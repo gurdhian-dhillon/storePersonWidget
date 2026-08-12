@@ -1,0 +1,136 @@
+string getSupervisorWasteReturns(string supervisorId, string daysTxt)
+{
+	// Remnants this supervisor declared after cutting, and whether the store has
+	// checked them in yet. POST: supervisorId, daysTxt.
+	//
+	// BOUNDED BY DATE, and not only to keep the screen short. This walked every
+	// Declared movement ever recorded and did a plan lookup on each one to work
+	// out whose it was - a cost that grows forever and lands on Creator's
+	// statement-execution limit, which is not catchable and surfaces as a bare
+	// 500. daysTxt is how far back to look; the widget offers 7, 30 and 90.
+	//
+	// A piece still waiting after the window falls off the list. That is the
+	// trade: widen the window to find it. Anything unclaimed for three months is
+	// a conversation, not a screen.
+	//
+	// He declares offcuts at the end of a cutting stage; they sit at
+	// Pending_Receipt until the store confirms them, and only then does the
+	// allocator offer them to anyone. Until now he had no way to see whether
+	// that happened - the piece simply left his screen. This closes the loop
+	// from his side without giving him a button, because confirming his own
+	// return would defeat the point of the store checking it.
+	//
+	// Ownership comes from the plan the Declared movement points at, since a
+	// movement carries no supervisor of its own.
+
+	rowsJson = "";
+	waitingCount = 0;
+	// Set out here because the catch reports it. Assigned inside the try, a
+	// failure on the line above it would make the error handler throw as well,
+	// and the real message would be lost.
+	days = 30;
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	supTxt = ifnull(supervisorId,"").toString().trim();
+
+	dStr = ifnull(daysTxt,"").toString().trim();
+	if(dStr == "" || dStr.isNumber() == false)
+	{
+		dStr = "30";
+	}
+	days = dStr.toDecimal().toLong();
+
+	// Zero is a real answer, not an empty one: subDay(0) leaves the cutoff at
+	// today, so Moved_On >= cutoff is today ONLY. The floor used to be 1, which
+	// made the shortest window two days - today plus yesterday - so there was no
+	// way to ask "what did I send back today".
+	if(days < 0)
+	{
+		days = 0;
+	}
+	if(days > 365)
+	{
+		days = 365;
+	}
+	cutoff = zoho.currentdate.subDay(days);
+
+	if(supTxt == "" || supTxt.isNumber() == false)
+	{
+		return "{\"errors\":[],\"pieces\":[],\"waitingCount\":0,\"windowDays\":" + days + "}";
+	}
+
+	supId = supTxt.toLong();
+
+	// Newest first - what he cut today is what he is most likely asking about.
+	declared = Waste_Movement[Movement_Type == "Declared" && Moved_On >= cutoff] sort by Added_Time desc;
+
+	for each  mv in declared
+	{
+		mineTxt = false;
+		soNo = "";
+		planNo = "";
+
+		for each  pl in Production_Planning[ID == mv.Plan]
+		{
+			if(pl.Assigned_To != null && pl.Assigned_To == supId)
+			{
+				mineTxt = true;
+				planNo = ifnull(pl.Plan_No,"").toString();
+				for each  so in Sales_Order[ID == pl.Sales_Order]
+				{
+					soNo = ifnull(so.Sales_Order,"").toString();
+				}
+			}
+		}
+
+		if(mineTxt == true)
+		{
+			// The piece knows where it is now; the movement only knows it was
+			// declared. Status has to come off Waste_Master.
+			pStatus = "";
+			matName = "";
+			for each  wp in Waste_Master[ID == mv.Waste_Piece]
+			{
+				pStatus = ifnull(wp.Status,"").toString();
+				for each  rm in Raw_Material[ID == wp.SKU]
+				{
+					matName = ifnull(rm.Material_Display_Name,"").toString().trim();
+					if(matName == "")
+					{
+						matName = ifnull(rm.Name,"").toString();
+					}
+					matName = matName.replaceAll("\"","'");
+				}
+			}
+
+			declaredOn = "";
+			if(mv.Moved_On != null)
+			{
+				declaredOn = mv.Moved_On.toString("dd-MMM-yyyy");
+			}
+
+			if(pStatus == "Pending_Receipt")
+			{
+				waitingCount = waitingCount + 1;
+			}
+
+			if(rowsJson != "")
+			{
+				rowsJson = rowsJson + ",";
+			}
+			// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+			rowsJson = rowsJson + "{\"id\":\"" + mv.ID + "\",\"material\":\"" + matName + "\",\"width\":" + ifnull(mv.Piece_Width,0) + ",\"length\":" + ifnull(mv.Piece_Length,0) + ",\"count\":" + ifnull(mv.Piece_Count,0) + ",\"status\":\"" + pStatus + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"declaredOn\":\"" + declaredOn + "\"}";
+		}
+	}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"pieces\":[],\"waitingCount\":0,\"windowDays\":" + days + "}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[],\"pieces\":[" + rowsJson + "],\"waitingCount\":" + waitingCount + ",\"windowDays\":" + days + "}";
+}

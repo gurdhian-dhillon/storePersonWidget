@@ -1,0 +1,528 @@
+string getProductionWidgetData(string supervisorId, string planId)
+{
+	// SCOPED TO ONE SUPERVISOR. Custom API, POST, one argument.
+	//
+	// This used to take no argument and return every live plan in the factory,
+	// with the widget throwing away everything but the one supervisor it was
+	// showing. Each item costs a handful of queries - its requirements, its
+	// stage logs, its waste movements and their children, its BOM and its
+	// master record - so the cost was every supervisor's entire day's work,
+	// fetched to render one man's screen.
+	//
+	// The statement-execution limit is NOT catchable: it kills the script and
+	// the widget gets a bare HTTP 500 with no error card at all. This is the
+	// single biggest lever on staying under it.
+	//
+	// An EMPTY supervisorId still returns everything, deliberately - nothing
+	// else calls this today, but a cross-floor view would want exactly that,
+	// and refusing would make it a different function.
+	//
+	// planId NARROWS IT FURTHER, to the one order actually on screen.
+	//
+	// The dropdown needs a line per plan - number, order, date, status. The
+	// SCREEN needs one plan's items, and everything expensive hangs off an
+	// item: its requirements, its stage logs, its waste movements and their
+	// children, its BOM and its master record. Sending every plan in full meant
+	// paying for a supervisor's whole week to draw the one order he is looking
+	// at.
+	//
+	// So every plan comes back as a light row, and exactly one comes back with
+	// items. Empty planId gives the detail to the FIRST plan, which is the one
+	// the widget auto-selects - so a first load still needs only one call.
+	errJson = "";
+	plansJson = "";
+	empsJson = "";
+	supsJson = "";
+	partyJson = "";
+
+	try
+	{
+		//------------------------------------------------------------------
+		// Third parties: fetched once at the top level, matched to stages in
+		// the WIDGET by exact string.
+		//
+		// A query on Applicable_Stages would have to use "contains", which is a
+		// SUBSTRING match, and the stage names collide - "Machine Embroidery"
+		// sits inside "Manual Machine Embroidery". Substring matching would
+		// offer the wrong parties for a stage.
+		//
+		// Inactive parties are sent too and never offered by the widget, so a
+		// party that has vanished from the picker can still be named on the
+		// stage it is holding rather than simply being absent.
+		//------------------------------------------------------------------
+		for each tp in Third_Party[ID != 0] sort by Party_Name
+		{
+			// Iterated as a list rather than split off toString() - a
+			// multi-select rendered to a string is not a shape worth relying
+			// on, and an empty one is EMPTY, not null, so it is guarded first.
+			tpStgJson = "";
+			tpStgRaw = ifnull(tp.Applicable_Stages,"");
+			if(tpStgRaw.toString().trim() != "")
+			{
+				for each tstg in tpStgRaw
+				{
+					tstgTxt = tstg.toString().trim().replaceAll("\"","'");
+					if(tstgTxt != "")
+					{
+						if(tpStgJson != "") { tpStgJson = tpStgJson + ","; }
+						tpStgJson = tpStgJson + "\"" + tstgTxt + "\"";
+					}
+				}
+			}
+
+			if(partyJson != "") { partyJson = partyJson + ","; }
+			// Ids forced to string - an 18-digit id breaks JSON.parse.
+			partyJson = partyJson + "{\"id\":\"" + tp.ID + "\",\"name\":\"" + ifnull(tp.Party_Name,"").toString().replaceAll("\"","'") + "\",\"contact\":\"" + ifnull(tp.Contact_Person,"").toString().replaceAll("\"","'") + "\",\"phone\":\"" + ifnull(tp.Phone,"").toString().replaceAll("\"","'") + "\",\"status\":\"" + ifnull(tp.Status,"") + "\",\"stages\":[" + tpStgJson + "]}";
+		}
+
+		// MACHINES ARE NO LONGER TRACKED. Each operator works a fixed machine,
+		// so "which machine" is answered by "which operator" and the picker was
+		// asking a question nobody on the floor had to think about. The whole
+		// Machine_Master block that stood here is gone, along with the machines
+		// array this used to return.
+		//
+		// Machine_Master itself is left alone in Creator, still holding what it
+		// held. Nothing reads or writes it from production any more.
+
+		// 0. WHO THE ADMIN HAS PUT ON WHICH STAGE, inverted into operator ->
+		//    stages. He answers the question stage-first - "Cutting: Aman,
+		//    Arjun" - and the picker asks it operator-first, so it is turned
+		//    round once here rather than re-scanned per stage card.
+		//
+		//    UNIONED across records, never newest-wins. Stage cannot carry a
+		//    Unique constraint - Creator does not offer one on a Drop Down - so
+		//    duplicates are refused by a validation and coped with here. Picking
+		//    a winner would leave the losing record sitting in the report looking
+		//    authoritative while doing nothing, and union degrades the safe way:
+		//    a looser picker, never an empty one.
+		//
+		//    Is_Active is read in the query. If that field is ever deleted from
+		//    the form this line breaks loudly, which is the right way round -
+		//    silently ignoring a suspended rule would not be noticed.
+		opStages = Map();
+		for each oa in Operator_Assignment[Is_Active == true]
+		{
+			oaStage = ifnull(oa.Stage,"").toString().trim();
+			if(oaStage != "")
+			{
+				// A record with no operators is NOT "restrict to nobody" - it is
+				// the same as no record, so it contributes nothing and the stage
+				// falls through to the unrestricted case in the widget. This loop
+				// simply does not run for one.
+				for each oaOp in oa.Operators
+				{
+					oaKey = oaOp.toString();
+					oaList = opStages.get(oaKey);
+					if(oaList == null)
+					{
+						oaList = List();
+					}
+					if(oaList.contains(oaStage) == false)
+					{
+						oaList.add(oaStage);
+					}
+					opStages.put(oaKey,oaList);
+				}
+			}
+		}
+
+		// 1. Every employee, for the Operator picker inside a stage card.
+		//
+		//    STILL EVERY employee, deliberately. This list is not only the
+		//    picker - it is the widget's whole directory, used to name the
+		//    operator on a finished stage log and the supervisor on a plan.
+		//    Narrowing it here would blank both, so a man who has since changed
+		//    designation would vanish from work he actually did. The stage filter
+		//    belongs in the widget, exactly as it already does for third
+		//    parties.
+		//
+		//    role is the Designation text, so the widget can fall back to "all
+		//    operators" on a stage the admin has not assigned.
+		for each emp in Employee[ID != 0] sort by Employee_Name
+		{
+			empStgJson = "";
+			empStgList = opStages.get(emp.ID + "");
+			if(empStgList != null)
+			{
+				for each estg in empStgList
+				{
+					if(empStgJson != "") { empStgJson = empStgJson + ","; }
+					empStgJson = empStgJson + "\"" + estg.toString().replaceAll("\"","'") + "\"";
+				}
+			}
+			if(empsJson != "") { empsJson = empsJson + ","; }
+			// Employee_Name escaped - it was not, and one apostrophe-free name
+			// with a double quote in it would have broken JSON.parse for the
+			// entire screen.
+			empsJson = empsJson + "{\"id\":\"" + emp.ID + "\",\"name\":\"" + ifnull(emp.Employee_Name,"").toString().replaceAll("\"","'") + "\",\"role\":\"" + ifnull(emp.Designation,"").toString().replaceAll("\"","'") + "\",\"stages\":[" + empStgJson + "]}";
+		}
+
+		// 2. Every plan that is still live work, INCLUDING ones the store has
+		//    not issued against yet.
+		//
+		//    "Pending" was excluded, which meant an order assigned to a
+		//    supervisor was invisible to him until the store happened to send
+		//    material. He could not see how much work was coming, or that an
+		//    order existed at all - the first he knew of it was cloth arriving.
+		//
+		//    The widget already renders these correctly: an item at
+		//    Awaiting_Material shows a disabled "Waiting on Store" instead of a
+		//    Start button, so seeing the order does not let him start it early.
+		//
+		//    Production Complete stays out. That is history and has its own tab.
+		supTxt = ifnull(supervisorId,"").toString().trim();
+
+		if(supTxt != "" && supTxt.isNumber())
+		{
+			supFilt = supTxt.toLong();
+			pendingPlans = Production_Planning[Assigned_To == supFilt && (Order_Status == "Pending" || Order_Status == "Material Ready" || Order_Status == "Partially Received" || Order_Status == "In Progress")] sort by Added_Time;
+		}
+		else
+		{
+			pendingPlans = Production_Planning[Order_Status == "Pending" || Order_Status == "Material Ready" || Order_Status == "Partially Received" || Order_Status == "In Progress"] sort by Added_Time;
+		}
+
+		// 3. Supervisors for the FILTER dropdown are only those who actually
+		//    have such a plan. Listing every employee there means picking a name
+		//    and landing on an empty screen with nothing to say why.
+		seenSup = Map();
+		for each  sp in pendingPlans
+		{
+			spId = sp.Assigned_To;
+			if(spId != null && seenSup.get(spId + "") == null)
+			{
+				seenSup.put(spId + "","1");
+				spName = "Unknown";
+				for each  spEmp in Employee[ID == spId]
+				{
+					spName = spEmp.Employee_Name;
+				}
+				if(supsJson != "") { supsJson = supsJson + ","; }
+				supsJson = supsJson + "{\"id\":\"" + spId + "\",\"name\":\"" + spName + "\"}";
+			}
+		}
+
+		//------------------------------------------------------------------
+		// Which plan gets its items.
+		//
+		// VERIFIED AGAINST THE SET WE JUST FETCHED, never trusted as given. The
+		// widget holds the last plan it was showing, and changing supervisor
+		// reloads the tab before that selection is cleared - so it arrives here
+		// naming a plan belonging to somebody else. Matching nothing, every plan
+		// came back header-only and the screen read "No Items Found" on a plan
+		// that has items.
+		//
+		// Falls back to the first, which is what the widget auto-selects anyway.
+		//------------------------------------------------------------------
+		wantPlan = 0;
+		wantTxt = ifnull(planId,"").toString().trim();
+		if(wantTxt != "" && wantTxt.isNumber())
+		{
+			wantPlan = wantTxt.toLong();
+		}
+
+		firstPlan = 0;
+		wantIsHis = false;
+		for each  pChk in pendingPlans
+		{
+			if(firstPlan == 0)
+			{
+				firstPlan = pChk.ID;
+			}
+			if(wantPlan != 0 && pChk.ID == wantPlan)
+			{
+				wantIsHis = true;
+			}
+		}
+		if(wantIsHis == false)
+		{
+			wantPlan = firstPlan;
+		}
+
+		for each plan in pendingPlans
+		{
+			soNo = "";
+			for each so in Sales_Order[ID == plan.Sales_Order] {
+				soNo = so.Sales_Order;
+			}
+
+			itemsJson = "";
+
+			// EVERY OTHER PLAN IS A HEADER ONLY. It is in the dropdown, not on
+			// the screen, and nothing the dropdown shows comes from an item.
+			hasDetail = "false";
+			if(plan.ID == wantPlan)
+			{
+				hasDetail = "true";
+			}
+
+			planItems = Plan_Item[ID == 0];
+			if(plan.ID == wantPlan)
+			{
+				// Plan_Item is its own form now, not a subform - so this is a
+				// query against the plan rather than a walk of nested rows.
+				planItems = Plan_Item[Plan == plan.ID] sort by Line_No;
+			}
+
+			// EVERY item is sent, including ones already finished, and the widget
+			// decides which to draw.
+			//
+			// Filtering here was tried and reverted. renderPlanHeader derives its
+			// totals from the items it receives - "to produce", "produced", "N of
+			// M complete" - so dropping the finished ones server-side made a
+			// re-opened 100-piece order report "1 item, to produce 10 pcs". The
+			// header was not wrong to work that way; the server was wrong to send
+			// it a filtered list and let it believe that was the plan.
+			//
+			// isRemake goes with each item so the widget can hide the finished
+			// originals from the stage list while the header still counts the
+			// whole plan - and so a supervisor handed cloth for something he
+			// already finished is told it is a QC remake rather than left to
+			// wonder.
+			for each itm in planItems
+			{
+				// Item_Sku is a LOOKUP to Item_Master, so the field itself holds a
+				// record id. This shipped the id as "sku" on every item, which
+				// nobody noticed only because nothing rendered it. The code the
+				// shop floor recognises lives on the master record.
+				sku = "";
+				for each  imR in Item_Master[ID == itm.Item_Sku]
+				{
+					sku = ifnull(imR.SKU,"").toString().replaceAll("\"","'");
+				}
+
+				bomId = itm.BOM;
+
+				// Fetch BOM Phases
+				phasesJson = "";
+				if (bomId != null)
+				{
+					for each bomRec in BOM[ID == bomId]
+					{
+						for each stage in bomRec.Production_Stages
+						{
+							if(phasesJson != "") { phasesJson = phasesJson + ","; }
+							phasesJson = phasesJson + "{\"sequence\":" + ifnull(stage.Sequence_No,0) + ",\"operation\":\"" + stage.Operation + "\"}";
+						}
+					}
+				}
+
+				// Requirements are keyed on the Plan_Item record now, so this is
+				// a direct query rather than filtering a plan-wide list by SKU.
+				//
+				//------------------------------------------------------------
+				// COMBINED PER MATERIAL, CUT SIZE AND SOURCE.
+				//
+				// TWO RULES AT ONCE, and they pull in opposite directions:
+				//
+				//  COMBINE within a source. Three damage reports on one thread
+				//  put three lines reading 8, 8 and 8 Cone on this table. He is
+				//  standing at a table deciding what to lay out - the cones are
+				//  one box and the answer he wants is 24. Requests are the
+				//  STORE's unit of work, not his.
+				//
+				//  SEPARATE across sources. The plan's own 80 Cone and the 24 he
+				//  asked for after ruining some are not one figure. Added
+				//  together the reissue disappears into a number that reads as
+				//  always having been planned, and the material he has to account
+				//  for stops being visible at all.
+				//
+				// Cut size is in the key too, because two rows of the same cloth
+				// cut to different sizes are genuinely different work and their
+				// piece counts are not addable.
+				//------------------------------------------------------------
+				mAgg = Map();
+				mOrder = List();
+
+				for each mrA in Material_Requirement[Plan_Item == itm.ID]
+				{
+					if(mrA.Material != null)
+					{
+						// A Creator field never written is EMPTY, not null, so
+						// every row planned before Source existed reads "Plan" -
+						// which is exactly what those rows are.
+						aSrc = ifnull(mrA.Source,"").toString().trim();
+						if(aSrc == "")
+						{
+							aSrc = "Plan";
+						}
+
+						aKey = mrA.Material + "|" + ifnull(mrA.Cut_Size_Width,0) + "x" + ifnull(mrA.Cut_Size_Length,0) + "|" + aSrc;
+
+						aCur = mAgg.get(aKey);
+						if(aCur == null)
+						{
+							aCur = Map();
+							aCur.put("materialId",mrA.Material + "");
+							aCur.put("name",ifnull(mrA.Material_Name,"").toString().replaceAll("\"","'"));
+							aCur.put("unit",ifnull(mrA.Unit,"").toString());
+							aCur.put("isFabric",ifnull(mrA.Is_Fabric,false));
+							aCur.put("cutWidth",ifnull(mrA.Cut_Size_Width,0));
+							aCur.put("cutLength",ifnull(mrA.Cut_Size_Length,0));
+							aCur.put("received",0.0);
+							aCur.put("reqPieces",0);
+							aCur.put("fromWaste",0);
+							aCur.put("fromRaw",0);
+
+							// Set once, from the key. Every row under this entry
+							// has the same source by construction, so there is
+							// nothing to accumulate.
+							aIsRe = "false";
+							if(aSrc == "Reissue")
+							{
+								aIsRe = "true";
+							}
+							aCur.put("isReissue",aIsRe);
+							mOrder.add(aKey);
+						}
+
+						aCur.put("received",aCur.get("received") + ifnull(mrA.Received_Qty,0));
+						aCur.put("reqPieces",aCur.get("reqPieces") + ifnull(mrA.Required_Pieces,0));
+						aCur.put("fromWaste",aCur.get("fromWaste") + ifnull(mrA.Pieces_From_Waste,0));
+						aCur.put("fromRaw",aCur.get("fromRaw") + ifnull(mrA.Pieces_From_Raw,0));
+
+						mAgg.put(aKey,aCur);
+					}
+				}
+
+				matsJson = "";
+				for each aK in mOrder
+				{
+					mr = mAgg.get(aK);
+
+					if(matsJson != "") { matsJson = matsJson + ","; }
+					// Cut detail carried for fabric. The supervisor is about to
+					// cut this cloth and the metre figure alone does not tell
+					// him what to cut - he needs the piece size and how many.
+					// piecesFromWaste / piecesFromRaw carried so the cutting screen
+					// can say WHERE the cloth came from. Without them a fabric line
+					// reads as one undifferentiated requirement, and the supervisor
+					// has no way to tell that half his pieces are coming off
+					// offcuts he has to handle differently.
+					matsJson = matsJson + "{\"materialId\":\"" + mr.get("materialId") + "\",\"name\":\"" + mr.get("name") + "\",\"received\":" + mr.get("received") + ",\"unit\":\"" + mr.get("unit") + "\",\"isFabric\":" + mr.get("isFabric") + ",\"isWaste\":false,\"isReissue\":" + mr.get("isReissue") + ",\"requiredPieces\":" + mr.get("reqPieces") + ",\"piecesFromWaste\":" + mr.get("fromWaste") + ",\"piecesFromRaw\":" + mr.get("fromRaw") + ",\"cutWidth\":" + mr.get("cutWidth") + ",\"cutLength\":" + mr.get("cutLength") + "}";
+				}
+
+				// Waste pieces carry their own Plan_Item now, so no cross-match
+				// against the requirement list is needed to find the item's own.
+				// STEP 4b: Issued movements keyed on the Plan_Item, so no walk of
+				// the plan's subform and no filtering by item afterwards.
+				wasteJson = "";
+				itemIssued = Waste_Movement[Plan_Item == itm.ID && Movement_Type == "Issued"];
+
+				for each wi in itemIssued
+				{
+					// Received is summed from the movements pointing back at this
+					// issue rather than read off a counter.
+					wRecv = 0;
+					for each rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
+					{
+						wRecv = wRecv + ifnull(rv.Piece_Count,0);
+					}
+
+					// The material comes off the piece the movement points at.
+					wName = "Waste";
+					wSkuId = null;
+					for each wmRec in Waste_Master[ID == wi.Waste_Piece]
+					{
+						wSkuId = wmRec.SKU;
+					}
+					for each rmw in Raw_Material[ID == wSkuId]
+					{
+						rmwName = ifnull(rmw.Material_Display_Name,"").toString().trim();
+						if(rmwName == "")
+						{
+							rmwName = ifnull(rmw.Name,"").toString();
+						}
+						wName = rmwName.replaceAll("\"","'") + " (Waste)";
+					}
+
+					if(wasteJson != "") { wasteJson = wasteJson + ","; }
+					// isWaste, the piece's own size, and how many cuts it yields.
+					// The row used to carry only a name ending in "(Waste)" and a
+					// received count, so on the cutting screen an offcut was
+					// indistinguishable from a short delivery of fresh cloth -
+					// and the piece he has to lay out was nowhere on the page.
+					wasteJson = wasteJson + "{\"materialId\":\"" + wSkuId + "\",\"name\":\"" + wName + "\",\"received\":" + wRecv + ",\"unit\":\"pcs\",\"isFabric\":false,\"isWaste\":true,\"requiredPieces\":0,\"piecesFromWaste\":0,\"piecesFromRaw\":0,\"sent\":" + ifnull(wi.Piece_Count,0) + ",\"pieceWidth\":" + ifnull(wi.Piece_Width,0) + ",\"pieceLength\":" + ifnull(wi.Piece_Length,0) + ",\"yields\":" + ifnull(wi.Pieces_Yielded,0) + ",\"cutWidth\":" + ifnull(wi.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(wi.Cut_Size_Length,0) + "}";
+				}
+				
+				// Combine mats and waste
+				allMatsJson = matsJson;
+				if (allMatsJson != "" && wasteJson != "") { allMatsJson = allMatsJson + "," + wasteJson; }
+				else if (allMatsJson == "") { allMatsJson = wasteJson; }
+
+				// Stage logs - now their own records, queried by Plan_Item
+				// rather than filtered out of a subform by SKU.
+				logsJson = "";
+				for each trk in Stage_Log[Plan_Item == itm.ID] sort by Sequence_No
+				{
+					if(logsJson != "") { logsJson = logsJson + ","; }
+					opId = "";
+					if (trk.Operator != null) {
+						opId = trk.Operator;
+					}
+					//------------------------------------------------------
+					// THE SHARES THIS STAGE WAS SPLIT INTO.
+					//
+					// One row per operator, in the order they were put on the
+					// work. A stage nobody has been assigned to sends an empty
+					// array, which is also every stage logged before the split
+					// existed - so an old finished stage still renders from the
+					// header's own operator and figures.
+					//
+					// "sort by" on its own assignment. Inline in a for-each
+					// header it does not reliably parse, and a function that
+					// will not save is indistinguishable from one that saved
+					// and did nothing.
+					//------------------------------------------------------
+					stageShares = Stage_Assignment[Stage_Log == trk.ID] sort by Added_Time;
+
+					asgJson = "";
+					for each  ag in stageShares
+					{
+						agOp = "";
+						if(ag.Operator != null) { agOp = ag.Operator; }
+
+						if(asgJson != "") { asgJson = asgJson + ","; }
+						asgJson = asgJson + "{\"id\":\"" + ag.ID + "\",\"operator\":\"" + agOp + "\",\"assigned\":" + ifnull(ag.Assigned_Qty,0) + ",\"qtyOut\":" + ifnull(ag.Qty_Out,0) + ",\"start\":\"" + ifnull(ag.Start_Time,"") + "\",\"end\":\"" + ifnull(ag.End_Time,"") + "\",\"status\":\"" + ifnull(ag.Assignment_Status,"") + "\",\"remarks\":\"" + ifnull(ag.Remarks,"").toString().replaceAll("\"","'") + "\"}";
+					}
+
+					// Outsourcing rides on the SAME stage row. A stage sent out is
+					// still one stage - it has a start, an end, a Qty_In and a
+					// Qty_Out - so a second record would have duplicated all of
+					// that to add three fields.
+					trkParty = "";
+					if(trk.Third_Party != null) { trkParty = trk.Third_Party; }
+					trkSent = "";
+					if(trk.Sent_On != null) { trkSent = trk.Sent_On.toString("dd-MMM-yyyy"); }
+					trkBack = "";
+					if(trk.Returned_On != null) { trkBack = trk.Returned_On.toString("dd-MMM-yyyy"); }
+
+					logsJson = logsJson + "{\"id\":\"" + trk.ID + "\",\"phase\":\"" + trk.Phase_Name + "\",\"operator\":\"" + opId + "\",\"assigns\":[" + asgJson + "],\"outsourced\":" + ifnull(trk.Is_Outsourced,false) + ",\"party\":\"" + trkParty + "\",\"sentOn\":\"" + trkSent + "\",\"outsourceRef\":\"" + ifnull(trk.Outsource_Ref,"").toString().replaceAll("\"","'") + "\",\"returnedOn\":\"" + trkBack + "\",\"start\":\"" + ifnull(trk.Start_Time,"") + "\",\"end\":\"" + ifnull(trk.End_Time,"") + "\",\"qtyIn\":" + ifnull(trk.Qty_In,0) + ",\"qtyOut\":" + ifnull(trk.Qty_Out,0) + ",\"status\":\"" + ifnull(trk.Stage_Status,"") + "\",\"remarks\":\"" + ifnull(trk.Remarks,"").replaceAll("\"","'") + "\"}";
+				}
+
+				if(itemsJson != "") { itemsJson = itemsJson + ","; }
+				// isRemake carried so the card can say so. A supervisor handed
+				// cloth for something he already finished deserves to be told it
+				// is a QC remake rather than left to wonder.
+				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"name\":\"" + itm.Item_Name + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "]}";
+			}
+
+			// Formatted here rather than in the widget - a raw Creator date
+			// crossing JSON is one more thing to parse and get wrong.
+			planDateTxt = "";
+			if(plan.Plan_Start_Date != null)
+			{
+				planDateTxt = plan.Plan_Start_Date.toString("dd-MMM-yyyy");
+			}
+
+			if(plansJson != "") { plansJson = plansJson + ","; }
+			plansJson = plansJson + "{\"id\":\"" + plan.ID + "\",\"planNo\":\"" + plan.Plan_No + "\",\"salesOrder\":\"" + soNo + "\",\"planDate\":\"" + planDateTxt + "\",\"orderStatus\":\"" + ifnull(plan.Order_Status,"") + "\",\"assignedTo\":\"" + ifnull(plan.Assigned_To,"") + "\",\"hasDetail\":" + hasDetail + ",\"items\":[" + itemsJson + "]}";
+		}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+
+	return "{\"errors\":[],\"plans\":[" + plansJson + "],\"operators\":[" + empsJson + "],\"supervisors\":[" + supsJson + "],\"parties\":[" + partyJson + "]}";
+}

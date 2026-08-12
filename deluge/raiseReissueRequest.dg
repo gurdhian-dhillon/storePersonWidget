@@ -1,0 +1,330 @@
+string raiseReissueRequest(string payloadJson)
+{
+	// Turns picked damage lines into real demand: ONE Material_Requirement row
+	// per damage line, which is what puts them on the store's issue screen.
+	//
+	// Custom API, POST, one argument: payloadJson.
+	//   { "planItemId":"9", "supervisorId":"5",
+	//     "lines":[ {"damageId":"31","lineId":"77"} ] }
+	//
+	// ONE ROW PER LINE, NEVER SUMMED. He ruined 1.2m on Monday and 0.8m on
+	// Wednesday; the store sees two rows, each carrying its own date and its own
+	// reason. A single 2.0m row would be fewer rows to work through and would
+	// trace back to no particular incident - and tracing back to the incident is
+	// the entire reason this feature exists.
+	//
+	// THE QUANTITIES ARE NOT TAKEN FROM THE PAYLOAD. The widget says WHICH lines
+	// to raise; the amounts are read back off Material_Damage. He already decided
+	// the numbers when he reported the damage, and re-sending them would let a
+	// stale tab - one left open while he edited the report elsewhere - quietly
+	// request the old figures.
+	//
+	// ADDITIVE, NEVER AN EDIT. A reissue is a NEW requirement row, not a bump to
+	// the original one. The original stays exactly as it was - issued, received,
+	// settled, with its Pieces_From_Raw and Pieces_From_Waste intact - and those
+	// counters are what every "anything that re-opens a requirement must wind
+	// back every counter" rule is about. Touching them would put this function
+	// into that whole class of bug for no gain.
+	//
+	// FIELDS THIS NEEDS ADDING to Material_Requirement:
+	//   Source        Dropdown - Plan / Reissue / QC_Remake   (default Plan)
+	//   Damage_Ref    Lookup   -> Material_Damage
+	//   Reason        Multi Line
+	//   Reported_On   Date
+	// Source defaulting to Plan is what keeps every existing row correct without
+	// touching one of them: an empty field genuinely means "came from the
+	// original plan", which every existing row did.
+
+	res = "{\"success\":false,\"error\":\"Nothing was raised\"}";
+	madeCount = 0;
+	logLines = list();
+
+	try
+	{
+	inp = payloadJson.toMap();
+
+	itemIdTxt = ifnull(inp.get("planItemId"),"").toString().trim();
+	if(itemIdTxt == "" || itemIdTxt.isNumber() == false)
+	{
+		return "{\"success\":false,\"error\":\"Missing or non-numeric planItemId\"}";
+	}
+	itemId = itemIdTxt.toLong();
+
+	picked = ifnull(inp.get("lines"),list());
+	// size() is right - picked is a List, not a query result.
+	if(picked.size() == 0)
+	{
+		return "{\"success\":false,\"error\":\"No lines were selected\"}";
+	}
+
+	// The damage records to look through, and the exact subform rows wanted out
+	// of them. Keyed as text so ids compare like with like - a mixed-type
+	// comparison throws rather than returning false.
+	wantLine = Map();
+	dmgIds = List();
+	for each  pRaw in picked
+	{
+		pm = pRaw.toMap();
+		dIdTxt = ifnull(pm.get("damageId"),"").toString().trim();
+		lIdTxt = ifnull(pm.get("lineId"),"").toString().trim();
+		if(dIdTxt != "" && lIdTxt != "")
+		{
+			wantLine.put(lIdTxt,"1");
+			if(dmgIds.contains(dIdTxt) == false)
+			{
+				dmgIds.add(dIdTxt);
+			}
+		}
+	}
+
+	if(dmgIds.size() == 0)
+	{
+		return "{\"success\":false,\"error\":\"Selected lines carried no ids\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// The plan and its supervisor. Assigned_To on a requirement is the store's
+	// filter, so a row without it is invisible on their screen - it comes off
+	// the plan rather than the payload for the same reason the quantities do.
+	//----------------------------------------------------------------------
+	planId = 0;
+	itemName = "";
+	for each  pi in Plan_Item[ID == itemId]
+	{
+		itemName = ifnull(pi.Item_Name,"").toString();
+		if(pi.Plan != null)
+		{
+			planId = pi.Plan;
+		}
+	}
+
+	if(planId == 0)
+	{
+		return "{\"success\":false,\"error\":\"Item " + itemId + " has no plan\"}";
+	}
+
+	planSup = null;
+	planStatus = "";
+	for each  plR in Production_Planning[ID == planId]
+	{
+		planSup = plR.Assigned_To;
+		planStatus = ifnull(plR.Order_Status,"").toString();
+	}
+
+	//----------------------------------------------------------------------
+	// One pass. Each picked line becomes its own requirement, and is marked the
+	// moment that requirement exists - so a failure part-way through leaves the
+	// lines it did not reach still Pending and retryable, rather than marked
+	// with nothing behind them.
+	//----------------------------------------------------------------------
+	for each  dIdTxt2 in dmgIds
+	{
+		for each  dmg in Material_Damage[ID == dIdTxt2.toLong()]
+		{
+			//----------------------------------------------------------
+			// THE MATERIAL IS FOR THE REMAKE BATCH, not the original.
+			//
+			// The original item is finishing with what survived; the cloth he
+			// is asking for is what the replacements will be cut from. Putting
+			// the requirement on the original would leave the remake batch
+			// sitting at Awaiting_Material with nothing owed to it - visible to
+			// him, invisible to the store - while the finished original was
+			// asked for material it no longer needs.
+			//
+			// Falls back to the original when no remake was wanted: he is
+			// replacing consumables on the item he is still working.
+			//----------------------------------------------------------
+			targetItem = itemId;
+			if(dmg.Remake_Item != null)
+			{
+				targetItem = dmg.Remake_Item;
+			}
+
+			dmgNote = ifnull(dmg.Note,"").toString().trim();
+			if(dmgNote == "")
+			{
+				dmgNote = "damaged during production";
+			}
+			dmgDate = ifnull(dmg.Reported_On,"").toString();
+			dmgPhase = ifnull(dmg.Phase_Name,"").toString().trim();
+
+			// The one-line why that travels onto the requirement, so the store
+			// can see it on their own screen without opening anything.
+			whyTxt = dmgDate;
+			if(dmgPhase != "")
+			{
+				whyTxt = whyTxt + " - " + dmgPhase;
+			}
+			whyTxt = whyTxt + " - " + dmgNote;
+
+			stillPending = false;
+
+			for each  dl in dmg.Damage_Lines
+			{
+				lineKey = dl.ID.toString();
+				lnStatus = ifnull(dl.Reissue_Status,"").toString().trim();
+				matKey = "";
+				if(dl.Material != null)
+				{
+					matKey = dl.Material.toString();
+				}
+
+				// Only lines the widget asked for, still waiting, and pointing at
+				// a material. Re-raising an already-Requested line would issue the
+				// same material twice against one damage report.
+				if(wantLine.get(lineKey) != null && lnStatus == "Pending" && matKey != "")
+				{
+					// Empty is not null and toDecimal() throws on it.
+					qS = ifnull(dl.Damaged_Qty,"0").toString().trim();
+					if(qS == "")
+					{
+						qS = "0";
+					}
+					pS = ifnull(dl.Damaged_Pieces,"0").toString().trim();
+					if(pS == "")
+					{
+						pS = "0";
+					}
+					clS = ifnull(dl.Cut_Size_Length,"0").toString().trim();
+					if(clS == "")
+					{
+						clS = "0";
+					}
+					cwS = ifnull(dl.Cut_Size_Width,"0").toString().trim();
+					if(cwS == "")
+					{
+						cwS = "0";
+					}
+
+					newReqId = insert into Material_Requirement
+					[
+						Plan=planId
+						Plan_Item=targetItem
+						Material_Name=ifnull(dl.Material_Name,"").toString()
+						Is_Fabric=ifnull(dl.Is_Fabric,false)
+						Unit=ifnull(dl.Unit,"").toString()
+						Required_Qty=qS.toDecimal()
+						Issued_Qty=0
+						Received_Qty=0
+						Cut_Size_Length=clS.toDecimal().toLong()
+						Cut_Size_Width=cwS.toDecimal().toLong()
+						Required_Pieces=pS.toDecimal().toLong()
+						Pieces_From_Waste=0
+						Pieces_From_Raw=0
+						Source="Reissue"
+						Reason=whyTxt
+						Added_User=zoho.loginuser
+					];
+
+					reqId = newReqId.toLong();
+
+					// Lookups after the insert - a null one fails the whole block.
+					for each  mrq in Material_Requirement[ID == reqId]
+					{
+						mrq.Material = matKey.toLong();
+						mrq.Damage_Ref = dmg.ID;
+						if(planSup != null)
+						{
+							mrq.Assigned_To = planSup;
+						}
+						if(dmgDate != "")
+						{
+							mrq.Reported_On = dmg.Reported_On;
+						}
+					}
+
+					dl.Reissue_Status = "Requested";
+					dl.Requirement = reqId;
+
+					// It owes material again. Only ever moved BACKWARDS from
+					// Ready - a batch already in production is left alone,
+					// because denying work that has started is worse than a
+					// status that reads slightly ahead of itself.
+					for each  tgt in Plan_Item[ID == targetItem]
+					{
+						if(ifnull(tgt.Item_Status,"").toString() == "Ready_For_Production")
+						{
+							tgt.Item_Status = "Awaiting_Material";
+						}
+					}
+
+					madeCount = madeCount + 1;
+					logLines.add("REISSUE -> " + ifnull(dl.Material_Name,"").toString() + " | qty " + qS + " | pieces " + pS);
+				}
+				else if(lnStatus == "Pending")
+				{
+					stillPending = true;
+				}
+			}
+
+			// A record closes only when nothing on it is waiting any more. He can
+			// raise half an item's materials today and the rest tomorrow, so
+			// closing on the first raise would hide the remainder from the tab.
+			if(stillPending == false)
+			{
+				dmg.Status = "Closed";
+			}
+		}
+	}
+
+	if(madeCount == 0)
+	{
+		return "{\"success\":false,\"error\":\"Those lines were already raised, or no longer exist\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// The plan has to be somewhere the store screen looks.
+	//
+	// getStoreMaterialRequirements and issueMaterials accept only Pending,
+	// Partially Received and In Progress. "Material Ready" is NOT one of them -
+	// it means everything asked for has arrived, which stopped being true the
+	// moment this ran. A requirement nobody can see is worse than no requirement
+	// at all, because the supervisor is standing there waiting on it.
+	//----------------------------------------------------------------------
+	if(planStatus == "Material Ready" || planStatus == "Production Complete")
+	{
+		for each  plW in Production_Planning[ID == planId]
+		{
+			plW.Order_Status = "In Progress";
+		}
+		logLines.add("PLAN " + planId + " pulled back from '" + planStatus + "' to In Progress");
+	}
+
+	//----------------------------------------------------------------------
+	// AND THE SALES ORDER WITH IT.
+	//
+	// saveProductionPhase mirrors the plan onto the order, so pulling only the
+	// plan back left the order claiming it was finished while material was
+	// still being asked for. Only from Production Complete - the same rule
+	// createRemakeItems applies - so an order already past QC is never dragged
+	// backwards.
+	//----------------------------------------------------------------------
+	for each  plO in Production_Planning[ID == planId]
+	{
+		if(plO.Sales_Order != null)
+		{
+			for each  soB in Sales_Order[ID == plO.Sales_Order]
+			{
+				if(ifnull(soB.Order_Status,"").toString() == "Production Complete")
+				{
+					soB.Order_Status = "In Progress";
+					logLines.add("ORDER pulled back to In Progress");
+				}
+			}
+		}
+	}
+
+	logLines.add("Done. Requirements created: " + madeCount);
+	info logLines;
+
+	res = "{\"success\":true,\"created\":" + madeCount + ",\"item\":\"" + itemName.replaceAll("\"","'") + "\"}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"" + e.toString().replaceAll("\"","'") + "\"}";
+		logLines.add(res);
+		info logLines;
+	}
+
+	return res;
+}

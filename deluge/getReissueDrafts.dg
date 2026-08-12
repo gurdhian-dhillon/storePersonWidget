@@ -1,0 +1,172 @@
+string getReissueDrafts(string supervisorId)
+{
+	// Everything this supervisor has reported damaged and not yet asked the store
+	// to replace. Feeds the Reissue tab.
+	//
+	// Custom API, POST, one argument: supervisorId.
+	//
+	// GROUPED BY PLAN_ITEM, because that is the unit he decides in - "for this
+	// order and this item, what do I want back". A single item can collect damage
+	// from several stages on several days; those arrive as separate lines under
+	// one card rather than as separate cards, so he can see the whole picture for
+	// an item before asking for anything.
+	//
+	// ONLY Reissue_Status == "Pending" lines are listed. A line he unticked when
+	// reporting is Not_Needed - it still counts as damage on the consumption
+	// report, but it is not waiting on anybody, and showing it here would make
+	// the tab a list of things he has already dealt with.
+	//
+	// Item_Name and Sales_Order_No are read straight off Material_Damage, where
+	// saveMaterialDamage denormalised them. Resolving them per row would be three
+	// queries each, and the statement-execution limit is NOT catchable: it kills
+	// the script and the widget gets a bare 500 with no error card at all.
+
+	res = "{\"errors\":[\"Nothing ran\"],\"items\":[]}";
+
+	try
+	{
+	supTxt = ifnull(supervisorId,"").toString().trim();
+	if(supTxt == "" || supTxt.isNumber() == false)
+	{
+		return "{\"errors\":[\"Missing or non-numeric supervisorId\"],\"items\":[]}";
+	}
+	supId = supTxt.toLong();
+
+	//----------------------------------------------------------------------
+	// One pass over his open damage records, bucketed by item.
+	//
+	// Deluge has no nested-structure builder worth using, so the JSON for each
+	// item's lines is accumulated as text in a Map keyed on the item id, and
+	// the order the items were first seen is kept in a separate List. A Map
+	// alone would lose the ordering, and "newest first" is what he expects.
+	//----------------------------------------------------------------------
+	lineJsonByItem = Map();
+	itemMeta = Map();
+	itemOrder = List();
+
+	// Newest first - the damage he is most likely to act on is the damage he
+	// just reported. "sort by" must sit on its own assignment; inline in a
+	// for-each header it does not reliably parse.
+	openDamage = Material_Damage[Supervisor == supId && Status == "Open"] sort by Added_Time desc;
+
+	// SKU lookups cached across every line. The same material shows up on most
+	// items, so without this the same Raw_Material record is fetched again and
+	// again - the exact shape that runs a script into the statement limit.
+	skuCache = Map();
+
+	for each  dmg in openDamage
+	{
+		itemKey = "";
+		if(dmg.Plan_Item != null)
+		{
+			itemKey = dmg.Plan_Item.toString();
+		}
+
+		// A damage record with no item cannot be raised against anything, so it
+		// is skipped rather than shown as an unactionable card. There is no
+		// reliable break in a Deluge for-each - the body is guarded instead.
+		if(itemKey != "")
+		{
+			if(itemMeta.get(itemKey) == null)
+			{
+				itemOrder.add(itemKey);
+
+				planTxt = "";
+				if(dmg.Plan != null)
+				{
+					planTxt = dmg.Plan.toString();
+				}
+
+				itemMeta.put(itemKey,"{\"planItemId\":\"" + itemKey + "\",\"planId\":\"" + planTxt + "\",\"item\":\"" + ifnull(dmg.Item_Name,"").toString().replaceAll("\"","'") + "\",\"salesOrder\":\"" + ifnull(dmg.Sales_Order_No,"").toString().replaceAll("\"","'") + "\"}");
+			}
+
+			reportedTxt = ifnull(dmg.Reported_On,"").toString();
+			noteTxt = ifnull(dmg.Note,"").toString().replaceAll("\"","'");
+			phaseTxt = ifnull(dmg.Phase_Name,"").toString().replaceAll("\"","'");
+			piecesLost = ifnull(dmg.Damaged_Pieces,0);
+
+			for each  dl in dmg.Damage_Lines
+			{
+				lnStatus = ifnull(dl.Reissue_Status,"").toString().trim();
+
+				if(lnStatus == "Pending")
+				{
+					matKey = "";
+					if(dl.Material != null)
+					{
+						matKey = dl.Material.toString();
+					}
+
+					skuTxt = "";
+					if(matKey != "")
+					{
+						skuTxt = ifnull(skuCache.get(matKey),"").toString();
+						if(skuTxt == "")
+						{
+							for each  rm in Raw_Material[ID == dl.Material]
+							{
+								skuTxt = ifnull(rm.SKU,"").toString().replaceAll("\"","'");
+							}
+							skuCache.put(matKey,skuTxt);
+						}
+					}
+
+					have = ifnull(lineJsonByItem.get(itemKey),"").toString();
+					if(have != "")
+					{
+						have = have + ",";
+					}
+
+					// lineId is the SUBFORM ROW id. raiseReissueRequest needs it
+					// to mark exactly this line Requested - matching on material
+					// alone would be wrong, because the same material can be
+					// damaged twice on one item and only one of those raised.
+					//
+					// Ids forced to string; an 18-digit id breaks JSON.parse.
+					have = have + "{\"lineId\":\"" + dl.ID + "\",\"damageId\":\"" + dmg.ID + "\",\"matId\":\"" + matKey + "\",\"name\":\"" + ifnull(dl.Material_Name,"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + skuTxt + "\",\"unit\":\"" + ifnull(dl.Unit,"").toString().replaceAll("\"","'") + "\",\"isFab\":" + ifnull(dl.Is_Fabric,false) + ",\"qty\":" + ifnull(dl.Damaged_Qty,0) + ",\"pieces\":" + ifnull(dl.Damaged_Pieces,0) + ",\"cutLen\":" + ifnull(dl.Cut_Size_Length,0) + ",\"cutWid\":" + ifnull(dl.Cut_Size_Width,0) + ",\"reportedOn\":\"" + reportedTxt + "\",\"phase\":\"" + phaseTxt + "\",\"piecesLost\":" + piecesLost + ",\"note\":\"" + noteTxt + "\"}";
+
+					lineJsonByItem.put(itemKey,have);
+				}
+			}
+		}
+	}
+
+	//----------------------------------------------------------------------
+	// Assemble. An item whose every line turned out to be Not_Needed has a
+	// header but no lines, and a card with nothing in it is noise - so the
+	// emptiness is tested here rather than guessed at above.
+	//----------------------------------------------------------------------
+	itemsJson = "";
+	pendingLines = 0;
+
+	for each  k in itemOrder
+	{
+		lines = ifnull(lineJsonByItem.get(k),"").toString();
+		if(lines != "")
+		{
+			head = itemMeta.get(k).toString();
+
+			if(itemsJson != "")
+			{
+				itemsJson = itemsJson + ",";
+			}
+
+			// The header Map holds a complete object, so its closing brace is
+			// dropped to splice the lines in. Building the JSON by hand is not a
+			// style choice here - Map.toString() does not emit valid JSON once
+			// the structure nests Map -> List -> Map.
+			itemsJson = itemsJson + head.removeLastOccurence("}") + ",\"lines\":[" + lines + "]}";
+
+			pendingLines = pendingLines + 1;
+		}
+	}
+
+	res = "{\"errors\":[],\"items\":[" + itemsJson + "],\"itemCount\":" + pendingLines + "}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"" + e.toString().replaceAll("\"","'") + "\"],\"items\":[]}";
+	}
+
+	return res;
+}

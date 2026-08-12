@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin — Employee report</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- The shared design system, not a copy of it. Tokens, header, tables,
+         pills, chevrons and empty states all come from the audit page's
+         stylesheet so the two admin screens cannot drift apart. Only what is
+         specific to this report lives in report.css. -->
+    <link rel="stylesheet" href="../css/style.css">
+    <link rel="stylesheet" href="css/report.css">
+</head>
+<body>
+    <div class="app-container">
+
+        <header class="app-header">
+            <div class="app-header-left">
+                <h1>Employee report</h1>
+                <span class="app-date" id="app-date"></span>
+            </div>
+
+            <!-- ONE DAY AT A TIME. A shift log is "what did we get through
+                 today", and a single day also bounds the Stage_Log scan
+                 naturally — which is what keeps this away from the
+                 statement-execution limit as the app fills up. -->
+            <div class="app-header-right">
+                <div class="day-nav">
+                    <button id="day-prev" class="day-btn" type="button" aria-label="Previous day">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                             stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+                    </button>
+                    <input id="day-input" class="day-input" type="date" aria-label="Report date">
+                    <button id="day-next" class="day-btn" type="button" aria-label="Next day">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                             stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+                    </button>
+                </div>
+                <button id="day-today" class="ghost-btn" type="button">Today</button>
+                <button id="refresh-btn" class="primary-btn" type="button">Refresh</button>
+            </div>
+        </header>
+
+        <div class="tiles" id="tiles"></div>
+
+        <main id="content"></main>
+
+        <section id="nolog-wrap"></section>
+
+    </div>
+
+    <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

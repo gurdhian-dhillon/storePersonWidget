@@ -1,0 +1,642 @@
+string createProductionPlans()
+{
+	// Builds a production plan for every sales order that is waiting for one.
+	//
+	// THE QUEUE IS Sales_Order.Order_Status, NOT A TIME WINDOW. This used to scan
+	// orders added in the last N hours, which meant an order that could not be
+	// planned - no assignment rule for its source - fell out of the window and was
+	// never retried. It stayed unplanned for good, and only an email said so.
+	//
+	// Now "Pending" IS the queue. An order that cannot be planned keeps its status
+	// and is picked up on the next run, the moment the missing rule exists. An
+	// order that is planned moves to "In Progress" and leaves the queue, so no run
+	// ever looks at it again.
+	//
+	// Sales_Order.Order_Status: Pending -> In Progress -> Production Complete ->
+	// QC Passed -> Packed -> Dispatched. Only the first hop belongs to this
+	// function; saveProductionPhase makes the second when the plan finishes.
+	//
+	// Note it is a DIFFERENT field from Production_Planning.Order_Status, and the
+	// two now share the words "Production Complete" - that is the seam where the
+	// plan stops and the order carries on, not one field seen twice. Always check
+	// which form a query is against before trusting the value.
+	//
+	// Where the run summary goes. The recipient can be any address - nothing
+	// about it needs verifying. The SENDER is not a choice at all: `from` must
+	// be zoho.adminuserid or the function will not save, and what recipients
+	// actually see is Creator's own notification address, decided by the account
+	// rather than by this code. Both were tested and both deliver.
+	notifyTo = "gurdhian.helios@gmail.com";
+
+	//------------------------------------------------------------------------
+	// Mail styling, defined ONCE and here at the top, because the row builders
+	// inside the per-order loop need it as much as the body builder at the end.
+	//
+	// Email HTML has no stylesheet - no <style> block survives Gmail, no class
+	// ever applies - so every rule has to be inline on every element. Shared
+	// strings are the only thing standing between this and thirty copies of the
+	// same declaration, each free to drift from the others.
+	//
+	// Table layout, not divs: Outlook renders through Word and ignores flex,
+	// grid and inline-block. Colours are stated explicitly rather than left to
+	// inherit, because Gmail's dark mode inverts what it is not told about.
+	//
+	// Palette is the app's own - #2563eb primary, #e9eef4 page - so the mail and
+	// the widgets look like one system.
+	//------------------------------------------------------------------------
+	mFont = "-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif";
+	mTh = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:left;font-weight:600";
+	mThR = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:right;font-weight:600";
+	mTd = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a";
+	mTdR = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a;text-align:right;font-weight:600";
+	mTdBad = "padding:10px 12px;border-bottom:1px solid #fee2e2;font-size:13px;color:#991b1b";
+
+	createdCount = 0;
+	skippedCount = 0;
+	failedCount = 0;
+	// ONE list for every order that could not be planned, whatever the reason.
+	// There used to be a table per reason, which meant adding a reason meant
+	// adding a table, a counter, a heading and a subject clause. Reason and detail
+	// are columns now, so a new reason is one more string.
+	failedList = list();
+	createdList = list();
+	logLines = list();
+	// Oldest first - an order that has been waiting longest gets planned first,
+	// and that ordering carries through to the store's issue screen, where it is
+	// the priority for allocating scarce offcuts.
+	pendingOrders = Sales_Order[Order_Status == "Pending"] sort by Added_Time;
+	// count(), not size() - size() is a List method and this is a query result.
+	logLines.add("Sales Orders waiting to be planned: " + pendingOrders.count());
+	allPlansDesc = Production_Planning[ID != 0] sort by Added_Time desc;
+	maxNum = 0;
+	for each  lp in allPlansDesc
+	{
+		lastNo = lp.Plan_No;
+		maxNum = lastNo.substring(lastNo.lastIndexOf("-") + 1).toLong();
+		break;
+	}
+	for each  so in pendingOrders
+	{
+		soId = so.ID;
+		existingIds = Production_Planning[Sales_Order == soId].ID.getAll();
+		if(existingIds.size() > 0)
+		{
+			// Planned already, but still sitting in the queue - a plan built
+			// before the status drove this, or a run that died between the two
+			// writes. Move it on rather than rescanning it every run for ever.
+			so.Order_Status = "In Progress";
+			skippedCount = skippedCount + 1;
+			logLines.add("SKIP (plan exists, order moved to In Progress) -> SO " + so.Sales_Order);
+			continue;
+		}
+		//--------------------------------------------------------------------
+		// EVERY reason this order cannot be planned is collected, and only then
+		// is it rejected. Bailing at the first problem would report the missing
+		// supervisor, and only after that was fixed - twelve hours later - would
+		// the next run mention the missing BOM. Two round trips of half a day to
+		// learn two facts that were both true the first time.
+		//
+		// All of it happens BEFORE the plan number is taken, so a rejected order
+		// never consumes a PLAN-000xx and the numbering stays unbroken.
+		//--------------------------------------------------------------------
+		rejReasons = "";
+
+		orderSource = so.Order_Source;
+		assignedEmpId = null;
+		if(orderSource != null && orderSource != "")
+		{
+			ruleEmps = Order_Assignment[Order_Source == orderSource].Employee.getAll();
+			if(ruleEmps.size() > 0)
+			{
+				assignedEmpId = ruleEmps.get(0);
+			}
+		}
+		if(assignedEmpId == null)
+		{
+			// No supervisor, no plan. Every downstream screen filters by
+			// Assigned_To - the store list, the receive screen, production - so
+			// an unassigned plan is invisible everywhere while still counting as
+			// "a plan exists", which then blocks this function from ever
+			// creating a real one for that order. Rejecting leaves the order
+			// clean to pick up once an Order_Assignment rule exists.
+			srcTxt = "(no order source)";
+			if(orderSource != null && orderSource != "")
+			{
+				srcTxt = orderSource;
+			}
+			rejReasons = "No supervisor assigned for order source '" + srcTxt + "' - add a rule in Order Assignment";
+		}
+
+		// Both Plan_Item and Material_Requirement are their own forms now, and
+		// a requirement needs its Plan_Item's id - which does not exist until
+		// the plan header is inserted. So everything is gathered here, keyed by
+		// item position, and written after the header in one pass.
+		//
+		// Gathered BEFORE the plan number is taken. Nothing in here writes, so an
+		// order that turns out to be unplannable costs a wasted pass and nothing
+		// else - and it walks away without a plan number to its name.
+		planItems = list();
+		itemLineCount = 0;
+		matLineCount = 0;
+		// Item names, not ids. A mail naming 474519000000014002 is a mail nobody
+		// can act on.
+		noBomTxt = "";
+		multiBomTxt = "";
+		for each  soRow in so.Item_Table
+		{
+			finishedItemId = soRow.SKU;
+			produceQty = ifnull(soRow.Quantity,0);
+			itemName = soRow.Item_Name;
+
+			//------------------------------------------------------------
+			// AN ITEM WITHOUT A BOM CANNOT BE PLANNED, and one bad item kills
+			// the whole order.
+			//
+			// It used to be planned anyway: bomId stayed null, the item was
+			// written with no BOM lookup and no Material_Requirement rows, and
+			// the plan looked complete. The store would then find nothing to
+			// issue against it and the supervisor would find nothing to cut -
+			// a plan that exists, blocks this function from ever re-planning
+			// the order, and can never finish.
+			//
+			// More than one BOM is refused rather than resolved. Taking the
+			// first would plan the order against a material list nobody chose,
+			// and nothing downstream would ever reveal which one was used.
+			//------------------------------------------------------------
+			nameTxt = ifnull(itemName,"").toString().trim();
+			if(nameTxt == "")
+			{
+				nameTxt = "(unnamed item)";
+			}
+
+			bomIds = BOM[Item == finishedItemId].ID.getAll();
+			bomId = null;
+			if(bomIds.size() == 0)
+			{
+				if(noBomTxt != "")
+				{
+					noBomTxt = noBomTxt + ", ";
+				}
+				noBomTxt = noBomTxt + nameTxt;
+			}
+			else if(bomIds.size() > 1)
+			{
+				if(multiBomTxt != "")
+				{
+					multiBomTxt = multiBomTxt + ", ";
+				}
+				multiBomTxt = multiBomTxt + nameTxt + " (" + bomIds.size() + " BOMs)";
+			}
+			else
+			{
+				bomId = bomIds.get(0);
+			}
+			// --- Plan_Item, held until the plan header exists ---
+			piMap = Map();
+			piMap.put("name",itemName);
+			piMap.put("sku",finishedItemId);
+			piMap.put("qty",produceQty);
+			piMap.put("bom",bomId);
+			// Its requirements ride along, as a JSON string because a Deluge Map
+			// holding a List of Maps does not survive being nested reliably.
+			itemLineCount = itemLineCount + 1;
+
+			//------------------------------------------------------------
+			// --- Material_Requirement rows for THIS item ---
+			//
+			// EXTRACTED. The fabric arithmetic that used to sit inline here now
+			// lives in buildItemRequirements, because the QC rework flow has to
+			// produce the same requirements from the same BOM and a second copy
+			// of this maths would drift silently - the remake would get slightly
+			// wrong cloth and nobody would find out until the store came up
+			// short.
+			//
+			// It also fixes a bug that was live here: totalRows was computed as
+			// (piecesNeeded / piecesPerRow).ceil() with both sides integers, so
+			// Deluge truncated before .ceil() ever saw it and every fabric line
+			// was planned one row short. The helper multiplies by 1.0 first, the
+			// same way every other .ceil() in the app already did.
+			//
+			// Returns "[]" when there is no BOM, so nothing here has to test it -
+			// though an item without a BOM never reaches this point now, the
+			// order having been rejected above.
+			//------------------------------------------------------------
+			itemMatsJson = "[]";
+			if(bomId != null)
+			{
+				itemMatsJson = thisapp.buildItemRequirements(bomId.toString(),produceQty.toString(),"SO " + so.Sales_Order);
+			}
+
+			// Counted from the result rather than tallied inside the loop that
+			// no longer exists here. Only used for the run summary.
+			matLineCount = matLineCount + itemMatsJson.toJSONList().size();
+
+			piMap.put("mats",itemMatsJson);
+			planItems.add(piMap);
+		}
+
+		//--------------------------------------------------------------------
+		// Everything wrong with this order, gathered into one sentence.
+		//--------------------------------------------------------------------
+		if(itemLineCount == 0)
+		{
+			// An empty order used to produce an empty plan: a real record, in
+			// every supervisor's list, with nothing to do and no way to finish.
+			if(rejReasons != "")
+			{
+				rejReasons = rejReasons + "; ";
+			}
+			rejReasons = rejReasons + "No items on the order";
+		}
+		if(noBomTxt != "")
+		{
+			if(rejReasons != "")
+			{
+				rejReasons = rejReasons + "; ";
+			}
+			rejReasons = rejReasons + "No BOM for: " + noBomTxt;
+		}
+		if(multiBomTxt != "")
+		{
+			if(rejReasons != "")
+			{
+				rejReasons = rejReasons + "; ";
+			}
+			rejReasons = rejReasons + "More than one BOM for: " + multiBomTxt;
+		}
+
+		if(rejReasons != "")
+		{
+			// The order KEEPS Order_Status "Pending". That is the whole retry
+			// mechanism: it is picked up again on the next run, and plans itself
+			// the moment the BOM or the assignment rule exists. Nothing here
+			// writes, so there is nothing to undo.
+			failedCount = failedCount + 1;
+			failedList.add("<tr><td style='" + mTd + ";white-space:nowrap'><b>" + so.Sales_Order + "</b></td><td style='" + mTdBad + "'>" + rejReasons.replaceAll("<","&lt;") + "</td></tr>");
+			logLines.add("REJECT -> SO " + so.Sales_Order + " | " + rejReasons);
+			continue;
+		}
+
+		// Taken only now that the order is known to be plannable, so a rejected
+		// order leaves no gap in the sequence.
+		maxNum = maxNum + 1;
+		if(maxNum < 10)
+		{
+			padded = "0000" + maxNum;
+		}
+		else if(maxNum < 100)
+		{
+			padded = "000" + maxNum;
+		}
+		else if(maxNum < 1000)
+		{
+			padded = "00" + maxNum;
+		}
+		else if(maxNum < 10000)
+		{
+			padded = "0" + maxNum;
+		}
+		else
+		{
+			padded = "" + maxNum;
+		}
+		planNo = "PLAN-" + padded;
+
+		//--------------------------------------------------------------------
+		// PRIORITY, collapsed into ONE sortable number.
+		//
+		// Deluge `sort by` takes a single field - there is no
+		// `sort by Rank, Added_Time` - and priority needs rank first, oldest
+		// first WITHIN a rank. So both go in one integer:
+		//
+		//     Priority_Key = rank * 1000000 + planSequence
+		//
+		//   shopify PLAN-00042 -> 1000042      faire  PLAN-00003 -> 2000003
+		//   shopify PLAN-00007 -> 1000007      pr     PLAN-00040 -> 4000040
+		//
+		// Sorted ascending that is exactly the rule: every shopify plan before
+		// every faire plan, oldest first inside each band. rank dominates, so a
+		// shopify order placed this morning still beats a pr order from last
+		// month, and the million-wide band means the sequence can never carry
+		// far enough to cross into the next rank.
+		//
+		// maxNum is the plan sequence that was just taken above, so the FIFO
+		// half comes free - plans are numbered in order-age order because
+		// pendingOrders is sorted by Added_Time.
+		//
+		// THE RANKS ARE HARDCODED HERE, ON PURPOSE, and this is the only place
+		// in the app that knows them - everything downstream just sorts by the
+		// number. Moving them to an admin master later means changing this block
+		// and nothing else.
+		//
+		// Compared lowercase and trimmed. The dropdown value is whatever someone
+		// typed into the form builder, and an exact-case match that silently
+		// misses would send every order to the unknown rank without any error.
+		//--------------------------------------------------------------------
+		srcRank = 5;
+		srcTxt = ifnull(orderSource,"").toString().trim().toLowerCase();
+		if(srcTxt == "shopify")
+		{
+			srcRank = 1;
+		}
+		else if(srcTxt == "faire")
+		{
+			srcRank = 2;
+		}
+		else if(srcTxt == "custom")
+		{
+			srcRank = 3;
+		}
+		else if(srcTxt == "pr")
+		{
+			srcRank = 4;
+		}
+		else
+		{
+			// Rank 5, never 0. An unrecognised source must sort LAST, not first
+			// - a typo in the dropdown should not promote an order above
+			// everything else. Logged so the run summary names it.
+			logLines.add("WARN (unranked order source '" + ifnull(orderSource,"") + "', ranked last) -> SO " + so.Sales_Order);
+		}
+		priorityKey = (srcRank * 1000000) + maxNum;
+
+		// 1) insert the header
+		//
+		// Order_Source is copied onto the plan as TEXT. Not needed for sorting -
+		// needed so the store screen can badge the card. Without it the top card
+		// is at the top for a reason nobody on screen can see, and the first
+		// person to disagree with the order has nothing to point at.
+		newPlan = insert into Production_Planning
+		[
+			Plan_No=planNo
+			Sales_Order=soId
+			Assigned_To=assignedEmpId
+			Order_Status="Pending"
+			Plan_Start_Date=zoho.currentdate
+			Order_Source=ifnull(orderSource,"").toString()
+			Priority_Rank=srcRank
+			Priority_Key=priorityKey
+			Added_User=zoho.loginuser
+		];
+		// 2) re-fetch by Plan_No for a real record handle, attach both subforms
+		for each  planRec in Production_Planning[Plan_No == planNo]
+		{
+			// Plan_Item first, then its requirements - a Material_Requirement
+			// cannot be written until the item it belongs to has an id.
+			lineNo = 0;
+			for each  piMap2 in planItems
+			{
+				lineNo = lineNo + 1;
+				newItemId = insert into Plan_Item
+				[
+					Plan=planRec.ID
+					Item_Sku=piMap2.get("sku")
+					Item_Name=piMap2.get("name")
+					Qty_Ordered=piMap2.get("qty")
+					Qty_Produced=0
+					Item_Status="Awaiting_Material"
+					Line_No=lineNo
+					Added_User=zoho.loginuser
+				];
+				// BOM is a lookup and an item may have none - a null cannot go
+				// in the insert block, so it is set afterwards when present.
+				if(piMap2.get("bom") != null)
+				{
+					for each  pit in Plan_Item[ID == newItemId]
+					{
+						pit.BOM=piMap2.get("bom");
+					}
+				}
+				matsList = piMap2.get("mats").toString().toJSONList();
+				for each  mRaw in matsList
+				{
+					mm = mRaw.toMap();
+					// Issued-so-far counters, exactly like Issued_Qty - NOT
+					// a planned split. Waste is deliberately not considered
+					// at plan time because waste stock moves between now and
+					// issue, so any split decided here would be stale by the
+					// time the store person acts.
+					newReqId = insert into Material_Requirement
+					[
+						Plan=planRec.ID
+						Plan_Item=newItemId
+						Material_Name=mm.get("name")
+						Is_Fabric=mm.get("isFab")
+						Unit=mm.get("unit")
+						Required_Qty=mm.get("req")
+						Issued_Qty=0
+						Received_Qty=0
+						Cut_Size_Length=mm.get("cutLen")
+						Cut_Size_Width=mm.get("cutWid")
+						Required_Pieces=mm.get("pcs")
+						Pieces_From_Waste=0
+						Pieces_From_Raw=0
+						Added_User=zoho.loginuser
+					];
+					// Lookups set after the insert - assignedEmpId is guaranteed
+					// non-null by the skip above, but Material is safer this way
+					// and it keeps both lookups in one place.
+					for each  mrq in Material_Requirement[ID == newReqId]
+					{
+						mrq.Material=mm.get("mat").toString().toLong();
+						mrq.Assigned_To=assignedEmpId;
+					}
+				}
+			}
+		}
+		// LAST, and only now: the order leaves the queue. Set any earlier and a
+		// failure part-way through would drop the order out of "Pending" with no
+		// plan behind it, and nothing would ever look at it again.
+		so.Order_Status = "In Progress";
+
+		createdCount = createdCount + 1;
+		logLines.add("CREATE " + planNo + " -> SO " + so.Sales_Order + " | items: " + itemLineCount + " | materials: " + matLineCount + " | emp: " + assignedEmpId);
+
+		// For the run summary below. The NAME, not the id - a mail saying a plan
+		// went to 474519000000014002 is a mail nobody can act on. One lookup per
+		// created plan, and a run creates a handful at most.
+		supName = "";
+		for each  empN in Employee[ID == assignedEmpId]
+		{
+			supName = ifnull(empN.Employee_Name,"").toString();
+		}
+		// No material count. It is a number nobody acts on in a mail - the plan
+		// is either created or it is not, and how many requirement rows it grew
+		// is a question for the plan itself. Still logged, just not mailed.
+		createdList.add("<tr><td style='" + mTd + ";white-space:nowrap'><b style='color:#2563eb'>" + planNo + "</b></td><td style='" + mTd + ";white-space:nowrap'>" + so.Sales_Order + "</td><td style='" + mTd + "'>" + supName + "</td><td style='" + mTdR + "'>" + itemLineCount + "</td></tr>");
+	}
+	//------------------------------------------------------------------------
+	// ONE MAIL PER RUN, covering both halves of what happened: the plans that
+	// were created and the orders that could not be. Not one mail per order -
+	// that is a mailbox full of near-identical alerts on a busy morning - and not
+	// two mails per run, which doubles the send count to say one run's worth.
+	//
+	// The skipped half is less urgent than it once was. A skipped order KEEPS its
+	// Pending status, so every run retries it and it plans itself the moment the
+	// missing rule is added; it can no longer be lost by falling out of a window.
+	// The mail is a prompt to add the rule, not the only thing preventing silent
+	// loss.
+	//
+	// GUARDED. This runs TWICE A DAY on a schedule, so a run with nothing in it
+	// sends nothing. Fourteen "nothing to do" mails a week burn the send quota
+	// and, worse, train whoever gets them to stop opening the one that matters.
+	//
+	// The guard was off while notifications were being tested, because silence is
+	// ambiguous - it can mean "nothing to do" or "the mail never fired". On a
+	// schedule that trade flips: the run is logged either way, and the log is
+	// where "did it fire" belongs.
+	//
+	// skippedCount alone does not trigger a mail. That is housekeeping - an order
+	// that already had a plan being moved out of the queue - not news.
+	//
+	// SENT LAST, and wrapped, because the plans are already written by this point.
+	// A mail failure - quota, a transient error - must not make a successful
+	// planning run look like a failed one, and must never leave the caller
+	// thinking nothing was created. The run is reported either way.
+	//
+	// `from` must be zoho.adminuserid - a string literal there does not save.
+	//------------------------------------------------------------------------
+	// Carried into the returned summary, so Execute answers "did it send, and to
+	// whom" without opening the log. The usage counter ticking while nothing
+	// arrives means the send was accepted and lost afterwards - the recipient is
+	// then the first thing worth seeing, not the last.
+	mailNote = "not attempted";
+	if(createdCount == 0 && failedCount == 0)
+	{
+		mailNote = "not sent - nothing happened this run";
+		logLines.add("MAIL " + mailNote);
+	}
+
+	try
+	{
+		if(createdCount > 0 || failedCount > 0)
+		{
+		// Singular and plural spelled out. "1 plan(s)" is the sort of thing that
+		// makes a system look unattended, and it costs one line to avoid.
+		planWord = "plans";
+		if(createdCount == 1)
+		{
+			planWord = "plan";
+		}
+		orderWord = "orders";
+		if(failedCount == 1)
+		{
+			orderWord = "order";
+		}
+
+		//----------------------------------------------------------------
+		// Shell: tinted page, one centred white card. Two nested tables
+		// because a max-width div does not centre in Outlook.
+		//----------------------------------------------------------------
+		mailBody = "<div style='background:#e9eef4;padding:24px 12px;font-family:" + mFont + "'>";
+		mailBody = mailBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0'><tr><td align='center'>";
+		mailBody = mailBody + "<table role='presentation' width='640' cellpadding='0' cellspacing='0' border='0' style='width:640px;max-width:100%;background:#ffffff;border:1px solid #dbe3ec;border-radius:10px'>";
+
+		// Brand header
+		mailBody = mailBody + "<tr><td style='background:#2563eb;padding:18px 24px;border-radius:10px 10px 0 0'>";
+		mailBody = mailBody + "<div style='font-size:17px;font-weight:700;color:#ffffff'>Production Planning</div>";
+		mailBody = mailBody + "<div style='font-size:12px;color:#c7dbfe;padding-top:3px'>" + zoho.currentdate.toString("dd MMM yyyy") + " &middot; " + zoho.currenttime.toString("HH:mm") + "</div>";
+		mailBody = mailBody + "</td></tr>";
+
+		//----------------------------------------------------------------
+		// The two numbers, big. This is the whole mail for anyone who only
+		// glances - and the failure tile goes red only when there IS a
+		// failure, so a clean run has no red on it anywhere.
+		//----------------------------------------------------------------
+		failInk = "#94a3b8";
+		failBg = "#f8fafc";
+		if(failedCount > 0)
+		{
+			failInk = "#dc2626";
+			failBg = "#fef2f2";
+		}
+
+		mailBody = mailBody + "<tr><td style='padding:20px 24px 4px 24px'>";
+		mailBody = mailBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0'><tr>";
+		mailBody = mailBody + "<td width='50%' style='background:#f0f7ff;border:1px solid #dbeafe;border-radius:8px;padding:14px 16px'>";
+		mailBody = mailBody + "<div style='font-size:28px;font-weight:700;color:#2563eb;line-height:1.1'>" + createdCount + "</div>";
+		mailBody = mailBody + "<div style='font-size:12px;color:#64748b;padding-top:4px'>Plans created</div>";
+		mailBody = mailBody + "</td><td width='12'>&nbsp;</td>";
+		mailBody = mailBody + "<td width='50%' style='background:" + failBg + ";border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px'>";
+		mailBody = mailBody + "<div style='font-size:28px;font-weight:700;color:" + failInk + ";line-height:1.1'>" + failedCount + "</div>";
+		mailBody = mailBody + "<div style='font-size:12px;color:#64748b;padding-top:4px'>Not planned</div>";
+		mailBody = mailBody + "</td></tr></table></td></tr>";
+
+		//----------------------------------------------------------------
+		// FAILURES FIRST. They are the only part of this mail that needs
+		// anyone to do anything, and burying them under a list of successes
+		// is how a mail gets skimmed and closed.
+		//----------------------------------------------------------------
+		if(failedCount > 0)
+		{
+			rowsHtml = "";
+			for each  r in failedList
+			{
+				rowsHtml = rowsHtml + r;
+			}
+			mailBody = mailBody + "<tr><td style='padding:18px 24px 0 24px'>";
+			mailBody = mailBody + "<div style='border-left:3px solid #dc2626;padding-left:12px'>";
+			mailBody = mailBody + "<div style='font-size:14px;font-weight:700;color:#991b1b'>" + failedCount + " " + orderWord + " could not be planned</div>";
+			mailBody = mailBody + "<div style='font-size:12px;color:#64748b;padding-top:4px'>No plan was created and no plan number was used. They are <b>still Pending</b> and will plan themselves on the next run once the reason is fixed &mdash; nothing needs re-triggering.</div>";
+			mailBody = mailBody + "</div>";
+			mailBody = mailBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;margin-top:12px;border:1px solid #e2e8f0;border-radius:6px'>";
+			mailBody = mailBody + "<tr><th style='" + mTh + "'>Sales order</th><th style='" + mTh + "'>Why it was not planned</th></tr>";
+			mailBody = mailBody + rowsHtml + "</table></td></tr>";
+		}
+
+		if(createdCount > 0)
+		{
+			createdHtml = "";
+			for each  cr in createdList
+			{
+				createdHtml = createdHtml + cr;
+			}
+			mailBody = mailBody + "<tr><td style='padding:18px 24px 0 24px'>";
+			mailBody = mailBody + "<div style='font-size:14px;font-weight:700;color:#0f172a'>" + createdCount + " " + planWord + " created</div>";
+			mailBody = mailBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;margin-top:12px;border:1px solid #e2e8f0;border-radius:6px'>";
+			mailBody = mailBody + "<tr><th style='" + mTh + "'>Plan</th><th style='" + mTh + "'>Sales order</th><th style='" + mTh + "'>Supervisor</th><th style='" + mThR + "'>Items</th></tr>";
+			mailBody = mailBody + createdHtml + "</table></td></tr>";
+		}
+
+		// Housekeeping, mentioned only when there is already a mail going out.
+		if(skippedCount > 0)
+		{
+			mailBody = mailBody + "<tr><td style='padding:16px 24px 0 24px;font-size:12px;color:#64748b'>" + skippedCount + " order(s) already had a plan and were moved out of the queue.</td></tr>";
+		}
+
+		mailBody = mailBody + "<tr><td style='padding:20px 24px 22px 24px'>";
+		mailBody = mailBody + "<div style='border-top:1px solid #eef2f6;padding-top:12px;font-size:11px;color:#94a3b8'>Gad Fashions Manufacturing &middot; automated planning run, twice daily. Nothing to reply to.</div>";
+		mailBody = mailBody + "</td></tr>";
+
+		mailBody = mailBody + "</table></td></tr></table></div>";
+
+		// The subject carries the whole answer, so the common case - all planned -
+		// needs no click.
+		subjTxt = "Production planning: " + createdCount + " created";
+		if(failedCount > 0)
+		{
+			subjTxt = subjTxt + ", " + failedCount + " NOT planned";
+		}
+
+		sendmail
+		[
+			from :zoho.adminuserid
+			to :notifyTo
+			subject :subjTxt
+			message :mailBody
+		]
+		mailNote = "accepted, to " + notifyTo + ", subject '" + subjTxt + "'";
+		logLines.add("MAIL " + mailNote);
+		}
+	}
+	catch (eMail)
+	{
+		// Logged, never rethrown. The plans exist whatever happened here.
+		mailNote = "FAILED - " + eMail.toString();
+		logLines.add("MAIL " + mailNote);
+	}
+	summary = "Done. Created: " + createdCount + ", Not planned: " + failedCount + ", Skipped (plan exists): " + skippedCount + " | Mail: " + mailNote;
+	logLines.add(summary);
+	info logLines;
+	return summary;
+}

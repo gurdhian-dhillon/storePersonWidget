@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Store</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="app-container">
+
+        <header class="app-header">
+            <div class="app-header-left">
+                <h1>Store</h1>
+                <span class="app-date" id="app-date"></span>
+            </div>
+
+            <div class="app-header-right">
+                <span class="header-sub" id="header-sub"></span>
+                <button id="refresh-btn" class="primary-btn" type="button">Refresh</button>
+            </div>
+        </header>
+
+        <!-- Tab strip. Counts are filled from the boot fetch, not separate
+             calls — a badge is not worth a round trip of its own. -->
+        <nav class="tab-strip" id="tab-strip">
+            <button type="button" class="tab-btn is-active" data-tab="issue">
+                Issue<span class="tab-count" id="count-issue"></span>
+            </button>
+            <button type="button" class="tab-btn" data-tab="history">
+                History
+            </button>
+            <button type="button" class="tab-btn" data-tab="waste">
+                Waste receipt<span class="tab-count" id="count-waste"></span>
+            </button>
+            <button type="button" class="tab-btn" data-tab="disputes">
+                Disputes<span class="tab-count" id="count-disputes"></span>
+            </button>
+            <button type="button" class="tab-btn" data-tab="requests">
+                My requests<span class="tab-count" id="count-requests"></span>
+            </button>
+        </nav>
+
+        <main class="tab-body">
+
+            <section class="tab-panel is-active" id="panel-issue">
+                <div class="empty-state hidden" id="empty-state">
+                    <h2>No pending requirements</h2>
+                    <p>There are no supervisors with pending material requirements right now.</p>
+                </div>
+                <div id="dynamic-content"></div>
+            </section>
+
+            <section class="tab-panel" id="panel-history"></section>
+            <section class="tab-panel" id="panel-waste"></section>
+            <section class="tab-panel" id="panel-disputes"></section>
+            <section class="tab-panel" id="panel-requests"></section>
+
+        </main>
+
+    </div>
+
+    <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

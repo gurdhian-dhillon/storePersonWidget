@@ -1,0 +1,414 @@
+string receiveWastePieces(string piecesJson)
+{
+	// The store checking declared offcuts onto the rack. POST, one argument:
+	// a JSON array of rows, one per Waste_Master id.
+	//
+	//   [{"id":"1234","count":3,"note":"two missing from the bundle"}]
+	//
+	// Pending_Receipt means "the supervisor says he sent it back". Available
+	// means "it is on the rack and I have seen it". Only Available pieces are
+	// offered to the allocator, which is why this step exists: without it the
+	// store screen would promise pieces that are still on the cutting table.
+	//
+	// COUNT, NOT JUST A TICK. During Pending_Receipt, Piece_Count holds what was
+	// DECLARED, not what is on the rack. This is where the two are compared. What
+	// the store actually found becomes the rack count; the gap goes to
+	// Disputed_Count and raises an Inbound Stock_Dispute. Before this, the row
+	// could only be accepted whole, so a short return had nowhere to go and the
+	// store quietly took the supervisor's word for the count.
+	//
+	// This is the mirror of receiveMaterials, which does the same comparison on
+	// the way out. The direction is the only thing that differs, and the dispute
+	// carries it so resolveDispute knows who may answer what.
+	//
+	// A bare id string is still accepted and means "all of it" - an older widget
+	// must not be read as reporting a count of zero and dispute the whole row.
+	//
+	// The report action markWasteReceived stays a full-receipt path. A report
+	// action fires on click with no way to collect a count, which is the same
+	// reason resolveDispute exists as a Custom API rather than an action.
+
+	movedCount = 0;
+	skipCount = 0;
+	dispCount = 0;
+	pieceCount = 0;
+
+	// Disputes raised by THIS check-in, gathered for one pair of notification
+	// mails at the end rather than a mail per row. A store person working through
+	// a rack of returns settles several rows in one sitting.
+	dispRows = List();
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	rows = piecesJson.toJSONList();
+	info "waste rows to receive: " + rows.size();
+
+	for each  rawRow in rows
+	{
+		wid = "";
+		gotTxt = "";
+		noteTxt = "";
+
+		try
+		{
+			rowMap = rawRow.toMap();
+			wid = ifnull(rowMap.get("id"),"").toString().trim();
+			gotTxt = ifnull(rowMap.get("count"),"").toString().trim();
+			noteTxt = ifnull(rowMap.get("note"),"").toString().replaceAll("\"","'");
+		}
+		catch (eShape)
+		{
+			wid = "";
+		}
+
+		// The old shape: a bare array of ids, every one meaning the whole row.
+		if(wid == "")
+		{
+			wid = ifnull(rawRow,"").toString().trim();
+			gotTxt = "";
+			noteTxt = "";
+		}
+
+		// An empty or non-numeric id makes toLong() throw "Error while fetching
+		// record", which says nothing about the real problem.
+		if(wid != "" && wid.isNumber() == true)
+		{
+			for each  rec in Waste_Master[ID == wid.toLong()]
+			{
+				// Only ever moves Pending_Receipt forward. A Consumed, Issued or
+				// Scrapped row caught by a stray tick must not be resurrected
+				// as stock - there is no undo on a quantity.
+				if(rec.Status == "Pending_Receipt")
+				{
+					// Creator fields that were never written are EMPTY, not null,
+					// and toDecimal() throws on empty - normalise to string first.
+					pcStr = ifnull(rec.Piece_Count,"0").toString().trim();
+					if(pcStr == "")
+					{
+						pcStr = "0";
+					}
+					declared = pcStr.toDecimal().toLong();
+
+					got = declared;
+					if(gotTxt != "" && gotTxt.isNumber() == true)
+					{
+						got = gotTxt.toDecimal().toLong();
+					}
+					// Clamped rather than rejected. More than was declared is not a
+					// receipt, it is a different conversation, and it must never
+					// invent stock; below zero is nonsense either way.
+					if(got < 0)
+					{
+						got = 0;
+					}
+					if(got > declared)
+					{
+						got = declared;
+					}
+					shortBy = declared - got;
+
+					// Where it came from is on the Declared movement, not the
+					// piece - Waste_Master says what the remnant IS, the movement
+					// says what happened to it. Read once, used by both the
+					// receipt movement and the dispute.
+					declMv = null;
+					mvPlan = null;
+					mvItem = null;
+					mvSup = null;
+
+					for each  dmv in Waste_Movement[Waste_Piece == rec.ID && Movement_Type == "Declared"]
+					{
+						declMv = dmv.ID;
+						mvPlan = dmv.Plan;
+						mvItem = dmv.Plan_Item;
+						mvSup = dmv.Moved_By;
+					}
+
+					// Moved_By is set after the insert in saveWasteFromCutting and
+					// can be empty if that second pass failed. The plan's own
+					// supervisor is the same person, and a dispute with nobody
+					// attached never reaches anyone's screen.
+					if(mvSup == null && mvPlan != null)
+					{
+						for each  plS in Production_Planning[ID == mvPlan]
+						{
+							mvSup = plS.Assigned_To;
+						}
+					}
+
+					rec.Piece_Count = got;
+					movedCount = movedCount + 1;
+					pieceCount = pieceCount + got;
+
+					// The status says where the pieces are now; the movement says
+					// when they got there and how many. A status alone cannot
+					// answer "how long did receipt take" or "how many turned up".
+					if(got > 0)
+					{
+						newMoveId = insert into Waste_Movement
+						[
+							Movement_Type="Received"
+							Piece_Width=ifnull(rec.Piece_Width,0)
+							Piece_Length=ifnull(rec.Piece_Length,0)
+							Piece_Count=got
+							Moved_On=zoho.currentdate
+							Added_User=zoho.loginuser
+						];
+
+						for each  mv in Waste_Movement[ID == newMoveId.toLong()]
+						{
+							mv.Waste_Piece = rec.ID;
+							if(declMv != null)
+							{
+								mv.Parent_Movement = declMv;
+							}
+							if(mvPlan != null)
+							{
+								mv.Plan = mvPlan;
+							}
+							if(mvItem != null)
+							{
+								mv.Plan_Item = mvItem;
+							}
+						}
+					}
+
+					if(shortBy <= 0)
+					{
+						rec.Status = "Available";
+					}
+					else
+					{
+						wdStr = ifnull(rec.Disputed_Count,"0").toString().trim();
+						if(wdStr == "")
+						{
+							wdStr = "0";
+						}
+						rec.Disputed_Count = wdStr.toDecimal().toLong() + shortBy;
+
+						// Some turned up, so the row is real stock and belongs on
+						// the rack at the count that is actually there. None turned
+						// up and it is neither on the rack nor still awaiting a
+						// check: Pending_Receipt would offer it again tomorrow and
+						// Available would hand the allocator an empty row.
+						if(got > 0)
+						{
+							rec.Status = "Available";
+						}
+						else
+						{
+							rec.Status = "Disputed";
+						}
+
+						try
+						{
+							wDispName = "Waste";
+							for each  rmw in Raw_Material[ID == rec.SKU]
+							{
+								wDispName = ifnull(rmw.Material_Display_Name,"").toString().trim();
+								if(wDispName == "")
+								{
+									wDispName = ifnull(rmw.Name,"").toString();
+								}
+								wDispName = wDispName.replaceAll("\"","'");
+							}
+
+							newWDispId = insert into Stock_Dispute
+							[
+								Material_Name=wDispName
+								Unit="pcs"
+								Is_Waste=true
+								Direction="Inbound"
+								Issued_Qty=declared
+								Received_Qty=got
+								Disputed_Qty=shortBy
+								Status="Open"
+								Raised_On=zoho.currentdate
+								Raised_Note=noteTxt
+								Added_User=zoho.loginuser
+							];
+
+							// Lookups cannot go in an insert block - a null one
+							// fails the whole insert.
+							// Gathered for the notification at the end - inside the
+							// try, after the insert succeeded, so a dispute that
+							// failed to write is never announced as existing.
+							// Supervisor id carried per row: one check-in can
+							// cover pieces declared by more than one of them.
+							dispRows.add(wDispName + "|" + declared + "|" + got + "|" + shortBy + "|" + ifnull(mvSup,"").toString());
+
+							for each  wdsp in Stock_Dispute[ID == newWDispId.toLong()]
+							{
+								wdsp.Waste_Piece = rec.ID;
+								if(rec.SKU != null)
+								{
+									wdsp.Material = rec.SKU;
+								}
+								if(mvSup != null)
+								{
+									wdsp.Supervisor = mvSup;
+								}
+								if(mvPlan != null)
+								{
+									wdsp.Plan = mvPlan;
+								}
+								if(mvItem != null)
+								{
+									wdsp.Plan_Item = mvItem;
+								}
+							}
+
+							dispCount = dispCount + 1;
+						}
+						catch (eDisp)
+						{
+							info "Stock_Dispute not raised for waste piece " + rec.ID + ": " + eDisp.toString();
+						}
+					}
+				}
+				else
+				{
+					skipCount = skipCount + 1;
+				}
+			}
+		}
+		else
+		{
+			skipCount = skipCount + 1;
+		}
+	}
+	}
+	catch (e)
+	{
+		return "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\",\"received\":0,\"skipped\":0,\"disputed\":0,\"pieces\":0}";
+	}
+
+	//------------------------------------------------------------------------
+	// DISPUTE NOTIFICATIONS. Inbound: the STORE raised these, so the party that
+	// has to answer is the SUPERVISOR. Admin gets its own copy.
+	//
+	// TWO mails, not one with two recipients - they are different messages. The
+	// supervisor's asks him to account for pieces he declared; admin's is a
+	// record that a dispute exists and nobody has answered.
+	//
+	// AN INBOUND DISPUTE RE-OPENS NOTHING. Offcuts coming back are owed to
+	// nobody: there is no Issued movement to read a yield from and no
+	// Pieces_From_Waste to wind back. The supervisor's mail says so explicitly,
+	// because "disputed" reads like "your order is now short" and here it is not.
+	//
+	// Outside the main try/catch and wrapped in its own - everything is written
+	// by here, and a mail failure must not make a completed check-in look failed.
+	//------------------------------------------------------------------------
+	adminTo = "gurdhian.helios@gmail.com";
+	// No Email field on Employee yet, so this cannot reach the supervisor
+	// directly. It goes to the admin address and NAMES him, which keeps the
+	// notification from being lost and keeps the gap visible.
+	//   TO SWITCH ON once Employee.Email exists: read it in the loop below and
+	//   use it as `to`, keeping this address as the fallback.
+	supTo = "gurdhian.helios@gmail.com";
+
+	try
+	{
+		if(dispRows.size() > 0)
+		{
+			dTh = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:left;font-weight:600";
+			dThR = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:right;font-weight:600";
+			dTd = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a";
+			dTdR = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a;text-align:right;font-weight:600";
+			dTdBad = "padding:10px 12px;border-bottom:1px solid #fee2e2;font-size:13px;color:#991b1b;text-align:right;font-weight:700";
+
+			// One check-in can settle rows declared by different supervisors, so
+			// the names are collected rather than assumed to be one.
+			supCache = Map();
+			supNames = "";
+			dRowsHtml = "";
+
+			for each  dr in dispRows
+			{
+				dp = dr.toList("|");
+				dSupKey = dp.get(4).toString().trim();
+				dSupName = "Supervisor";
+
+				if(dSupKey != "")
+				{
+					dSupName = ifnull(supCache.get(dSupKey),"").toString();
+					if(dSupName == "")
+					{
+						for each  dEmp in Employee[ID == dSupKey.toLong()]
+						{
+							dSupName = ifnull(dEmp.Employee_Name,"").toString().replaceAll("\"","'");
+						}
+						if(dSupName == "")
+						{
+							dSupName = "Supervisor";
+						}
+						supCache.put(dSupKey,dSupName);
+
+						if(supNames != "")
+						{
+							supNames = supNames + ", ";
+						}
+						supNames = supNames + dSupName;
+					}
+				}
+
+				dRowsHtml = dRowsHtml + "<tr><td style='" + dTd + "'>" + dp.get(0) + "</td><td style='" + dTd + "'>" + dSupName + "</td><td style='" + dTdR + "'>" + dp.get(1) + "</td><td style='" + dTdR + "'>" + dp.get(2) + "</td><td style='" + dTdBad + "'>" + dp.get(3) + "</td></tr>";
+			}
+
+			if(supNames == "")
+			{
+				supNames = "Supervisor";
+			}
+
+			dTable = "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;margin-top:14px;border:1px solid #e2e8f0;border-radius:6px'>";
+			dTable = dTable + "<tr><th style='" + dTh + "'>Offcut</th><th style='" + dTh + "'>Declared by</th><th style='" + dThR + "'>Declared</th><th style='" + dThR + "'>Found</th><th style='" + dThR + "'>Missing</th></tr>";
+			dTable = dTable + dRowsHtml + "</table>";
+
+			dWord = "disputes";
+			if(dispRows.size() == 1)
+			{
+				dWord = "dispute";
+			}
+			dSubtitle = "Raised by the store &middot; " + zoho.currentdate.toString("dd MMM yyyy") + " " + zoho.currenttime.toString("HH:mm");
+
+			// --- 1. To the SUPERVISOR: pieces you declared did not arrive ---
+			vInner = "<div style='font-size:14px;color:#0f172a'>The store has checked in your returned offcuts and <b>" + dispRows.size() + " " + dWord + "</b> came up short of what was declared.</div>";
+			vInner = vInner + dTable;
+			vInner = vInner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>Answer on the <b>Disputes</b> tab. If you still have them, <b>Resending</b> puts them back into the store's check-in list. If they were never there, <b>Supervisor correction</b> writes the count off as miscounted - which is not the same as scrapped, and keeps the write-off figures honest.</div>";
+			vInner = vInner + "<div style='font-size:12px;color:#64748b;padding-top:10px'><b>No order is affected.</b> Returned offcuts are owed to nobody, so nothing here re-opens a material requirement or holds up production.</div>";
+			vInner = vInner + "<div style='font-size:12px;color:#94a3b8;padding-top:10px'>Written for " + supNames + ". No email is on file for supervisors yet, so it is being sent here.</div>";
+
+			sendmail
+			[
+				from :zoho.adminuserid
+				to :supTo
+				subject :"Action needed: " + dispRows.size() + " offcut " + dWord + " - " + supNames
+				message :thisapp.buildNotificationEmail("Returned offcuts came up short",dSubtitle,"#dc2626",vInner)
+			]
+
+			// --- 2. To ADMIN: a dispute exists and nobody has answered yet ---
+			aInner = "<div style='font-size:14px;color:#0f172a'><b>" + dispRows.size() + " " + dWord + "</b> raised by the store while checking in returned offcuts. Nobody has answered yet.</div>";
+			aInner = aInner + dTable;
+			aInner = aInner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>Direction is <b>Inbound</b> - supervisor to store - so the supervisor answers first. No material requirement is affected and no order is held up. For visibility only.</div>";
+
+			sendmail
+			[
+				from :zoho.adminuserid
+				to :adminTo
+				subject :"Dispute raised: " + dispRows.size() + " offcut " + dWord + " - " + supNames + " (inbound)"
+				message :thisapp.buildNotificationEmail("Dispute raised",dSubtitle,"#dc2626",aInner)
+			]
+
+			info "Waste dispute notifications sent: " + dispRows.size() + " row(s)";
+		}
+	}
+	catch (eMail)
+	{
+		// Logged, never rethrown. The check-in and the disputes are already written.
+		info "Waste dispute notification not sent: " + eMail.toString();
+	}
+
+	return "{\"success\":true,\"received\":" + movedCount + ",\"skipped\":" + skipCount + ",\"disputed\":" + dispCount + ",\"pieces\":" + pieceCount + "}";
+}

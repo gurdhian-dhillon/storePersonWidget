@@ -1,0 +1,374 @@
+string getSupervisorMaterials(string supervisorId)
+{
+	// Supervisor's material receipt list - everything issued to him that he has not
+	// confirmed yet.
+	//
+	// The list is of PHYSICAL THINGS, not order lines. One 10m roll booked against
+	// three items is one line here, because he measures the roll once. The per-order
+	// split is nested inside for the exception path, where he received less than was
+	// issued and has to decide which order goes short.
+	//
+	// Waste pieces are the exception to that: a specific 300x400 remnant was cut for
+	// a specific item, so it is not fungible and gets its own line.
+	//
+	// supervisorId empty -> returns just the supervisor list, so the widget can
+	// populate its picker with one call.
+
+	supJson = "";
+	matJson = "";
+	wasteJson = "";
+
+	// SUPERVISORS ONLY, but every supervisor - not only those with something
+	// pending.
+	//
+	// This picker stands in for a login until zoho.loginuser can be resolved to
+	// an Employee record. Two different filters get confused here, so both are
+	// stated:
+	//
+	//  BY WORK - never. A login does not appear and disappear depending on
+	//  whether you have work waiting; a supervisor with an empty day still has
+	//  to sign in and look at his production tab.
+	//
+	//  BY ROLE - yes, now that Designation exists. Offering a store person or a
+	//  dispatcher as someone to "log in as" was only ever a symptom of having no
+	//  role field to filter on. This is the login stand-in, so the list is who
+	//  may hold this screen.
+	//
+	// Matched on the Designation TEXT. It is a dropdown whose choices are built
+	// at runtime from the Department, so there is no lookup id to resolve - see
+	// autoPopulateDesignation.
+	supEmps = Employee[Designation == "Supervisor" && Status == "Active"] sort by Employee_Name;
+
+	// FALLS BACK TO EVERYONE IF THAT FINDS NOBODY, deliberately, and this is not
+	// belt-and-braces - it is the difference between a screen that works and a
+	// dead one. Designation and Status are new fields; every Employee record
+	// created before them is blank on both, so the moment this filter shipped it
+	// would have emptied the picker and locked every supervisor out of the
+	// widget with nothing on screen explaining why.
+	//
+	// Degrades to exactly the old behaviour, which was usable. Once the employee
+	// records carry designations the fallback stops firing on its own, and the
+	// info line below is how you tell which state you are in.
+	if(supEmps.count() == 0)
+	{
+		info "getSupervisorMaterials: no Active employee has Designation 'Supervisor' - falling back to the full employee list. Set Designation and Status on the Employee records.";
+		supEmps = Employee[ID != 0] sort by Employee_Name;
+	}
+
+	for each  emp in supEmps
+	{
+		if(supJson != "")
+		{
+			supJson = supJson + ",";
+		}
+		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+		supJson = supJson + "{\"id\":\"" + emp.ID + "\",\"name\":\"" + ifnull(emp.Employee_Name,"").toString().replaceAll("\"","'") + "\"}";
+	}
+
+	// Partially Received is still open - some items verified, others not.
+	pendingPlans = Production_Planning[Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress"] sort by Added_Time;
+
+	if(supervisorId == null || supervisorId.trim() == "")
+	{
+		return "{\"errors\":[],\"supervisors\":[" + supJson + "],\"materials\":[],\"waste\":[],\"plansAssigned\":0,\"plansAwaiting\":0}";
+	}
+
+	supId = supervisorId.trim().toLong();
+
+	//------------------------------------------------------------------------
+	// How much work is on him overall.
+	//
+	// The receipt list only shows material already issued, so a supervisor with
+	// three orders and no deliveries yet saw an empty screen and had no way to
+	// know the orders existed. These counts let the tab say so in a sentence.
+	//------------------------------------------------------------------------
+	plansAssigned = 0;
+	plansAwaiting = 0;
+
+	livePlans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Material Ready" || Order_Status == "Partially Received" || Order_Status == "In Progress")];
+
+	for each  lp in livePlans
+	{
+		plansAssigned = plansAssigned + 1;
+
+		// "Waiting on the store" is read off the issued quantities, NOT off
+		// Order_Status. A plan stays "Pending" until the supervisor confirms
+		// receipt - issuing does not move it - so counting Pending told him an
+		// order was still waiting on the store while its cloth sat on the very
+		// same screen waiting to be checked.
+		issuedAny = false;
+		for each  mrq in Material_Requirement[Plan == lp.ID]
+		{
+			if(mrq.Assigned_To == supId)
+			{
+				iqStr = ifnull(mrq.Issued_Qty,"0").toString().trim();
+				if(iqStr == "")
+				{
+					iqStr = "0";
+				}
+				if(iqStr.toDecimal() > 0)
+				{
+					issuedAny = true;
+				}
+			}
+		}
+
+		if(issuedAny == false)
+		{
+			plansAwaiting = plansAwaiting + 1;
+		}
+	}
+
+	//------------------------------------------------------------------------
+	// What is already in dispute, and therefore NOT waiting to be received.
+	//
+	// Outstanding used to be Issued_Qty - Received_Qty and nothing else. Report
+	// 1.5 m missing out of 2.5 and that 1.5 stayed on this screen as an ordinary
+	// pending delivery - so it could be received a second time. That credited the
+	// receipt while leaving the dispute open and the 1.5 sitting in Disputed_Qty:
+	// the same cloth counted as both arrived and missing, and the item released
+	// to production on material nobody had.
+	//
+	// Disputed quantity belongs to the disputes screen until somebody resolves
+	// it. Found credits the receipt; a correction or a write-off re-opens the
+	// requirement so the store issues again, and THAT issue is what should show
+	// up here.
+	//
+	// Keyed per plan+material, not per material, so the per-order detail below
+	// still adds up to the total beside it.
+	//------------------------------------------------------------------------
+	openDispPM = Map();
+	openDispWP = Map();
+
+	for each  dsp in Stock_Dispute[Supervisor == supId && Status == "Open"]
+	{
+		dqStr = ifnull(dsp.Disputed_Qty,"0").toString().trim();
+		if(dqStr == "")
+		{
+			dqStr = "0";
+		}
+
+		resSoFar = 0.0;
+		for each  rl in dsp.Resolution_Lines
+		{
+			rqStr = ifnull(rl.Resolved_Qty,"0").toString().trim();
+			if(rqStr == "")
+			{
+				rqStr = "0";
+			}
+			resSoFar = resSoFar + rqStr.toDecimal();
+		}
+
+		stillOpen = dqStr.toDecimal() - resSoFar;
+
+		if(stillOpen > 0)
+		{
+			if(ifnull(dsp.Is_Waste,false) == true && dsp.Waste_Piece != null)
+			{
+				wKey = dsp.Waste_Piece + "";
+				wHave = openDispWP.get(wKey);
+				if(wHave == null)
+				{
+					wHave = 0.0;
+				}
+				openDispWP.put(wKey,wHave + stillOpen);
+			}
+			else if(dsp.Plan != null && dsp.Material != null)
+			{
+				pmKey = dsp.Plan + "|" + dsp.Material;
+				pmHave = openDispPM.get(pmKey);
+				if(pmHave == null)
+				{
+					pmHave = 0.0;
+				}
+				openDispPM.put(pmKey,pmHave + stillOpen);
+			}
+		}
+	}
+
+	//------------------------------------------------------------------------
+	// Aggregate outstanding receipts by material. Per-order detail is kept in
+	// a parallel map so the widget can nest it under each line.
+	//------------------------------------------------------------------------
+	agg = Map();
+	orderedKeys = List();
+	detail = Map();
+
+	for each  plan in pendingPlans
+	{
+		soNo = "";
+		for each  so in Sales_Order[ID == plan.Sales_Order]
+		{
+			soNo = so.Sales_Order;
+		}
+
+		for each  mr in Material_Requirement[Plan == plan.ID]
+		{
+			rowSup = mr.Assigned_To;
+			matId = mr.Material;
+			if(rowSup != null && matId != null && rowSup == supId)
+			{
+				issStr = ifnull(mr.Issued_Qty,"0").toString().trim();
+				if(issStr == "")
+				{
+					issStr = "0";
+				}
+				recStr = ifnull(mr.Received_Qty,"0").toString().trim();
+				if(recStr == "")
+				{
+					recStr = "0";
+				}
+				pend = issStr.toDecimal() - recStr.toDecimal();
+
+				// Take off whatever of this line is already reported missing.
+				// Drawn down as it is applied, so two requirement rows on the
+				// same plan and material cannot each discount the same dispute.
+				pmKey2 = plan.ID + "|" + matId;
+				dispLeft = openDispPM.get(pmKey2);
+				if(dispLeft != null && dispLeft > 0)
+				{
+					takeOff = dispLeft;
+					if(takeOff > pend)
+					{
+						takeOff = pend;
+					}
+					pend = pend - takeOff;
+					openDispPM.put(pmKey2,dispLeft - takeOff);
+				}
+
+				if(pend > 0)
+				{
+					key = matId + "";
+					cur = agg.get(key);
+					if(cur == null)
+					{
+						cur = Map();
+						cur.put("matId",matId);
+						cur.put("name",mr.Material_Name);
+						cur.put("unit",mr.Unit);
+						cur.put("isFabric",mr.Is_Fabric);
+						cur.put("pending",0.0);
+						// Whether ANY of the rows behind this line is a
+						// replacement for material damaged in production. The
+						// aggregate merges every plan and every requirement into
+						// one figure, so without this the supervisor signs for a
+						// quantity with no way of knowing part of it is the cloth
+						// he asked for after ruining some - which is the one thing
+						// about that delivery he already has context for.
+						cur.put("hasReissue","false");
+						agg.put(key,cur);
+						orderedKeys.add(key);
+						detail.put(key,"");
+					}
+					cur.put("pending",cur.get("pending") + pend);
+
+					// A Creator field never written is EMPTY, not null - so every
+					// requirement raised before Source existed reads "Plan", which
+					// is what it is.
+					rowSrc = ifnull(mr.Source,"").toString().trim();
+					isRe = "false";
+					if(rowSrc == "Reissue")
+					{
+						isRe = "true";
+						cur.put("hasReissue","true");
+					}
+					agg.put(key,cur);
+
+					dJson = detail.get(key);
+					if(dJson != "")
+					{
+						dJson = dJson + ",";
+					}
+					// The reason travels down to the line as well. On the drill-
+					// down he can see WHICH of the plans behind this figure is the
+					// reissue and why - the header flag only says that one is.
+					dJson = dJson + "{\"planNo\":\"" + plan.Plan_No + "\",\"salesOrder\":\"" + soNo + "\",\"pending\":" + pend + ",\"isReissue\":" + isRe + ",\"reason\":\"" + ifnull(mr.Reason,"").toString().replaceAll("\"","'").replaceAll("\n"," ") + "\"}";
+					detail.put(key,dJson);
+				}
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// Waste pieces - listed individually, never merged. He is holding that
+		// specific remnant for that specific cut.
+		//--------------------------------------------------------------------
+		// STEP 4b: Issued movements, not the Waste_Issued subform. rowId below is
+		// now a Waste_Movement id - the receive payload keeps the same shape, so
+		// the widget needs no change, but receiveMaterials has to read it the
+		// same way or receipts land on nothing.
+		issuedMoves = Waste_Movement[Plan == plan.ID && Movement_Type == "Issued"];
+
+		for each  wi in issuedMoves
+		{
+			wCount = ifnull(wi.Piece_Count,0);
+
+			// Summed from the Received movements rather than a counter.
+			wRecv = 0;
+			for each  rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
+			{
+				wRecv = wRecv + ifnull(rv.Piece_Count,0);
+			}
+			wPend = wCount - wRecv;
+
+			// Same rule for remnants: a piece already reported missing is on
+			// the disputes screen, not waiting on the trolley.
+			wKey2 = wi.Waste_Piece + "";
+			wDispLeft = openDispWP.get(wKey2);
+			if(wDispLeft != null && wDispLeft > 0)
+			{
+				wTakeOff = wDispLeft;
+				if(wTakeOff > wPend)
+				{
+					wTakeOff = wPend;
+				}
+				wPend = wPend - wTakeOff.toLong();
+				openDispWP.put(wKey2,wDispLeft - wTakeOff);
+			}
+
+			// The material comes off the piece the movement points at.
+			wSkuId = null;
+			for each  wmRec in Waste_Master[ID == wi.Waste_Piece]
+			{
+				wSkuId = wmRec.SKU;
+			}
+
+			if(wPend > 0)
+			{
+				// A movement carries no Assigned_To, so ownership comes from the
+				// material row it was booked against.
+				ownedBySup = false;
+				matName = "";
+				for each  mr2 in Material_Requirement[Plan == plan.ID]
+				{
+					if(mr2.Material != null && wSkuId != null && mr2.Material.toString() == wSkuId.toString() && mr2.Assigned_To == supId)
+					{
+						ownedBySup = true;
+						matName = mr2.Material_Name;
+					}
+				}
+
+				if(ownedBySup == true)
+				{
+					if(wasteJson != "")
+					{
+						wasteJson = wasteJson + ",";
+					}
+					wasteJson = wasteJson + "{\"rowId\":\"" + wi.ID + "\",\"planNo\":\"" + plan.Plan_No + "\",\"salesOrder\":\"" + soNo + "\",\"materialId\":\"" + wSkuId + "\",\"material\":\"" + matName + "\",\"width\":" + ifnull(wi.Piece_Width,0) + ",\"length\":" + ifnull(wi.Piece_Length,0) + ",\"pending\":" + wPend + ",\"cutWidth\":" + ifnull(wi.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(wi.Cut_Size_Length,0) + ",\"yields\":" + ifnull(wi.Pieces_Yielded,0) + "}";
+				}
+			}
+		}
+	}
+
+	for each  k in orderedKeys
+	{
+		e = agg.get(k);
+		if(matJson != "")
+		{
+			matJson = matJson + ",";
+		}
+		matJson = matJson + "{\"materialId\":\"" + e.get("matId") + "\",\"material\":\"" + e.get("name") + "\",\"unit\":\"" + e.get("unit") + "\",\"isFabric\":" + e.get("isFabric") + ",\"isReissue\":" + ifnull(e.get("hasReissue"),"false") + ",\"pending\":" + e.get("pending") + ",\"orders\":[" + detail.get(k) + "]}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[],\"supervisors\":[" + supJson + "],\"materials\":[" + matJson + "],\"waste\":[" + wasteJson + "],\"plansAssigned\":" + plansAssigned + ",\"plansAwaiting\":" + plansAwaiting + "}";
+}

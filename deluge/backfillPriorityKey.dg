@@ -1,0 +1,168 @@
+string backfillPriorityKey(string dryRun)
+{
+	// ONE-SHOT. Stamps Order_Source, Priority_Rank and Priority_Key onto plans
+	// created before those fields existed.
+	//
+	// RUN THIS BEFORE DEPLOYING THE THREE SORT CHANGES, not after. A plan with an
+	// empty Priority_Key sorts to one end or the other - which end is Creator's
+	// business, not something to find out on the live store screen - so until
+	// every open plan carries a key, the store list is either all the old plans
+	// first or all of them last, and the offcut allocation follows it.
+	//
+	// Not a Custom API. Run it from Creator's Execute, read the log, run it
+	// again. dryRun anything other than "false" reports and writes nothing.
+	//
+	// Safe to run twice: a plan that already has a non-zero key is left alone, so
+	// this never renumbers work that createProductionPlans has already stamped.
+	//
+	// Same rank table as createProductionPlans, and it has to stay the same. If
+	// the ranks there ever change, they change here too - or a backfilled plan
+	// and a freshly created one disagree about what "shopify" is worth. That
+	// duplication is the price of keeping the live path free of a second query;
+	// it is two blocks, and this file exists only until the old plans are gone.
+
+	// Quotes stripped as well as trimmed. Creator's Execute box hands the
+	// argument over as typed, so "false" with the quote characters still on it
+	// arrives as a five-character word wrapped in two more - which does not
+	// equal false, silently takes the dry path, and looks exactly like a run
+	// that worked. That happened on the first attempt.
+	//
+	// Default is DRY. Anything unrecognised reports and writes nothing.
+	drTxt = ifnull(dryRun,"").toString().trim().toLowerCase().replaceAll("\"","").replaceAll("'","");
+	writeIt = false;
+	if(drTxt == "false" || drTxt == "no" || drTxt == "0" || drTxt == "write")
+	{
+		writeIt = true;
+	}
+	// Echoed back so the mode can never be a mystery again - if this line and
+	// the mode below disagree with what you typed, the argument is the problem.
+	info "backfillPriorityKey: dryRun argument received as '" + ifnull(dryRun,"") + "' -> writeIt=" + writeIt;
+
+	doneCount = 0;
+	skipCount = 0;
+	unranked = 0;
+	logTxt = "";
+	// The distinct source strings that matched no rank. Counting them says five
+	// plans are unranked; naming them says the field reads "Fair" and nobody
+	// spelled it "faire" - which is the only version of that message anyone can
+	// act on.
+	unrankedNames = List();
+
+	// EVERY plan, not only the open ones. A closed plan with an empty key costs
+	// nothing to stamp and means the history screens sort the same way the live
+	// ones do - and it stops this being a job that has to be run again later for
+	// the rows that were missed the first time.
+	for each  pl in Production_Planning[ID != 0]
+	{
+		// A Creator field that was never written is EMPTY, not null, and
+		// toDecimal() throws on it - normalise to string first.
+		keyStr = ifnull(pl.Priority_Key,"0").toString().trim();
+		if(keyStr == "")
+		{
+			keyStr = "0";
+		}
+
+		if(keyStr.toDecimal().toLong() > 0)
+		{
+			skipCount = skipCount + 1;
+		}
+		else
+		{
+			// The source lives on the ORDER. It is copied onto the plan here for
+			// the same reason createProductionPlans copies it - so the store card
+			// can be badged without a second query per row.
+			plSrc = "";
+			for each  soRec in Sales_Order[ID == pl.Sales_Order]
+			{
+				plSrc = ifnull(soRec.Order_Source,"").toString();
+			}
+
+			plRank = 5;
+			plSrcTxt = plSrc.trim().toLowerCase();
+			if(plSrcTxt == "shopify")
+			{
+				plRank = 1;
+			}
+			else if(plSrcTxt == "faire")
+			{
+				plRank = 2;
+			}
+			else if(plSrcTxt == "custom")
+			{
+				plRank = 3;
+			}
+			else if(plSrcTxt == "pr")
+			{
+				plRank = 4;
+			}
+			else
+			{
+				// Rank 5, never 0. An unrecognised or missing source sorts LAST.
+				// Promoting it above everything else because nobody filled the
+				// field in is the one outcome worth ruling out.
+				unranked = unranked + 1;
+				if(unrankedNames.contains(plSrc) == false)
+				{
+					unrankedNames.add(plSrc);
+				}
+			}
+
+			// The sequence half, read off the plan number the same way
+			// createProductionPlans derives the next one - PLAN-00042 -> 42.
+			// Guarded because a plan numbered by hand may not carry the dash.
+			plSeq = 0;
+			plNo = ifnull(pl.Plan_No,"").toString().trim();
+			if(plNo.contains("-") == true)
+			{
+				seqTxt = plNo.substring(plNo.lastIndexOf("-") + 1).trim();
+				if(seqTxt != "" && seqTxt.isNumber() == true)
+				{
+					plSeq = seqTxt.toLong();
+				}
+			}
+
+			newKey = (plRank * 1000000) + plSeq;
+
+			logTxt = logTxt + "\n  " + plNo + "  src='" + plSrc + "'  rank=" + plRank + "  seq=" + plSeq + "  key=" + newKey;
+
+			if(writeIt == true)
+			{
+				pl.Order_Source = plSrc;
+				pl.Priority_Rank = plRank;
+				pl.Priority_Key = newKey;
+			}
+			doneCount = doneCount + 1;
+		}
+	}
+
+	mode = "DRY RUN - nothing written";
+	if(writeIt == true)
+	{
+		mode = "WRITTEN";
+	}
+
+	// The unknown sources NAMED, not just counted. Read this line before writing
+	// anything: every value listed here is sorting last, and if one of them is a
+	// real source under a spelling the rank table does not know, that is a
+	// business priority silently inverted rather than a cosmetic warning.
+	unkTxt = "none";
+	unkJson = "";
+	if(unrankedNames.size() > 0)
+	{
+		unkTxt = "";
+		for each  un in unrankedNames
+		{
+			if(unkTxt != "")
+			{
+				unkTxt = unkTxt + ", ";
+				unkJson = unkJson + ",";
+			}
+			unkTxt = unkTxt + "'" + un + "'";
+			unkJson = unkJson + "\"" + un.toString().replaceAll("\"","'") + "\"";
+		}
+	}
+
+	info mode + " | stamped " + doneCount + " | already keyed " + skipCount + " | unranked rows " + unranked + " | unranked sources: " + unkTxt + logTxt;
+
+	return "{\"mode\":\"" + mode + "\",\"stamped\":" + doneCount + ",\"alreadyKeyed\":" + skipCount + ",\"unranked\":" + unranked + ",\"unrankedSources\":[" + unkJson + "]}";
+}

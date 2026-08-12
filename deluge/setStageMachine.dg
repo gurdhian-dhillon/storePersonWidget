@@ -1,0 +1,157 @@
+string setStageMachine(string payloadJson)
+{
+	// Attach, switch or free the machine on a stage that is ALREADY running.
+	//
+	// Taking a machine at Start is saveProductionPhase's job - it writes the
+	// Stage_Log and claims the machine in one call, so there is no window where
+	// a stage runs unclaimed or a machine is held against a stage that failed to
+	// start. This function is only for what happens after that:
+	//
+	//   - he started with no machine because they were all busy, and one freed up
+	//   - the machine broke mid-stage and he is moving to another one
+	//   - he is done with it before the stage ends and presses Free
+	//
+	// The third case is why this exists at all. Without it his only way out of a
+	// broken machine is to End the stage early with a wrong Qty_Out, which
+	// corrupts production numbers to work around a UI limit.
+	//
+	// payload:
+	// {
+	//   "stageLogId": "123456",
+	//   "machineId": "789012",   <- empty string means FREE, take nothing
+	//   "operatorId": "345"
+	// }
+
+	// Deluge requires a return at the function's top level, so the result is
+	// built into a variable rather than returned from inside the try/catch.
+	res = "{\"success\":false,\"error\":\"Nothing was saved\"}";
+
+	try
+	{
+		inp = payloadJson.toMap();
+		logIdStr = ifnull(inp.get("stageLogId"),"").toString().trim();
+		machIdStr = ifnull(inp.get("machineId"),"").toString().trim();
+		opIdStr = ifnull(inp.get("operatorId"),"").toString().trim();
+
+		if (logIdStr == "")
+		{
+			return "{\"success\":false,\"error\":\"Missing stageLogId\"}";
+		}
+		logId = logIdStr.toLong();
+
+		machId = 0;
+		if (machIdStr != "") { machId = machIdStr.toLong(); }
+
+		opId = null;
+		if (opIdStr != "") { opId = opIdStr.toLong(); }
+
+		//------------------------------------------------------------------
+		// The stage has to exist, and a finished stage cannot take a machine -
+		// it would be occupied against work that is already over, and nothing
+		// would ever come back to release it. Freeing one is still allowed,
+		// because that is exactly how such a row gets cleaned up.
+		//------------------------------------------------------------------
+		stageOk = false;
+		stageDone = false;
+		for each  lg in Stage_Log[ID == logId]
+		{
+			stageOk = true;
+			if (ifnull(lg.Stage_Status,"").toString().trim() == "Done") { stageDone = true; }
+		}
+
+		if (stageOk == false)
+		{
+			return "{\"success\":false,\"error\":\"That stage no longer exists\"}";
+		}
+
+		if (stageDone == true && machId > 0)
+		{
+			return "{\"success\":false,\"error\":\"That stage has already ended - a finished stage cannot take a machine.\"}";
+		}
+
+		//------------------------------------------------------------------
+		// Validate the NEW machine before releasing the old one. Released
+		// first and the claim then fails, he ends up holding nothing at all -
+		// worse than the machine he started with.
+		//------------------------------------------------------------------
+		machName = "";
+		if (machId > 0)
+		{
+			machOk = false;
+			for each  mcChk in Machine_Master[ID == machId]
+			{
+				machName = ifnull(mcChk.Machine_Code,"").toString().replaceAll("\"","'");
+				mcSt = ifnull(mcChk.Status,"").toString().trim();
+
+				mcHolder = 0;
+				if (mcChk.Current_Stage_Log != null) { mcHolder = mcChk.Current_Stage_Log; }
+
+				// Free, or already held by this very stage - re-picking the
+				// machine you are already on is a no-op, not a collision.
+				if (mcSt == "Available") { machOk = true; }
+				if (mcHolder == logId) { machOk = true; }
+			}
+
+			if (machOk == false)
+			{
+				if (machName == "") { machName = "That machine"; }
+				return "{\"success\":false,\"code\":\"MACHINE_TAKEN\",\"error\":\"" + machName + " is no longer free. Pick another one.\"}";
+			}
+		}
+
+		//------------------------------------------------------------------
+		// Release whatever this stage holds now. Queried by Current_Stage_Log
+		// rather than read off Stage_Log.Machine - the machine that believes it
+		// is on this stage is the one that would stay locked, so that is the
+		// one that has to be let go. Skips the machine being claimed, or a
+		// re-pick of the same machine would free it and take it in one call.
+		//------------------------------------------------------------------
+		for each  mcRel in Machine_Master[Current_Stage_Log == logId]
+		{
+			relId = mcRel.ID;
+			if (machId == 0 || relId != machId)
+			{
+				mcRel.Status = "Available";
+				mcRel.Current_Stage_Log = null;
+				mcRel.Current_Operator = null;
+				mcRel.Occupied_Since = null;
+			}
+		}
+
+		//------------------------------------------------------------------
+		// Claim the new one, and point the stage at it.
+		//------------------------------------------------------------------
+		if (machId > 0)
+		{
+			for each  mcSet in Machine_Master[ID == machId]
+			{
+				mcSet.Status = "Occupied";
+				mcSet.Current_Stage_Log = logId;
+				mcSet.Occupied_Since = zoho.currenttime;
+				if (opId != null) { mcSet.Current_Operator = opId; }
+			}
+		}
+
+		for each  lg2 in Stage_Log[ID == logId]
+		{
+			if (machId > 0)
+			{
+				lg2.Machine = machId;
+			}
+			else
+			{
+				lg2.Machine = null;
+			}
+		}
+
+		// machineId echoed back as a STRING - an 18-digit id sent as a number
+		// breaks JSON.parse on the widget side.
+		res = "{\"success\":true,\"stageLogId\":\"" + logId + "\",\"machineId\":\"" + machIdStr + "\",\"machineCode\":\"" + machName + "\"}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

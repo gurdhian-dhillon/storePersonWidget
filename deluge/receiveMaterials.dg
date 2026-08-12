@@ -1,0 +1,697 @@
+string receiveMaterials(string supervisorId, string receiptsJson)
+{
+	// Supervisor confirms what he physically received.
+	//
+	// receiptsJson:
+	// {
+	//   "materials":[ {"materialId":"123","received":9.5,"remark":"half metre short"} ],
+	//   "waste":[ {"rowId":"456","received":1,"remark":""} ]
+	// }
+	//
+	// Received quantities fan across his plan rows OLDEST PLAN FIRST - the same rule
+	// issueMaterials uses to spend Issued_Qty. Same rule, same order, same result,
+	// which is why no mapping of issue-to-plan needs storing anywhere.
+	//
+	// A short receipt is RECORDED, never auto-corrected. Stock was already
+	// decremented at issue time; quietly adjusting it here would mean the ledger
+	// changed under the store person without anyone deciding to.
+
+	errJson = "";
+	okJson = "";
+
+	// Disputes raised by THIS receipt, gathered for one pair of notification
+	// mails at the end. Not one mail per dispute: a receipt three materials short
+	// raises three disputes, and six mails describing one trip to the counter is
+	// how people learn to ignore them.
+	dispRows = List();
+
+	// DEBUG WRAPPER: Creator reports every runtime failure as a generic
+	// "code 9430 - There is an error while executing Custom API." Catching it
+	// here surfaces the real Deluge message in the widget console instead.
+	try
+	{
+	supId = supervisorId.trim().toLong();
+	inp = receiptsJson.toMap();
+	mats = ifnull(inp.get("materials"),"[]").toString().toJSONList();
+	wastes = ifnull(inp.get("waste"),"[]").toString().toJSONList();
+	info "supId=" + supId + " matLines=" + mats.size() + " wasteLines=" + wastes.size();
+
+	// Partially Received is still open - the rest of the plan is yet to arrive.
+	plans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress")] sort by Added_Time;
+
+	//------------------------------------------------------------------------
+	// Fungible materials - metres, cones, labels. Fan across the plan rows.
+	//------------------------------------------------------------------------
+	for each  mRaw in mats
+	{
+		// toJSONList() yields JSON objects, NOT Deluge Maps - .get() silently
+		// returns null on those. .toMap() converts to a real Map first.
+		mm = mRaw.toMap();
+		matId = ifnull(mm.get("materialId"),"").toString().trim();
+
+		// Creator fields that were never written are EMPTY, not null, and
+		// toDecimal() throws on empty - normalise to string first.
+		rStr = ifnull(mm.get("received"),"0").toString().trim();
+		if(rStr == "")
+		{
+			rStr = "0";
+		}
+		gotQty = rStr.toDecimal();
+		remark = ifnull(mm.get("remark"),"").toString();
+
+		if(matId == "" || gotQty < 0)
+		{
+			if(errJson != "")
+			{
+				errJson = errJson + ",";
+			}
+			errJson = errJson + "\"Material " + matId + ": invalid received quantity\"";
+		}
+		else
+		{
+			toFan = gotQty;
+			pendingTotal = 0.0;
+			matName = "";
+			matUnit = "";
+			// Where to hang the dispute if this comes up short. The receipt is
+			// against a bulk handover that can span plans, so the first line
+			// still owed is used - the same "oldest plan first" rule the fan
+			// itself follows, so the ticket points at the order that has been
+			// waiting longest.
+			shortPlanId = null;
+			shortItemId = null;
+
+			for each  plan in plans
+			{
+				for each  row in Material_Requirement[Plan == plan.ID]
+				{
+					if(row.Material != null && row.Material.toString() == matId && row.Assigned_To == supId)
+					{
+						matName = row.Material_Name;
+						matUnit = ifnull(row.Unit,"").toString();
+						issStr = ifnull(row.Issued_Qty,"0").toString().trim();
+						if(issStr == "")
+						{
+							issStr = "0";
+						}
+						recStr = ifnull(row.Received_Qty,"0").toString().trim();
+						if(recStr == "")
+						{
+							recStr = "0";
+						}
+						already = recStr.toDecimal();
+						
+						// If it was null, initialize it so it displays as 0 instead of blank
+						if (row.Received_Qty == null) {
+							row.Received_Qty = already;
+						}
+
+						rowPend = issStr.toDecimal() - already;
+
+						if(rowPend > 0)
+						{
+							pendingTotal = pendingTotal + rowPend;
+							if(shortPlanId == null)
+							{
+								shortPlanId = plan.ID;
+								shortItemId = row.Plan_Item;
+							}
+							if(toFan > 0)
+							{
+								give = rowPend;
+								if(toFan < rowPend)
+								{
+									give = toFan;
+								}
+								row.Received_Qty = already + give;
+								toFan = toFan - give;
+							}
+						}
+					}
+				}
+			}
+
+			shortBy = pendingTotal - gotQty;
+			if(shortBy < 0)
+			{
+				// More confirmed than went out. Capped rather than trusted -
+				// the extra came from somewhere else, and inventing stock to
+				// match a typo is worse than the typo.
+				shortBy = 0;
+			}
+
+			//--------------------------------------------------------------
+			// THIS is where material actually leaves the company. Everything
+			// the supervisor confirmed comes off In_Transit and is gone into
+			// production; anything missing moves to Disputed, where it stays
+			// owned but unaccounted until somebody explains it.
+			//
+			// The whole pending amount leaves In_Transit either way - the
+			// handover is settled now, one way or the other.
+			//--------------------------------------------------------------
+			if(pendingTotal > 0)
+			{
+				for each  rmStock in Raw_Material[ID == matId.toLong()]
+				{
+					itStr = ifnull(rmStock.In_Transit_Qty,"0").toString().trim();
+					if(itStr == "")
+					{
+						itStr = "0";
+					}
+					dispStr = ifnull(rmStock.Disputed_Qty,"0").toString().trim();
+					if(dispStr == "")
+					{
+						dispStr = "0";
+					}
+					itQty = itStr.toDecimal();
+					dispQty = dispStr.toDecimal();
+
+					settleQty = pendingTotal;
+					if(settleQty > itQty)
+					{
+						// Cannot settle more than is actually in transit -
+						// otherwise a re-run would drive it negative.
+						settleQty = itQty;
+					}
+
+					rmStock.In_Transit_Qty = itQty - settleQty;
+					if(shortBy > 0)
+					{
+						rmStock.Disputed_Qty = dispQty + shortBy;
+					}
+				}
+			}
+
+			if(shortBy > 0)
+			{
+				noteTxt = "";
+				if(remark != "")
+				{
+					noteTxt = " - " + remark.replaceAll("\"","'");
+				}
+
+				// Reported, never auto-corrected. A dispute is a question for a
+				// person - was it mismeasured, taken by someone else, or lost -
+				// and the system cannot answer any of those.
+				//
+				// His remark is stored on the dispute as well as echoed back
+				// below. The echo is gone the moment he closes the screen, and
+				// the store then opens a dispute with no idea what he saw.
+				try
+				{
+					newDispId = insert into Stock_Dispute
+					[
+						Material_Name=matName
+						Unit=matUnit
+						Is_Waste=false
+						Direction="Outbound"
+						Issued_Qty=pendingTotal
+						Received_Qty=gotQty
+						Disputed_Qty=shortBy
+						Status="Open"
+						Raised_On=zoho.currentdate
+						Raised_Note=remark.replaceAll("\"","'")
+						Added_User=zoho.loginuser
+					];
+
+					for each  dsp in Stock_Dispute[ID == newDispId.toLong()]
+					{
+						dsp.Material = matId.toLong();
+						dsp.Supervisor = supId;
+						if(shortPlanId != null)
+						{
+							dsp.Plan = shortPlanId;
+						}
+						if(shortItemId != null)
+						{
+							dsp.Plan_Item = shortItemId;
+						}
+					}
+					// Gathered for the notification. Inside the try, after the
+					// insert succeeded - a dispute that failed to write must not
+					// be announced as though it exists.
+					dispRows.add(matName + "|" + matUnit + "|" + pendingTotal + "|" + gotQty + "|" + shortBy);
+				}
+				catch (e2)
+				{
+					info "Stock_Dispute not raised for " + matName + ": " + e2.toString();
+				}
+
+				if(errJson != "")
+				{
+					errJson = errJson + ",";
+				}
+				errJson = errJson + "\"" + matName + ": " + shortBy + " short of the " + pendingTotal + " issued" + noteTxt + " - dispute raised\"";
+			}
+
+			if(okJson != "")
+			{
+				okJson = okJson + ",";
+			}
+			okJson = okJson + "{\"materialId\":\"" + matId + "\",\"received\":" + gotQty + ",\"short\":" + shortBy + "}";
+		}
+	}
+
+	//------------------------------------------------------------------------
+	// Waste pieces - specific rows, no fanning. He is holding that piece.
+	//------------------------------------------------------------------------
+	for each  wRaw in wastes
+	{
+		wm = wRaw.toMap();
+		rowId = ifnull(wm.get("rowId"),"").toString().trim();
+		wrStr = ifnull(wm.get("received"),"0").toString().trim();
+		if(wrStr == "")
+		{
+			wrStr = "0";
+		}
+		gotPcs = wrStr.toDecimal().toLong();
+
+		// Why the remnant is short, in his words. Same field, same screen and
+		// same reader as the remark on a material line - a short offcut raises
+		// the same Outbound dispute a short metre does, and the store opens it
+		// on the same list. It was the only one of the two arriving blank.
+		wRemark = ifnull(wm.get("remark"),"").toString();
+
+		// STEP 4b: rowId is a Waste_Movement id now, not a subform row, so the
+		// record is fetched directly instead of walking every plan to find it.
+		if(rowId != "" && rowId.isNumber() == true)
+		{
+			for each  wi in Waste_Movement[ID == rowId.toLong() && Movement_Type == "Issued"]
+			{
+				issuedW = ifnull(wi.Piece_Count,0);
+
+				alreadyW = 0;
+				for each  rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
+				{
+					alreadyW = alreadyW + ifnull(rv.Piece_Count,0);
+				}
+
+				// Cannot receive back more than went out.
+				takePcs = gotPcs;
+				if(alreadyW + takePcs > issuedW)
+				{
+					takePcs = issuedW - alreadyW;
+				}
+				if(takePcs < 0)
+				{
+					takePcs = 0;
+				}
+
+				// The receipt is its OWN movement pointing at the issue, not an
+				// edit of it. Two receipts against one issue therefore leave two
+				// dated rows rather than one number that has quietly moved twice.
+				if(takePcs > 0)
+				{
+					newRvId = insert into Waste_Movement
+					[
+						Movement_Type="Received"
+						Piece_Width=ifnull(wi.Piece_Width,0)
+						Piece_Length=ifnull(wi.Piece_Length,0)
+						Piece_Count=takePcs
+						Cut_Size_Width=ifnull(wi.Cut_Size_Width,0)
+						Cut_Size_Length=ifnull(wi.Cut_Size_Length,0)
+						Moved_On=zoho.currentdate
+						Added_User=zoho.loginuser
+					];
+
+					for each  rvNew in Waste_Movement[ID == newRvId.toLong()]
+					{
+						rvNew.Parent_Movement = wi.ID;
+						rvNew.Waste_Piece = wi.Waste_Piece;
+						rvNew.Plan = wi.Plan;
+						rvNew.Plan_Item = wi.Plan_Item;
+						rvNew.Moved_By = supId;
+					}
+				}
+
+				//------------------------------------------------------
+				// Settle the pieces, same rule as fungible material:
+				// confirmed pieces are consumed, missing ones are disputed.
+				// Whole pieces only - there is no half a remnant.
+				//------------------------------------------------------
+				stillOut = issuedW - (alreadyW + takePcs);
+				if(stillOut < 0)
+				{
+					stillOut = 0;
+				}
+
+				for each  wmStock in Waste_Master[ID == wi.Waste_Piece]
+				{
+					witStr = ifnull(wmStock.In_Transit_Count,"0").toString().trim();
+					if(witStr == "")
+					{
+						witStr = "0";
+					}
+					wdispStr = ifnull(wmStock.Disputed_Count,"0").toString().trim();
+					if(wdispStr == "")
+					{
+						wdispStr = "0";
+					}
+					witCount = witStr.toDecimal().toLong();
+					wdispCount = wdispStr.toDecimal().toLong();
+
+					settlePcs = takePcs + stillOut;
+					if(settlePcs > witCount)
+					{
+						settlePcs = witCount;
+					}
+
+					wmStock.In_Transit_Count = witCount - settlePcs;
+					if(stillOut > 0)
+					{
+						wmStock.Disputed_Count = wdispCount + stillOut;
+					}
+
+					// Nothing left anywhere means the row is finished for good.
+					restStr = ifnull(wmStock.Piece_Count,"0").toString().trim();
+					if(restStr == "")
+					{
+						restStr = "0";
+					}
+					if(restStr.toDecimal().toLong() <= 0 && (witCount - settlePcs) <= 0 && (wdispCount + stillOut) <= 0)
+					{
+						wmStock.Status = "Consumed";
+					}
+				}
+
+				if(stillOut > 0)
+				{
+					try
+					{
+						wNoteTxt = "";
+						if(wRemark != "")
+						{
+							wNoteTxt = " - " + wRemark.replaceAll("\"","'");
+						}
+
+						wDispName = "Waste";
+						wDispMat = null;
+						for each  wmRec2 in Waste_Master[ID == wi.Waste_Piece]
+						{
+							wDispMat = wmRec2.SKU;
+						}
+						// Display name first, Name only as a fallback - the same
+						// rule every other screen follows. Reading Name alone put
+						// the internal name on the dispute while the widgets
+						// showed the display one, so the two disagreed about what
+						// the same material was called.
+						for each  rmw2 in Raw_Material[ID == wDispMat]
+						{
+							wDispName = ifnull(rmw2.Material_Display_Name,"").toString().trim();
+							if(wDispName == "")
+							{
+								wDispName = ifnull(rmw2.Name,"").toString().trim();
+							}
+							wDispName = wDispName.replaceAll("\"","'");
+						}
+
+						newWDispId = insert into Stock_Dispute
+						[
+							Material_Name=wDispName
+							Unit="pcs"
+							Is_Waste=true
+							Direction="Outbound"
+							Issued_Qty=issuedW
+							Received_Qty=alreadyW + takePcs
+							Disputed_Qty=stillOut
+							Status="Open"
+							Raised_On=zoho.currentdate
+							Raised_Note=wRemark.replaceAll("\"","'")
+							Added_User=zoho.loginuser
+						];
+
+						for each  wdsp in Stock_Dispute[ID == newWDispId.toLong()]
+						{
+							wdsp.Waste_Piece = wi.Waste_Piece;
+							wdsp.Supervisor = supId;
+							if(wDispMat != null)
+							{
+								wdsp.Material = wDispMat;
+							}
+							if(wi.Plan != null)
+							{
+								wdsp.Plan = wi.Plan;
+							}
+							if(wi.Plan_Item != null)
+							{
+								wdsp.Plan_Item = wi.Plan_Item;
+							}
+						}
+						dispRows.add(wDispName + " (offcuts)|pcs|" + issuedW + "|" + (alreadyW + takePcs) + "|" + stillOut);
+					}
+					catch (e3)
+					{
+						info "Stock_Dispute not raised for waste piece " + wi.Waste_Piece + ": " + e3.toString();
+					}
+
+					if(errJson != "")
+					{
+						errJson = errJson + ",";
+					}
+					errJson = errJson + "\"Waste piece " + ifnull(wi.Piece_Width,0) + "x" + ifnull(wi.Piece_Length,0) + ": " + stillOut + " of " + issuedW + " not received" + wNoteTxt + " - dispute raised\"";
+				}
+			}
+		}
+	}
+
+	//------------------------------------------------------------------------
+	// Check if any plan items are now completely fulfilled and received.
+	//------------------------------------------------------------------------
+	for each plan in plans
+	{
+		planItems = Plan_Item[Plan == plan.ID];
+		allReadyCount = 0;
+		totalItemCount = 0;
+		
+		// Tracked separately to close off Material_Issue records once everything 
+		// that went out has come back, regardless of plan fulfillment state.
+		recvComplete = true; 
+
+		for each pItem in planItems
+		{
+			totalItemCount = totalItemCount + 1;
+			itemReady = true;
+			reqCount = 0;
+
+			for each row in Material_Requirement[Plan_Item == pItem.ID]
+			{
+				reqCount = reqCount + 1;
+				isFab = row.Is_Fabric;
+				
+				reqStr = ifnull(row.Required_Qty,"0").toString().trim();
+				if(reqStr == "") { reqStr = "0"; }
+				issStr = ifnull(row.Issued_Qty,"0").toString().trim();
+				if(issStr == "") { issStr = "0"; }
+				recStr = ifnull(row.Received_Qty,"0").toString().trim();
+				if(recStr == "") { recStr = "0"; }
+				
+				reqQty = reqStr.toDecimal();
+				issQty = issStr.toDecimal();
+				recQty = recStr.toDecimal();
+				
+				if (recQty < issQty)
+				{
+					itemReady = false;
+					recvComplete = false;
+				}
+				
+				if (isFab == true)
+				{
+					reqPcs = ifnull(row.Required_Pieces,0);
+					issPcs = ifnull(row.Pieces_From_Waste,0) + ifnull(row.Pieces_From_Raw,0);
+					if (reqPcs <= 0 || issPcs < reqPcs)
+					{
+						itemReady = false;
+					}
+				}
+				else
+				{
+					if (reqQty <= 0 || issQty < reqQty)
+					{
+						itemReady = false;
+					}
+				}
+			}
+			
+			if (reqCount == 0)
+			{
+				itemReady = false;
+			}
+			
+			// Check waste requirements for this specific item. Issued movements
+			// keyed on the Plan_Item, with receipt summed from their children.
+			itemIssued = Waste_Movement[Plan_Item == pItem.ID && Movement_Type == "Issued"];
+			for each wi in itemIssued
+			{
+				wCount = ifnull(wi.Piece_Count,0);
+				wRecv = 0;
+				for each rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
+				{
+					wRecv = wRecv + ifnull(rv.Piece_Count,0);
+				}
+				if (wRecv < wCount)
+				{
+					itemReady = false;
+				}
+			}
+			
+			if (itemReady == true && pItem.Item_Status == "Awaiting_Material")
+			{
+				pItem.Item_Status = "Ready_For_Production";
+			}
+			
+			// Count how many are ready or past ready (In_Production, Complete)
+			if (pItem.Item_Status != "Awaiting_Material")
+			{
+				allReadyCount = allReadyCount + 1;
+			}
+		}
+		
+		// Guarded so a receipt cannot walk the plan backwards. One item can be on
+		// the cutting table while another is still being delivered, and "Material
+		// Ready" would deny work already under way.
+		planStNow = ifnull(plan.Order_Status,"").toString();
+
+		if (totalItemCount > 0 && allReadyCount > 0 && planStNow != "In Progress" && planStNow != "Production Complete")
+		{
+			if (allReadyCount == totalItemCount)
+			{
+				plan.Order_Status = "Material Ready";
+			}
+			else if (planStNow == "Pending")
+			{
+				plan.Order_Status = "Partially Received";
+			}
+		}
+
+		// STEP 4: close off the handover records for this plan. Without this
+		// every Material_Issue sits at "Issued" forever and the event log can
+		// only ever say material left the counter, never that it arrived.
+		//
+		// Own try/catch, same reasoning as the writer in issueMaterials: the
+		// receipt itself has already been recorded by this point, and failing it
+		// over a status flag would be worse than the flag being stale.
+		try
+		{
+			newIssStatus = "Partially_Received";
+			if (recvComplete == true)
+			{
+				newIssStatus = "Received";
+			}
+			for each  mi in Material_Issue[Plan == plan.ID && Issue_Status != "Received"]
+			{
+				mi.Issue_Status = newIssStatus;
+			}
+		}
+		catch (e3)
+		{
+			info "Material_Issue status not updated for plan " + plan.ID + ": " + e3.toString();
+		}
+	}
+
+	}
+	catch (e)
+	{
+		// Surfaces as an alert in the widget via the existing errors[] handling.
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"received\":[]}";
+	}
+
+	//------------------------------------------------------------------------
+	// DISPUTE NOTIFICATIONS. Outbound: the SUPERVISOR raised these, so the party
+	// that has to answer is the STORE. Admin gets its own copy.
+	//
+	// TWO mails, not one with two recipients, because they are not the same
+	// message. The store's says "here is what he says is missing, go and check
+	// the shelf"; admin's says "a dispute exists, neither side has answered yet".
+	// A single mail addressed to both would have to be written for whoever reads
+	// it less carefully.
+	//
+	// Outside the main try/catch and wrapped in its own. Everything is already
+	// written by here - stock settled, disputes raised, statuses moved - and a
+	// mail failure must not turn a completed receipt into an error the supervisor
+	// will try again.
+	//------------------------------------------------------------------------
+	adminTo = "gurdhian.helios@gmail.com";
+	// No Email field on Employee and no store person at all - the store widget
+	// has no picker, so "the store" is a desk, not a name. Both go to the admin
+	// address for now and each mail says who it was written for, so nothing is
+	// lost and the gap stays visible.
+	storeTo = "gurdhian.helios@gmail.com";
+
+	try
+	{
+		if(dispRows.size() > 0)
+		{
+			dSupName = "";
+			for each  dEmp in Employee[ID == supId]
+			{
+				dSupName = ifnull(dEmp.Employee_Name,"").toString().replaceAll("\"","'");
+			}
+			if(dSupName == "")
+			{
+				dSupName = "Supervisor";
+			}
+
+			dTh = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:left;font-weight:600";
+			dThR = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:right;font-weight:600";
+			dTd = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a";
+			dTdR = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a;text-align:right;font-weight:600";
+			dTdBad = "padding:10px 12px;border-bottom:1px solid #fee2e2;font-size:13px;color:#991b1b;text-align:right;font-weight:700";
+
+			dRowsHtml = "";
+			for each  dr in dispRows
+			{
+				dp = dr.toList("|");
+				dRowsHtml = dRowsHtml + "<tr><td style='" + dTd + "'>" + dp.get(0) + "</td><td style='" + dTdR + "'>" + dp.get(2) + " <span style='color:#64748b;font-weight:400'>" + dp.get(1) + "</span></td><td style='" + dTdR + "'>" + dp.get(3) + "</td><td style='" + dTdBad + "'>" + dp.get(4) + "</td></tr>";
+			}
+
+			dTable = "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;margin-top:14px;border:1px solid #e2e8f0;border-radius:6px'>";
+			dTable = dTable + "<tr><th style='" + dTh + "'>Material</th><th style='" + dThR + "'>Issued</th><th style='" + dThR + "'>Received</th><th style='" + dThR + "'>Short by</th></tr>";
+			dTable = dTable + dRowsHtml + "</table>";
+
+			dWord = "disputes";
+			if(dispRows.size() == 1)
+			{
+				dWord = "dispute";
+			}
+			dSubtitle = "Raised by " + dSupName + " &middot; " + zoho.currentdate.toString("dd MMM yyyy") + " " + zoho.currenttime.toString("HH:mm");
+
+			// --- 1. To the STORE: you sent it, he says it did not arrive ---
+			sInner = "<div style='font-size:14px;color:#0f172a'><b>" + dSupName + "</b> has confirmed his receipt and reported <b>" + dispRows.size() + " " + dWord + "</b>. The quantity below left the store but he says it did not reach him.</div>";
+			sInner = sInner + dTable;
+			sInner = sInner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>Check the shelf and answer on the <b>Disputes</b> tab. If the stock is still with the store, <b>Store correction</b> returns it and re-opens the requirement so it can be issued again. Until someone answers, this quantity is neither on the shelf nor with him.</div>";
+			sInner = sInner + "<div style='font-size:12px;color:#94a3b8;padding-top:10px'>Written for the store. No store mailbox is configured yet, so it is being sent here.</div>";
+
+			sendmail
+			[
+				from :zoho.adminuserid
+				to :storeTo
+				subject :"Action needed: " + dispRows.size() + " " + dWord + " raised by " + dSupName
+				message :thisapp.buildNotificationEmail("Material disputed on receipt",dSubtitle,"#dc2626",sInner)
+			]
+
+			// --- 2. To ADMIN: a dispute exists and nobody has answered yet ---
+			aInner = "<div style='font-size:14px;color:#0f172a'><b>" + dispRows.size() + " " + dWord + "</b> raised by <b>" + dSupName + "</b> on receipt. Nobody has answered yet.</div>";
+			aInner = aInner + dTable;
+			aInner = aInner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>Direction is <b>Outbound</b> - store to supervisor - so the store answers first. This is for visibility; no action is needed from you unless it stays open.</div>";
+
+			sendmail
+			[
+				from :zoho.adminuserid
+				to :adminTo
+				subject :"Dispute raised: " + dispRows.size() + " " + dWord + " - " + dSupName + " (outbound)"
+				message :thisapp.buildNotificationEmail("Dispute raised",dSubtitle,"#dc2626",aInner)
+			]
+
+			info "Dispute notifications sent: " + dispRows.size() + " row(s)";
+		}
+	}
+	catch (eMail)
+	{
+		// Logged, never rethrown. The receipt and the disputes are already written.
+		info "Dispute notification not sent: " + eMail.toString();
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[" + errJson + "],\"received\":[" + okJson + "]}";
+}

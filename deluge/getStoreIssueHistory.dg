@@ -1,0 +1,278 @@
+string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, string limitTxt)
+{
+	// SIGNATURE CHANGED - it took two arguments. The Custom API's argument list
+	// must be changed to match, in this order, or every call fails.
+	// Handovers between two dates, for the store dashboard's History tab.
+	// POST: fromTxt and toTxt, both as "dd-MMM-yyyy" (e.g. "01-Aug-2026").
+	//
+	// The date arrives pre-formatted rather than as an ISO string because Deluge
+	// parses "dd-MMM-yyyy" the same way regardless of the org's locale setting,
+	// while "01-08-2026" is a different day in the US than it is here.
+	//
+	// Reads Material_Issue, the handover event written by issueMaterials. The
+	// balances on Material_Requirement can say how much has gone out in total;
+	// only this can say what crossed the counter on Tuesday afternoon and who
+	// took it.
+
+	rowsJson = "";
+	totalLines = 0;
+
+	//--------------------------------------------------------------------------
+	// PAGED, where this used to cap.
+	//
+	// The old shape built the newest 50 and counted the rest, so a wide range
+	// simply hid its older end behind "narrow the dates to see them" - the one
+	// thing a history tab exists to let you not do.
+	//
+	// Worse, it was not really a bound. There is no reliable break in a Deluge
+	// for-each, so the guard was `if(builtRows >= maxRows)` INSIDE the loop -
+	// which caps the TABLE, not the COST. Every handover in the range was still
+	// iterated. The statement-execution limit is not catchable: it kills the
+	// script and the widget gets a bare HTTP 500 with no error card.
+	//
+	// "range from A to B" makes Creator return only the page, so the loop runs
+	// at most `limit` times whatever the range holds - and the date filter is in
+	// the QUERY, so the two compose. That is the whole reason this works here
+	// and could not work on the supervisor's waste screen, where ownership is
+	// decided in code after the fetch.
+	//
+	// PAGED ON HANDOVERS, not lines - a handover is the unit on screen, and a
+	// page boundary through the middle of one would split a card in half.
+	//--------------------------------------------------------------------------
+	// A handover is a CARD, not a row - the newest is expanded and the rest are
+	// collapsed - so ten fills the screen where twenty would need scrolling past
+	// the pager to reach it.
+	total = 0;
+	offset = 0;
+	limit = 10;
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	dFrom = fromTxt.trim().toDate();
+	dTo = toTxt.trim().toDate();
+	info "history from " + dFrom + " to " + dTo;
+
+	// Guarded here as well as in the widget. The client caps the pickers, but a
+	// Custom API is callable from anywhere, and "no handovers in Aug 2027" looks
+	// identical to "nothing was issued then" - a confusing answer to a question
+	// that should not have been asked.
+	if(dFrom > dTo)
+	{
+		return "{\"errors\":[\"The From date is after the To date\"],\"handovers\":[],\"lineCount\":0}";
+	}
+	if(dFrom > zoho.currentdate)
+	{
+		return "{\"errors\":[\"Cannot look at a future date\"],\"handovers\":[],\"lineCount\":0}";
+	}
+
+	// A fence, not the real protection - the row cap below is that. This only
+	// stops an absurd range being asked for at all: the widget's own buttons top
+	// out at 30 days, but a Custom API is callable from anywhere, and fetching
+	// five years of handovers to then throw all but 50 away is work nobody
+	// benefits from.
+	// Expressed as "is From earlier than 90 days before To" rather than a day
+	// count, because subDay is the date arithmetic Deluge is reliable about.
+	if(dFrom < dTo.subDay(90))
+	{
+		return "{\"errors\":[\"That range is too wide - please pick 90 days or less\"],\"handovers\":[],\"lineCount\":0}";
+	}
+
+	// NEWEST first. What the store person is nearly always checking is what just
+	// went out, and over a 30-day range that was the last card on the page.
+	//
+	// Sorted on Added_Time, not Issue_Date. Issue_Date is a DATE, so a day with
+	// six handovers on it has no order at all within that day - and a busy day is
+	// exactly when the ordering matters. Added_Time is stamped at insert, which
+	// is the same moment Issue_Date is written, so it gives the true sequence.
+	// The date RANGE still filters on Issue_Date - that is the field the pickers
+	// mean.
+	// A numeric that was never written arrives as an EMPTY STRING, and
+	// toDecimal() throws on it - normalise to string, test, then convert.
+	oStr = ifnull(offsetTxt,"").toString().trim();
+	if(oStr == "" || oStr.isNumber() == false)
+	{
+		oStr = "0";
+	}
+	offset = oStr.toDecimal().toLong();
+	if(offset < 0)
+	{
+		offset = 0;
+	}
+
+	lStr = ifnull(limitTxt,"").toString().trim();
+	if(lStr == "" || lStr.isNumber() == false)
+	{
+		lStr = "10";
+	}
+	limit = lStr.toDecimal().toLong();
+	if(limit < 1)
+	{
+		limit = 1;
+	}
+	// Hard ceiling whatever the caller asks for. A Custom API is callable from
+	// anywhere, so "limit=100000" has to cost what any other page costs rather
+	// than being the one call that takes the app down.
+	if(limit > 50)
+	{
+		limit = 50;
+	}
+
+	// ONE statement, and it is the honest figure for THIS range - counting 400
+	// handovers costs what counting 4 does. It is what lets the pager say "of
+	// 137" without fetching anything it will not show.
+	total = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo].count();
+
+	// range is 1-BASED and INCLUSIVE at both ends, so page 1 of 10 is 1 to 10
+	// and page 2 is 11 to 20 - not 10 to 20, which repeats a handover on every
+	// page boundary.
+	rFrom = offset + 1;
+	rTo = offset + limit;
+
+	issues = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo] sort by Added_Time desc range from rFrom to rTo;
+
+	//--------------------------------------------------------------------------
+	// The material catalogue, fetched ONCE, as two id-keyed maps.
+	//
+	// This loop used to live inside the line loop - one Raw_Material query per
+	// issued line - so the cost of opening History grew with everything the store
+	// had ever issued in the range, without limit. That is the shape that trips
+	// the statement-execution limit, and the limit is NOT catchable: it kills the
+	// script, so the try/catch never runs and the widget gets a bare 500 with no
+	// error card to explain it.
+	//
+	// Fetched whole rather than per line because the catalogue is a few hundred
+	// rows at most and does not grow with trading. One query for a 30-day range,
+	// one for a one-day range - the cost stops depending on the date pickers.
+	//
+	// The SKU cannot come off the line itself. Issue_Lines.Material is a LOOKUP
+	// whose display column is the SKU, so Creator's own form renders it as
+	// "RM-00005" - but Deluge reads a lookup as the record id, which is how
+	// 18-digit numbers ended up under every material name. The id is the map key,
+	// never the displayed value.
+	//--------------------------------------------------------------------------
+	matNameMap = Map();
+	matSkuMap = Map();
+
+	for each  rmC in Raw_Material[ID != 0]
+	{
+		rmKey = rmC.ID.toString();
+
+		rmName = ifnull(rmC.Material_Display_Name,"").toString().trim();
+		if(rmName == "")
+		{
+			rmName = ifnull(rmC.Name,"").toString().trim();
+		}
+
+		matNameMap.put(rmKey,rmName.replaceAll("\"","'"));
+		matSkuMap.put(rmKey,ifnull(rmC.SKU,"").toString().trim().replaceAll("\"","'"));
+	}
+
+	// The one lookup left, and it is cached. A range holds many handovers but
+	// only a handful of supervisors, so the same few names were being fetched
+	// over and over. Resolved live rather than stored on the record because a
+	// person's name is a fact about them now, not about the day they collected.
+	supCache = Map();
+
+	// No cap guard here any more. The query returned the page, so every record
+	// this loop sees is one that is going on screen.
+	for each  mi in issues
+	{
+		supKey = ifnull(mi.Issued_To,"").toString();
+		supName = ifnull(supCache.get(supKey),"").toString();
+
+		if(supName == "" && supKey != "")
+		{
+			for each  emp in Employee[ID == mi.Issued_To]
+			{
+				supName = ifnull(emp.Employee_Name,"").toString().replaceAll("\"","'");
+			}
+			supCache.put(supKey,supName);
+		}
+
+		// No plan or sales order resolved here any more.
+		//
+		// Material_Issue.Plan holds ONE plan - the first one that took an
+		// allocation while issueMaterials fanned the quantity out - but a handover
+		// is one press of Issue against a SUPERVISOR, and that fan-out routinely
+		// spans several of his open plans. Reporting the latched one made every
+		// card claim "this material went to this order", which was true only when
+		// the supervisor happened to have a single plan open.
+		//
+		// Dropping it also takes two queries per handover off this loop, which is
+		// what the 30-day range spends most of its statement budget on.
+		//
+		// The per-line truth still exists if it is ever wanted on screen:
+		// Issue_Lines carries Requirement and Plan_Item on every row, so a line
+		// can name its real plan. The HEADER simply has no single right answer.
+
+		linesJson = "";
+		for each  ln in mi.Issue_Lines
+		{
+			// Creator fields that were never written are EMPTY, not null, and
+			// toDecimal() throws on empty - normalise to string first.
+			qStr = ifnull(ln.Qty,"0").toString().trim();
+			if(qStr == "")
+			{
+				qStr = "0";
+			}
+
+			// Both columns come out of the maps built once above - no query in
+			// this loop at all. The key is the lookup's RECORD ID, which is what
+			// ln.Material actually holds.
+			lnKey = "";
+			if(ln.Material != null)
+			{
+				lnKey = ln.Material.toString();
+			}
+
+			lnName = ifnull(matNameMap.get(lnKey),"").toString();
+			lnSku = ifnull(matSkuMap.get(lnKey),"").toString();
+
+			// Falls back to whatever the line itself recorded. Handovers written
+			// before issueMaterials was fixed have the SKU sitting in
+			// Material_Name, and a material later removed from the catalogue
+			// misses the map entirely - in both cases the line's own text is
+			// better than an empty cell.
+			if(lnName == "")
+			{
+				lnName = ifnull(ln.Material_Name,"").toString().trim().replaceAll("\"","'");
+			}
+
+			if(linesJson != "")
+			{
+				linesJson = linesJson + ",";
+			}
+			linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + "}";
+			totalLines = totalLines + 1;
+		}
+
+		issueTime = ifnull(mi.Issue_Time,"").toString();
+
+		issueDateTxt = "";
+		if(mi.Issue_Date != null)
+		{
+			issueDateTxt = mi.Issue_Date.toString("dd-MMM-yyyy");
+		}
+
+		if(rowsJson != "")
+		{
+			rowsJson = rowsJson + ",";
+		}
+		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+		rowsJson = rowsJson + "{\"id\":\"" + mi.ID + "\",\"date\":\"" + issueDateTxt + "\",\"time\":\"" + issueTime + "\",\"supervisor\":\"" + supName + "\",\"status\":\"" + ifnull(mi.Issue_Status,"").toString() + "\",\"lines\":[" + linesJson + "]}";
+	}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"handovers\":[],\"lineCount\":0,\"total\":0,\"offset\":0,\"limit\":10}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	//
+	// lineCount describes THIS PAGE, total describes the whole range. Two
+	// different figures and the widget shows both - "12 handovers here, 137 in
+	// the range" - because a page count alone reads as the range being small.
+	return "{\"errors\":[],\"handovers\":[" + rowsJson + "],\"lineCount\":" + totalLines + ",\"total\":" + total + ",\"offset\":" + offset + ",\"limit\":" + limit + "}";
+}

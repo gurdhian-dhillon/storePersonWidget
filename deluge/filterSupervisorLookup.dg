@@ -1,0 +1,35 @@
+// Order_Assignment form workflow: On Load.
+// Narrows the Employee lookup to active supervisors.
+//
+// Copy of filterOperatorLookup with the designation string changed - read that
+// file's header for why this is done in Deluge rather than as a filter
+// criterion on the field. Short version: Designation is a dropdown with no
+// configured options, so the form builder has nothing to build a criterion from.
+//
+// WHY THIS FORM MATTERS MORE THAN IT LOOKS. Order_Assignment is where a plan
+// gets its supervisor - createProductionPlans reads it per Order_Source and
+// stamps the result on Production_Planning.Assigned_To. Every downstream screen
+// filters on that. So a store person picked here does not just look wrong on
+// this form; he ends up owning a production plan, appearing in the production
+// tab's supervisor filter, and being mailed about material he cannot act on.
+// This is the cheapest place to stop that.
+//
+// Not guarded with a fallback, unlike the picker in getSupervisorMaterials. That
+// one is the login stand-in and an empty list there is a dead screen; this is an
+// admin form used occasionally, and an empty picker is a visible prompt to go
+// and set the designations rather than something that blocks the floor.
+
+// BEFORE anything touches the field - `clear` and ui.add both take the
+// selection with them on a lookup, and re-adding the choices does not bring it
+// back. On a new record this is simply empty.
+savedEmp = input.Employee;
+
+// sort by on its own assignment, never in a for-each header - inline is what
+// made the first version of the operator file refuse to save at all.
+supList = Employee[Designation == "Supervisor" && Status == "Active"] sort by Employee_Name;
+
+Employee:ui.add(supList.ID.getAll());
+
+// Put the selection back. Assigning a value uses input., unlike the client task
+// above which names the field bare.
+input.Employee = savedEmp;

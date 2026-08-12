@@ -1,0 +1,95 @@
+string getSupervisorCounts(string supervisorId)
+{
+	// Tab badge counts for the supervisor dashboard. POST, one argument.
+	//
+	// Same shape and the same reason as getStoreCounts: called once when the
+	// widget loads, and again whenever the supervisor picker changes. It counts
+	// records and reads almost none of them, so a badge costs a count rather
+	// than a full list - the tabs still fetch their own data when opened.
+	//
+	// Every number is scoped to ONE supervisor. A badge showing the whole
+	// factory's work would be worse than no badge, because it would send him to
+	// a tab that turns out to have nothing of his on it.
+
+	pendingReceive = 0;
+	openDisputes = 0;
+	wasteWaiting = 0;
+	reissueWaiting = 0;
+	activePlans = 0;
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	supTxt = ifnull(supervisorId,"").toString().trim();
+
+	// No supervisor picked yet is not an error - the widget asks for counts
+	// before he has chosen, and zeros are the right answer.
+	if(supTxt == "" || supTxt.isNumber() == false)
+	{
+		return "{\"errors\":[],\"pendingReceive\":0,\"openDisputes\":0,\"wasteWaiting\":0,\"activePlans\":0,\"reissueWaiting\":0}";
+	}
+	supId = supTxt.toLong();
+
+	// Handovers the store has made to him that he has not confirmed.
+	//
+	// Counted off Material_Issue rather than re-derived from the requirements
+	// the way getSupervisorMaterials does. That function walks every open plan
+	// and every line on it, which is right for a screen and far too heavy for a
+	// number on a tab. Issue_Status is written "Issued" by issueMaterials and
+	// moved on by receiveMaterials, so anything not "Received" is still owed an
+	// answer from him.
+	pendingReceive = Material_Issue[Issued_To == supId && Issue_Status != "Received"].count();
+
+	openDisputes = Stock_Dispute[Supervisor == supId && Status == "Open"].count();
+
+	// Damage he has reported and not yet asked the store for. Counted on the
+	// HEADER, not the lines: a record closes only once nothing on it is still
+	// Pending, so an open one always has at least one line waiting. Counting
+	// lines would mean opening every subform on every badge refresh, and the
+	// statement-execution limit is not catchable.
+	//
+	// .count() is right here - this is a query result, not a List.
+	reissueWaiting = Material_Damage[Supervisor == supId && Status == "Open"].count();
+
+	// Orders on his plate. Production Complete and anything dispatched are done
+	// with, and a badge counting them would never go down.
+	activePlans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "Material Ready" || Order_Status == "In Progress")].count();
+
+	// Offcuts he has declared that the store has not checked in yet.
+	//
+	// This one cannot be a plain count. Waste_Master carries no supervisor - the
+	// piece knows what it IS, the movement knows what happened to it - so the
+	// only route to "his" is through the Declared movement. That makes it a read
+	// per movement, so it is bounded by date exactly as getSupervisorWasteReturns
+	// is: the statement-execution limit is NOT catchable, and an unbounded scan
+	// here would take the whole dashboard down with a bare 500 and no error card.
+	//
+	// 30 days. A remnant the store has not checked in after a month is not a
+	// badge any more, it is a conversation.
+	cutoff = zoho.currentdate.subDay(30);
+
+	declared = Waste_Movement[Movement_Type == "Declared" && Moved_By == supId && Moved_On >= cutoff];
+	info "declared movements in window for " + supId + ": " + declared.count();
+
+	for each  dmv in declared
+	{
+		if(dmv.Waste_Piece != null)
+		{
+			for each  wp in Waste_Master[ID == dmv.Waste_Piece]
+			{
+				if(wp.Status == "Pending_Receipt")
+				{
+					wasteWaiting = wasteWaiting + 1;
+				}
+			}
+		}
+	}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"pendingReceive\":0,\"openDisputes\":0,\"wasteWaiting\":0,\"activePlans\":0,\"reissueWaiting\":0}";
+	}
+
+	return "{\"errors\":[],\"pendingReceive\":" + pendingReceive + ",\"openDisputes\":" + openDisputes + ",\"wasteWaiting\":" + wasteWaiting + ",\"activePlans\":" + activePlans + ",\"reissueWaiting\":" + reissueWaiting + "}";
+}

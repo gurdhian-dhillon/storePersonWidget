@@ -1,0 +1,22 @@
+string Admin_Space.getDailyProductionTrend()
+{
+	trendList = List();
+	today = zoho.currentdate;
+	// Loop through the last 7 days
+	numDays = {0,1,2,3,4,5,6};
+	for each  d in numDays
+	{
+		targetDate = today.subDay(6 - d);
+		logs = Stage_Log[Log_Date == targetDate];
+		totalQtyOut = 0.0;
+		for each  log in logs
+		{
+			totalQtyOut = totalQtyOut + ifnull(log.Qty_Out,0.0).toDecimal();
+		}
+		tempMap = Map();
+		tempMap.put("Date",targetDate.toString("dd MMM"));
+		tempMap.put("Total",totalQtyOut);
+		trendList.add(tempMap);
+	}
+	return trendList.toString();
+}

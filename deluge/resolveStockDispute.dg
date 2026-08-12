@@ -1,0 +1,243 @@
+void resolveStockDispute()
+{
+	// FORM WORKFLOW on Stock_Dispute - On Add and On Edit -> On Success.
+	//
+	// NOT a report custom action. A resolution needs three values at once - how
+	// much, which outcome, and why - and a custom action fires on click with no way
+	// to collect any of them. That limitation already cost us a round on the wash
+	// flow; here it is fatal rather than awkward, so the record edit IS the input:
+	// the resolver adds a Resolution Line and saves.
+	//
+	// THE THREE OUTCOMES, and what each means for stock:
+	//
+	//   Found            the supervisor had it after all. It reached production.
+	//                    Disputed -q. Received_Qty +q on the short rows.
+	//                    Nothing returns to the shelf - it was never there.
+	//
+	//   Store_Correction the store person over-recorded; it never left the shelf.
+	//                    Disputed -q, on-hand +q, Issued_Qty -q.
+	//
+	//   Lost             gone in transport. Disputed -q, nothing returns,
+	//                    Issued_Qty -q.
+	//
+	// Store_Correction and Lost are the same resolution but for whether the
+	// material comes back. Both drop Issued_Qty, which RE-OPENS the requirement so
+	// the line shows as owed again and gets issued through the ordinary flow. That
+	// is deliberate: production still needs the material either way.
+	//
+	// Issued_Qty is reduced NEWEST-SHORT-FIRST, the mirror of the oldest-first fan
+	// that filled the rows. Reducing oldest-first would re-open a line that was
+	// fully satisfied while leaving a genuinely short one still looking complete.
+	//
+	// IDEMPOTENCY. Processed on the line is the guard. A saved record gets edited
+	// again - a typo in a note, a second line added - and without it every save
+	// would move the stock over again. There is no undo on a quantity.
+
+	try
+	{
+	for each  dsp in Stock_Dispute[ID == input.ID]
+	{
+		isWaste = ifnull(dsp.Is_Waste,false);
+		resolvedTotal = 0.0;
+
+		for each  ln in dsp.Resolution_Lines
+		{
+			// Empty string, not null, on a numeric never written.
+			qStr = ifnull(ln.Resolved_Qty,"0").toString().trim();
+			if(qStr == "")
+			{
+				qStr = "0";
+			}
+			q = qStr.toDecimal();
+
+			alreadyDone = ifnull(ln.Processed,false);
+			resType = ifnull(ln.Resolution,"").toString().trim();
+
+			// Every line counts toward the total, processed or not - the total
+			// decides whether the dispute is finished.
+			if(q > 0)
+			{
+				resolvedTotal = resolvedTotal + q;
+			}
+
+			if(alreadyDone == false && q > 0 && resType != "")
+			{
+				//------------------------------------------------------
+				// 1. The stock side
+				//------------------------------------------------------
+				if(isWaste == true && dsp.Waste_Piece != null)
+				{
+					for each  wm in Waste_Master[ID == dsp.Waste_Piece]
+					{
+						wdStr = ifnull(wm.Disputed_Count,"0").toString().trim();
+						if(wdStr == "")
+						{
+							wdStr = "0";
+						}
+						wpStr = ifnull(wm.Piece_Count,"0").toString().trim();
+						if(wpStr == "")
+						{
+							wpStr = "0";
+						}
+						wdCount = wdStr.toDecimal().toLong();
+						wpCount = wpStr.toDecimal().toLong();
+
+						takeD = q.toLong();
+						if(takeD > wdCount)
+						{
+							takeD = wdCount;
+						}
+						wm.Disputed_Count = wdCount - takeD;
+
+						// Only a store correction puts pieces back on the rack.
+						if(resType == "Store_Correction")
+						{
+							wm.Piece_Count = wpCount + takeD;
+							wm.Status = "Available";
+						}
+					}
+				}
+				else if(dsp.Material != null)
+				{
+					for each  rm in Raw_Material[ID == dsp.Material]
+					{
+						rdStr = ifnull(rm.Disputed_Qty,"0").toString().trim();
+						if(rdStr == "")
+						{
+							rdStr = "0";
+						}
+						rdQty = rdStr.toDecimal();
+
+						takeD = q;
+						if(takeD > rdQty)
+						{
+							takeD = rdQty;
+						}
+						rm.Disputed_Qty = rdQty - takeD;
+
+						if(resType == "Store_Correction")
+						{
+							isFab = ifnull(rm.Is_Fabric,false);
+							if(isFab == true)
+							{
+								onStr = ifnull(rm.Wash_Quantity,"0").toString().trim();
+								if(onStr == "")
+								{
+									onStr = "0";
+								}
+								rm.Wash_Quantity = onStr.toDecimal() + takeD;
+							}
+							else
+							{
+								onStr = ifnull(rm.Quantity,"0").toString().trim();
+								if(onStr == "")
+								{
+									onStr = "0";
+								}
+								rm.Quantity = onStr.toDecimal() + takeD;
+							}
+						}
+					}
+				}
+
+				//------------------------------------------------------
+				// 2. The requirement side
+				//------------------------------------------------------
+				if(dsp.Plan != null && dsp.Material != null && isWaste == false)
+				{
+					if(resType == "Found")
+					{
+						// It reached production after all - credit the short
+						// rows, oldest first, exactly as a receipt would.
+						toCredit = q;
+						for each  rowF in Material_Requirement[Plan == dsp.Plan]
+						{
+							if(toCredit > 0 && rowF.Material != null && rowF.Material.toString() == dsp.Material.toString())
+							{
+								fIss = ifnull(rowF.Issued_Qty,"0").toString().trim();
+								if(fIss == "")
+								{
+									fIss = "0";
+								}
+								fRec = ifnull(rowF.Received_Qty,"0").toString().trim();
+								if(fRec == "")
+								{
+									fRec = "0";
+								}
+								gap = fIss.toDecimal() - fRec.toDecimal();
+								if(gap > 0)
+								{
+									give = gap;
+									if(give > toCredit)
+									{
+										give = toCredit;
+									}
+									rowF.Received_Qty = fRec.toDecimal() + give;
+									toCredit = toCredit - give;
+								}
+							}
+						}
+					}
+					else
+					{
+						// Correction or loss - the material never arrived, so
+						// the line is owed again. Reduced newest-short-first.
+						shortRows = Material_Requirement[Plan == dsp.Plan] sort by Added_Time desc;
+						toUnissue = q;
+						for each  rowU in shortRows
+						{
+							if(toUnissue > 0 && rowU.Material != null && rowU.Material.toString() == dsp.Material.toString())
+							{
+								uIss = ifnull(rowU.Issued_Qty,"0").toString().trim();
+								if(uIss == "")
+								{
+									uIss = "0";
+								}
+								uRec = ifnull(rowU.Received_Qty,"0").toString().trim();
+								if(uRec == "")
+								{
+									uRec = "0";
+								}
+								gapU = uIss.toDecimal() - uRec.toDecimal();
+								if(gapU > 0)
+								{
+									pull = gapU;
+									if(pull > toUnissue)
+									{
+										pull = toUnissue;
+									}
+									rowU.Issued_Qty = uIss.toDecimal() - pull;
+									toUnissue = toUnissue - pull;
+								}
+							}
+						}
+					}
+				}
+
+				ln.Processed = true;
+				info "dispute " + dsp.ID + ": " + resType + " " + q;
+			}
+		}
+
+		//--------------------------------------------------------------
+		// Closed once the lines account for the whole disputed amount. A
+		// partial resolution leaves it open with the remainder, because
+		// "one of the two turned up" is a real answer and forcing it to be
+		// all-or-nothing would make somebody lie about the other one.
+		//--------------------------------------------------------------
+		dStr = ifnull(dsp.Disputed_Qty,"0").toString().trim();
+		if(dStr == "")
+		{
+			dStr = "0";
+		}
+		if(resolvedTotal >= dStr.toDecimal() && dsp.Status == "Open")
+		{
+			dsp.Status = "Resolved";
+		}
+	}
+	}
+	catch (e)
+	{
+		info "resolveStockDispute failed: " + e.toString();
+	}
+}

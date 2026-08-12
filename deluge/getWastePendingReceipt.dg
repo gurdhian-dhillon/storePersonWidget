@@ -1,0 +1,99 @@
+string getWastePendingReceipt()
+{
+	// Remnants the supervisor has declared after cutting but nobody has physically
+	// checked onto the rack yet. GET, no arguments.
+	//
+	// Pending_Receipt means "he says he sent it back". Available means "it is on
+	// the rack and I have seen it". Only Available pieces are offered to the
+	// allocator, which is why this list matters: a piece stuck at Pending_Receipt
+	// is invisible to every store screen and will never be reused.
+	//
+	// Where it came from is read off the Declared movement rather than stored on
+	// the piece - Waste_Master says what the remnant IS, the movement says what
+	// happened to it.
+
+	rowsJson = "";
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	// Oldest first. A remnant that has been unconfirmed for a week is the one
+	// worth chasing, and it should not sit below this morning's.
+	pending = Waste_Master[Status == "Pending_Receipt"] sort by Added_Time;
+	info "pending receipt rows: " + pending.count();
+
+	for each  wp in pending
+	{
+		// Creator fields that were never written are EMPTY, not null, and
+		// toDecimal() throws on empty - normalise to string first.
+		pwStr = ifnull(wp.Piece_Width,"0").toString().trim();
+		if(pwStr == "")
+		{
+			pwStr = "0";
+		}
+		plStr = ifnull(wp.Piece_Length,"0").toString().trim();
+		if(plStr == "")
+		{
+			plStr = "0";
+		}
+		pcStr = ifnull(wp.Piece_Count,"0").toString().trim();
+		if(pcStr == "")
+		{
+			pcStr = "0";
+		}
+
+		matName = "";
+		for each  rm in Raw_Material[ID == wp.SKU]
+		{
+			matName = ifnull(rm.Material_Display_Name,"").toString().trim();
+			if(matName == "")
+			{
+				matName = ifnull(rm.Name,"").toString();
+			}
+			matName = matName.replaceAll("\"","'");
+		}
+
+		// The declaration says which order and which stage produced it. Read
+		// from the movement, not the piece - the piece does not know.
+		soNo = "";
+		planNo = "";
+		supName = "";
+		declaredOn = "";
+
+		for each  mv in Waste_Movement[Waste_Piece == wp.ID && Movement_Type == "Declared"]
+		{
+			if(mv.Moved_On != null)
+			{
+				declaredOn = mv.Moved_On.toString("dd-MMM-yyyy");
+			}
+			for each  pl in Production_Planning[ID == mv.Plan]
+			{
+				planNo = ifnull(pl.Plan_No,"").toString();
+				for each  so in Sales_Order[ID == pl.Sales_Order]
+				{
+					soNo = ifnull(so.Sales_Order,"").toString();
+				}
+				for each  emp in Employee[ID == pl.Assigned_To]
+				{
+					supName = ifnull(emp.Employee_Name,"").toString().replaceAll("\"","'");
+				}
+			}
+		}
+
+		if(rowsJson != "")
+		{
+			rowsJson = rowsJson + ",";
+		}
+		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+		rowsJson = rowsJson + "{\"id\":\"" + wp.ID + "\",\"material\":\"" + matName + "\",\"width\":" + pwStr.toDecimal() + ",\"length\":" + plStr.toDecimal() + ",\"count\":" + pcStr.toDecimal().toLong() + ",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"supervisor\":\"" + supName + "\",\"declaredOn\":\"" + declaredOn + "\"}";
+	}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"pieces\":[]}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[],\"pieces\":[" + rowsJson + "]}";
+}

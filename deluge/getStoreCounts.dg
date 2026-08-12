@@ -1,0 +1,38 @@
+string getStoreCounts()
+{
+	// Tab badge counts for the store dashboard. GET, no arguments.
+	//
+	// Deliberately its own function rather than folded into
+	// getStoreMaterialRequirements: that one returns a bare JSON ARRAY, and adding
+	// a counts block would mean wrapping it in an object and changing every reader.
+	// A second small call on boot is cheaper than that, and this one stays cheap
+	// because it counts records and reads none of them.
+	//
+	// Called once when the widget loads. The tabs themselves fetch their own data
+	// only when opened - a badge is worth one count, not a full list.
+
+	pendingWaste = 0;
+	openDisputes = 0;
+	openRequests = 0;
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	// Remnants the supervisor says he sent back but nobody has confirmed are
+	// on the rack. Until this is done they are invisible to the allocator, so
+	// a number here is the whole point of the tab.
+	pendingWaste = Waste_Master[Status == "Pending_Receipt"].count();
+
+	openDisputes = Stock_Dispute[Status == "Open"].count();
+
+	// Shortage and wash tickets the store raised and nobody has closed.
+	openRequests = Material_Exception[Status == "Open"].count();
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"pendingWaste\":0,\"openDisputes\":0,\"openRequests\":0}";
+	}
+
+	return "{\"errors\":[],\"pendingWaste\":" + pendingWaste + ",\"openDisputes\":" + openDisputes + ",\"openRequests\":" + openRequests + "}";
+}

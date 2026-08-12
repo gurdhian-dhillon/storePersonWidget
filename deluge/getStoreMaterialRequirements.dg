@@ -1,0 +1,787 @@
+string getStoreMaterialRequirements()
+{
+	// Everything the store person is owed, grouped by supervisor, with fabric
+	// requirements already allocated against reusable offcuts.
+	//
+	// Contract is a BARE JSON ARRAY of supervisor blocks. The widget renders
+	// whatever is in it, so the error path below has to fit that shape too.
+	resultJson = "[]";
+
+	try
+	{
+
+	agg = Map();
+	orderedKeys = List();
+
+	// Plan_Item name and remake flag, cached by id. Lines are per requirement
+	// ROW, so one order can contribute two of them - and since a QC remake
+	// repeats its original's material and order number, the two were arriving
+	// as identical-looking rows with nothing to tell them apart.
+	//
+	// Cached rather than queried per row: a plan has a handful of items and the
+	// same one appears on every requirement it owns, so this is a few queries
+	// per call instead of one per line.
+	piCache = Map();
+
+	// HIGHEST PRIORITY FIRST, oldest first within a priority. This ordering does
+	// TWO jobs and they are easy to mistake for one:
+	//   - it is the order the supervisor cards render in, so the shopify
+	//     supervisor is at the top of the store person's screen;
+	//   - it is the order the waste allocation claims offcuts in, so when two
+	//     supervisors want the same remnant the shopify one gets it.
+	// Both fall out of this single sort, because supOrder is built as the keys
+	// are walked and wsLeft is decremented in the same pass.
+	//
+	// Priority_Key = rank * 1000000 + plan sequence, stamped by
+	// createProductionPlans. It is one field because Deluge `sort by` accepts
+	// exactly one - there is no `sort by Priority_Rank, Added_Time` - and this
+	// needed rank first with age as the tie-break. Added_Time is no longer read
+	// here at all; the sequence half of the key carries the age.
+	//
+	// A plan created before Priority_Key existed has an EMPTY key and would sort
+	// to one end or the other. They must be backfilled, not left to chance.
+	//
+	// "sort by" has to sit on its own assignment - Deluge will not parse it
+	// inline in a for-each header.
+	// Partially Received counts as still open. A plan whose first item has been
+	// verified drops out of "Pending", and filtering on that alone made the rest
+	// of its materials unissuable - invisible here and refused by issueMaterials.
+	//
+	// In Progress for the same reason: one item can be on the cutting table while
+	// another is still waiting for cloth. Fully-issued rows render as read-only
+	// receipts, so a plan appearing here does not mean it is asking for anything.
+	pendingPlans = Production_Planning[Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress"] sort by Priority_Key;
+
+
+	for each  plan in pendingPlans
+	{
+		// Hoisted out of the requirement loop - one fetch per plan, not per row.
+		soNo = "";
+		for each  so in Sales_Order[ID == plan.Sales_Order]
+		{
+			soNo = so.Sales_Order;
+		}
+
+		for each  mr in Material_Requirement[Plan == plan.ID]
+		{
+			supId = mr.Assigned_To;
+			matId = mr.Material;
+			if(supId != null && matId != null)
+			{
+				isFab = mr.Is_Fabric;
+				cutW = 0.0;
+				cutL = 0.0;
+				reqPieces = 0;
+				issPieces = 0;
+				wasteIssPieces = 0;
+				if(isFab == true)
+				{
+					cutW = ifnull(mr.Cut_Size_Width,0);
+					cutL = ifnull(mr.Cut_Size_Length,0);
+					reqPieces = ifnull(mr.Required_Pieces,0);
+					// Two issued-so-far counters, mirroring Issued_Qty.
+					issPieces = ifnull(mr.Pieces_From_Waste,0) + ifnull(mr.Pieces_From_Raw,0);
+					wasteIssPieces = ifnull(mr.Pieces_From_Waste,0);
+				}
+
+				//--------------------------------------------------------------
+				// SOURCE IS PART OF THE KEY, so a reissue can never merge into
+				// the plan's own demand for the same material.
+				//
+				// They are different questions. The plan row says "this order
+				// needs 28.35m". A reissue row says "3 panels were ruined at
+				// Cutting on 6 Aug and he wants them again". Added together they
+				// read as one requirement of 29.55m that was always expected -
+				// which hides the damage completely, and is exactly what the
+				// store would then be unable to explain.
+				//
+				// A Creator field that was never written is EMPTY, not null, so
+				// every row written before this field existed lands on "Plan".
+				// That is correct: they all did come from the plan.
+				//--------------------------------------------------------------
+				srcTxt = ifnull(mr.Source,"").toString().trim();
+				if(srcTxt == "")
+				{
+					srcTxt = "Plan";
+				}
+				isReissue = false;
+				if(srcTxt == "Reissue")
+				{
+					isReissue = true;
+				}
+
+				// Non-fabric rows carry 0x0, so they collapse to one line per
+				// material exactly as before.
+				key = supId + "|" + matId + "|" + cutW + "x" + cutL + "|" + srcTxt;
+
+				cur = agg.get(key);
+				if(cur == null)
+				{
+					cur = Map();
+					cur.put("supId",supId);
+					cur.put("matId",matId);
+					cur.put("name",mr.Material_Name);
+					cur.put("unit",mr.Unit);
+					cur.put("isFabric",isFab);
+					cur.put("isReissue",isReissue);
+					cur.put("cutW",cutW);
+					cur.put("cutL",cutL);
+					cur.put("required",0.0);
+					cur.put("issued",0.0);
+					cur.put("reqPieces",0);
+					cur.put("issPieces",0);
+					cur.put("wasteIssPieces",0);
+					// The aggregate collapses every plan into one number, which is
+					// what the screen needs but leaves a shortage untraceable - it
+					// cannot say which orders wanted it. One line per requirement
+					// row keeps that, and per ROW rather than per plan because a
+					// plan can want the same fabric for two different items.
+					cur.put("lines",List());
+					orderedKeys.add(key);
+				}
+				cur.put("required",cur.get("required") + ifnull(mr.Required_Qty,0));
+				cur.put("issued",cur.get("issued") + ifnull(mr.Issued_Qty,0));
+				cur.put("reqPieces",cur.get("reqPieces") + reqPieces);
+				cur.put("issPieces",cur.get("issPieces") + issPieces);
+				cur.put("wasteIssPieces",cur.get("wasteIssPieces") + wasteIssPieces);
+
+				// Which ITEM on the order wanted this, and whether it is a QC
+				// remake. Without it, an order that has both an original line
+				// and a remake line for the same fabric shows two rows reading
+				// the same order number and the same material, and the person
+				// raising a wash or purchase ticket cannot tell which is which.
+				piKey = ifnull(mr.Plan_Item,"") + "";
+				piInfo = ifnull(piCache.get(piKey),"").toString();
+				if(piInfo == "" && piKey != "")
+				{
+					piName = "";
+					piRemake = "false";
+					for each  piRec in Plan_Item[ID == mr.Plan_Item]
+					{
+						piName = ifnull(piRec.Item_Name,"").toString().trim();
+						if(ifnull(piRec.Is_Remake,false) == true)
+						{
+							piRemake = "true";
+						}
+					}
+					piInfo = piRemake + "|" + piName;
+					piCache.put(piKey,piInfo);
+				}
+
+				lnItem = "";
+				lnRemake = false;
+				if(piInfo != "")
+				{
+					if(piInfo.startsWith("true|"))
+					{
+						lnRemake = true;
+					}
+					lnItem = piInfo.substring(piInfo.indexOf("|") + 1);
+				}
+
+				lnMap = Map();
+				lnMap.put("planId",plan.ID + "");
+				lnMap.put("salesOrder",soNo);
+				lnMap.put("planItemId",piKey);
+				lnMap.put("item",lnItem.replaceAll("\"","'"));
+				lnMap.put("isRemake",lnRemake);
+				lnMap.put("supervisorId",supId + "");
+				lnMap.put("required",ifnull(mr.Required_Qty,0));
+				lnMap.put("issued",ifnull(mr.Issued_Qty,0));
+				// Why the store is being asked for this material a second time.
+				// One row per damage line, never summed, so this reason belongs
+				// to exactly one incident - which is the whole point of not
+				// merging them.
+				lnMap.put("reason",ifnull(mr.Reason,"").toString().replaceAll("\"","'").replaceAll("\n"," "));
+				lnList = cur.get("lines");
+				lnList.add(lnMap);
+				cur.put("lines",lnList);
+
+				agg.put(key,cur);
+			}
+		}
+	}
+
+
+	//------------------------------------------------------------------------
+	// Available waste, oldest first. That sort IS the FIFO policy - the list is
+	// consumed in the order given. Added_Time is Creator's own field, which is
+	// why Waste_Master needs no Generated_On of its own.
+	//
+	// wsLeft tracks what is still unclaimed as we walk the keys in priority
+	// order, so the first supervisor sees the real pieces and every later one
+	// sees what is genuinely left.
+	//------------------------------------------------------------------------
+	// Grouped BY SKU, not one flat list.
+	//
+	// The allocation used to scan every available remnant for every requirement
+	// key, and repeat that scan once per pass - so the cost was keys x rows x
+	// rows, nearly all of it comparing linen against thread. That is what blew
+	// Creator's statement-execution limit, and because that limit is enforced by
+	// killing the script it is NOT catchable: the try/catch below never ran and
+	// the widget got a bare 500 instead of the error card.
+	//
+	// Grouping first means a material only ever looks at its own cloth, and a
+	// material with no matching remnant does no allocation work at all.
+	wsLeft = Map();
+	wasteBySku = Map();
+	counterBySku = Map();
+	availableWaste = Waste_Master[Status == "Available"] sort by Added_Time;
+
+
+	for each  wp in availableWaste
+	{
+		skuId = ifnull(wp.SKU,"").toString();
+
+		// Creator fields that were never written are EMPTY, not null, and
+		// toDecimal() throws on empty - normalise to string first.
+		pwStr = ifnull(wp.Piece_Width,"0").toString().trim();
+		if(pwStr == "")
+		{
+			pwStr = "0";
+		}
+		plStr = ifnull(wp.Piece_Length,"0").toString().trim();
+		if(plStr == "")
+		{
+			plStr = "0";
+		}
+		pcStr = ifnull(wp.Piece_Count,"0").toString().trim();
+		if(pcStr == "")
+		{
+			pcStr = "0";
+		}
+
+		pw = pwStr.toDecimal();
+		pl = plStr.toDecimal();
+		pc = pcStr.toDecimal().toLong();
+
+		// A zero-dimension or zero-count row is not stock. It would make the
+		// scoring divide by zero, so it never gets into the list.
+		if(skuId != "" && pw > 0 && pl > 0 && pc > 0)
+		{
+			wRow = Map();
+			wRow.put("wasteId",wp.ID + "");
+			wRow.put("sku",skuId);
+			wRow.put("width",pw);
+			wRow.put("length",pl);
+			wsLeft.put(wp.ID + "",pc);
+
+			skuList = wasteBySku.get(skuId);
+			if(skuList == null)
+			{
+				skuList = List();
+			}
+			skuList.add(wRow);
+			wasteBySku.put(skuId,skuList);
+
+			// A SEPARATE list of the same length, used only to count allocation
+			// passes. The pass loop cannot iterate the row list while the
+			// selection loop inside it is also iterating that list - one list,
+			// two live iterators, and Deluge does not keep them apart.
+			cList = counterBySku.get(skuId);
+			if(cList == null)
+			{
+				cList = List();
+			}
+			cList.add(wp.ID + "");
+			counterBySku.put(skuId,cList);
+		}
+	}
+
+
+	//------------------------------------------------------------------------
+	// Open exception tickets, fetched ONCE and grouped by material.
+	//
+	// This was a query plus a subform walk inside the per-material loop, so a
+	// screen with thirty materials issued thirty queries to read a table that
+	// rarely holds more than a handful of rows.
+	//------------------------------------------------------------------------
+	excBySku = Map();
+	for each  oex in Material_Exception[Status == "Open"]
+	{
+		exT = ifnull(oex.Type_field,"").toString();
+		exSku = ifnull(oex.SKU,"").toString();
+
+		if(exT != "" && exSku != "")
+		{
+			coveredPlans = List();
+			for each  exLn in oex.Exception_Lines
+			{
+				pId = ifnull(exLn.Plan,"").toString();
+				if(pId != "" && coveredPlans.contains(pId) == false)
+				{
+					coveredPlans.add(pId);
+				}
+			}
+
+			exMap = Map();
+			exMap.put("type",exT);
+			exMap.put("planIds",coveredPlans);
+
+			exList = excBySku.get(exSku);
+			if(exList == null)
+			{
+				exList = List();
+			}
+			exList.add(exMap);
+			excBySku.put(exSku,exList);
+		}
+	}
+
+
+	bySup = Map();
+	supOrder = List();
+
+	for each  k in orderedKeys
+	{
+
+		e = agg.get(k);
+		supId = e.get("supId");
+		matId = e.get("matId");
+		// Computed ONCE. This was being recomputed for every candidate remnant
+		// on every allocation pass.
+		matIdTxt = matId.toString();
+		isFab = e.get("isFabric");
+		availableStock = 0.0;
+		unwashedStock = 0.0;
+		fabricWidthCm = 0.0;
+		skuText = "";
+		// Read live from Raw_Material rather than the Material_Name snapshot on
+		// the requirement, so renaming a material fixes plans already created.
+		dispName = "";
+		for each  rm in Raw_Material[ID == matId]
+		{
+			skuText = rm.SKU;
+			dispName = ifnull(rm.Material_Display_Name,"").toString().trim();
+			if(isFab == true)
+			{
+				availableStock = ifnull(rm.Wash_Quantity,0);
+				unwashedStock = ifnull(rm.Unwash_Quantity,0);
+				// Stored as TEXT, in inches. Converted here and nowhere else.
+				val = rm.Fabric_Width_Inches;
+				if(val != null && val.trim() != "")
+				{
+					fabricWidthCm = val.trim().toDecimal() * 2.54;
+				}
+			}
+			else
+			{
+				availableStock = ifnull(rm.Quantity,0);
+			}
+		}
+
+
+		req = e.get("required");
+		iss = e.get("issued");
+
+		// Display name where one is set, otherwise the name captured at plan
+		// time - an empty display name must not blank out the row.
+		showName = e.get("name");
+		if(dispName != "")
+		{
+			showName = dispName;
+		}
+
+		matEntry = Map();
+		matEntry.put("materialId",matId + "");
+		matEntry.put("material",showName);
+		matEntry.put("sku",skuText);
+		matEntry.put("unit",e.get("unit"));
+		matEntry.put("isFabric",isFab);
+		// Set on the aggregate rather than derived per line: Source is part of
+		// the key, so every line under one entry has the same one by
+		// construction. Reading it off a line would be true today and quietly
+		// wrong the moment that key changes.
+		matEntry.put("isReissue",ifnull(e.get("isReissue"),false));
+		matEntry.put("required",req);
+		matEntry.put("issued",iss);
+		matEntry.put("remaining",req - iss);
+		matEntry.put("availableStock",availableStock);
+		// Carried through untouched so the widget can attach it to an exception.
+		matEntry.put("lines",e.get("lines"));
+
+		// Which requests are already open for this material, and WHICH PLANS each
+		// one covers. The plan list is the point: a ticket raised yesterday for
+		// two orders says nothing about an order that appeared this morning, so
+		// the widget re-arms the button when it sees demand the ticket predates.
+		// Without this, new demand would silently inherit an old request.
+		//
+		// Read off the map built above rather than queried again per material.
+		openExList = excBySku.get(matIdTxt);
+		if(openExList == null)
+		{
+			openExList = List();
+		}
+		matEntry.put("openExceptions",openExList);
+
+
+		if(isFab == true)
+		{
+			cutW = e.get("cutW");
+			cutL = e.get("cutL");
+			outstandingPieces = e.get("reqPieces") - e.get("issPieces");
+			if(outstandingPieces < 0)
+			{
+				outstandingPieces = 0;
+			}
+
+			matEntry.put("unwashedStock",unwashedStock);
+			matEntry.put("cutWidth",cutW);
+			matEntry.put("cutLength",cutL);
+			matEntry.put("fabricWidthCm",fabricWidthCm);
+			matEntry.put("requiredPieces",e.get("reqPieces"));
+			matEntry.put("issuedPieces",e.get("issPieces"));
+			matEntry.put("wasteIssuedPieces",e.get("wasteIssPieces"));
+			matEntry.put("outstandingPieces",outstandingPieces);
+
+			wastePicks = List();
+
+			//----------------------------------------------------------
+			// PIECES STILL TO COVER. Set here, BEFORE the waste
+			// allocation, and decremented by it.
+			//
+			// This used to live inside the hasWaste guard below, together
+			// with the fresh-metres sum that reads it - so a material with
+			// no remnants on the rack skipped both, and shipped a stale
+			// "Required_Qty - Issued_Qty" instead. That went wrong in two
+			// directions at once:
+			//
+			//  UNDER-ASKS after any part-issue. Cloth is only usable in
+			//  whole marker rows, so issuing 10m of a 55cm cut yields 18
+			//  rows and throws 10cm away - but the budget was charged the
+			//  full 10m. The next ask came back 10cm short of the row it
+			//  needed, and the last piece could never be issued at all.
+			//
+			//  OVER-ASKS badly once remnants have been used and are gone.
+			//  36 of 100 pieces cut from offcuts leaves 64 needing cloth -
+			//  12.10m - but the stale figure still quoted the plan's full
+			//  18.70m. The widget pre-fills it and issueMaterials accepts
+			//  it, so 6.60m walked out with nothing booking it.
+			//
+			// Both are the same mistake: budgeting fabric in METRES.
+			// CLAUDE.md already states the rule - Required_Qty is a
+			// pre-waste estimate, Required_Pieces is the target - and this
+			// is what makes the store screen obey it.
+			//----------------------------------------------------------
+			remainPcs = outstandingPieces;
+
+			// Cut pieces the waste covers. NOT the same as the number of waste
+			// pieces handed over - one 300x400 remnant can yield two 187x137
+			// cuts, so 1 piece issued can cover 2 pieces required.
+			coveredPcsTotal = 0;
+
+
+			// Only this material's remnants, and only if it has any. A material
+			// with nothing matching skips the allocation entirely instead of
+			// scanning the whole waste store to conclude the same thing.
+			myWaste = wasteBySku.get(matIdTxt);
+			myCounter = counterBySku.get(matIdTxt);
+			hasWaste = false;
+			if(myWaste != null && myCounter != null)
+			{
+				hasWaste = true;
+			}
+
+			if(hasWaste == true && outstandingPieces > 0 && cutW > 0 && cutL > 0 && fabricWidthCm > 0)
+			{
+				// Least-waste-area selection, not first-fit.
+				//
+				// Each pass scores every candidate piece by the area thrown away
+				// per cut obtained, and takes from the best one. This prefers a
+				// snug remnant over a large one and so protects big stock: a
+				// 300x400 cut into 187x137 wastes 68,762 cm2 for 2 pieces, while
+				// a 200x300 wastes only 8,762 cm2 for the same 2.
+				//
+				// The outer loop is a BOUNDED REPEAT, not an iteration over the
+				// rows - each pass either finishes the requirement or exhausts
+				// one waste row, so there can never be more passes than rows.
+				// myCounter is used purely as the counter, and must NOT be
+				// myWaste itself - see where it is built.
+				for each  passRow in myCounter
+				{
+					// Deluge has no reliable break out of a for-each, so the body
+					// is guarded instead. Once the requirement is covered, every
+					// remaining pass costs one comparison rather than another full
+					// scan of the candidates.
+					if(remainPcs > 0)
+					{
+
+					bestId = "";
+					bestScore = 0.0;
+					bestCap = 0;
+					bestW = 0.0;
+					bestL = 0.0;
+					bestAvail = 0;
+
+					// myWaste, not every remnant in the building - and no SKU test
+					// inside, because the grouping already did it.
+					for each  sRow in myWaste
+					{
+						sId = sRow.get("wasteId");
+						pieceW = sRow.get("width");
+						pieceL = sRow.get("length");
+						avail = wsLeft.get(sId);
+
+						// Grain is fixed - a piece narrower than the cut width
+						// can never be turned sideways to fit.
+						if(avail > 0 && pieceW >= cutW && pieceL >= cutL)
+						{
+							perRow = (pieceW / cutW).floor();
+							maxRows = (pieceL / cutL).floor();
+							capacity = perRow * maxRows;
+
+
+							// Cuts one physical piece yields here, and the area
+							// sacrificed to get them. Lower is better.
+							cutsFrom = capacity;
+							if(cutsFrom > remainPcs)
+							{
+								cutsFrom = remainPcs;
+							}
+							score = ((pieceW * pieceL) - (cutsFrom * cutW * cutL)) / cutsFrom;
+
+
+							// Strictly-better only, so equal scores keep the
+							// oldest piece - the group is already oldest-first, so
+							// FIFO survives as the tie-break.
+							if(bestId == "" || score < bestScore)
+							{
+								bestId = sId;
+								bestScore = score;
+								bestCap = capacity;
+								bestW = pieceW;
+								bestL = pieceL;
+								bestAvail = avail;
+							}
+						}
+					}
+
+					if(bestId != "")
+					{
+
+						// Take just enough of this piece, capped at what is left
+						// of it. Whichever runs out first ends this pass.
+						//
+						// * 1.0 FORCES DECIMAL DIVISION. Two integers divided in
+						// Deluge can truncate, and a truncated quotient is already
+						// rounded DOWN before .ceil() ever sees it - so 5 cuts at 2
+						// per piece asks for 2 pieces, not 3, and quietly leaves a
+						// cut uncovered. The .ceil() looks like it guards this and
+						// does not.
+						takePcs = ((remainPcs * 1.0) / bestCap).ceil();
+						if(takePcs > bestAvail)
+						{
+							takePcs = bestAvail;
+						}
+						coveredPcs = takePcs * bestCap;
+						if(coveredPcs > remainPcs)
+						{
+							coveredPcs = remainPcs;
+						}
+
+
+						pickEntry = Map();
+						pickEntry.put("wasteId",bestId);
+						pickEntry.put("width",bestW);
+						pickEntry.put("length",bestL);
+						pickEntry.put("pieces",takePcs);
+						wastePicks.add(pickEntry);
+
+						// Claim them so the next supervisor cannot be offered
+						// the same physical pieces.
+						wsLeft.put(bestId,bestAvail - takePcs);
+						remainPcs = remainPcs - coveredPcs;
+						coveredPcsTotal = coveredPcsTotal + coveredPcs;
+						}
+					}
+				}
+
+			}
+
+			//----------------------------------------------------------
+			// Whatever the waste could not cover comes off fresh fabric.
+			//
+			// OUTSIDE the guard above, so this runs for EVERY fabric row -
+			// remnants or none. With no remnants the allocation simply did
+			// not touch remainPcs, and this asks for exactly the cloth the
+			// outstanding pieces need.
+			//----------------------------------------------------------
+			perRowR = 0;
+			canCount = false;
+			if(e.get("reqPieces") > 0 && cutW > 0 && cutL > 0 && fabricWidthCm > 0)
+			{
+				perRowR = (fabricWidthCm / cutW).floor();
+				if(perRowR > 0)
+				{
+					canCount = true;
+				}
+			}
+
+			if(canCount == true)
+			{
+				freshMeters = 0.0;
+				if(remainPcs > 0)
+				{
+					// * 1.0 for the same reason as takePcs above - an integer
+					// quotient is truncated before .ceil() can round it up,
+					// which would ask for one row too few of fresh cloth.
+					rowsR = ((remainPcs * 1.0) / perRowR).ceil();
+					freshMeters = (rowsR * cutL) / 100;
+				}
+			}
+			else
+			{
+				// No piece data to count with - a row planned before
+				// Required_Pieces existed, a cut wider than the cloth, or a
+				// fabric whose width was never recorded. The metres estimate
+				// is all there is, and quoting 0 would make the row
+				// unissuable rather than merely approximate.
+				freshMeters = req - iss;
+				if(freshMeters < 0)
+				{
+					freshMeters = 0.0;
+				}
+			}
+
+			matEntry.put("wastePicks",wastePicks);
+			matEntry.put("freshMeters",freshMeters);
+			matEntry.put("piecesCoveredByWaste",coveredPcsTotal);
+			// Pieces that still have to be cut from fresh fabric. This, not
+			// outstandingPieces, is what the store person is being asked for.
+			matEntry.put("freshPieces",outstandingPieces - coveredPcsTotal);
+
+			// Required, as shown to the store person, is the FRESH requirement.
+			// The plan-time Required_Qty assumed no waste existed, so quoting it
+			// here would ask for more fabric than the cutting now needs.
+			matEntry.put("required",freshMeters);
+			matEntry.put("requiredTotal",req);
+
+			// For fabric, "how much is left to issue" is the waste-adjusted
+			// figure, not Required_Qty - Issued_Qty. Without this override a
+			// requirement fully covered by waste would need 0 metres, be issued
+			// 0 metres, and then sit on the screen as pending forever because
+			// the metres never move. Fulfilment for fabric is counted in
+			// pieces; Required_Qty is an estimate, not a target.
+			matEntry.put("remaining",freshMeters);
+		}
+
+		matList = bySup.get(supId);
+		if(matList == null)
+		{
+			matList = List();
+			supOrder.add(supId);
+		}
+		matList.add(matEntry);
+		bySup.put(supId,matList);
+	}
+
+
+	//------------------------------------------------------------------------
+	// Serialisation, BY HAND.
+	//
+	// This used to be Map.toString() on a Map holding a List of Maps. That
+	// worked for as long as the deepest level happened to be empty, and broke
+	// the day the first waste piece existed: wastePicks added a fourth level of
+	// nesting, Deluge emitted Java map syntax rather than JSON for it, and the
+	// oversized malformed string failed on the way out of the function - AFTER
+	// the try block, which is why the widget saw a bare 500 instead of the
+	// error card this function is careful to return.
+	//
+	// Every other function in this app builds its JSON by hand for exactly this
+	// reason. This one was the last holdout.
+	//------------------------------------------------------------------------
+	resultJson = "[";
+	isFirst = true;
+	// supOrder, not bySup.keys() - the cards must render in the same priority
+	// order the waste was allocated in, or the allocation looks arbitrary.
+	for each  supId in supOrder
+	{
+		supName = "Unknown";
+		for each  emp in Employee[ID == supId]
+		{
+			supName = emp.Employee_Name;
+		}
+
+		matsJson = "";
+		for each  mEnt in bySup.get(supId)
+		{
+			if(matsJson != "")
+			{
+				matsJson = matsJson + ",";
+			}
+
+			linesJson = "";
+			for each  lnE in mEnt.get("lines")
+			{
+				if(linesJson != "")
+				{
+					linesJson = linesJson + ",";
+				}
+				linesJson = linesJson + "{\"planId\":\"" + lnE.get("planId") + "\",\"salesOrder\":\"" + lnE.get("salesOrder").toString().replaceAll("\"","'") + "\",\"planItemId\":\"" + lnE.get("planItemId") + "\",\"item\":\"" + lnE.get("item") + "\",\"isRemake\":" + lnE.get("isRemake") + ",\"supervisorId\":\"" + lnE.get("supervisorId") + "\",\"required\":" + lnE.get("required") + ",\"issued\":" + lnE.get("issued") + ",\"reason\":\"" + lnE.get("reason") + "\"}";
+			}
+
+			exsJson = "";
+			for each  exE in mEnt.get("openExceptions")
+			{
+				if(exsJson != "")
+				{
+					exsJson = exsJson + ",";
+				}
+				pidsJson = "";
+				for each  pidE in exE.get("planIds")
+				{
+					if(pidsJson != "")
+					{
+						pidsJson = pidsJson + ",";
+					}
+					pidsJson = pidsJson + "\"" + pidE + "\"";
+				}
+				exsJson = exsJson + "{\"type\":\"" + exE.get("type").toString().replaceAll("\"","'") + "\",\"planIds\":[" + pidsJson + "]}";
+			}
+
+			matsJson = matsJson + "{\"materialId\":\"" + mEnt.get("materialId") + "\",\"material\":\"" + mEnt.get("material").toString().replaceAll("\"","'") + "\",\"sku\":\"" + mEnt.get("sku").toString().replaceAll("\"","'") + "\",\"unit\":\"" + mEnt.get("unit").toString().replaceAll("\"","'") + "\",\"isFabric\":" + mEnt.get("isFabric") + ",\"isReissue\":" + mEnt.get("isReissue") + ",\"required\":" + mEnt.get("required") + ",\"issued\":" + mEnt.get("issued") + ",\"remaining\":" + mEnt.get("remaining") + ",\"availableStock\":" + mEnt.get("availableStock") + ",\"lines\":[" + linesJson + "],\"openExceptions\":[" + exsJson + "]";
+
+			// The fabric-only half. Emitted only when it was populated, so a
+			// non-fabric row carries exactly the keys it did before.
+			if(mEnt.get("isFabric") == true)
+			{
+				picksJson = "";
+				for each  pkE in mEnt.get("wastePicks")
+				{
+					if(picksJson != "")
+					{
+						picksJson = picksJson + ",";
+					}
+					// The level that broke it. Ids as strings, everything else
+					// numeric - the widget round-trips wasteId untouched.
+					picksJson = picksJson + "{\"wasteId\":\"" + pkE.get("wasteId") + "\",\"width\":" + pkE.get("width") + ",\"length\":" + pkE.get("length") + ",\"pieces\":" + pkE.get("pieces") + "}";
+				}
+
+				matsJson = matsJson + ",\"unwashedStock\":" + mEnt.get("unwashedStock") + ",\"cutWidth\":" + mEnt.get("cutWidth") + ",\"cutLength\":" + mEnt.get("cutLength") + ",\"fabricWidthCm\":" + mEnt.get("fabricWidthCm") + ",\"requiredPieces\":" + mEnt.get("requiredPieces") + ",\"issuedPieces\":" + mEnt.get("issuedPieces") + ",\"wasteIssuedPieces\":" + mEnt.get("wasteIssuedPieces") + ",\"outstandingPieces\":" + mEnt.get("outstandingPieces") + ",\"wastePicks\":[" + picksJson + "],\"freshMeters\":" + mEnt.get("freshMeters") + ",\"piecesCoveredByWaste\":" + mEnt.get("piecesCoveredByWaste") + ",\"freshPieces\":" + mEnt.get("freshPieces") + ",\"requiredTotal\":" + mEnt.get("requiredTotal");
+			}
+
+			matsJson = matsJson + "}";
+		}
+
+		if(isFirst == false)
+		{
+			resultJson = resultJson + ",";
+		}
+		resultJson = resultJson + "{\"supervisorId\":\"" + supId + "\",\"supervisorName\":\"" + supName.toString().replaceAll("\"","'") + "\",\"materials\":[" + matsJson + "]}";
+
+		isFirst = false;
+	}
+	resultJson = resultJson + "]";
+
+	}
+	catch (e)
+	{
+		info "DELUGE ERROR: " + e.toString();
+		// Creator reports every failure to a widget as the useless "code 9430",
+		// so the real message is carried out in the supervisor name - the only
+		// text channel this API's array contract has.
+		return "[{\"supervisorId\":\"0\",\"supervisorName\":\"ERR: " + e.toString().replaceAll("\"","'") + "\",\"materials\":[]}]";
+	}
+
+	return resultJson;
+}

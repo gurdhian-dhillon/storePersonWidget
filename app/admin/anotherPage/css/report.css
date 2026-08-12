@@ -1,0 +1,232 @@
+/* Employee report — the layer on top of ../css/style.css.
+   Everything shared (tokens, header, .table-wrapper, .pill, .chevron,
+   .ans-toggle, .empty-state, .work-row) comes from there. Only what this
+   screen adds is below. */
+
+/* ---- day picker ---- */
+
+.day-nav {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+}
+
+.day-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.9rem;
+    height: 1.9rem;
+    padding: 0;
+    color: var(--primary);
+    background: none;
+    border: 0;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.day-btn svg { width: 1rem; height: 1rem; display: block; }
+.day-btn:hover { background: #f2f7ff; }
+.day-btn:disabled { color: #cbd5e1; cursor: default; background: none; }
+.day-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+.day-input {
+    padding: 5px 8px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--text-main);
+    background: none;
+    border: 0;
+    border-radius: 6px;
+}
+
+.day-input:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+.ghost-btn {
+    padding: 8px 14px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--primary);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+    cursor: pointer;
+}
+
+.ghost-btn:hover { border-color: var(--primary); background: #f2f7ff; }
+.ghost-btn:disabled { color: var(--text-muted); border-color: var(--border); background: var(--surface); cursor: default; }
+
+/* ---- the day in five numbers ---- */
+
+.tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    margin: 16px 0 20px;
+}
+
+.tile {
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+}
+
+.tile-label {
+    display: block;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.tile-value {
+    display: block;
+    margin-top: 3px;
+    font-size: 20px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+}
+
+.tile-sub { display: block; font-size: 11px; color: var(--text-muted); }
+
+.tile-people { border-left-color: var(--primary); }
+.tile-stages { border-left-color: var(--plan); }
+.tile-out { border-left-color: var(--status-success); }
+.tile-lost { border-left-color: var(--status-danger); }
+.tile-yield { border-left-color: var(--issue); }
+
+/* ---- the report table ---- */
+
+.rep-table td.r,
+.rep-table th.r { text-align: right; }
+
+/* An audit table is read DOWN a column, not across a row, so the digits have
+   to line up. */
+.rep-table td.r { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.rep-table td { vertical-align: middle; }
+.rep-row:hover { background: #f6f9ff; }
+.rep-row > td.emp-cell { min-width: 13rem; line-height: 1.35; }
+
+.emp-name { font-weight: 700; }
+.emp-sub { font-size: 11px; color: var(--text-muted); }
+
+/* The pieces someone is still holding. Not a second stage count and not
+   output — it is the only figure on the row that is about right now rather
+   than about the day, so it is set apart rather than given a column of its
+   own next to the finished work. */
+.stage-sub { font-size: 11px; color: var(--status-warning); font-weight: 600; }
+
+.lost-none { color: #cbd5e1; }
+.lost-some { color: var(--status-danger); font-weight: 700; }
+
+/* Yield is a RATIO and ratios lie when the volume behind them is small — one
+   piece lost out of three is 67%. The bar carries the volume so the two are
+   never read apart. */
+.yield-cell { min-width: 6.5rem; }
+.yield-num { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.yield-bar {
+    height: 4px;
+    margin-top: 3px;
+    border-radius: 2px;
+    background: #eef2f7;
+    overflow: hidden;
+}
+
+.yield-fill { height: 100%; border-radius: 2px; }
+.y-good { background: var(--status-success); }
+.y-fair { background: var(--status-warning); }
+.y-poor { background: var(--status-danger); }
+
+.yield-num.y-good-t { color: #15803d; }
+.yield-num.y-fair-t { color: #b45309; }
+.yield-num.y-poor-t { color: #b91c1c; }
+
+/* Work nobody was recorded against. Kept in the table rather than dropped,
+   because the day's totals have to be the sum of the rows — but greyed, since
+   it is a gap in the data rather than a person. */
+.rep-row.unattributed { background: #fafbfc; }
+.rep-row.unattributed .emp-name { color: var(--text-muted); font-style: italic; }
+
+/* ---- the stage breakdown behind the chevron ---- */
+
+.stage-table { width: 100%; }
+.stage-table th { background: transparent; padding: 4px 10px; }
+.stage-table td { padding: 6px 10px; border-bottom: 1px solid #eef2f7; }
+.stage-table tr:last-child td { border-bottom: 0; }
+.stage-table td.r { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stage-phase { font-weight: 600; }
+.stage-when { font-family: var(--mono); font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+
+.pill-running { background: var(--status-warning-bg); color: #92400e; }
+.pill-done { background: var(--status-success-bg); color: #065f46; }
+.pill-outsourced { background: #ede9fe; color: #5b21b6; }
+
+/* ---- nobody logged anything ---- */
+
+.nolog {
+    margin-top: 22px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+}
+
+.nolog-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 12px 16px;
+    font: inherit;
+    text-align: left;
+    background: none;
+    border: 0;
+    cursor: pointer;
+}
+
+.nolog-head:hover { background: #f8fafc; }
+.nolog-head h2 { margin: 0; font-size: 13px; font-weight: 600; }
+.nolog-head .muted { font-size: 12px; }
+.nolog.open .nolog-head { border-bottom: 1px solid var(--border); }
+.nolog.open .nolog-head .chevron { transform: rotate(180deg); }
+
+.nolog-body { display: none; padding: 14px 16px 16px; }
+.nolog.open .nolog-body { display: block; }
+
+.nolog-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.nolog-chip {
+    padding: 5px 10px;
+    font-size: 12px;
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+}
+
+.nolog-chip span { color: var(--text-muted); }
+
+@media (max-width: 720px) {
+    .app-header-right { width: 100%; flex-wrap: wrap; }
+    .tile-value { font-size: 17px; }
+}

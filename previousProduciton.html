@@ -1,0 +1,2791 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="UTF-8" />
+		<title>Production Entry</title>
+		<script src="https://js.zohostatic.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+		<style>
+			:root {
+				--ll-accent: #e11d70;
+				--ll-accent-hover: #be185d;
+				--ll-accent-soft: #fdf2f8;
+				--ll-accent-border: #f9a8d4;
+				--ll-ink: #1e293b;
+				--ll-muted: #64748b;
+				--ll-border: #e2e8f0;
+				--ll-surface: #ffffff;
+				--ll-soft: #f8fafc;
+				--ll-radius: 12px;
+				--ll-shadow: 0 1px 2px rgba(15, 23, 42, 0.04),
+					0 6px 16px rgba(15, 23, 42, 0.04);
+			}
+			*,
+			*::before,
+			*::after {
+				box-sizing: border-box;
+			}
+			html,
+			body {
+				width: 100%;
+				margin: 0;
+			}
+			body {
+				font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+				padding: 16px 18px 28px;
+				background: transparent;
+				color: var(--ll-ink);
+				line-height: 1.45;
+				-webkit-font-smoothing: antialiased;
+			}
+			.page-title {
+				margin: 0 0 4px;
+				font-size: 22px;
+				font-weight: 700;
+				letter-spacing: -0.02em;
+			}
+			.page-subtitle {
+				margin: 0 0 16px;
+				font-size: 13px;
+				color: var(--ll-muted);
+			}
+			.section-card {
+				background: var(--ll-surface);
+				border: 1px solid var(--ll-border);
+				border-radius: var(--ll-radius);
+				box-shadow: var(--ll-shadow);
+				overflow: hidden;
+				margin-top: 16px;
+			}
+			.section-card.is-hidden,
+			#execution-section.is-hidden {
+				display: none !important;
+			}
+			.section-card:first-of-type {
+				margin-top: 0;
+			}
+			.section-head {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 12px;
+				padding: 12px 16px;
+				border-bottom: 1px solid var(--ll-border);
+				background: linear-gradient(180deg, #fff 0%, var(--ll-soft) 100%);
+			}
+			.section-head-left {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+			}
+			.section-step {
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				width: 26px;
+				height: 26px;
+				border-radius: 8px;
+				background: var(--ll-accent-soft);
+				color: var(--ll-accent);
+				font-size: 12px;
+				font-weight: 700;
+				flex-shrink: 0;
+			}
+			.section-title {
+				margin: 0;
+				font-size: 15px;
+				font-weight: 700;
+			}
+			.section-body {
+				padding: 14px 16px 16px;
+			}
+			.field {
+				margin-bottom: 0;
+				min-width: 0;
+			}
+			.field label {
+				display: block;
+				font-size: 12px;
+				font-weight: 650;
+				color: #334155;
+				margin-bottom: 5px;
+			}
+			.field select,
+			.field input,
+			.field textarea {
+				width: 100%;
+				padding: 9px 11px;
+				border: 1px solid var(--ll-border);
+				border-radius: 8px;
+				font-size: 14px;
+				font-family: inherit;
+				background: #fff;
+				color: var(--ll-ink);
+			}
+			.field select:focus,
+			.field input:focus,
+			.field textarea:focus {
+				outline: none;
+				border-color: var(--ll-accent-border);
+				box-shadow: 0 0 0 3px rgba(225, 29, 112, 0.12);
+			}
+			.field input:disabled,
+			.field select:disabled,
+			.field textarea:disabled {
+				background: var(--ll-soft);
+				color: #475569;
+				cursor: not-allowed;
+			}
+			.job-order-field {
+				max-width: 380px;
+			}
+			.grid-3 {
+				display: grid;
+				grid-template-columns: repeat(3, minmax(0, 1fr));
+				gap: 12px 14px;
+			}
+			.grid-2 {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 12px 14px;
+			}
+			.timing-grid {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 12px;
+				margin-top: 14px;
+			}
+			.timing-card {
+				display: grid;
+				grid-template-columns: 1fr 1fr auto;
+				gap: 10px;
+				align-items: end;
+				padding: 12px;
+				border: 1px solid var(--ll-border);
+				border-radius: 10px;
+				background: var(--ll-soft);
+			}
+			.timing-card.is-start {
+				border-color: #fecdd3;
+				background: linear-gradient(180deg, #fff 0%, var(--ll-accent-soft) 100%);
+			}
+			.timing-card-label {
+				grid-column: 1 / -1;
+				font-size: 11px;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.05em;
+				color: var(--ll-muted);
+				margin-bottom: -2px;
+			}
+			.timing-card .btn {
+				height: 38px;
+				min-width: 84px;
+			}
+			.btn {
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				padding: 8px 14px;
+				border: 1px solid transparent;
+				border-radius: 8px;
+				font-size: 13px;
+				font-weight: 650;
+				cursor: pointer;
+			}
+			.btn:disabled {
+				opacity: 0.55;
+				cursor: not-allowed;
+			}
+			.btn-primary {
+				background: var(--ll-accent);
+				border-color: var(--ll-accent);
+				color: #fff;
+			}
+			.btn-primary:hover:not(:disabled) {
+				background: var(--ll-accent-hover);
+				border-color: var(--ll-accent-hover);
+			}
+			.btn-secondary {
+				background: #fff;
+				border-color: var(--ll-border);
+				color: var(--ll-ink);
+			}
+			.btn-secondary:hover:not(:disabled) {
+				background: var(--ll-soft);
+			}
+			.btn-accent {
+				background: var(--ll-accent);
+				border-color: var(--ll-accent);
+				color: #fff;
+			}
+
+			/* Quantity Check — compact */
+			.qc-wrap {
+				overflow-x: auto;
+			}
+			.qc-table {
+				width: 100%;
+				table-layout: fixed;
+				border-collapse: collapse;
+				font-size: 13px;
+			}
+			.qc-table th {
+				text-align: left;
+				padding: 8px 10px;
+				background: var(--ll-soft);
+				border-bottom: 1px solid var(--ll-border);
+				font-size: 11px;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.03em;
+				color: var(--ll-muted);
+				white-space: nowrap;
+			}
+			.qc-table td {
+				padding: 6px 10px;
+				border-bottom: 1px solid #f1f5f9;
+				vertical-align: middle;
+			}
+			.qc-table tbody tr:hover {
+				background: #fcfcfd;
+			}
+			.qc-table input[type="text"] {
+				width: 100%;
+				box-sizing: border-box;
+				padding: 6px 8px;
+				border: 1px solid var(--ll-border);
+				border-radius: 6px;
+				font-size: 13px;
+			}
+			.qc-table input[name="qc_actual"]:not(:disabled) {
+				background: #fff;
+				border-color: var(--ll-accent-border);
+			}
+			.qc-table input[readonly],
+			.qc-table input:disabled {
+				background: var(--ll-soft);
+				color: #475569;
+				cursor: not-allowed;
+			}
+			.qc-table .qc-check {
+				text-align: center;
+				width: 120px;
+			}
+			.qc-table .qc-check input[type="checkbox"] {
+				width: 16px;
+				height: 16px;
+				cursor: pointer;
+				accent-color: var(--ll-accent);
+			}
+			.qc-table .qc-check input[type="checkbox"]:disabled {
+				cursor: not-allowed;
+			}
+			.qc-th-received-label {
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				gap: 6px;
+				cursor: pointer;
+				text-transform: none;
+				letter-spacing: normal;
+				font-size: 11px;
+				font-weight: 650;
+				color: var(--ll-ink);
+			}
+			.qc-product-main {
+				font-weight: 650;
+				color: var(--ll-ink);
+				font-size: 13px;
+			}
+			.qc-empty {
+				padding: 14px 12px;
+				font-size: 13px;
+				color: var(--ll-muted);
+				text-align: center;
+				background: #fcfcfd;
+			}
+			.qc-session-bar {
+				padding: 12px 16px;
+				background: var(--ll-soft);
+			}
+			.qc-session-start {
+				border-bottom: 1px solid var(--ll-border);
+			}
+			.qc-session-end {
+				border-top: 1px solid var(--ll-border);
+			}
+			.qc-session-hint {
+				margin: 0 0 10px;
+				font-size: 12px;
+				font-weight: 650;
+				color: var(--ll-accent);
+			}
+			.qc-session-fields {
+				display: grid;
+				grid-template-columns: minmax(200px, 280px) minmax(200px, 260px);
+				gap: 12px 16px;
+				align-items: end;
+			}
+			.qc-session-end .qc-session-fields {
+				grid-template-columns: minmax(200px, 260px);
+				justify-content: end;
+			}
+			.qc-session-field {
+				min-width: 0;
+			}
+			.qc-wrap.is-pending {
+				opacity: 0.55;
+				pointer-events: none;
+				user-select: none;
+			}
+			.qc-wrap.is-pending::before {
+				content: "2. Mark materials received and enter Actual Qty";
+				display: block;
+				padding: 8px 16px;
+				font-size: 12px;
+				font-weight: 650;
+				color: var(--ll-muted);
+				background: #fff;
+				border-bottom: 1px dashed var(--ll-border);
+			}
+			.qc-col-product {
+				width: 28%;
+			}
+			.qc-col-sku {
+				width: 14%;
+			}
+			.qc-col-color {
+				width: 14%;
+			}
+			.qc-col-qty {
+				width: 12%;
+			}
+			.qc-col-unit {
+				width: 10%;
+			}
+			.stage-remarks-field {
+				max-width: 360px;
+				margin-top: 12px;
+			}
+
+			.process-picker-intro {
+				margin: 0 0 10px;
+				font-size: 13px;
+				color: var(--ll-muted);
+			}
+			.process-picker-grid {
+				display: grid;
+				grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+				gap: 8px;
+			}
+			.process-picker-actions {
+				margin-top: 12px;
+				padding-top: 12px;
+				border-top: 1px solid var(--ll-border);
+			}
+			.process-option {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				padding: 10px 12px;
+				background: #fff;
+				border: 1px solid var(--ll-border);
+				border-radius: 8px;
+				cursor: pointer;
+			}
+			.process-option:hover {
+				border-color: var(--ll-accent-border);
+				background: var(--ll-accent-soft);
+			}
+			.process-option:has(input:checked) {
+				border-color: var(--ll-accent);
+				background: var(--ll-accent-soft);
+				box-shadow: inset 0 0 0 1px var(--ll-accent);
+			}
+			.process-option input {
+				width: 16px;
+				height: 16px;
+				flex-shrink: 0;
+				accent-color: var(--ll-accent);
+				cursor: pointer;
+			}
+			.process-option input:disabled {
+				cursor: not-allowed;
+			}
+			.process-option-text {
+				font-size: 13px;
+				font-weight: 650;
+				color: var(--ll-ink);
+			}
+			.process-locked-badge {
+				display: none;
+				font-size: 11px;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.04em;
+				color: var(--ll-accent);
+				background: var(--ll-accent-soft);
+				border: 1px solid var(--ll-accent-border);
+				border-radius: 999px;
+				padding: 4px 10px;
+			}
+			.process-picker.is-locked .process-locked-badge {
+				display: inline-block;
+			}
+
+			#execution-section {
+				margin-top: 16px;
+			}
+			.flow-trail {
+				border: 1px solid var(--ll-border);
+				border-radius: var(--ll-radius);
+				overflow: hidden;
+				margin-bottom: 14px;
+				background: var(--ll-surface);
+				box-shadow: var(--ll-shadow);
+			}
+			.flow-trail-head {
+				display: flex;
+				align-items: center;
+				padding: 12px 16px;
+				border-bottom: 1px solid var(--ll-border);
+				background: linear-gradient(180deg, #fff 0%, var(--ll-soft) 100%);
+			}
+			.flow-trail-track {
+				display: flex;
+				flex-wrap: wrap;
+				align-items: center;
+				gap: 8px;
+				padding: 12px 16px;
+			}
+			.flow-node {
+				display: inline-flex;
+				align-items: center;
+				gap: 8px;
+			}
+			.flow-chip {
+				padding: 6px 11px;
+				border-radius: 999px;
+				border: 1px solid var(--ll-border);
+				background: #fff;
+				font-size: 12px;
+				font-weight: 650;
+				color: var(--ll-muted);
+			}
+			.flow-chip.is-done {
+				background: #ecfdf5;
+				border-color: #a7f3d0;
+				color: #047857;
+			}
+			.flow-chip.is-current {
+				background: var(--ll-accent-soft);
+				border-color: var(--ll-accent-border);
+				color: var(--ll-accent);
+			}
+			.flow-arrow {
+				color: #94a3b8;
+				font-weight: 700;
+			}
+			.stage-stack {
+				display: flex;
+				flex-direction: column;
+				gap: 12px;
+			}
+			.stage-card {
+				border: 1px solid var(--ll-border);
+				border-radius: var(--ll-radius);
+				overflow: hidden;
+				background: var(--ll-surface);
+				box-shadow: var(--ll-shadow);
+			}
+			.stage-card.is-current {
+				border-color: var(--ll-accent-border);
+				box-shadow: 0 0 0 3px rgba(225, 29, 112, 0.08);
+			}
+			.stage-card-head {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 10px;
+				padding: 10px 14px;
+				font-size: 14px;
+				font-weight: 700;
+				background: var(--ll-soft);
+				border-bottom: 1px solid var(--ll-border);
+			}
+			.stage-card.is-current .stage-card-head {
+				background: var(--ll-accent-soft);
+			}
+			.stage-card.is-done .stage-card-head {
+				background: #ecfdf5;
+			}
+			.stage-status {
+				font-size: 11px;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.04em;
+				color: var(--ll-muted);
+			}
+			.stage-card.is-current .stage-status {
+				color: var(--ll-accent);
+			}
+			.stage-card.is-done .stage-status {
+				color: #047857;
+			}
+			.stage-card-body {
+				padding: 12px 14px 14px;
+			}
+			.stage-time-row {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+			}
+			.stage-time-row input {
+				flex: 1;
+				min-width: 0;
+			}
+			.stage-time-row .btn {
+				flex-shrink: 0;
+				height: 38px;
+				min-width: 72px;
+			}
+			.stage-actions {
+				margin-top: 6px;
+			}
+			.qc-col-qty {
+				width: 12%;
+			}
+			.qc-col-unit {
+				width: 10%;
+			}
+			.stage-remarks-field {
+				max-width: 360px;
+				margin-top: 12px;
+			}
+
+			.process-picker-intro {
+				margin: 0 0 10px;
+				font-size: 13px;
+				color: var(--ll-muted);
+			}
+			.process-picker-grid {
+				display: grid;
+				grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+				gap: 8px;
+			}
+			.process-picker-actions {
+				margin-top: 12px;
+				padding-top: 12px;
+				border-top: 1px solid var(--ll-border);
+			}
+			.process-option {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				padding: 10px 12px;
+				background: #fff;
+				border: 1px solid var(--ll-border);
+				border-radius: 8px;
+				cursor: pointer;
+			}
+			.process-option:hover {
+				border-color: var(--ll-accent-border);
+				background: var(--ll-accent-soft);
+			}
+			.process-option:has(input:checked) {
+				border-color: var(--ll-accent);
+				background: var(--ll-accent-soft);
+				box-shadow: inset 0 0 0 1px var(--ll-accent);
+			}
+			.process-option input {
+				width: 16px;
+				height: 16px;
+				flex-shrink: 0;
+				accent-color: var(--ll-accent);
+				cursor: pointer;
+			}
+			.process-option input:disabled {
+				cursor: not-allowed;
+			}
+			.process-option-text {
+				font-size: 13px;
+				font-weight: 650;
+				color: var(--ll-ink);
+			}
+			.process-locked-badge {
+				display: none;
+				font-size: 11px;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.04em;
+				color: var(--ll-accent);
+				background: var(--ll-accent-soft);
+				border: 1px solid var(--ll-accent-border);
+				border-radius: 999px;
+				padding: 4px 10px;
+			}
+			.process-picker.is-locked .process-locked-badge {
+				display: inline-block;
+			}
+
+			#execution-section {
+				margin-top: 16px;
+			}
+			.flow-trail {
+				border: 1px solid var(--ll-border);
+				border-radius: var(--ll-radius);
+				overflow: hidden;
+				margin-bottom: 14px;
+				background: var(--ll-surface);
+				box-shadow: var(--ll-shadow);
+			}
+			.flow-trail-head {
+				display: flex;
+				align-items: center;
+				padding: 12px 16px;
+				border-bottom: 1px solid var(--ll-border);
+				background: linear-gradient(180deg, #fff 0%, var(--ll-soft) 100%);
+			}
+			.flow-trail-track {
+				display: flex;
+				flex-wrap: wrap;
+				align-items: center;
+				gap: 8px;
+				padding: 12px 16px;
+			}
+			.flow-node {
+				display: inline-flex;
+				align-items: center;
+				gap: 8px;
+			}
+			.flow-chip {
+				padding: 6px 11px;
+				border-radius: 999px;
+				border: 1px solid var(--ll-border);
+				background: #fff;
+				font-size: 12px;
+				font-weight: 650;
+				color: var(--ll-muted);
+			}
+			.flow-chip.is-done {
+				background: #ecfdf5;
+				border-color: #a7f3d0;
+				color: #047857;
+			}
+			.flow-chip.is-current {
+				background: var(--ll-accent-soft);
+				border-color: var(--ll-accent-border);
+				color: var(--ll-accent);
+			}
+			.flow-arrow {
+				color: #94a3b8;
+				font-weight: 700;
+			}
+			.stage-stack {
+				display: flex;
+				flex-direction: column;
+				gap: 12px;
+			}
+			.stage-card {
+				border: 1px solid var(--ll-border);
+				border-radius: var(--ll-radius);
+				overflow: hidden;
+				background: var(--ll-surface);
+				box-shadow: var(--ll-shadow);
+			}
+			.stage-card.is-current {
+				border-color: var(--ll-accent-border);
+				box-shadow: 0 0 0 3px rgba(225, 29, 112, 0.08);
+			}
+			.stage-card-head {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 10px;
+				padding: 10px 14px;
+				font-size: 14px;
+				font-weight: 700;
+				background: var(--ll-soft);
+				border-bottom: 1px solid var(--ll-border);
+			}
+			.stage-card.is-current .stage-card-head {
+				background: var(--ll-accent-soft);
+			}
+			.stage-card.is-done .stage-card-head {
+				background: #ecfdf5;
+			}
+			.stage-status {
+				font-size: 11px;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.04em;
+				color: var(--ll-muted);
+			}
+			.stage-card.is-current .stage-status {
+				color: var(--ll-accent);
+			}
+			.stage-card.is-done .stage-status {
+				color: #047857;
+			}
+			.stage-card-body {
+				padding: 12px 14px 14px;
+			}
+			.stage-time-row {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+			}
+			.stage-time-row input {
+				flex: 1;
+				min-width: 0;
+			}
+			.stage-time-row .btn {
+				flex-shrink: 0;
+				height: 38px;
+				min-width: 72px;
+			}
+			.stage-actions {
+				margin-top: 6px;
+			}
+			#status {
+				font-size: 13px;
+				color: var(--ll-muted);
+				margin-bottom: 8px;
+			}
+			#error {
+				display: none;
+				background: #fef2f2;
+				color: #b91c1c;
+				border: 1px solid #fecaca;
+				border-radius: 8px;
+				padding: 8px 12px;
+				margin-bottom: 12px;
+				font-size: 13px;
+			}
+			.production-complete {
+				display: none;
+				margin-top: 12px;
+				padding: 12px 14px;
+				border-radius: 8px;
+				border: 1px solid #a7f3d0;
+				background: #ecfdf5;
+				color: #047857;
+				font-size: 14px;
+				font-weight: 650;
+			}
+
+			/* Summary Modal */
+			.modal-overlay {
+				position: fixed;
+				top: 0;
+				left: 0;
+				width: 100%;
+				height: 100%;
+				background: rgba(15, 23, 42, 0.6);
+				backdrop-filter: blur(4px);
+				z-index: 9999;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				padding: 20px;
+				opacity: 0;
+				pointer-events: none;
+				transition: opacity 0.3s ease;
+			}
+			.modal-overlay:not(.is-hidden) {
+				opacity: 1;
+				pointer-events: auto;
+			}
+			.modal-content {
+				background: var(--ll-surface);
+				border-radius: var(--ll-radius);
+				box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+				width: 100%;
+				max-width: 480px;
+				overflow: hidden;
+				transform: translateY(20px);
+				transition: transform 0.3s ease;
+			}
+			.modal-overlay:not(.is-hidden) .modal-content {
+				transform: translateY(0);
+			}
+			.modal-header {
+				padding: 20px 24px;
+				border-bottom: 1px solid var(--ll-border);
+				background: linear-gradient(180deg, #fff 0%, var(--ll-soft) 100%);
+			}
+			.modal-title {
+				margin: 0;
+				font-size: 20px;
+				font-weight: 700;
+				color: var(--ll-ink);
+				display: flex;
+				align-items: center;
+				gap: 10px;
+			}
+			.modal-title-icon {
+				color: #059669; /* Success green */
+				display: flex;
+			}
+			.modal-body {
+				padding: 24px;
+			}
+			.summary-list {
+				display: flex;
+				flex-direction: column;
+				gap: 16px;
+			}
+			.summary-item {
+				display: flex;
+				justify-content: space-between;
+				align-items: baseline;
+				padding-bottom: 12px;
+				border-bottom: 1px dashed var(--ll-border);
+			}
+			.summary-item:last-child {
+				border-bottom: none;
+				padding-bottom: 0;
+			}
+			.summary-label {
+				font-size: 13px;
+				color: var(--ll-muted);
+				font-weight: 650;
+			}
+			.summary-value {
+				font-size: 14px;
+				font-weight: 700;
+				color: var(--ll-ink);
+				text-align: right;
+				max-width: 60%;
+				word-break: break-word;
+			}
+			.summary-value.highlight {
+				color: var(--ll-accent);
+				font-size: 15px;
+			}
+			.modal-footer {
+				padding: 16px 24px;
+				border-top: 1px solid var(--ll-border);
+				background: var(--ll-soft);
+				display: flex;
+				justify-content: flex-end;
+			}
+
+			@media (max-width: 900px) {
+				.grid-3 {
+					grid-template-columns: 1fr 1fr;
+				}
+				.timing-grid {
+					grid-template-columns: 1fr;
+				}
+				.qc-session-fields {
+					grid-template-columns: 1fr 1fr;
+				}
+			}
+			@media (max-width: 600px) {
+				body {
+					padding: 12px;
+				}
+				.grid-3,
+				.grid-2 {
+					grid-template-columns: 1fr;
+				}
+				.job-order-field {
+					max-width: none;
+				}
+				.qc-session-fields,
+				.qc-session-end .qc-session-fields {
+					grid-template-columns: 1fr;
+					justify-content: stretch;
+				}
+				.timing-card {
+					grid-template-columns: 1fr 1fr;
+				}
+				.timing-card .btn {
+					grid-column: 1 / -1;
+					width: 100%;
+				}
+			}
+		</style>
+
+
+	</head>
+	<body>
+		<h2 class="page-title">Production Entry</h2>
+		<p class="page-subtitle">
+			Select a job order, confirm materials, lock steps, then execute stages.
+		</p>
+
+		<div id="status"></div>
+		<div id="error"></div>
+
+		<section class="section-card header-panel">
+			<div class="section-head">
+				<div class="section-head-left">
+					<span class="section-step">1</span>
+					<h3 class="section-title">Job Order</h3>
+				</div>
+			</div>
+			<div class="section-body">
+				<div class="field job-order-field">
+					<label for="job-order-select">Job Order No.</label>
+					<select id="job-order-select">
+						<option value="">-Select-</option>
+					</select>
+				</div>
+
+				<div class="grid-3" style="margin-top: 16px">
+					<div class="field">
+						<label for="plan-no">Plan No.</label>
+						<input type="text" id="plan-no" disabled />
+					</div>
+					<div class="field">
+						<label for="job-order-date">Job Order Date</label>
+						<input type="text" id="job-order-date" disabled />
+					</div>
+					<div class="field">
+						<label for="bom-no">BOM No.</label>
+						<input type="text" id="bom-no" disabled />
+					</div>
+					<div class="field">
+						<label for="item-name">Item Name</label>
+						<input type="text" id="item-name" disabled />
+					</div>
+					<div class="field">
+						<label for="sku">SKU</label>
+						<input type="text" id="sku" disabled />
+					</div>
+					<div class="field">
+						<label for="production-order-qty">Production Order Quantity</label>
+						<input type="text" id="production-order-qty" disabled />
+					</div>
+				</div>
+
+				<div class="timing-grid">
+					<div class="timing-card is-start">
+						<div class="timing-card-label">Production Start</div>
+						<div class="field">
+							<label for="po-start-date">Date</label>
+							<input type="date" id="po-start-date" disabled />
+						</div>
+						<div class="field">
+							<label for="po-start-time">Time</label>
+							<input type="time" id="po-start-time" step="60" disabled />
+						</div>
+						<button type="button" class="btn btn-primary" id="btn-po-start">
+							Start
+						</button>
+					</div>
+					<div class="timing-card is-end">
+						<div class="timing-card-label">Production End (auto)</div>
+						<div class="field">
+							<label for="po-end-date">Date</label>
+							<input type="date" id="po-end-date" disabled />
+						</div>
+						<div class="field">
+							<label for="po-end-time">Time</label>
+							<input type="time" id="po-end-time" step="60" disabled />
+						</div>
+						<button
+							type="button"
+							class="btn btn-secondary"
+							id="btn-po-end"
+							disabled
+							title="Filled automatically when all stages are completed"
+						>
+							Auto
+						</button>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<section class="section-card qc-section is-hidden" id="quantity-check-section">
+			<div class="section-head">
+				<div class="section-head-left">
+					<span class="section-step">2</span>
+					<h3 class="section-title">Quantity Check</h3>
+				</div>
+			</div>
+
+			<div class="qc-session-bar qc-session-start">
+				<p class="qc-session-hint">1. Select Verified By, then press Start</p>
+				<div class="qc-session-fields">
+					<div class="field qc-session-field">
+						<label for="verified-by">Verified By</label>
+						<select id="verified-by" name="Verified_By">
+							<option value="">-Select-</option>
+						</select>
+					</div>
+					<div class="field qc-session-field">
+						<label for="qc-start-time">Start Time</label>
+						<div class="stage-time-row">
+							<input type="time" id="qc-start-time" step="60" disabled />
+							<button type="button" class="btn btn-primary" id="btn-qc-start">
+								Start
+							</button>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<div class="qc-wrap is-pending" id="qc-wrap">
+				<table class="qc-table" id="qc-table">
+					<thead>
+						<tr>
+							<th class="qc-col-product">Product Name</th>
+							<th class="qc-col-sku">SKU</th>
+							<th class="qc-col-color">Color</th>
+							<th class="qc-col-qty">Planned Qty</th>
+							<th class="qc-col-unit">Unit</th>
+							<th class="qc-check">
+								<label class="qc-th-received-label">
+									<span>Received</span>
+									<input
+										type="checkbox"
+										id="qc-received-all"
+										title="Select or clear all rows"
+										aria-label="Mark all rows as received"
+									/>
+								</label>
+							</th>
+							<th class="qc-col-qty">Actual Qty</th>
+							<th class="qc-col-unit">Unit</th>
+						</tr>
+					</thead>
+					<tbody id="qc-body"></tbody>
+				</table>
+				<div class="qc-empty" id="qc-empty">
+					Select a Job Order to load material requirements.
+				</div>
+			</div>
+
+			<div class="qc-session-bar qc-session-end">
+				<p class="qc-session-hint">3. When materials are confirmed, press End</p>
+				<div class="qc-session-fields">
+					<div class="field qc-session-field">
+						<label for="qc-end-time">End Time</label>
+						<div class="stage-time-row">
+							<input type="time" id="qc-end-time" step="60" disabled />
+							<button type="button" class="btn btn-primary" id="btn-qc-end">
+								End
+							</button>
+						</div>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<section
+			class="section-card process-picker is-hidden"
+			id="production-steps-section"
+		>
+			<div class="section-head">
+				<div class="section-head-left">
+					<span class="section-step">3</span>
+					<h3 class="section-title">Production Steps</h3>
+				</div>
+				<span class="process-locked-badge" id="steps-locked-badge"
+					>Locked</span
+				>
+			</div>
+			<div class="section-body">
+				<p class="process-picker-intro">
+					Select the steps that apply to this job. Order is fixed — only which
+					steps run will change. Lock selection to start stage execution.
+				</p>
+				<div
+					class="process-picker-grid"
+					id="production-steps-grid"
+					role="group"
+					aria-label="Production steps"
+				></div>
+				<div class="process-picker-actions">
+					<button type="button" class="btn btn-primary" id="btn-lock-steps">
+						Lock Steps & Start
+					</button>
+				</div>
+			</div>
+		</section>
+
+		<div id="execution-section" class="is-hidden">
+			<section class="flow-trail">
+				<div class="flow-trail-head">
+					<div class="section-head-left">
+						<span class="section-step">4</span>
+						<span class="section-title">Production Flow</span>
+					</div>
+				</div>
+				<div class="flow-trail-track" id="flow-trail-track"></div>
+			</section>
+			<div class="stage-stack" id="stage-stack"></div>
+			<div class="production-complete" id="production-complete">
+				All selected stages completed — finished good ready.
+			</div>
+		</div>
+
+		<section class="section-card waste-section is-hidden" id="waste-section">
+			<div class="section-head">
+				<div class="section-head-left">
+					<span class="section-step">5</span>
+					<h3 class="section-title">Waste Management</h3>
+				</div>
+			</div>
+			<div class="qc-wrap" id="waste-wrap">
+				<table class="qc-table" id="waste-table">
+					<thead>
+						<tr>
+							<th class="qc-col-product">Product Name</th>
+							<th class="qc-col-sku">SKU</th>
+							<th class="qc-col-color">Color</th>
+							<th class="qc-col-qty">Actual Qty</th>
+							<th class="qc-col-unit">Unit</th>
+							<th class="qc-check">
+								<label class="qc-th-received-label">
+									<span>Has Waste</span>
+									<input
+										type="checkbox"
+										id="waste-has-all"
+										title="Select or clear all rows"
+										aria-label="Mark all rows as having waste"
+									/>
+								</label>
+							</th>
+							<th class="qc-col-qty">Waste Qty</th>
+						</tr>
+					</thead>
+					<tbody id="waste-body"></tbody>
+				</table>
+				<div class="qc-empty" id="waste-empty">
+					Complete production to record waste.
+				</div>
+			</div>
+			<div style="padding: 12px 16px; border-top: 1px solid var(--ll-border);">
+				<button type="button" class="btn btn-primary" id="btn-save-waste">Save Waste Record</button>
+			</div>
+		</section>
+
+		<!-- Summary Modal -->
+		<div class="modal-overlay is-hidden" id="summary-modal">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h3 class="modal-title">
+						<span class="modal-title-icon">
+							<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+								<polyline points="22 4 12 14.01 9 11.01"></polyline>
+							</svg>
+						</span>
+						Production Complete
+					</h3>
+				</div>
+				<div class="modal-body">
+					<div class="summary-list">
+						<div class="summary-item">
+							<span class="summary-label">Job Order No.</span>
+							<span class="summary-value" id="summary-jo">-</span>
+						</div>
+						<div class="summary-item">
+							<span class="summary-label">Item</span>
+							<span class="summary-value" id="summary-item">-</span>
+						</div>
+						<div class="summary-item">
+							<span class="summary-label">Finished Goods Created</span>
+							<span class="summary-value highlight" id="summary-qty">0</span>
+						</div>
+						<div class="summary-item">
+							<span class="summary-label">Stages Completed</span>
+							<span class="summary-value" id="summary-stages">0</span>
+						</div>
+						<div class="summary-item">
+							<span class="summary-label">Total Time Taken</span>
+							<span class="summary-value" id="summary-time">-</span>
+						</div>
+					</div>
+				</div>
+				<div class="modal-footer">
+					<button type="button" class="btn btn-primary" id="btn-close-summary">Start New Entry</button>
+				</div>
+			</div>
+		</div>
+
+		<script>
+			// NOTE: JS API v2 (widgetsdk-min.js version 2.0) auto-initializes.
+			// ZOHO.CREATOR.init() is a v1-only method and does not exist here.
+
+			const JOB_ORDER_REPORT = "Job_Order_Report";
+			const BOM_REPORT = "BOM_Report";
+			const EMPLOYEE_REPORT = "Employee_Report";
+			const PRODUCTION_ENTRY_REPORT = "Production_Entry_Report";
+
+			/**
+			 * Fixed master step order (PDF / BOM merge).
+			 * Excluded for now: Fabric Issue, Quality Check, Packing, Dispatch.
+			 * Ends at Finishing (= finished good).
+			 */
+			const PRODUCTION_STEPS = [
+				{ id: "cutting", label: "Cutting" },
+				{ id: "tracing_marking", label: "Tracing / Marking" },
+				{ id: "hand_embroidery", label: "Hand Embroidery" },
+				{
+					id: "manual_machine_embroidery",
+					label: "Manual Machine Embroidery",
+				},
+				{ id: "machine_embroidery", label: "Machine Embroidery" },
+				{ id: "hand_quilting", label: "Hand Quilting" },
+				{ id: "machine_quilting", label: "Machine Quilting" },
+				{ id: "product_cutting", label: "Product Cutting" },
+				{ id: "fringes", label: "Fringes" },
+				{ id: "long_tassels", label: "Long Tassels" },
+				{ id: "ruffle_edges", label: "Ruffle Edges" },
+				{ id: "stitching", label: "Stitching (+ Accessories)" },
+				{ id: "finishing", label: "Finishing" },
+			];
+
+			const statusEl = document.getElementById("status");
+			const errorEl = document.getElementById("error");
+			const jobOrderSelect = document.getElementById("job-order-select");
+			const qcBody = document.getElementById("qc-body");
+			const qcEmpty = document.getElementById("qc-empty");
+			const qcWrap = document.getElementById("qc-wrap");
+			const qcReceivedAll = document.getElementById("qc-received-all");
+			const verifiedBySelect = document.getElementById("verified-by");
+			const qcStartTime = document.getElementById("qc-start-time");
+			const qcEndTime = document.getElementById("qc-end-time");
+			const btnQcStart = document.getElementById("btn-qc-start");
+			const btnQcEnd = document.getElementById("btn-qc-end");
+			const quantityCheckSection = document.getElementById(
+				"quantity-check-section",
+			);
+			const productionStepsSection = document.getElementById(
+				"production-steps-section",
+			);
+			const productionStepsGrid = document.getElementById(
+				"production-steps-grid",
+			);
+			const btnLockSteps = document.getElementById("btn-lock-steps");
+			const executionSection = document.getElementById("execution-section");
+			const flowTrailTrack = document.getElementById("flow-trail-track");
+			const stageStack = document.getElementById("stage-stack");
+			const productionCompleteEl = document.getElementById(
+				"production-complete",
+			);
+			const wasteSection = document.getElementById("waste-section");
+
+			const headerFields = {
+				jobOrderDate: document.getElementById("job-order-date"),
+				planNo: document.getElementById("plan-no"),
+				bomNo: document.getElementById("bom-no"),
+				itemName: document.getElementById("item-name"),
+				sku: document.getElementById("sku"),
+				productionOrderQty: document.getElementById("production-order-qty"),
+				poStartDate: document.getElementById("po-start-date"),
+				poStartTime: document.getElementById("po-start-time"),
+				poEndDate: document.getElementById("po-end-date"),
+				poEndTime: document.getElementById("po-end-time"),
+			};
+
+			const btnPoStart = document.getElementById("btn-po-start");
+			const btnPoEnd = document.getElementById("btn-po-end");
+
+			/** Cached Employee_Report rows for Verified By / Done By dropdowns. */
+			let employeeOptionsHtml = '<option value="">-Select-</option>';
+
+			/** Execution state (UI only — no Creator save yet). */
+			let stepsLocked = false;
+			let lockedFlow = [];
+			let currentStepIndex = 0;
+			/** @type {Record<string, {doneById:string, doneByName:string, startTime:string, endTime:string, remarks:string}>} */
+			let stageResults = {};
+			
+			/** Record ID of the Production Entry created in Stage 1 */
+			let currentProductionEntryId = null;
+			const formatCreatorDateTime = (dateObj = new Date()) => {
+				const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+				const dd = String(dateObj.getDate()).padStart(2, "0");
+				const mmm = months[dateObj.getMonth()];
+				const yyyy = dateObj.getFullYear();
+				const hh = String(dateObj.getHours()).padStart(2, "0");
+				const mm = String(dateObj.getMinutes()).padStart(2, "0");
+				const ss = String(dateObj.getSeconds()).padStart(2, "0");
+				return `${dd}-${mmm}-${yyyy} ${hh}:${mm}:${ss}`;
+			};
+
+			const setStatus = (text) => {
+				statusEl.textContent = text || "";
+			};
+
+			const showError = (text) => {
+				if (!text) {
+					errorEl.style.display = "none";
+					errorEl.textContent = "";
+					return;
+				}
+				errorEl.style.display = "block";
+				errorEl.textContent = text;
+			};
+
+			const clearHeaderFields = () => {
+				Object.values(headerFields).forEach((el) => {
+					el.value = "";
+				});
+				btnPoStart.disabled = false;
+				btnPoEnd.disabled = true;
+				currentProductionEntryId = null;
+			};
+
+			const showSection = (el) => {
+				if (!el) return;
+				el.classList.remove("is-hidden");
+			};
+
+			const hideSection = (el) => {
+				if (!el) return;
+				el.classList.add("is-hidden");
+			};
+
+			const resetProgressiveSections = () => {
+				hideSection(quantityCheckSection);
+				hideSection(productionStepsSection);
+				hideSection(executionSection);
+				hideSection(wasteSection);
+				productionCompleteEl.style.display = "none";
+			};
+
+			const lockCompletedProductionEntry = () => {
+				jobOrderSelect.disabled = true;
+				Object.values(headerFields).forEach((el) => {
+					el.disabled = true;
+				});
+				btnPoStart.disabled = true;
+				btnPoEnd.disabled = true;
+				lockQuantityCheckAfterEnd();
+				setStepCheckboxesDisabled(true);
+				btnLockSteps.disabled = true;
+				stageStack.querySelectorAll("input, select, textarea, button").forEach((el) => {
+					el.disabled = true;
+				});
+			};
+
+			const stampProductionEnd = () => {
+				const completedAt = new Date();
+				headerFields.poEndDate.value = nowDateValue();
+				headerFields.poEndTime.value = nowTimeValue();
+				btnPoEnd.disabled = true;
+
+				if (!currentProductionEntryId) {
+					return Promise.reject(new Error("Production Entry ID missing."));
+				}
+
+				setStatus("Saving Production End Date-Time...");
+				return ZOHO.CREATOR.DATA.updateRecordById({
+					report_name: "Production_Entry_Report",
+					id: currentProductionEntryId,
+					payload: { data: { PO_End: formatCreatorDateTime(completedAt) } }
+				}).then((response) => {
+					if (response.code !== 3000) {
+						throw new Error("Failed to save Production End: " + JSON.stringify(response));
+					}
+					console.log("Production End saved.");
+					return response;
+				});
+			};
+
+			const calculateTotalTime = (startDateStr, startTimeStr, endDateStr, endTimeStr) => {
+				if (!startDateStr || !startTimeStr || !endDateStr || !endTimeStr) return "N/A";
+				
+				const start = new Date(`${startDateStr}T${startTimeStr}`);
+				const end = new Date(`${endDateStr}T${endTimeStr}`);
+				
+				if (isNaN(start.getTime()) || isNaN(end.getTime())) return "N/A";
+				
+				const diffMs = end - start;
+				if (diffMs < 0) return "N/A";
+				
+				const totalMins = Math.floor(diffMs / 60000);
+				const hours = Math.floor(totalMins / 60);
+				const mins = totalMins % 60;
+				
+				if (hours > 0 && mins > 0) return `${hours} hr ${mins} min`;
+				if (hours > 0) return `${hours} hr`;
+				return `${mins} min`;
+			};
+
+			const showSummaryPopup = () => {
+				const summaryModal = document.getElementById("summary-modal");
+				if (!summaryModal) return;
+
+				const joSelect = document.getElementById("job-order-select");
+				const joText = joSelect.options[joSelect.selectedIndex]?.text || "";
+				
+				document.getElementById("summary-jo").textContent = joText;
+				document.getElementById("summary-item").textContent = headerFields.itemName.value || headerFields.sku.value;
+				document.getElementById("summary-qty").textContent = headerFields.productionOrderQty.value;
+				document.getElementById("summary-stages").textContent = lockedFlow.length;
+				
+				const totalTime = calculateTotalTime(
+					headerFields.poStartDate.value, 
+					headerFields.poStartTime.value,
+					headerFields.poEndDate.value,
+					headerFields.poEndTime.value
+				);
+				document.getElementById("summary-time").textContent = totalTime;
+
+				summaryModal.classList.remove("is-hidden");
+			};
+
+			const displayValueOf = (lookupField) =>
+				lookupField?.zc_display_value ?? "";
+
+			const fieldText = (value) => {
+				if (value == null || value === "") return "";
+				if (typeof value === "object") {
+					return value.zc_display_value ?? "";
+				}
+				return String(value);
+			};
+
+			const creatorInputValue = (value) => {
+				if (value == null || value === "") return "";
+				if (typeof value === "object") {
+					return value.ID ?? value.id ?? value.zc_display_value ?? "";
+				}
+				return String(value);
+			};
+
+			const creatorDecisionIsChecked = (value) => {
+				if (value === true) return true;
+				if (value == null || value === "") return false;
+				if (typeof value === "object") {
+					return creatorDecisionIsChecked(
+						value.value ?? value.zc_display_value ?? value.display_value
+					);
+				}
+				return ["true", "yes", "1", "on", "checked"].includes(
+					String(value).trim().toLowerCase()
+				);
+			};
+
+			// Creator replaces a subform's rows when its parent is updated. Maintain
+			// one canonical row per stage and replace the whole subform atomically.
+			const saveProductionStage = (stageName, changes) =>
+				ZOHO.CREATOR.DATA.getRecordById({
+					report_name: "Production_Entry_Report",
+					id: currentProductionEntryId,
+					field_config: "all"
+				}).then((fetchResponse) => {
+					if (fetchResponse.code !== 3000) {
+						throw new Error("Could not load existing stage entries: " + JSON.stringify(fetchResponse));
+					}
+
+					const stagesByName = new Map();
+					const existingStages = fetchResponse?.data?.Production_Stages ?? [];
+					existingStages.forEach((row) => {
+						const name = creatorInputValue(row.Stage_Name);
+						if (!name) return;
+
+						const previous = stagesByName.get(name) || {
+							Stage_Name: name,
+							Operator: "",
+							Start_Time: "",
+							End_Time: "",
+							Remarks: ""
+						};
+						const current = {
+							Stage_Name: name,
+							Operator: creatorInputValue(row.Operator),
+							Start_Time: creatorInputValue(row.Start_Time),
+							End_Time: creatorInputValue(row.End_Time),
+							Remarks: creatorInputValue(row.Remarks)
+						};
+
+						["Operator", "Start_Time", "End_Time", "Remarks"].forEach((field) => {
+							if (current[field] !== "") previous[field] = current[field];
+						});
+						stagesByName.set(name, previous);
+					});
+
+					const savedStage = stagesByName.get(stageName) || {
+						Stage_Name: stageName,
+						Operator: "",
+						Start_Time: "",
+						End_Time: "",
+						Remarks: ""
+					};
+					stagesByName.set(stageName, { ...savedStage, ...changes, Stage_Name: stageName });
+					const stagesPayload = Array.from(stagesByName.values());
+
+					return ZOHO.CREATOR.DATA.updateRecordById({
+						report_name: "Production_Entry_Report",
+						id: currentProductionEntryId,
+						payload: { data: { Production_Stages: stagesPayload } }
+					});
+				});
+
+			const toNumber = (value) => {
+				const n = Number(value);
+				return Number.isFinite(n) ? n : 0;
+			};
+
+			const formatQty = (value) => {
+				const n = toNumber(value);
+				return Number.isInteger(n) ? String(n) : n.toFixed(2);
+			};
+
+			/** Local time as HH:MM for <input type="time">. */
+			const nowTimeValue = () => {
+				const d = new Date();
+				const hh = String(d.getHours()).padStart(2, "0");
+				const mm = String(d.getMinutes()).padStart(2, "0");
+				return `${hh}:${mm}`;
+			};
+
+			/** Local date as YYYY-MM-DD for <input type="date">. */
+			const nowDateValue = () => {
+				const d = new Date();
+				const yyyy = d.getFullYear();
+				const mo = String(d.getMonth() + 1).padStart(2, "0");
+				const dd = String(d.getDate()).padStart(2, "0");
+				return `${yyyy}-${mo}-${dd}`;
+			};
+
+			const setQcMaterialsInteractive = (enabled) => {
+				qcWrap.classList.toggle("is-pending", !enabled);
+				qcReceivedAll.disabled = !enabled;
+				qcBody.querySelectorAll("tr").forEach((tr) => {
+					const cb = tr.querySelector('input[name="qc_received"]');
+					const actual = tr.querySelector('input[name="qc_actual"]');
+					if (cb) cb.disabled = !enabled;
+					if (actual) actual.disabled = !enabled;
+				});
+			};
+
+			const clearQuantityCheck = () => {
+				qcBody.innerHTML = "";
+				qcReceivedAll.checked = false;
+				qcReceivedAll.indeterminate = false;
+				verifiedBySelect.value = "";
+				verifiedBySelect.disabled = false;
+				qcStartTime.value = "";
+				qcEndTime.value = "";
+				btnQcStart.disabled = false;
+				btnQcEnd.disabled = false;
+				setQcMaterialsInteractive(false);
+				qcEmpty.style.display = "block";
+				qcEmpty.textContent =
+					"Select a Job Order to load material requirements.";
+			};
+
+			const lockQuantityCheckAfterEnd = () => {
+				verifiedBySelect.disabled = true;
+				btnQcStart.disabled = true;
+				btnQcEnd.disabled = true;
+				setQcMaterialsInteractive(false);
+				qcWrap.classList.remove("is-pending");
+			};
+
+			const getSelectedProductionSteps = () =>
+				PRODUCTION_STEPS.filter((step) => {
+					const cb = productionStepsGrid.querySelector(
+						`input[data-step-id="${step.id}"]`,
+					);
+					return cb?.checked;
+				});
+
+			const setStepCheckboxesDisabled = (disabled) => {
+				productionStepsGrid
+					.querySelectorAll('input[type="checkbox"]')
+					.forEach((cb) => {
+						cb.disabled = disabled;
+					});
+			};
+
+			const resetExecution = () => {
+				stepsLocked = false;
+				lockedFlow = [];
+				currentStepIndex = 0;
+				stageResults = {};
+				productionStepsSection.classList.remove("is-locked");
+				btnLockSteps.disabled = false;
+				btnLockSteps.style.display = "";
+				setStepCheckboxesDisabled(false);
+				hideSection(executionSection);
+				flowTrailTrack.innerHTML = "";
+				stageStack.innerHTML = "";
+				productionCompleteEl.style.display = "none";
+			};
+
+			const clearProductionSteps = () => {
+				productionStepsGrid
+					.querySelectorAll('input[type="checkbox"]')
+					.forEach((cb) => {
+						cb.checked = false;
+					});
+				resetExecution();
+			};
+
+			const renderProductionSteps = () => {
+				productionStepsGrid.innerHTML = "";
+				PRODUCTION_STEPS.forEach((step) => {
+					const label = document.createElement("label");
+					label.className = "process-option";
+					label.innerHTML =
+						`<input type="checkbox" data-step-id="${step.id}" autocomplete="off" />` +
+						`<span class="process-option-text">${step.label}</span>`;
+					productionStepsGrid.appendChild(label);
+				});
+			};
+
+			const renderFlowTrail = () => {
+				flowTrailTrack.innerHTML = "";
+				lockedFlow.forEach((step, index) => {
+					if (index > 0) {
+						const arrow = document.createElement("span");
+						arrow.className = "flow-arrow";
+						arrow.textContent = "→";
+						flowTrailTrack.appendChild(arrow);
+					}
+
+					const node = document.createElement("div");
+					node.className = "flow-node";
+					const chip = document.createElement("span");
+					chip.className = "flow-chip";
+					chip.textContent = step.label;
+
+					if (stageResults[step.id]?.endTime) {
+						chip.classList.add("is-done");
+					} else if (index === currentStepIndex) {
+						chip.classList.add("is-current");
+					}
+
+					node.appendChild(chip);
+					flowTrailTrack.appendChild(node);
+				});
+			};
+
+			const lockStageCard = (card) => {
+				card.classList.remove("is-current");
+				card.classList.add("is-done");
+				card.querySelector(".stage-status").textContent = "Completed";
+				card
+					.querySelectorAll("input, select, textarea, button")
+					.forEach((el) => {
+						el.disabled = true;
+					});
+			};
+
+			const buildStageCard = (step, { current }) => {
+				const card = document.createElement("div");
+				card.className = `stage-card ${current ? "is-current" : "is-done"}`;
+				card.dataset.stepId = step.id;
+
+				const saved = stageResults[step.id];
+
+				card.innerHTML = `
+					<div class="stage-card-head">
+						<span>${step.label}</span>
+						<span class="stage-status">${current ? "In progress" : "Completed"}</span>
+					</div>
+					<div class="stage-card-body">
+						<div class="grid-2">
+							<div class="field">
+								<label for="done-by-${step.id}">Operator Name</label>
+								<select id="done-by-${step.id}" ${current ? "" : "disabled"}>
+									${employeeOptionsHtml}
+								</select>
+							</div>
+							<div class="field">
+								<label for="start-time-${step.id}">Start Time</label>
+								<div class="stage-time-row">
+									<input type="time" id="start-time-${step.id}" step="60" disabled />
+									<button type="button" class="btn btn-primary" data-action="start" ${current ? "" : "disabled"}>Start</button>
+								</div>
+							</div>
+							<div class="field">
+								<label for="end-time-${step.id}">End Time</label>
+								<div class="stage-time-row">
+									<input type="time" id="end-time-${step.id}" step="60" disabled />
+									<button type="button" class="btn btn-secondary" data-action="end" ${current ? "" : "disabled"}>End</button>
+								</div>
+							</div>
+						</div>
+						<div class="field stage-remarks-field">
+							<label for="remarks-${step.id}">Remarks</label>
+							<textarea id="remarks-${step.id}" rows="2" placeholder="Notes for this stage" ${current ? "" : "disabled"}></textarea>
+						</div>
+						${
+							current
+								? `<div class="stage-actions"><button type="button" class="btn btn-accent" data-action="complete">Complete Stage</button></div>`
+								: ""
+						}
+					</div>
+				`;
+
+				const doneBy = card.querySelector(`#done-by-${step.id}`);
+				const startTime = card.querySelector(`#start-time-${step.id}`);
+				const endTime = card.querySelector(`#end-time-${step.id}`);
+				const remarks = card.querySelector(`#remarks-${step.id}`);
+
+				if (saved) {
+					doneBy.value = saved.doneById || "";
+					startTime.value = saved.startTime || "";
+					endTime.value = saved.endTime || "";
+					remarks.value = saved.remarks || "";
+				}
+
+				if (current) {
+					card
+						.querySelector('[data-action="start"]')
+						.addEventListener("click", () => {
+							showError("");
+							if (!currentProductionEntryId) {
+								showError("Production Entry ID missing. Did you start Job Order?");
+								return;
+							}
+							if (!doneBy.value) {
+								showError("Select Operator Name before starting this stage.");
+								return;
+							}
+							startTime.value = nowTimeValue();
+							const startBtn = card.querySelector('[data-action="start"]');
+							startBtn.disabled = true;
+							doneBy.disabled = true;
+
+							setStatus(`Saving ${step.label} start...`);
+							saveProductionStage(step.label, {
+								Operator: doneBy.value,
+								Start_Time: startTime.value
+							}).then((response) => {
+								setStatus("");
+								if (response.code !== 3000) {
+									throw new Error("Save failed: " + JSON.stringify(response));
+								}
+								console.log(`${step.label} start saved.`);
+							}).catch((err) => {
+								setStatus("");
+								console.error(err);
+								showError(`Error saving ${step.label} start. Check console.`);
+								startBtn.disabled = false;
+								doneBy.disabled = false;
+							});
+						});
+
+					const finishStage = () => {
+						showError("");
+						if (!currentProductionEntryId) {
+							showError("Production Entry ID missing. Did you start Job Order?");
+							return;
+						}
+						if (!doneBy.value) {
+							showError("Select Operator Name before completing this stage.");
+							return;
+						}
+						if (!startTime.value) {
+							showError("Press Start before completing this stage.");
+							return;
+						}
+						if (!endTime.value) {
+							endTime.value = nowTimeValue();
+						}
+
+						const selectedOption = doneBy.options[doneBy.selectedIndex];
+						stageResults[step.id] = {
+							doneById: doneBy.value,
+							doneByName: selectedOption?.textContent || "",
+							startTime: startTime.value,
+							endTime: endTime.value,
+							remarks: remarks.value.trim(),
+						};
+
+						const completeBtn = card.querySelector('[data-action="complete"]');
+						if (completeBtn) completeBtn.disabled = true;
+						setStatus(`Saving ${step.label} completion...`);
+
+						saveProductionStage(step.label, {
+							Operator: doneBy.value,
+							End_Time: endTime.value,
+							Remarks: remarks.value.trim()
+						}).then((response) => {
+							setStatus("");
+							if (response.code === 3000) {
+								lockStageCard(card);
+								card.querySelector(".stage-actions")?.remove();
+
+								console.log("Stage completed:", step.id, stageResults[step.id]);
+
+								currentStepIndex += 1;
+								renderFlowTrail();
+
+								if (currentStepIndex >= lockedFlow.length) {
+									productionCompleteEl.style.display = "block";
+									stampProductionEnd().then(() => {
+										lockCompletedProductionEntry();
+										setStatus("");
+										showWasteSection();
+									}).catch((err) => {
+										setStatus("");
+										console.error(err);
+										showError("Final stage was saved, but Production End could not be saved. Try again.");
+									});
+									return;
+								}
+
+								const nextStep = lockedFlow[currentStepIndex];
+								const nextCard = buildStageCard(nextStep, { current: true });
+								stageStack.appendChild(nextCard);
+								nextCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+							} else {
+								showError(`Failed to save ${step.label} stage data: ` + JSON.stringify(response));
+								if (completeBtn) completeBtn.disabled = false;
+							}
+						}).catch((err) => {
+							setStatus("");
+							console.error(err);
+							showError(`Error saving ${step.label} stage. Check console.`);
+							if (completeBtn) completeBtn.disabled = false;
+						});
+					};
+
+					card
+						.querySelector('[data-action="end"]')
+						.addEventListener("click", () => {
+							showError("");
+							if (!startTime.value) {
+								showError("Press Start before ending this stage.");
+								return;
+							}
+							endTime.value = nowTimeValue();
+							card.querySelector('[data-action="end"]').disabled = true;
+						});
+
+					card
+						.querySelector('[data-action="complete"]')
+						.addEventListener("click", finishStage);
+				}
+
+				return card;
+			};
+
+			const startExecution = () => {
+				const selected = getSelectedProductionSteps();
+				if (!selected.length) {
+					showError("Select at least one production step before locking.");
+					return;
+				}
+				if (!currentProductionEntryId) {
+					showError("Production Entry ID missing. Did you start Job Order?");
+					return;
+				}
+
+				showError("");
+				setStatus("Locking selected steps...");
+				btnLockSteps.disabled = true;
+
+				const lockedStageNames = selected.map(s => s.label).join(", ");
+				
+				const config = {
+					report_name: "Production_Entry_Report",
+					id: currentProductionEntryId,
+					payload: {
+						data: {
+							Locked_Stages: lockedStageNames
+						}
+					}
+				};
+
+				ZOHO.CREATOR.DATA.updateRecordById(config).then((response) => {
+					setStatus("");
+					if (response.code === 3000) {
+						stepsLocked = true;
+						lockedFlow = selected;
+						currentStepIndex = 0;
+						stageResults = {};
+
+						productionStepsSection.classList.add("is-locked");
+						setStepCheckboxesDisabled(true);
+						btnLockSteps.disabled = true;
+						btnLockSteps.style.display = "none";
+
+						showSection(executionSection);
+						productionCompleteEl.style.display = "none";
+						stageStack.innerHTML = "";
+
+						renderFlowTrail();
+						const first = lockedFlow[0];
+						stageStack.appendChild(buildStageCard(first, { current: true }));
+						executionSection.scrollIntoView({ behavior: "smooth", block: "start" });
+					} else {
+						showError("Failed to lock steps: " + JSON.stringify(response));
+						btnLockSteps.disabled = false;
+					}
+				}).catch((err) => {
+					setStatus("");
+					console.error(err);
+					showError("Error locking steps. Check console.");
+					btnLockSteps.disabled = false;
+				});
+			};
+
+			const updateQcReceivedHeaderState = () => {
+				const boxes = [
+					...qcBody.querySelectorAll('input[name="qc_received"]'),
+				];
+				if (!boxes.length) {
+					qcReceivedAll.checked = false;
+					qcReceivedAll.indeterminate = false;
+					return;
+				}
+				const nOn = boxes.filter((cb) => cb.checked).length;
+				qcReceivedAll.checked = nOn === boxes.length;
+				qcReceivedAll.indeterminate = nOn > 0 && nOn < boxes.length;
+			};
+
+			const applyReceivedSyncForRow = (tr) => {
+				const cb = tr.querySelector('input[name="qc_received"]');
+				const planned = tr.querySelector('input[name="qc_planned"]');
+				const actual = tr.querySelector('input[name="qc_actual"]');
+				if (!cb || !planned || !actual) return;
+				if (cb.checked) {
+					actual.value = (planned.value || "").trim();
+				} else {
+					actual.value = "";
+				}
+			};
+
+			const setQcRowReceivedChecked = (tr, on) => {
+				const cb = tr.querySelector('input[name="qc_received"]');
+				if (!cb || cb.disabled) return;
+				cb.checked = !!on;
+				applyReceivedSyncForRow(tr);
+			};
+
+			const bindQcReceivedTableBehaviors = () => {
+				const table = document.getElementById("qc-table");
+				if (!table || table.getAttribute("data-qc-received-bound") === "1") {
+					return;
+				}
+				table.setAttribute("data-qc-received-bound", "1");
+
+				qcReceivedAll.addEventListener("change", () => {
+					const on = qcReceivedAll.checked;
+					qcBody.querySelectorAll("tr").forEach((tr) => {
+						setQcRowReceivedChecked(tr, on);
+					});
+					qcReceivedAll.indeterminate = false;
+					updateQcReceivedHeaderState();
+				});
+
+				// Per-row Mark as Received → copy/clear Planned → Actual for that row.
+				table.addEventListener("change", (event) => {
+					const target = event.target;
+					if (!(target instanceof HTMLInputElement)) return;
+					if (target.name !== "qc_received") return;
+					const tr = target.closest("tr");
+					if (!tr) return;
+					applyReceivedSyncForRow(tr);
+					updateQcReceivedHeaderState();
+				});
+			};
+
+			const productCellHtml = (row) => {
+				const item = fieldText(row.Item) || "—";
+				return `<div class="qc-product-main">${item}</div>`;
+			};
+
+			const renderMaterialRows = (materialRows, jobOrderQty) => {
+				qcBody.innerHTML = "";
+				qcReceivedAll.checked = false;
+				qcReceivedAll.indeterminate = false;
+				verifiedBySelect.disabled = false;
+				btnQcStart.disabled = false;
+				btnQcEnd.disabled = false;
+				qcStartTime.value = "";
+				qcEndTime.value = "";
+
+				if (!materialRows.length) {
+					qcEmpty.style.display = "block";
+					qcEmpty.textContent =
+						"No material lines found on this BOM (Material_Required).";
+					setQcMaterialsInteractive(false);
+					return;
+				}
+
+				qcEmpty.style.display = "none";
+
+				materialRows.forEach((row) => {
+					const planned = toNumber(row.Required_Quantity) * jobOrderQty;
+					const unit = fieldText(row.Unit);
+					const sku = fieldText(row.SKU);
+					const color = fieldText(row.Color);
+
+					const tr = document.createElement("tr");
+					tr.innerHTML =
+						`<td>${productCellHtml(row)}</td>` +
+						`<td><input type="text" name="qc_sku" value="${sku}" disabled tabindex="-1" /></td>` +
+						`<td><input type="text" name="qc_color" value="${color}" disabled tabindex="-1" /></td>` +
+						`<td><input type="text" name="qc_planned" value="${formatQty(planned)}" disabled tabindex="-1" /></td>` +
+						`<td><input type="text" name="qc_unit_planned" value="${unit}" disabled tabindex="-1" /></td>` +
+						`<td class="qc-check"><input type="checkbox" name="qc_received" title="Mark this row as received" aria-label="Mark as received" disabled /></td>` +
+						`<td><input type="text" name="qc_actual" inputmode="decimal" placeholder="0" autocomplete="off" disabled /></td>` +
+						`<td><input type="text" name="qc_unit" value="${unit}" disabled tabindex="-1" /></td>`;
+					qcBody.appendChild(tr);
+				});
+
+				setQcMaterialsInteractive(false);
+				updateQcReceivedHeaderState();
+			};
+
+			/* ── Waste Management ── */
+
+			const populateWasteTable = () => {
+				const wasteBody = document.getElementById("waste-body");
+				const wasteEmpty = document.getElementById("waste-empty");
+				const wasteHasAll = document.getElementById("waste-has-all");
+				wasteBody.innerHTML = "";
+				wasteHasAll.checked = false;
+				wasteHasAll.indeterminate = false;
+
+				const qcRows = qcBody.querySelectorAll("tr");
+				if (!qcRows.length) {
+					wasteEmpty.style.display = "block";
+					wasteEmpty.textContent = "No materials found to record waste.";
+					return;
+				}
+
+				wasteEmpty.style.display = "none";
+
+				qcRows.forEach((qcRow) => {
+					const itemName = qcRow.querySelector(".qc-product-main")?.textContent || "";
+					const sku = qcRow.querySelector('input[name="qc_sku"]')?.value || "";
+					const color = qcRow.querySelector('input[name="qc_color"]')?.value || "";
+					const actualQty = qcRow.querySelector('input[name="qc_actual"]')?.value || "";
+					const unit = qcRow.querySelector('input[name="qc_unit_planned"]')?.value || "";
+
+					const tr = document.createElement("tr");
+					tr.innerHTML =
+						`<td><div class="qc-product-main">${itemName}</div></td>` +
+						`<td><input type="text" name="waste_sku" value="${sku}" disabled tabindex="-1" /></td>` +
+						`<td><input type="text" name="waste_color" value="${color}" disabled tabindex="-1" /></td>` +
+						`<td><input type="text" name="waste_actual_qty" value="${actualQty}" disabled tabindex="-1" /></td>` +
+						`<td><input type="text" name="waste_unit" value="${unit}" disabled tabindex="-1" /></td>` +
+						`<td class="qc-check"><input type="checkbox" name="waste_has" title="Mark waste for this row" aria-label="Has waste" /></td>` +
+						`<td><input type="text" name="waste_qty" inputmode="decimal" placeholder="0" autocomplete="off" disabled /></td>`;
+					wasteBody.appendChild(tr);
+				});
+
+				updateWasteHasAllState();
+			};
+
+			const updateWasteHasAllState = () => {
+				const wasteBody = document.getElementById("waste-body");
+				const wasteHasAll = document.getElementById("waste-has-all");
+				const boxes = [...wasteBody.querySelectorAll('input[name="waste_has"]')];
+				if (!boxes.length) {
+					wasteHasAll.checked = false;
+					wasteHasAll.indeterminate = false;
+					return;
+				}
+				const nOn = boxes.filter((cb) => cb.checked).length;
+				wasteHasAll.checked = nOn === boxes.length;
+				wasteHasAll.indeterminate = nOn > 0 && nOn < boxes.length;
+			};
+
+			const applyHasWasteSyncForRow = (tr) => {
+				const cb = tr.querySelector('input[name="waste_has"]');
+				const wasteQty = tr.querySelector('input[name="waste_qty"]');
+				if (!cb || !wasteQty) return;
+				wasteQty.disabled = !cb.checked;
+				if (!cb.checked) {
+					wasteQty.value = "";
+				}
+			};
+
+			const bindWasteTableBehaviors = () => {
+				const table = document.getElementById("waste-table");
+				if (!table || table.getAttribute("data-waste-bound") === "1") return;
+				table.setAttribute("data-waste-bound", "1");
+
+				const wasteHasAll = document.getElementById("waste-has-all");
+				wasteHasAll.addEventListener("change", () => {
+					const wasteBody = document.getElementById("waste-body");
+					const on = wasteHasAll.checked;
+					wasteBody.querySelectorAll("tr").forEach((tr) => {
+						const cb = tr.querySelector('input[name="waste_has"]');
+						if (cb && !cb.disabled) {
+							cb.checked = on;
+							applyHasWasteSyncForRow(tr);
+						}
+					});
+					wasteHasAll.indeterminate = false;
+					updateWasteHasAllState();
+				});
+
+				table.addEventListener("change", (event) => {
+					const target = event.target;
+					if (!(target instanceof HTMLInputElement)) return;
+					if (target.name !== "waste_has") return;
+					const tr = target.closest("tr");
+					if (!tr) return;
+					applyHasWasteSyncForRow(tr);
+					updateWasteHasAllState();
+				});
+			};
+
+			const showWasteSection = () => {
+				populateWasteTable();
+				showSection(wasteSection);
+				wasteSection.scrollIntoView({ behavior: "smooth", block: "start" });
+			};
+
+			const lockWasteSection = () => {
+				wasteSection.querySelectorAll("input, button").forEach((el) => {
+					el.disabled = true;
+				});
+			};
+
+			const saveWasteRecord = () => {
+				showError("");
+				if (!currentProductionEntryId) {
+					showError("Production Entry ID missing.");
+					return;
+				}
+
+				const wasteBody = document.getElementById("waste-body");
+				const wasteRows = [];
+				wasteBody.querySelectorAll("tr").forEach((tr) => {
+					const itemName = tr.querySelector(".qc-product-main")?.textContent || "";
+					const sku = tr.querySelector('input[name="waste_sku"]')?.value || "";
+					const color = tr.querySelector('input[name="waste_color"]')?.value || "";
+					const actualQty = tr.querySelector('input[name="waste_actual_qty"]')?.value || "";
+					const unit = tr.querySelector('input[name="waste_unit"]')?.value || "";
+					const hasWaste = !!tr.querySelector('input[name="waste_has"]')?.checked;
+					const wasteQty = tr.querySelector('input[name="waste_qty"]')?.value || "";
+
+					wasteRows.push({
+						Item: itemName,
+						SKU: sku,
+						Color: color,
+						Actual_Qty: actualQty,
+						Unit: unit,
+						Has_Waste: hasWaste,
+						Waste_Qty: wasteQty
+					});
+				});
+
+				setStatus("Saving Waste Record...");
+				const btnSaveWaste = document.getElementById("btn-save-waste");
+				btnSaveWaste.disabled = true;
+
+				ZOHO.CREATOR.DATA.updateRecordById({
+					report_name: "Production_Entry_Report",
+					id: currentProductionEntryId,
+					payload: { data: { Waste_Record: wasteRows } }
+				}).then((response) => {
+					setStatus("");
+					if (response.code === 3000) {
+						console.log("Waste Record saved.");
+						lockWasteSection();
+					} else {
+						showError("Failed to save Waste Record: " + JSON.stringify(response));
+						btnSaveWaste.disabled = false;
+					}
+				}).catch((err) => {
+					setStatus("");
+					console.error(err);
+					showError("Error saving Waste Record. Check console.");
+					btnSaveWaste.disabled = false;
+				});
+			};
+
+			const loadBomMaterials = async (bomRecordId, jobOrderQty) => {
+				if (!bomRecordId) {
+					qcEmpty.style.display = "block";
+					qcEmpty.textContent = "This Job Order has no BOM linked.";
+					return;
+				}
+
+				setStatus("Loading BOM materials…");
+				try {
+					const response = await ZOHO.CREATOR.DATA.getRecordById({
+						report_name: BOM_REPORT,
+						id: bomRecordId,
+						field_config: "all",
+					});
+					const bom = response?.data;
+					const materialRows = bom?.Material_Required ?? [];
+
+					console.log("BOM record:", bom);
+					console.log("Material_Required:", materialRows);
+
+					renderMaterialRows(materialRows, jobOrderQty);
+				} catch (err) {
+					console.error(err);
+					qcEmpty.style.display = "block";
+					qcEmpty.textContent =
+						"Could not load BOM materials. Check the console.";
+					showError(
+						"Could not load BOM materials. Check the console for details.",
+					);
+				} finally {
+					setStatus("");
+				}
+			};
+
+			const loadEmployees = async () => {
+				try {
+					const response = await ZOHO.CREATOR.DATA.getRecords({
+						report_name: EMPLOYEE_REPORT,
+						field_config: "custom",
+						fields: "Employee_Name",
+					});
+					const records = response?.data ?? [];
+
+					employeeOptionsHtml = '<option value="">-Select-</option>';
+					records.forEach((record) => {
+						const name = fieldText(record.Employee_Name) || record.ID;
+						employeeOptionsHtml += `<option value="${record.ID}">${name}</option>`;
+
+						const option = document.createElement("option");
+						option.value = record.ID;
+						option.textContent = name;
+						verifiedBySelect.appendChild(option);
+					});
+				} catch (err) {
+					console.error(err);
+					showError(
+						"Could not load employees. Check the console for details.",
+					);
+				}
+			};
+
+			const loadJobOrders = async () => {
+				setStatus("Loading Job Orders…");
+				try {
+					const response = await ZOHO.CREATOR.DATA.getRecords({
+						report_name: JOB_ORDER_REPORT,
+						field_config: "custom",
+						fields: "Job_Order_No",
+					});
+					const records = response?.data ?? [];
+
+					records.forEach((record) => {
+						const option = document.createElement("option");
+						option.value = record.ID;
+						option.textContent = record.Job_Order_No || record.ID;
+						jobOrderSelect.appendChild(option);
+					});
+				} catch (err) {
+					console.error(err);
+					showError(
+						"Could not load Job Orders. Check the console for details.",
+					);
+				} finally {
+					setStatus("");
+				}
+			};
+
+			/**
+			 * Checks if a Production_Entry already exists for a given Job Order ID.
+			 * If found, restores all widget state (header, QC, production stages)
+			 * to wherever the user left off before the page reloaded.
+			 */
+			const resumeExistingEntry = async (jobOrderId) => {
+				try {
+					console.log("Checking for existing Production Entry with Job_Order ID:", jobOrderId);
+					const response = await ZOHO.CREATOR.DATA.getRecords({
+						report_name: PRODUCTION_ENTRY_REPORT,
+						criteria: `Job_Order == ${jobOrderId}`,
+						field_config: "all",
+						max_records: 200
+					});
+					console.log("Production Entry search response:", response);
+					const records = response?.data ?? [];
+					if (!records.length) {
+						console.log("No existing Production Entry for this Job Order — fresh start.");
+						return;
+					}
+
+					const entry = records[0];
+					currentProductionEntryId = entry.ID;
+					console.log("Resuming existing Production Entry:", currentProductionEntryId);
+					console.log("Full entry data:", entry);
+
+					/* Helper: parse Creator DateTime "dd-Mon-yyyy HH:mm:ss" into { date, time } */
+					const parseCreatorDateTime = (dtStr) => {
+						if (!dtStr) return { date: "", time: "" };
+						try {
+							const d = new Date(dtStr);
+							if (!isNaN(d.getTime())) {
+								const yyyy = d.getFullYear();
+								const mo = String(d.getMonth() + 1).padStart(2, "0");
+								const dd = String(d.getDate()).padStart(2, "0");
+								const hh = String(d.getHours()).padStart(2, "0");
+								const mm = String(d.getMinutes()).padStart(2, "0");
+								return { date: `${yyyy}-${mo}-${dd}`, time: `${hh}:${mm}` };
+							}
+						} catch (e) { /* fall through */ }
+						return { date: "", time: String(dtStr) };
+					};
+
+					/* ── Stage 1: Header fields ── */
+					if (entry.PO_Start) {
+						const poStart = parseCreatorDateTime(entry.PO_Start);
+						headerFields.poStartDate.value = poStart.date;
+						headerFields.poStartTime.value = poStart.time;
+						btnPoStart.disabled = true;
+						btnPoEnd.disabled = true;
+						showSection(quantityCheckSection);
+					}
+					if (entry.PO_End) {
+						const poEnd = parseCreatorDateTime(entry.PO_End);
+						headerFields.poEndDate.value = poEnd.date;
+						headerFields.poEndTime.value = poEnd.time;
+						btnPoEnd.disabled = true;
+					}
+
+					/* ── Stage 2: Quantity Check ── */
+					const hasQcStart = !!entry.QC_Start;
+					const hasQcEnd = !!entry.QC_End;
+
+					if (hasQcStart) {
+						qcStartTime.value = entry.QC_Start;
+						const verifiedBy = entry.QC_Verified_By;
+						if (verifiedBy) {
+							const vbId = typeof verifiedBy === "object" ? (verifiedBy.ID || "") : verifiedBy;
+							verifiedBySelect.value = vbId;
+							console.log("Restored QC_Verified_By:", vbId, "from:", verifiedBy);
+						}
+						btnQcStart.disabled = true;
+						verifiedBySelect.disabled = true;
+						setQcMaterialsInteractive(!hasQcEnd);
+
+						/* Restore saved QC_Materials into the table rows */
+						const savedQcMaterials = entry.QC_Materials ?? [];
+						if (savedQcMaterials.length) {
+							const tableRows = qcBody.querySelectorAll("tr");
+							const savedBySku = new Map(
+								savedQcMaterials.map((row) => [String(row.SKU || "").trim(), row])
+							);
+							tableRows.forEach((tr, idx) => {
+								const sku = tr.querySelector('input[name="qc_sku"]')?.value?.trim() || "";
+								const savedRow = savedBySku.get(sku) || savedQcMaterials[idx];
+								if (!savedRow) return;
+								if (!tr) return;
+								const receivedCb = tr.querySelector('input[name="qc_received"]');
+								const actualInput = tr.querySelector('input[name="qc_actual"]');
+								if (receivedCb) {
+									receivedCb.checked = creatorDecisionIsChecked(savedRow.Is_Received);
+								}
+								if (actualInput) {
+									actualInput.value = savedRow.Actual_Qty || "";
+								}
+							});
+							updateQcReceivedHeaderState();
+							console.log("Restored QC_Materials:", savedQcMaterials.length, "rows");
+						}
+					}
+
+					if (hasQcEnd) {
+						qcEndTime.value = entry.QC_End;
+						lockQuantityCheckAfterEnd();
+						showSection(productionStepsSection);
+					}
+
+					/* ── Stage 3: Locked Production Steps ── */
+					const lockedStagesStr = entry.Locked_Stages || "";
+					if (lockedStagesStr) {
+						const lockedNames = lockedStagesStr.split(",").map(s => s.trim());
+						lockedNames.forEach(name => {
+							const stepDef = PRODUCTION_STEPS.find(s => s.label === name);
+							if (stepDef) {
+								const cb = productionStepsGrid.querySelector(
+									`input[data-step-id="${stepDef.id}"]`
+								);
+								if (cb) cb.checked = true;
+							}
+						});
+
+						const selected = getSelectedProductionSteps();
+						if (selected.length) {
+							stepsLocked = true;
+							lockedFlow = selected;
+							stageResults = {};
+
+							productionStepsSection.classList.add("is-locked");
+							setStepCheckboxesDisabled(true);
+							btnLockSteps.disabled = true;
+							btnLockSteps.style.display = "none";
+
+							showSection(executionSection);
+							productionCompleteEl.style.display = "none";
+							stageStack.innerHTML = "";
+
+							/* ── Stage 4: Restore completed stages from subform ── */
+							const savedStages = entry.Production_Stages ?? [];
+							const completedStageNames = new Set();
+
+							savedStages.forEach(row => {
+								const name = row.Stage_Name;
+								const stepDef = PRODUCTION_STEPS.find(s => s.label === name);
+								if (!stepDef) return;
+
+							const hasEnd = !!row.End_Time;
+							const op = row.Operator;
+							const opId = typeof op === "object" ? (op?.ID || "") : (op || "");
+
+								// Convert possible 12-hour or full time strings to HH:mm
+								const parseTimeOnly = (tStr) => {
+									if (!tStr) return "";
+									// If it looks like a full Date-Time, parse it
+									if (tStr.includes("-") && tStr.includes(" ")) {
+										const parsed = parseCreatorDateTime(tStr);
+										return parsed.time;
+									}
+									// If it has AM/PM, convert it
+									const ampmMatch = tStr.match(/(\d+):(\d+)(?::\d+)?\s*(AM|PM)/i);
+									if (ampmMatch) {
+										let h = parseInt(ampmMatch[1], 10);
+										const m = ampmMatch[2];
+										const type = ampmMatch[3].toUpperCase();
+										if (type === "PM" && h < 12) h += 12;
+										if (type === "AM" && h === 12) h = 0;
+										return `${String(h).padStart(2, "0")}:${m}`;
+									}
+									// Otherwise just return the first 5 chars (HH:mm)
+									return tStr.substring(0, 5);
+								};
+
+							const previousStage = stageResults[stepDef.id] || {};
+							stageResults[stepDef.id] = {
+								doneById: opId || previousStage.doneById || "",
+								doneByName: previousStage.doneByName || "",
+								startTime: parseTimeOnly(row.Start_Time) || previousStage.startTime || "",
+								endTime: parseTimeOnly(row.End_Time) || previousStage.endTime || "",
+								remarks: row.Remarks || previousStage.remarks || "",
+							};
+
+								if (hasEnd) {
+									completedStageNames.add(name);
+								}
+							});
+
+							/* Figure out current step index */
+							currentStepIndex = 0;
+							for (let i = 0; i < lockedFlow.length; i++) {
+								if (completedStageNames.has(lockedFlow[i].label)) {
+									currentStepIndex = i + 1;
+								} else {
+									break;
+								}
+							}
+
+							/* Render completed stage cards */
+							for (let i = 0; i < currentStepIndex; i++) {
+								const completedCard = buildStageCard(lockedFlow[i], { current: false });
+								lockStageCard(completedCard);
+								completedCard.querySelector(".stage-actions")?.remove();
+								stageStack.appendChild(completedCard);
+							}
+
+							/* Check if we have an in-progress stage (has start but no end) */
+							if (currentStepIndex < lockedFlow.length) {
+								const currentStep = lockedFlow[currentStepIndex];
+								const inProgressData = stageResults[currentStep.id];
+								const hasStartedCurrent = inProgressData && inProgressData.startTime;
+
+								const currentCard = buildStageCard(currentStep, { current: true });
+								stageStack.appendChild(currentCard);
+
+								if (hasStartedCurrent) {
+									const startBtn = currentCard.querySelector('[data-action="start"]');
+									const doneByEl = currentCard.querySelector(`#done-by-${currentStep.id}`);
+									if (startBtn) startBtn.disabled = true;
+									if (doneByEl) doneByEl.disabled = true;
+								}
+							} else {
+								/* All stages completed */
+								productionCompleteEl.style.display = "block";
+							}
+
+							if (entry.PO_End) {
+								lockCompletedProductionEntry();
+							}
+
+							/* ── Waste Record restoration ── */
+							if (entry.PO_End) {
+								const savedWaste = entry.Waste_Record ?? [];
+								if (savedWaste.length) {
+									const wasteBodyEl = document.getElementById("waste-body");
+									const wasteEmptyEl = document.getElementById("waste-empty");
+									wasteBodyEl.innerHTML = "";
+									wasteEmptyEl.style.display = "none";
+
+									savedWaste.forEach((row) => {
+										const tr = document.createElement("tr");
+										tr.innerHTML =
+											`<td><div class="qc-product-main">${creatorInputValue(row.Item) || ""}</div></td>` +
+											`<td><input type="text" name="waste_sku" value="${creatorInputValue(row.SKU)}" disabled tabindex="-1" /></td>` +
+											`<td><input type="text" name="waste_color" value="${creatorInputValue(row.Color)}" disabled tabindex="-1" /></td>` +
+											`<td><input type="text" name="waste_actual_qty" value="${creatorInputValue(row.Actual_Qty)}" disabled tabindex="-1" /></td>` +
+											`<td><input type="text" name="waste_unit" value="${creatorInputValue(row.Unit)}" disabled tabindex="-1" /></td>` +
+											`<td class="qc-check"><input type="checkbox" name="waste_has" ${creatorDecisionIsChecked(row.Has_Waste) ? "checked" : ""} disabled /></td>` +
+											`<td><input type="text" name="waste_qty" value="${creatorInputValue(row.Waste_Qty)}" disabled tabindex="-1" /></td>`;
+										wasteBodyEl.appendChild(tr);
+									});
+									showSection(wasteSection);
+									lockWasteSection();
+								} else {
+									showWasteSection();
+								}
+							}
+
+							renderFlowTrail();
+							executionSection.scrollIntoView({ behavior: "smooth", block: "start" });
+						}
+					}
+				} catch (err) {
+					console.error("Error checking for existing Production Entry:", err);
+				}
+			};
+
+			const loadJobOrderDetails = async (jobOrderId) => {
+				clearHeaderFields();
+				clearQuantityCheck();
+				clearProductionSteps();
+				resetProgressiveSections();
+				showError("");
+
+				if (!jobOrderId) return;
+
+				setStatus("Loading Job Order details…");
+				try {
+					const response = await ZOHO.CREATOR.DATA.getRecordById({
+						report_name: JOB_ORDER_REPORT,
+						id: jobOrderId,
+						field_config: "all",
+					});
+					const record = response?.data;
+
+					if (!record) {
+						showError("Job Order record not found.");
+						return;
+					}
+
+					const itemRow = record.Item_Detail?.[0] ?? {};
+					const jobOrderQty = toNumber(itemRow.Job_Order_Quantity);
+
+					headerFields.planNo.value = displayValueOf(record.Plan_No);
+					headerFields.jobOrderDate.value = record.Job_Order_Date || "";
+					headerFields.bomNo.value = displayValueOf(record.BOM_No);
+					headerFields.itemName.value = itemRow.Item_Name || "";
+					headerFields.sku.value = displayValueOf(itemRow.SKU);
+					headerFields.productionOrderQty.value =
+						itemRow.Job_Order_Quantity ?? "";
+
+					const bomId = record.BOM_No?.ID;
+					await loadBomMaterials(bomId, jobOrderQty);
+
+					/* Check for existing Production Entry and resume if found */
+					setStatus("Checking for existing entry…");
+					await resumeExistingEntry(jobOrderId);
+				} catch (err) {
+					console.error(err);
+					showError(
+						"Could not load Job Order details. Check the console for details.",
+					);
+				} finally {
+					setStatus("");
+				}
+			};
+
+			btnLockSteps.addEventListener("click", startExecution);
+
+			btnPoStart.addEventListener("click", () => {
+				showError("");
+				if (!jobOrderSelect.value) {
+					showError("Select a Job Order before starting production.");
+					return;
+				}
+				if (!qcBody.querySelector("tr")) {
+					showError("This Job Order has no BOM materials loaded yet.");
+					return;
+				}
+				headerFields.poStartDate.value = nowDateValue();
+				headerFields.poStartTime.value = nowTimeValue();
+				headerFields.poEndDate.value = "";
+				headerFields.poEndTime.value = "";
+				btnPoStart.disabled = true;
+				btnPoEnd.disabled = true;
+
+				setStatus("Starting Production (saving Job Header)...");
+				const config = {
+					form_name: "Production_Entry",
+					payload: {
+						data: {
+							Job_Order: jobOrderSelect.value,
+							Plan_No: headerFields.planNo.value,
+							Job_Order_Date: headerFields.jobOrderDate.value,
+							BOM_No: headerFields.bomNo.value,
+							Item_Name: headerFields.itemName.value,
+							SKU: headerFields.sku.value,
+							PO_Qty: headerFields.productionOrderQty.value,
+							PO_Start: formatCreatorDateTime(new Date())
+						}
+					}
+				};
+
+				ZOHO.CREATOR.DATA.addRecords(config).then((response) => {
+					setStatus("");
+					if (response.code === 3000) {
+						currentProductionEntryId = response.data.ID;
+						console.log("Production Entry created:", currentProductionEntryId);
+						showSection(quantityCheckSection);
+						quantityCheckSection.scrollIntoView({
+							behavior: "smooth",
+							block: "start",
+						});
+					} else {
+						showError("Failed to start production: " + JSON.stringify(response));
+						btnPoStart.disabled = false;
+					}
+				}).catch((err) => {
+					setStatus("");
+					console.error(err);
+					showError("Error starting production. Check console.");
+					btnPoStart.disabled = false;
+				});
+			});
+
+			btnQcStart.addEventListener("click", () => {
+				showError("");
+				if (!currentProductionEntryId) {
+					showError("Production Entry ID missing. Did you start Job Order?");
+					return;
+				}
+				if (!verifiedBySelect.value) {
+					showError("Select Verified By before starting Quantity Check.");
+					return;
+				}
+				if (!qcBody.querySelector("tr")) {
+					showError("Load a Job Order with materials before starting.");
+					return;
+				}
+				qcStartTime.value = nowTimeValue();
+				btnQcStart.disabled = true;
+				verifiedBySelect.disabled = true;
+
+				setStatus("Saving QC Start...");
+				const config = {
+					report_name: "Production_Entry_Report",
+					id: currentProductionEntryId,
+					payload: {
+						data: {
+							QC_Verified_By: verifiedBySelect.value,
+							QC_Start: qcStartTime.value
+						}
+					}
+				};
+				ZOHO.CREATOR.DATA.updateRecordById(config).then((response) => {
+					setStatus("");
+					if (response.code === 3000) {
+						console.log("QC Start saved.");
+						setQcMaterialsInteractive(true);
+					} else {
+						showError("Failed to save QC Start: " + JSON.stringify(response));
+						btnQcStart.disabled = false;
+						verifiedBySelect.disabled = false;
+					}
+				}).catch((err) => {
+					setStatus("");
+					console.error(err);
+					showError("Error saving QC Start. Check console.");
+					btnQcStart.disabled = false;
+					verifiedBySelect.disabled = false;
+				});
+			});
+
+			btnQcEnd.addEventListener("click", () => {
+				showError("");
+				if (!currentProductionEntryId) {
+					showError("Production Entry ID missing. Did you start Job Order?");
+					return;
+				}
+				if (!qcStartTime.value) {
+					showError("Start Quantity Check before ending.");
+					return;
+				}
+				qcEndTime.value = nowTimeValue();
+
+				const qcMaterials = [];
+				qcBody.querySelectorAll("tr").forEach((tr) => {
+					const itemName = tr.querySelector(".qc-product-main")?.textContent || "";
+					const sku = tr.querySelector('input[name="qc_sku"]')?.value || "";
+					const color = tr.querySelector('input[name="qc_color"]')?.value || "";
+					const planned = tr.querySelector('input[name="qc_planned"]')?.value || "";
+					const unit = tr.querySelector('input[name="qc_unit_planned"]')?.value || "";
+					const received = !!tr.querySelector('input[name="qc_received"]')?.checked;
+					const actual = tr.querySelector('input[name="qc_actual"]')?.value || "";
+					
+					qcMaterials.push({
+						Item: itemName,
+						SKU: sku,
+						Color: color,
+						Planned_Qty: planned,
+						Unit: unit,
+						Is_Received: received,
+						Actual_Qty: actual
+					});
+				});
+
+				setStatus("Saving QC End & Materials...");
+				btnQcEnd.disabled = true;
+
+				const config = {
+					report_name: "Production_Entry_Report",
+					id: currentProductionEntryId,
+					payload: {
+						data: {
+							QC_End: qcEndTime.value,
+							QC_Materials: qcMaterials
+						}
+					}
+				};
+
+				ZOHO.CREATOR.DATA.updateRecordById(config).then((response) => {
+					setStatus("");
+					if (response.code === 3000) {
+						console.log("QC End & Materials saved.");
+						lockQuantityCheckAfterEnd();
+						showSection(productionStepsSection);
+						productionStepsSection.scrollIntoView({ behavior: "smooth", block: "start" });
+					} else {
+						showError("Failed to save QC data: " + JSON.stringify(response));
+						btnQcEnd.disabled = false;
+					}
+				}).catch((err) => {
+					setStatus("");
+					console.error(err);
+					showError("Error saving QC data. Check console.");
+					btnQcEnd.disabled = false;
+				});
+			});
+
+			jobOrderSelect.addEventListener("change", (event) => {
+				loadJobOrderDetails(event.target.value);
+			});
+
+			document.getElementById("btn-close-summary")?.addEventListener("click", () => {
+				location.reload();
+			});
+
+			bindQcReceivedTableBehaviors();
+			bindWasteTableBehaviors();
+			document.getElementById("btn-save-waste")?.addEventListener("click", saveWasteRecord);
+			renderProductionSteps();
+			resetProgressiveSections();
+			btnPoEnd.disabled = true;
+			loadJobOrders();
+			loadEmployees();
+		</script>
+	</body>
+</html>

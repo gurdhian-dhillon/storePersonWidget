@@ -1,0 +1,89 @@
+// Employee form workflow. Builds the Designation dropdown from the list held on
+// the chosen Department, so Production offers Supervisor / Operator / Quality
+// Inspector and Store offers Store Person / Packaging Person / Dispatcher.
+//
+// PASTED TWICE, into two different workflow slots - see the two blocks below.
+// On User Input of Department alone is not enough: opening an existing employee
+// to edit fires On Load only, so the dropdown would come up with no choices at
+// all and saving would blank the designation.
+//
+// Designation is a plain DROPDOWN with no options configured in the form
+// builder. That is correct - every choice it ever shows is added here at
+// runtime. It stores plain TEXT, which is what keeps the picker queries in
+// getSupervisorMaterials and getProductionWidgetData one-liners with no lookup
+// id to resolve first:  Employee[Designation == "Supervisor" && Status == "Active"]
+//
+// THE API, which is not what it looks like. All three of these are wrong and the
+// editor only reports the first one, as "Function applied over invalid
+// expression" on line 1:
+//   input.Designation.clear()   -> clear is a STATEMENT:  clear Designation;
+//   input.Designation.add(nm)   -> a COLON task:          Designation:ui.add(...)
+//   ...add(nm) once per name    -> ui.add takes a LIST, and REPLACES the choices
+// The field is named bare in both - no "input." prefix - even though reading the
+// user's selection on the next line does use it. ui.add and clear are also only
+// available in On Load / On User Input / subform add-delete row; they do nothing
+// in On Validate, so none of this can be moved there later.
+//
+// Link names to check against the actual forms before pasting: the Department
+// subform is assumed to be `Designations`, its columns `Designation_Name` and
+// `Is_Default`.
+
+//---------------------------------------------------------------------------
+// 1. On User Input of Department
+//---------------------------------------------------------------------------
+
+clear Designation;
+
+namesList = List();
+defName = "";
+
+for each  dRec in Department[ID == input.Department]
+{
+	for each  dgRow in dRec.Designations
+	{
+		// A subform text column that was never filled is EMPTY, not null.
+		nm = ifnull(dgRow.Designation_Name,"").toString().trim();
+		if(nm != "")
+		{
+			namesList.add(nm);
+			if(ifnull(dgRow.Is_Default,false) == true)
+			{
+				defName = nm;
+			}
+		}
+	}
+}
+
+// Guarded - a department with no designations yet must not hand ui.add an
+// empty list.
+if(namesList.size() > 0)
+{
+	Designation:ui.add(namesList);
+}
+
+// AFTER ui.add, never before: the value has to be one of the choices that now
+// exist. Assigning the value does use the input. prefix - only clear and
+// ui.add name the field bare.
+//
+// Unconditional here. Switching department must DROP whatever was selected for
+// the old one, or someone moved from Production to Store keeps "Supervisor" and
+// stays in the supervisor picker while sitting in a department that has none.
+input.Designation = defName;
+
+//---------------------------------------------------------------------------
+// 2. On Load - identical except for the last statement
+//---------------------------------------------------------------------------
+//
+// On a NEW record input.Designation is empty and the department default fills
+// it, exactly as above. On an EXISTING one it already holds what was saved, and
+// that must win - defaulting here would silently rewrite a Quality Inspector to
+// Operator every time someone opened the record to correct a phone number.
+//
+// clear only hides the choices, it does not touch the stored value, so the
+// saved designation survives the rebuild above and is still selected once its
+// name is added back.
+//
+//	if(input.Designation == "")
+//	{
+//		input.Designation = defName;
+//	}

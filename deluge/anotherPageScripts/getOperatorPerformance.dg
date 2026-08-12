@@ -1,0 +1,132 @@
+string Admin_Space.getOperatorPerformance()
+{
+	operatorList = List();
+	// Fetch all employees
+	allEmployees = Employee[ID != 0];
+	for each  emp in allEmployees
+	{
+		tempMap = Map();
+		tempMap.put("ID",emp.ID);
+		tempMap.put("Name",emp.Employee_Name);
+		tempMap.put("Role",emp.Designation);
+		tempMap.put("Status",emp.Status);
+		// Sum up production output for this operator today.
+		//
+		// TWO SOURCES. A stage is split between several operators now, and each
+		// man's share is a Stage_Assignment - the stage header carries no
+		// operator at all. Stage_Log is still read for work logged before the
+		// split existed, where the header IS the record of who did it.
+		//
+		// Input is what he was HANDED: his own share on a split stage, the whole
+		// stage on an unsplit one.
+		todayShares = Stage_Assignment[Operator == emp.ID && Log_Date == zoho.currentdate] sort by Added_Time desc;
+		todayLogs = Stage_Log[Operator == emp.ID && Log_Date == zoho.currentdate] sort by Added_Time desc;
+		totalCut = 0.0;
+		totalTarget = 0.0;
+		phasesList = List();
+		logsList = List();
+		for each  shr in todayShares
+		{
+			totalCut = totalCut + ifnull(shr.Qty_Out,0.0).toDecimal();
+			totalTarget = totalTarget + ifnull(shr.Assigned_Qty,0.0).toDecimal();
+			if(shr.Phase_Name != null && shr.Phase_Name != "")
+			{
+				if(!phasesList.contains(shr.Phase_Name))
+				{
+					phasesList.add(shr.Phase_Name);
+				}
+			}
+			shrMap = Map();
+			shrMap.put("Phase",ifnull(shr.Phase_Name,"Unknown"));
+			shrMap.put("Input",ifnull(shr.Assigned_Qty,0));
+			shrMap.put("Output",ifnull(shr.Qty_Out,0));
+			shrMap.put("Item",ifnull(shr.Plan_Item,"N/A"));
+			shrTime = "N/A";
+			if(shr.End_Time != null)
+			{
+				shrTime = shr.End_Time.toString();
+			}
+			else if(shr.Added_Time != null)
+			{
+				shrTime = shr.Added_Time.toString("hh:mm a");
+			}
+			shrMap.put("Time",shrTime);
+			logsList.add(shrMap);
+		}
+		for each  log in todayLogs
+		{
+			totalCut = totalCut + ifnull(log.Qty_Out,0.0).toDecimal();
+			totalTarget = totalTarget + ifnull(log.Qty_In,0.0).toDecimal();
+			if(log.Phase_Name != null && log.Phase_Name != "")
+			{
+				if(!phasesList.contains(log.Phase_Name))
+				{
+					phasesList.add(log.Phase_Name);
+				}
+			}
+			// Build detailed phase log
+			logMap = Map();
+			logMap.put("Phase",ifnull(log.Phase_Name,"Unknown"));
+			logMap.put("Input",ifnull(log.Qty_In,0));
+			logMap.put("Output",ifnull(log.Qty_Out,0));
+			logMap.put("Item",ifnull(log.Plan_Item,"N/A"));
+			timeVal = "N/A";
+			if(log.End_Time != null)
+			{
+				timeVal = log.End_Time.toString();
+			}
+			else if(log.Added_Time != null)
+			{
+				timeVal = log.Added_Time.toString("hh:mm a");
+			}
+			logMap.put("Time",timeVal);
+			logsList.add(logMap);
+		}
+		tempMap.put("Logs",logsList);
+		phasesStr = "";
+		for each  phase in phasesList
+		{
+			if(phasesStr == "")
+			{
+				phasesStr = phase;
+			}
+			else
+			{
+				phasesStr = phasesStr + ", " + phase;
+			}
+		}
+		if(phasesStr == "")
+		{
+			phasesStr = "None";
+		}
+		tempMap.put("Phases",phasesStr);
+		tempMap.put("Cut_Pieces",totalCut);
+		tempMap.put("Target",totalTarget);
+		// Calculate efficiency rating
+		efficiency = 0.0;
+		if(totalTarget > 0.0)
+		{
+			efficiency = totalCut / totalTarget * 100.0;
+		}
+		else if(totalCut > 0.0)
+		{
+			efficiency = 100.0;
+		}
+		tempMap.put("Efficiency",efficiency.toLong());
+		// Calculate status badge color
+		if(efficiency >= 100.0)
+		{
+			tempMap.put("Status","Active");
+		}
+		else if(totalCut > 0.0)
+		{
+			tempMap.put("Status","On Break");
+		}
+		else
+		{
+			tempMap.put("Status","Offline");
+		}
+		operatorList.add(tempMap);
+	}
+	return operatorList.toString();
+}

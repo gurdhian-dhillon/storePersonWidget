@@ -1,0 +1,249 @@
+string getStoreDisputes()
+{
+	// Open stock disputes for the store dashboard. GET, no arguments.
+	//
+	// Two kinds, in one list. Outbound is raised by receiveMaterials when a
+	// supervisor confirms less than was issued; the gap sits in Disputed_Qty on
+	// the material - owned, off the shelf, and unaccounted. Inbound is raised by
+	// receiveWastePieces when the store finds fewer offcuts on the rack than the
+	// supervisor declared. Direction says which, and an EMPTY Direction means
+	// Outbound - every dispute raised before the field existed was one.
+	//
+	// Both are the same question - "where did the rest of it go" - so they share
+	// a screen. Only the answers on offer differ, and the widget picks those from
+	// the direction.
+	//
+	// The remaining amount is Disputed_Qty minus what the resolution lines already
+	// account for. Disputed_Qty itself is never edited: it records the size of the
+	// problem as raised, and a partial resolution must not rewrite history.
+
+	rowsJson = "";
+	errJson = "";
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	// Oldest first - a dispute nobody has touched for a week is the one worth
+	// chasing, and it should not sit below this morning's.
+	open = Stock_Dispute[Status == "Open"] sort by Added_Time;
+	info "open disputes: " + open.count();
+
+	for each  d in open
+	{
+		// One dispute per try. Without this, a single unreadable record takes
+		// the whole screen down with it and the store sees "no open disputes"
+		// while the tab badge says otherwise - which is how this function
+		// managed to hide a dispute that was sitting in the form perfectly
+		// intact. A row that cannot be built is named and skipped instead.
+		try
+		{
+		// Creator fields that were never written are EMPTY, not null, and
+		// toDecimal() throws on empty - normalise to string first.
+		dStr = ifnull(d.Disputed_Qty,"0").toString().trim();
+		if(dStr == "")
+		{
+			dStr = "0";
+		}
+		iStr = ifnull(d.Issued_Qty,"0").toString().trim();
+		if(iStr == "")
+		{
+			iStr = "0";
+		}
+		rStr = ifnull(d.Received_Qty,"0").toString().trim();
+		if(rStr == "")
+		{
+			rStr = "0";
+		}
+
+		// What the resolution lines already account for, and who has looked.
+		//
+		// The denials matter to the screen, not just the audit trail: the second
+		// one writes the material off, so the person about to press it has to be
+		// told that is what it does.
+		resolvedSoFar = 0.0;
+		lineCount = 0;
+		supDenied = "false";
+		storeDenied = "false";
+		denyNote = "";
+
+		for each  ln in d.Resolution_Lines
+		{
+			lqStr = ifnull(ln.Resolved_Qty,"0").toString().trim();
+			if(lqStr == "")
+			{
+				lqStr = "0";
+			}
+			resolvedSoFar = resolvedSoFar + lqStr.toDecimal();
+			lineCount = lineCount + 1;
+
+			lnRes = ifnull(ln.Resolution,"").toString();
+			if(lnRes == "Supervisor_Denied")
+			{
+				supDenied = "true";
+				denyNote = ifnull(ln.Note,"").toString().replaceAll("\"","'");
+			}
+			if(lnRes == "Store_Denied")
+			{
+				storeDenied = "true";
+			}
+		}
+
+		remaining = dStr.toDecimal() - resolvedSoFar;
+		if(remaining < 0)
+		{
+			remaining = 0;
+		}
+
+		// ID == <empty lookup> is not an empty result, it is an invalid criteria -
+		// Deluge answers "UnPredictable exception, Invalid statement found" and
+		// kills the whole list. These two were never guarded because an outbound
+		// dispute always carries a supervisor and a plan; an inbound one is built
+		// from a Declared movement, and any of those links can be missing.
+		supName = "";
+		if(d.Supervisor != null)
+		{
+			for each  emp in Employee[ID == d.Supervisor]
+			{
+				supName = ifnull(emp.Employee_Name,"").toString().replaceAll("\"","'");
+			}
+		}
+
+		soNo = "";
+		planNo = "";
+		if(d.Plan != null)
+		{
+			for each  pl in Production_Planning[ID == d.Plan]
+			{
+				planNo = ifnull(pl.Plan_No,"").toString();
+				if(pl.Sales_Order != null)
+				{
+					for each  so in Sales_Order[ID == pl.Sales_Order]
+					{
+						soNo = ifnull(so.Sales_Order,"").toString();
+					}
+				}
+			}
+		}
+
+		raisedOn = "";
+		if(d.Raised_On != null)
+		{
+			raisedOn = d.Raised_On.toString("dd-MMM-yyyy");
+		}
+
+		isW = ifnull(d.Is_Waste,false);
+		wasteTxt = "false";
+		if(isW == true)
+		{
+			wasteTxt = "true";
+		}
+
+		// Direction and Raised_Note were added with the inbound waste disputes.
+		// Reading a field that does not exist THROWS, and the outer catch would
+		// then return an empty list for every dispute in the system - the screen
+		// says "no open disputes" while the tab badge says there are some, which
+		// is the worst possible way to find out a field is missing.
+		//
+		// So they get their own catch. A dispute nobody can see is a real
+		// problem; a dispute missing its direction badge is a cosmetic one.
+		dirTxt = "Outbound";
+		raisedNote = "";
+
+		try
+		{
+			dirTxt = ifnull(d.Direction,"").toString().trim();
+			if(dirTxt == "")
+			{
+				dirTxt = "Outbound";
+			}
+		}
+		catch (eDir)
+		{
+			dirTxt = "Outbound";
+			info "Stock_Dispute.Direction not readable - create the field: " + eDir.toString();
+		}
+
+		try
+		{
+			// Why the raiser says it is short. Newlines are stripped as well as
+			// quotes - a bare newline inside a hand-built JSON string is just as
+			// fatal as a bare quote, and this one is free text from a phone.
+			raisedNote = ifnull(d.Raised_Note,"").toString().replaceAll("\"","'");
+			raisedNote = raisedNote.replaceAll("\n"," ").replaceAll("\r"," ");
+		}
+		catch (eNote)
+		{
+			raisedNote = "";
+			info "Stock_Dispute.Raised_Note not readable - create the field: " + eNote.toString();
+		}
+
+		// A waste dispute is about one specific remnant, and its size is how
+		// anyone finds it on the rack. "Linen / Olive" alone matches a dozen rows.
+		//
+		// NOT named pw/pl. "pl" is already the Production_Planning loop record
+		// above, and reusing it as a decimal in the same function scope makes
+		// Deluge reject the QUERY - "UnPredictable exception, Invalid statement
+		// found", reported against the for-each line, not against the assignment
+		// that caused it. Loop variables and locals share one namespace here.
+		pcW = 0;
+		pcL = 0;
+		try
+		{
+			if(isW == true && d.Waste_Piece != null)
+			{
+				for each  wmS in Waste_Master[ID == d.Waste_Piece]
+				{
+					// Creator fields that were never written are EMPTY, not null,
+					// and toDecimal() throws on empty - normalise to string first.
+					pcWs = ifnull(wmS.Piece_Width,"0").toString().trim();
+					if(pcWs == "")
+					{
+						pcWs = "0";
+					}
+					pcLs = ifnull(wmS.Piece_Length,"0").toString().trim();
+					if(pcLs == "")
+					{
+						pcLs = "0";
+					}
+					pcW = pcWs.toDecimal();
+					pcL = pcLs.toDecimal();
+				}
+			}
+		}
+		catch (eSize)
+		{
+			pcW = 0;
+			pcL = 0;
+			info "Waste piece size not readable for dispute " + d.ID + ": " + eSize.toString();
+		}
+
+		if(rowsJson != "")
+		{
+			rowsJson = rowsJson + ",";
+		}
+		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+		rowsJson = rowsJson + "{\"id\":\"" + d.ID + "\",\"material\":\"" + ifnull(d.Material_Name,"").toString().replaceAll("\"","'") + "\",\"unit\":\"" + ifnull(d.Unit,"").toString() + "\",\"isWaste\":" + wasteTxt + ",\"direction\":\"" + dirTxt + "\",\"width\":" + pcW + ",\"length\":" + pcL + ",\"supervisor\":\"" + supName + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"issued\":" + iStr.toDecimal() + ",\"received\":" + rStr.toDecimal() + ",\"disputed\":" + dStr.toDecimal() + ",\"resolved\":" + resolvedSoFar + ",\"remaining\":" + remaining + ",\"lines\":" + lineCount + ",\"raisedOn\":\"" + raisedOn + "\",\"raisedNote\":\"" + raisedNote + "\",\"supervisorDenied\":" + supDenied + ",\"storeDenied\":" + storeDenied + ",\"supervisorNote\":\"" + denyNote + "\"}";
+		}
+		catch (eRow)
+		{
+			if(errJson != "")
+			{
+				errJson = errJson + ",";
+			}
+			errJson = errJson + "\"Dispute " + d.ID + " could not be read: " + eRow.toString().replaceAll("\"","'") + "\"";
+			info "dispute row skipped: " + d.ID + " - " + eRow.toString();
+		}
+	}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"disputes\":[]}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	//
+	// Errors and rows travel together: a run that could read four disputes out of
+	// five has to hand over the four AND say what happened to the fifth.
+	return "{\"errors\":[" + errJson + "],\"disputes\":[" + rowsJson + "]}";
+}

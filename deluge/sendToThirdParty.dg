@@ -1,0 +1,359 @@
+string sendToThirdParty(string payloadJson)
+{
+	// Sends one item out to a third party for a CONTIGUOUS BLOCK of stages, and
+	// opens a Stage_Log for each of them.
+	//
+	// Custom API, POST, one argument: payloadJson.
+	//   { "planId":"1", "planItemId":"9", "partyId":"5",
+	//     "sentOn":"2026-08-06", "sentTime":"15:40", "qty":"10",
+	//     "sequences":[2,3], "remarks":"" }
+	//
+	// WHY A BLOCK AND NOT A STAGE. He hands over panels once and the vendor runs
+	// several operations before handing them back - one van, one gate, one
+	// return. Recording that as three separate sends would invent three physical
+	// movements that never happened.
+	//
+	// CONTIGUOUS, enforced here and not only in the widget. Sending stages 2 and
+	// 4 while 3 stays in-house is two trips however it is entered, and the
+	// quantity chain between them would have a hole in it. A Custom API is
+	// callable from anywhere, so the rule has to hold server-side.
+	//
+	// EVERY STAGE IN THE BLOCK GETS Qty_In = the sent quantity.
+	//
+	// That is not an approximation - it is forced by the loss rule. A vendor who
+	// returns 9 of 10 cannot say which of his three operations dropped one, so
+	// the loss is attributed to the LAST stage of the block and every earlier
+	// stage passes the full quantity through. Which means the whole chain is
+	// known at send time and nothing has to be unwound on return.
+	//
+	// Needs a form called Third_Party with these link names:
+	//   Party_Name         Single Line
+	//   Contact_Person     Single Line
+	//   Phone              Single Line
+	//   Applicable_Stages  Multi Select  - the same stage names as the BOM
+	//   Status             Dropdown      - Active / Inactive
+	//   Remarks            Multi Line
+	//
+	// And these added to Stage_Log:
+	//   Is_Outsourced   Decision box
+	//   Third_Party     Lookup -> Third_Party
+	//   Sent_On         Date
+	//   Returned_On     Date
+	//   Outsource_Ref   Single Line   - groups the block
+
+	res = "{\"success\":false,\"error\":\"Nothing was sent\"}";
+	madeCount = 0;
+	logLines = list();
+
+	try
+	{
+	inp = payloadJson.toMap();
+
+	itemIdTxt = ifnull(inp.get("planItemId"),"").toString().trim();
+	if(itemIdTxt == "" || itemIdTxt.isNumber() == false)
+	{
+		return "{\"success\":false,\"error\":\"Missing or non-numeric planItemId\"}";
+	}
+	itemId = itemIdTxt.toLong();
+
+	partyTxt = ifnull(inp.get("partyId"),"").toString().trim();
+	if(partyTxt == "" || partyTxt.isNumber() == false)
+	{
+		return "{\"success\":false,\"error\":\"Pick a third party first\"}";
+	}
+	partyId = partyTxt.toLong();
+
+	// Creator fields that were never written are EMPTY, not null, and
+	// toDecimal() throws on empty - normalise to string first.
+	qStr = ifnull(inp.get("qty"),"0").toString().trim();
+	if(qStr == "")
+	{
+		qStr = "0";
+	}
+	sendQty = qStr.toDecimal().toLong();
+	if(sendQty <= 0)
+	{
+		return "{\"success\":false,\"error\":\"Quantity to send must be more than zero\"}";
+	}
+
+	sentOnTxt = ifnull(inp.get("sentOn"),"").toString().trim();
+	sentTimeTxt = ifnull(inp.get("sentTime"),"").toString().trim();
+	remarkTxt = ifnull(inp.get("remarks"),"").toString();
+
+	seqRaw = ifnull(inp.get("sequences"),list());
+	// size() is right - seqRaw is a List, not a query result.
+	if(seqRaw.size() == 0)
+	{
+		return "{\"success\":false,\"error\":\"Pick at least one stage to send\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// The item, its plan and its stage list.
+	//
+	// A query returns a COLLECTION, not a record - if(x != null) is true even
+	// when nothing matched, so a for-each is the only reliable way to take one
+	// record out of a query.
+	//----------------------------------------------------------------------
+	planId = 0;
+	bomId = null;
+	itemName = "";
+	itemFound = false;
+	for each  pi in Plan_Item[ID == itemId]
+	{
+		itemFound = true;
+		itemName = ifnull(pi.Item_Name,"").toString();
+		bomId = pi.BOM;
+		if(pi.Plan != null)
+		{
+			planId = pi.Plan;
+		}
+	}
+
+	if(itemFound == false)
+	{
+		return "{\"success\":false,\"error\":\"Item " + itemId + " not found\"}";
+	}
+	if(bomId == null)
+	{
+		return "{\"success\":false,\"error\":\"This item has no BOM, so it has no stages\"}";
+	}
+
+	// Sequence -> phase name, off the BOM. Keyed as text so the comparison is
+	// like with like; a mixed-type comparison throws rather than returning false.
+	phaseBySeq = Map();
+	seqOrder = List();
+	for each  bomRec in BOM[ID == bomId]
+	{
+		for each  st in bomRec.Production_Stages
+		{
+			sq = ifnull(st.Sequence_No,0);
+			phaseBySeq.put(sq.toString(),ifnull(st.Operation,"").toString());
+			if(seqOrder.contains(sq) == false)
+			{
+				seqOrder.add(sq);
+			}
+		}
+	}
+	// Ascending, so a stage's POSITION in this list is its step number.
+	seqOrder.sort(true);
+
+	//----------------------------------------------------------------------
+	// The block must be contiguous, and every sequence in it must be a real
+	// stage on this item's BOM.
+	//----------------------------------------------------------------------
+	seqList = List();
+	for each  sRaw in seqRaw
+	{
+		sTxt = ifnull(sRaw,"0").toString().trim();
+		if(sTxt == "")
+		{
+			sTxt = "0";
+		}
+		seqList.add(sTxt.toDecimal().toLong());
+	}
+	seqList.sort(true);
+
+	firstSeq = seqList.get(0);
+	lastSeq = seqList.get(seqList.size() - 1);
+
+	//----------------------------------------------------------------------
+	// CONTIGUITY IS TESTED ON POSITION, NOT ON THE SEQUENCE NUMBER.
+	//
+	// Sequence_No is 10 / 20 / 30 - spaced on purpose so a stage can be
+	// inserted between two others later. Arithmetic on those numbers says
+	// stages 10 and 20 are ten apart and therefore not adjacent, which would
+	// have rejected every multi-stage block that exists.
+	//
+	// So the BOM's stages are put in order and the test becomes "do the picked
+	// ones occupy consecutive POSITIONS in that list" - which is what "one
+	// after another" actually means, whatever the numbering happens to be.
+	//----------------------------------------------------------------------
+	for each  sq2 in seqList
+	{
+		if(phaseBySeq.get(sq2.toString()) == null)
+		{
+			return "{\"success\":false,\"error\":\"Stage " + sq2 + " is not on this item's BOM\"}";
+		}
+	}
+
+	firstIdx = seqOrder.indexOf(firstSeq);
+	lastIdx = seqOrder.indexOf(lastSeq);
+
+	// A block of N stages spanning positions firstIdx..lastIdx must cover
+	// exactly N positions. One test catches both a gap and a duplicate.
+	if(lastIdx - firstIdx != seqList.size() - 1)
+	{
+		return "{\"success\":false,\"error\":\"Stages sent together must be one after another, with no gaps\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// Nothing in the block may already be running, finished, or out.
+	//
+	// Read once into a Map rather than a query per stage - a per-stage query
+	// here is the shape that runs a script into the statement-execution limit,
+	// and that limit is NOT catchable: it kills the script and the widget gets
+	// a bare HTTP 500 with no error card at all.
+	//----------------------------------------------------------------------
+	logIdByPhase = Map();
+	statusByPhase = Map();
+	outByPhase = Map();
+	doneSeq = Map();
+
+	for each  lg in Stage_Log[Plan_Item == itemId]
+	{
+		ph = ifnull(lg.Phase_Name,"").toString();
+		logIdByPhase.put(ph,lg.ID.toString());
+		statusByPhase.put(ph,ifnull(lg.Stage_Status,"").toString());
+
+		isOut = "no";
+		if(ifnull(lg.Is_Outsourced,false) == true && lg.Returned_On == null)
+		{
+			isOut = "yes";
+		}
+		outByPhase.put(ph,isOut);
+
+		if(ifnull(lg.Stage_Status,"").toString() == "Done")
+		{
+			doneSeq.put(ifnull(lg.Sequence_No,0).toString(),"1");
+		}
+	}
+
+	blocked = "";
+	for each  sq3 in seqList
+	{
+		phName = phaseBySeq.get(sq3.toString()).toString();
+		stNow = ifnull(statusByPhase.get(phName),"").toString();
+		if(stNow == "Done")
+		{
+			blocked = phName + " is already finished";
+		}
+		else if(ifnull(outByPhase.get(phName),"no").toString() == "yes")
+		{
+			blocked = phName + " is already out with a third party";
+		}
+		else if(stNow == "In_Progress")
+		{
+			blocked = phName + " is already running in-house";
+		}
+	}
+
+	if(blocked != "")
+	{
+		return "{\"success\":false,\"error\":\"" + blocked.replaceAll("\"","'") + "\"}";
+	}
+
+	// The stage before the block has to be finished, or the pieces he is
+	// sending do not exist yet.
+	// The PREVIOUS STAGE BY POSITION, for the same reason - "firstSeq - 1" is 9
+	// when the sequences are 10 / 20 / 30, and 9 is not a stage.
+	if(firstIdx > 0)
+	{
+		prevSeq = seqOrder.get(firstIdx - 1);
+		if(doneSeq.get(prevSeq.toString()) == null)
+		{
+			prevName = ifnull(phaseBySeq.get(prevSeq.toString()),"the previous stage").toString();
+			return "{\"success\":false,\"error\":\"" + prevName.replaceAll("\"","'") + " has to be finished before this block can go out\"}";
+		}
+	}
+
+	//----------------------------------------------------------------------
+	// One reference for the whole block. Written on every row, so "which
+	// stages went out together" is a field rather than an inference from item
+	// plus party plus date - which would have merged two sends of the same
+	// item to the same party on the same day into one apparent trip.
+	//----------------------------------------------------------------------
+	osRef = "OS-" + itemId + "-" + zoho.currenttime.toString("yyyyMMddHHmmss");
+
+	for each  sq4 in seqList
+	{
+		phName2 = phaseBySeq.get(sq4.toString()).toString();
+		existingId = ifnull(logIdByPhase.get(phName2),"").toString();
+
+		if(existingId != "")
+		{
+			// A stage started and abandoned before ever being ended. Reused
+			// rather than duplicated - Stage_Log is one row per item x phase and
+			// a second row would make every later read ambiguous.
+			for each  lgU in Stage_Log[ID == existingId.toLong()]
+			{
+				lgU.Qty_In = sendQty;
+				lgU.Stage_Status = "In_Progress";
+				lgU.Is_Outsourced = true;
+				lgU.Third_Party = partyId;
+				lgU.Outsource_Ref = osRef;
+				lgU.Remarks = remarkTxt;
+				if(sentOnTxt != "")
+				{
+					lgU.Sent_On = sentOnTxt.toDate();
+				}
+				if(sentTimeTxt != "")
+				{
+					lgU.Start_Time = sentTimeTxt;
+				}
+				// Cleared in case the row is being reused after an in-house start.
+				lgU.Machine = null;
+				lgU.End_Time = null;
+				lgU.Returned_On = null;
+			}
+		}
+		else
+		{
+			newLogId = insert into Stage_Log
+			[
+				Plan=planId
+				Plan_Item=itemId
+				Sequence_No=sq4
+				Phase_Name=phName2
+				Log_Date=zoho.currentdate
+				Qty_In=sendQty
+				Stage_Status="In_Progress"
+				Is_Outsourced=true
+				Outsource_Ref=osRef
+				Remarks=remarkTxt
+				Added_User=zoho.loginuser
+			];
+
+			// Lookups and dates after the insert - a null lookup fails the whole
+			// insert block, and an empty date string is not a valid Date.
+			for each  lgN in Stage_Log[ID == newLogId.toLong()]
+			{
+				lgN.Third_Party = partyId;
+				if(sentOnTxt != "")
+				{
+					lgN.Sent_On = sentOnTxt.toDate();
+				}
+				if(sentTimeTxt != "")
+				{
+					lgN.Start_Time = sentTimeTxt;
+				}
+			}
+		}
+
+		madeCount = madeCount + 1;
+		logLines.add("SENT -> " + phName2 + " | seq " + sq4 + " | qty " + sendQty);
+	}
+
+	// The item is being worked on, wherever the work is happening. Guarded so a
+	// finished item is never dragged backwards.
+	for each  piU in Plan_Item[ID == itemId]
+	{
+		if(ifnull(piU.Item_Status,"").toString() != "Complete")
+		{
+			piU.Item_Status = "In_Production";
+		}
+	}
+
+	logLines.add("Done. Stages sent: " + madeCount + " | ref " + osRef);
+	info logLines;
+
+	res = "{\"success\":true,\"outsourceRef\":\"" + osRef + "\",\"stages\":" + madeCount + ",\"item\":\"" + itemName.replaceAll("\"","'") + "\"}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"" + e.toString().replaceAll("\"","'") + "\"}";
+		logLines.add(res);
+		info logLines;
+	}
+
+	return res;
+}

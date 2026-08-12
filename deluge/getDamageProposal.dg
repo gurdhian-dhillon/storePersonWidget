@@ -1,0 +1,125 @@
+string getDamageProposal(string payloadJson)
+{
+	// What material a given quantity of ONE item is worth, so the supervisor can
+	// say how much of it he ruined.
+	//
+	// Custom API, POST, one argument: payloadJson.
+	//   { "planItemId":"123", "qty":"3" }
+	//
+	// WHY THIS IS A SERVER CALL AND NOT WIDGET ARITHMETIC. The obvious shortcut
+	// is to send the item's existing Material_Requirement rows to the widget and
+	// scale them - 3 of 21 pieces, so 3/21 of the metres. That is WRONG for
+	// fabric and silently so: cloth is issued in whole marker rows, so 3 pieces
+	// at 2 per row is 2 rows, not 3/21 of eleven. buildItemRequirements is the
+	// one place that maths lives, and a second copy of it in JS would drift
+	// exactly the way the app has been bitten by before.
+	//
+	// It also means the proposal a supervisor sees for a damaged piece is costed
+	// by the identical function that planned the original - so if the two ever
+	// disagree, they disagree for a real reason and not an arithmetic one.
+	//
+	// Returns a PROPOSAL, not a decision. Every line is editable and removable on
+	// the widget side; nothing here is written anywhere.
+
+	res = "{\"errors\":[\"Nothing ran\"],\"materials\":[]}";
+
+	// Creator collapses every runtime failure to "code 9430", so the real
+	// message has to be carried out inside the payload.
+	try
+	{
+	inp = payloadJson.toMap();
+
+	itemIdTxt = ifnull(inp.get("planItemId"),"").toString().trim();
+	if(itemIdTxt == "" || itemIdTxt.isNumber() == false)
+	{
+		return "{\"errors\":[\"Missing or non-numeric planItemId\"],\"materials\":[]}";
+	}
+	itemId = itemIdTxt.toLong();
+
+	// A numeric that was never written is an EMPTY STRING, and toDecimal()
+	// throws on it - normalise to string, test, then convert.
+	qStr = ifnull(inp.get("qty"),"0").toString().trim();
+	if(qStr == "")
+	{
+		qStr = "0";
+	}
+	qty = qStr.toDecimal().toLong();
+	if(qty <= 0)
+	{
+		return "{\"errors\":[\"Quantity must be more than zero\"],\"materials\":[]}";
+	}
+
+	bomId = null;
+	itemName = "";
+	planId = 0;
+	found = false;
+
+	// A query returns a COLLECTION, not a record - if(x != null) is true even
+	// when nothing matched. A for-each is the only reliable way to take one
+	// record out of a query.
+	for each  pi in Plan_Item[ID == itemId]
+	{
+		found = true;
+		bomId = pi.BOM;
+		itemName = ifnull(pi.Item_Name,"").toString().replaceAll("\"","'");
+		if(pi.Plan != null)
+		{
+			planId = pi.Plan;
+		}
+	}
+
+	if(found == false)
+	{
+		return "{\"errors\":[\"Item " + itemId + " not found\"],\"materials\":[]}";
+	}
+	if(bomId == null)
+	{
+		// Not an error the supervisor can fix, but he must be told rather than
+		// shown an empty list that looks like "this item needs nothing".
+		return "{\"errors\":[\"This item has no BOM, so its material cannot be worked out\"],\"item\":\"" + itemName + "\",\"materials\":[]}";
+	}
+
+	matsJson = thisapp.buildItemRequirements(bomId.toString(),qty.toString(),"damage report for " + itemName);
+	matsList = matsJson.toJSONList();
+
+	outJson = "";
+	for each  mRaw in matsList
+	{
+		mm = mRaw.toMap();
+
+		matIdTxt = ifnull(mm.get("mat"),"").toString().trim();
+
+		// The SKU is on Raw_Material, not on the requirement. Same
+		// collection-not-a-record trap as above.
+		skuTxt = "";
+		if(matIdTxt != "" && matIdTxt.isNumber())
+		{
+			for each  rm in Raw_Material[ID == matIdTxt.toLong()]
+			{
+				skuTxt = ifnull(rm.SKU,"").toString().replaceAll("\"","'");
+			}
+		}
+
+		if(outJson != "")
+		{
+			outJson = outJson + ",";
+		}
+
+		// Ids forced to string - an 18-digit id breaks JSON.parse on the widget.
+		// perRow and perUnit are the RATES, carried through so the widget can
+		// re-scale a row when he changes how many pieces of that material were
+		// spoiled - without a server round trip on every keystroke, and without
+		// a second, drifting copy of the arithmetic. They are the same two
+		// numbers buildItemRequirements used to produce "qty" here.
+		outJson = outJson + "{\"matId\":\"" + matIdTxt + "\",\"name\":\"" + ifnull(mm.get("name"),"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + skuTxt + "\",\"unit\":\"" + ifnull(mm.get("unit"),"").toString() + "\",\"isFab\":" + ifnull(mm.get("isFab"),false) + ",\"qty\":" + ifnull(mm.get("req"),0) + ",\"pieces\":" + ifnull(mm.get("pcs"),0) + ",\"cutLen\":" + ifnull(mm.get("cutLen"),0) + ",\"cutWid\":" + ifnull(mm.get("cutWid"),0) + ",\"perRow\":" + ifnull(mm.get("perRow"),0) + ",\"perUnit\":" + ifnull(mm.get("perUnit"),0) + "}";
+	}
+
+	res = "{\"errors\":[],\"planId\":\"" + planId + "\",\"item\":\"" + itemName + "\",\"qty\":" + qty + ",\"materials\":[" + outJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"" + e.toString().replaceAll("\"","'") + "\"],\"materials\":[]}";
+	}
+
+	return res;
+}

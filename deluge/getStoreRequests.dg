@@ -1,0 +1,167 @@
+string getStoreRequests()
+{
+	// Requests the store has raised and is waiting on, for the "My requests" tab.
+	// GET, no arguments.
+	//
+	// ONE ROW PER REQUEST. A Wash_Needed exception queues a Wash_Request, so the
+	// two records describe a single thing: "this fabric needs washing" and "the
+	// wash is booked". Listing both made every wash appear twice, which reads as
+	// duplicate work rather than one job with two records behind it.
+	//
+	// So the exception is the row, and the wash job supplies its progress - the
+	// job knows whether the cloth is still on the line and how much came back.
+	// A wash job with no exception behind it (raised straight in Creator) still
+	// gets its own row; it is a real request nobody else is reporting.
+	//
+	// Open items first, then closed ones, so the tab confirms what landed as
+	// well as what is still outstanding. A request that quietly disappears on
+	// completion looks like a request that was lost.
+
+	rowsJson = "";
+	openCount = 0;
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	//--------------------------------------------------------------------
+	// Pass 1 - index the wash jobs by the exception that queued them, so an
+	// exception row can report the state of its job without a second row.
+	//--------------------------------------------------------------------
+	washStatusByExc = Map();
+	washGotByExc = Map();
+
+	washes = Wash_Request[ID != 0] sort by Added_Time desc;
+
+	for each  wr0 in washes
+	{
+		if(wr0.Exception != null)
+		{
+			eKey = wr0.Exception + "";
+
+			// Newest job wins if a material has been washed more than once
+			// against the same open ticket - the list is already newest-first,
+			// so only fill a key that is still empty.
+			if(washStatusByExc.get(eKey) == null)
+			{
+				gotStr0 = ifnull(wr0.Washed_Qty,"0").toString().trim();
+				if(gotStr0 == "")
+				{
+					gotStr0 = "0";
+				}
+				washStatusByExc.put(eKey,ifnull(wr0.Status,"").toString());
+				washGotByExc.put(eKey,gotStr0.toDecimal());
+			}
+		}
+	}
+
+	//--------------------------------------------------------------------
+	// Pass 2 - the exceptions themselves. Shortage and wash tickets both.
+	//--------------------------------------------------------------------
+	excs = Material_Exception[ID != 0] sort by Added_Time desc;
+
+	for each  ex in excs
+	{
+		exStatus = ifnull(ex.Status,"").toString();
+		exType = ifnull(ex.Type,"").toString();
+
+		// Creator fields that were never written are EMPTY, not null, and
+		// toDecimal() throws on empty - normalise to string first.
+		sStr = ifnull(ex.Shortfall_Qty,"0").toString().trim();
+		if(sStr == "")
+		{
+			sStr = "0";
+		}
+		rStr = ifnull(ex.Required_Qty,"0").toString().trim();
+		if(rStr == "")
+		{
+			rStr = "0";
+		}
+		askedQty = sStr.toDecimal();
+		gotQty = 0.0;
+
+		// A wash ticket reports its job's state, not its own. "Resolved" on the
+		// ticket only means the job finished; the useful answer is whether the
+		// cloth is back and how much of it.
+		showStatus = exStatus;
+		myKey = ex.ID + "";
+		if(exType == "Wash_Needed" && washStatusByExc.get(myKey) != null)
+		{
+			showStatus = washStatusByExc.get(myKey);
+			gotQty = washGotByExc.get(myKey);
+		}
+
+		raisedOn = "";
+		if(ex.Last_Reported_On != null)
+		{
+			raisedOn = ex.Last_Reported_On.toString("dd-MMM-yyyy");
+		}
+
+		// How many orders were waiting on it when it was raised.
+		lineCount = 0;
+		for each  exLn in ex.Exception_Lines
+		{
+			lineCount = lineCount + 1;
+		}
+
+		if(showStatus == "Open" || showStatus == "Pending" || showStatus == "In_Progress")
+		{
+			openCount = openCount + 1;
+		}
+
+		if(rowsJson != "")
+		{
+			rowsJson = rowsJson + ",";
+		}
+		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+		rowsJson = rowsJson + "{\"id\":\"" + ex.ID + "\",\"kind\":\"" + exType + "\",\"material\":\"" + ifnull(ex.Material_Name,"").toString().replaceAll("\"","'") + "\",\"unit\":\"" + ifnull(ex.Unit,"").toString() + "\",\"needed\":" + rStr.toDecimal() + ",\"qty\":" + askedQty + ",\"done\":" + gotQty + ",\"status\":\"" + showStatus + "\",\"orders\":" + lineCount + ",\"raisedOn\":\"" + raisedOn + "\",\"source\":\"exception\"}";
+	}
+
+	//--------------------------------------------------------------------
+	// Pass 3 - wash jobs raised directly, with no exception behind them.
+	// Anything queued by a ticket has already been reported above.
+	//--------------------------------------------------------------------
+	for each  wr in washes
+	{
+		if(wr.Exception == null)
+		{
+			wStatus = ifnull(wr.Status,"").toString();
+
+			reqStr = ifnull(wr.Requested_Qty,"0").toString().trim();
+			if(reqStr == "")
+			{
+				reqStr = "0";
+			}
+			gotStr = ifnull(wr.Washed_Qty,"0").toString().trim();
+			if(gotStr == "")
+			{
+				gotStr = "0";
+			}
+
+			wRaised = "";
+			if(wr.Requested_On != null)
+			{
+				wRaised = wr.Requested_On.toString("dd-MMM-yyyy");
+			}
+
+			if(wStatus == "Pending" || wStatus == "In_Progress")
+			{
+				openCount = openCount + 1;
+			}
+
+			if(rowsJson != "")
+			{
+				rowsJson = rowsJson + ",";
+			}
+			rowsJson = rowsJson + "{\"id\":\"" + wr.ID + "\",\"kind\":\"Wash_Job\",\"material\":\"" + ifnull(wr.Material_Name,"").toString().replaceAll("\"","'") + "\",\"unit\":\"" + ifnull(wr.Unit,"").toString() + "\",\"needed\":" + reqStr.toDecimal() + ",\"qty\":" + reqStr.toDecimal() + ",\"done\":" + gotStr.toDecimal() + ",\"status\":\"" + wStatus + "\",\"orders\":0,\"raisedOn\":\"" + wRaised + "\",\"source\":\"wash\"}";
+		}
+	}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"requests\":[],\"openCount\":0}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[],\"requests\":[" + rowsJson + "],\"openCount\":" + openCount + "}";
+}

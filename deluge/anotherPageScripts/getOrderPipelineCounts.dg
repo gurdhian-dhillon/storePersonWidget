@@ -1,0 +1,15 @@
+map Admin_Space.getOrderPipelineCounts()
+{
+	responseMap = Map();
+	pendingCount = Sales_Order[Order_Status == "Pending"].count();
+	inProgressCount = Sales_Order[Order_Status == "In Progress"].count();
+	completedCount = Sales_Order[Order_Status == "Production Complete"].count();
+	qcCount = Sales_Order[Order_Status == "QC Passed"].count();
+	packedCount = Sales_Order[Order_Status == "Packed"].count();
+	responseMap.put("pending",pendingCount);
+	responseMap.put("inProgress",inProgressCount);
+	responseMap.put("completed",completedCount);
+	responseMap.put("qcPassed",qcCount);
+	responseMap.put("packed",packedCount);
+	return responseMap;
+}

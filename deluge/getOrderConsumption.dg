@@ -1,0 +1,477 @@
+string getOrderConsumption(string salesOrderId)
+{
+	// What a sales order actually cost in raw material, and where that differs
+	// from the plan, why.
+	// POST, one argument: salesOrderId. Empty -> just the order list, so the
+	// widget can fill its picker with one call.
+	//
+	// THE NUMBER PEOPLE ACTUALLY WANT is "how much cloth did this order eat",
+	// and it is NOT Issued_Qty. Issued_Qty is what is currently booked as having
+	// reached production: a store correction pulls it back down, and so does a
+	// write-off. Material that was lost still left the building and still cost
+	// money, but by design it is no longer on the requirement.
+	//
+	//   spent = issued + written off as lost
+	//
+	// THREE THINGS MOVE IT AWAY FROM THE PLAN, and each is reported separately
+	// because they have completely different answers:
+	//
+	//   Lost         somebody has to account for it. Carries the two notes from
+	//                the people who looked, which is the whole audit trail.
+	//   Cutting      cloth is issued in whole rows of the marker. Asking for 5
+	//                pieces at 2 per row means 3 rows, and the sixth piece's
+	//                worth of cloth is issued whether or not it is cut. Expected,
+	//                not a problem, but it is real material and it shows here.
+	//   Offcut reuse pieces cut from returned remnants instead of fresh cloth.
+	//                The only one that pushes consumption DOWN, and the reason a
+	//                well-run order can come in under plan.
+	//
+	// Waste disputes are counted in physical remnants, not metres, so they are
+	// kept in their own figure. Adding a piece count to a metre total would give
+	// a number that means nothing.
+
+	soJson = "";
+	matJson = "";
+	orderName = "";
+
+	try
+	{
+	// Newest first - the order somebody is asking about is almost always a
+	// recent one.
+	allOrders = Sales_Order[ID != 0] sort by Added_Time desc;
+
+	for each  so in allOrders
+	{
+		if(soJson != "")
+		{
+			soJson = soJson + ",";
+		}
+		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+		soJson = soJson + "{\"id\":\"" + so.ID + "\",\"name\":\"" + ifnull(so.Sales_Order,"").toString().replaceAll("\"","'") + "\"}";
+	}
+
+	if(salesOrderId == null || salesOrderId.trim() == "")
+	{
+		return "{\"errors\":[],\"orders\":[" + soJson + "],\"materials\":[],\"orderName\":\"\"}";
+	}
+
+	soId = salesOrderId.trim().toLong();
+
+	for each  so2 in Sales_Order[ID == soId]
+	{
+		orderName = ifnull(so2.Sales_Order,"").toString().replaceAll("\"","'");
+	}
+
+	agg = Map();
+	keyList = List();
+
+	plans = Production_Planning[Sales_Order == soId] sort by Added_Time;
+
+	for each  plan in plans
+	{
+		//----------------------------------------------------------------
+		// What the plan asked for and what has gone out against it.
+		//----------------------------------------------------------------
+		for each  mr in Material_Requirement[Plan == plan.ID]
+		{
+			matId = mr.Material;
+			if(matId != null)
+			{
+				key = matId + "";
+				cur = agg.get(key);
+				if(cur == null)
+				{
+					cur = Map();
+					cur.put("matId",key);
+					cur.put("name",ifnull(mr.Material_Name,"").toString().replaceAll("\"","'"));
+					cur.put("unit",ifnull(mr.Unit,"").toString());
+					cur.put("isFabric",ifnull(mr.Is_Fabric,false));
+					cur.put("planned",0.0);
+					// Replacement material, kept out of "planned" and reported on
+					// its own. This is the figure that answers "how much did we
+					// re-issue on this order".
+					cur.put("reissued",0.0);
+					cur.put("issued",0.0);
+					cur.put("received",0.0);
+					cur.put("lostQty",0.0);
+					cur.put("lostPieces",0);
+					cur.put("reqPieces",0);
+					cur.put("rawPieces",0);
+					cur.put("wastePieces",0);
+					// Reported in their own columns and NEVER folded into spent or
+					// variance. See the block that fills them for why.
+					cur.put("damagedQty",0.0);
+					cur.put("damagedPieces",0);
+					cur.put("wasteKeptPcs",0);
+					cur.put("wasteScrapPcs",0);
+					cur.put("wasteArea",0.0);
+					cur.put("reasons","");
+					agg.put(key,cur);
+					keyList.add(key);
+				}
+
+				pStr = ifnull(mr.Required_Qty,"0").toString().trim();
+				if(pStr == "")
+				{
+					pStr = "0";
+				}
+				iStr = ifnull(mr.Issued_Qty,"0").toString().trim();
+				if(iStr == "")
+				{
+					iStr = "0";
+				}
+				rStr = ifnull(mr.Received_Qty,"0").toString().trim();
+				if(rStr == "")
+				{
+					rStr = "0";
+				}
+
+				//----------------------------------------------------------
+				// PLANNED IS PLAN ROWS ONLY.
+				//
+				// A reissue is a Material_Requirement like any other, so summing
+				// every row put the replacement cloth into the figure the order
+				// was PLANNED to need. The variance below is spent minus planned,
+				// so an order that overspent by exactly what it reissued read as
+				// a variance of zero - the one number that was supposed to reveal
+				// the waste, cancelled out by the waste itself.
+				//
+				// ISSUED still counts everything: it left the building and it
+				// cost money, whatever caused it.
+				//
+				// A Creator field never written is EMPTY, not null, so every row
+				// raised before Source existed falls through to "planned" - which
+				// is exactly what those rows were.
+				//----------------------------------------------------------
+				srcTxt = ifnull(mr.Source,"").toString().trim();
+				if(srcTxt == "Reissue")
+				{
+					cur.put("reissued",cur.get("reissued") + pStr.toDecimal());
+				}
+				else
+				{
+					cur.put("planned",cur.get("planned") + pStr.toDecimal());
+				}
+				cur.put("issued",cur.get("issued") + iStr.toDecimal());
+				cur.put("received",cur.get("received") + rStr.toDecimal());
+				cur.put("reqPieces",cur.get("reqPieces") + ifnull(mr.Required_Pieces,0));
+				cur.put("rawPieces",cur.get("rawPieces") + ifnull(mr.Pieces_From_Raw,0));
+				cur.put("wastePieces",cur.get("wastePieces") + ifnull(mr.Pieces_From_Waste,0));
+				agg.put(key,cur);
+			}
+		}
+
+		//----------------------------------------------------------------
+		// Write-offs. Read off the resolution lines rather than a field on
+		// the dispute, because a dispute can be settled in parts - two
+		// metres found, three written off - and only the lines know which
+		// was which.
+		//----------------------------------------------------------------
+		for each  dsp in Stock_Dispute[Plan == plan.ID]
+		{
+			dMat = dsp.Material;
+			if(dMat != null)
+			{
+				dKey = dMat + "";
+				dCur = agg.get(dKey);
+
+				// A material can be disputed on a plan whose requirement row
+				// has since been deleted. Rare, but the loss still happened
+				// and still belongs on the order.
+				if(dCur == null)
+				{
+					dCur = Map();
+					dCur.put("matId",dKey);
+					dCur.put("name",ifnull(dsp.Material_Name,"").toString().replaceAll("\"","'"));
+					dCur.put("unit",ifnull(dsp.Unit,"").toString());
+					dCur.put("isFabric",false);
+					dCur.put("planned",0.0);
+					// Must be initialised here too. This branch builds a whole
+					// entry of its own, and a key missing from it serialises as
+					// null into hand-built JSON - which parses on the widget as
+					// a null, not a zero, and renders as "null" on the row.
+					dCur.put("reissued",0.0);
+					dCur.put("issued",0.0);
+					dCur.put("received",0.0);
+					dCur.put("lostQty",0.0);
+					dCur.put("lostPieces",0);
+					dCur.put("reqPieces",0);
+					dCur.put("rawPieces",0);
+					dCur.put("wastePieces",0);
+					dCur.put("damagedQty",0.0);
+					dCur.put("damagedPieces",0);
+					dCur.put("wasteKeptPcs",0);
+					dCur.put("wasteScrapPcs",0);
+					dCur.put("wasteArea",0.0);
+					dCur.put("reasons","");
+					agg.put(dKey,dCur);
+					keyList.add(dKey);
+				}
+
+				dIsWaste = ifnull(dsp.Is_Waste,false);
+
+				// The two people who looked. Their notes are why this figure
+				// is defensible at all - without them a write-off is just a
+				// number that appeared one day.
+				lookedTxt = "";
+				for each  lnD in dsp.Resolution_Lines
+				{
+					lnRes = ifnull(lnD.Resolution,"").toString();
+					if(lnRes == "Supervisor_Denied" || lnRes == "Store_Denied")
+					{
+						who = "Store";
+						if(lnRes == "Supervisor_Denied")
+						{
+							who = "Supervisor";
+						}
+						if(lookedTxt != "")
+						{
+							lookedTxt = lookedTxt + " | ";
+						}
+						lookedTxt = lookedTxt + who + ": " + ifnull(lnD.Note,"").toString().replaceAll("\"","'");
+					}
+				}
+
+				for each  ln2 in dsp.Resolution_Lines
+				{
+					if(ifnull(ln2.Resolution,"").toString() == "Lost")
+					{
+						lqS = ifnull(ln2.Resolved_Qty,"0").toString().trim();
+						if(lqS == "")
+						{
+							lqS = "0";
+						}
+						lostAmt = lqS.toDecimal();
+
+						if(lostAmt > 0)
+						{
+							if(dIsWaste == true)
+							{
+								dCur.put("lostPieces",dCur.get("lostPieces") + lostAmt.toLong());
+							}
+							else
+							{
+								dCur.put("lostQty",dCur.get("lostQty") + lostAmt);
+							}
+
+							onTxt = "";
+							if(ln2.Resolved_On != null)
+							{
+								onTxt = ln2.Resolved_On.toString("dd-MMM-yyyy");
+							}
+
+							rJson = dCur.get("reasons");
+							if(rJson != "")
+							{
+								rJson = rJson + ",";
+							}
+							rJson = rJson + "{\"type\":\"Lost\",\"qty\":" + lostAmt + ",\"isWaste\":" + dIsWaste + ",\"on\":\"" + onTxt + "\",\"plan\":\"" + ifnull(plan.Plan_No,"").toString() + "\",\"looked\":\"" + lookedTxt + "\"}";
+							dCur.put("reasons",rJson);
+						}
+					}
+				}
+
+				agg.put(dKey,dCur);
+			}
+		}
+
+		//----------------------------------------------------------------
+		// DAMAGE. What had to be replaced because somebody ruined it.
+		//
+		// REPORTED, NEVER NETTED. Damaged_Qty means "material that had to be
+		// replaced", not "material destroyed" - at Cutting the supervisor
+		// often salvages the usable part of a ruined panel into the waste box
+		// AND reports the damage to get cloth reissued. Both are true and both
+		// are already counted elsewhere: the remnant is real stock, the reissue
+		// is real cloth. Subtracting one from the other here without knowing
+		// which offcut came from which incident drives the figure NEGATIVE, and
+		// a negative loss reads as an arithmetic fault rather than as this.
+		//
+		// So it sits in its own column beside the reissue it caused, and no
+		// total adds them together. Closing that gap needs provenance on
+		// Waste_Master - see the deliberate-gaps note in CLAUDE.md - which is a
+		// schema change, not a reporting one.
+		//----------------------------------------------------------------
+		for each  dm in Material_Damage[Plan == plan.ID]
+		{
+			for each  dl in dm.Damage_Lines
+			{
+				dlMat = dl.Material;
+				if(dlMat != null)
+				{
+					dlKey = dlMat + "";
+					dlCur = agg.get(dlKey);
+					if(dlCur == null)
+					{
+						dlCur = Map();
+						dlCur.put("matId",dlKey);
+						dlCur.put("name",ifnull(dl.Material_Name,"").toString().replaceAll("\"","'"));
+						dlCur.put("unit",ifnull(dl.Unit,"").toString());
+						dlCur.put("isFabric",ifnull(dl.Is_Fabric,false));
+						dlCur.put("reasons","");
+						dlCur.put("damagedQty",0.0);
+						dlCur.put("damagedPieces",0);
+						keyList.add(dlKey);
+					}
+					dlCur.put("damagedQty",dlCur.get("damagedQty") + ifnull(dl.Damaged_Qty,0));
+					dlCur.put("damagedPieces",dlCur.get("damagedPieces") + ifnull(dl.Damaged_Pieces,0));
+					agg.put(dlKey,dlCur);
+				}
+			}
+		}
+
+		//----------------------------------------------------------------
+		// WASTE GENERATED. The remnants the cutting actually threw off.
+		//
+		// COUNTED IN PIECES AND AREA, NEVER IN THE UNIT COLUMN. A remnant is a
+		// physical thing with two dimensions; adding its count to a metre total
+		// gives a number that means nothing. Area is carried alongside so two
+		// orders can be compared without pretending pieces are equivalent.
+		//
+		// Declared and Scrapped are separated because they answer different
+		// questions. Declared went back on the rack and will be reused - that
+		// is the good outcome. Scrapped was cut and thrown away, and it is what
+		// makes "how much did we bin this month" answerable at all.
+		//
+		// The movement points at the PIECE, not the material, so the material
+		// comes off the Waste_Master row it was cut from.
+		//----------------------------------------------------------------
+		for each  wg in Waste_Movement[Plan == plan.ID && (Movement_Type == "Declared" || Movement_Type == "Scrapped")]
+		{
+			wgMat = "";
+			for each  wgRec in Waste_Master[ID == wg.Waste_Piece]
+			{
+				wgMat = ifnull(wgRec.SKU,"").toString();
+			}
+
+			if(wgMat != "")
+			{
+				wgCur = agg.get(wgMat);
+				if(wgCur == null)
+				{
+					wgName = wgMat;
+					wgUnit = "";
+					// wgMat is the SKU as a STRING - it has to be, it is the key
+					// this entry is filed under in agg. ID is a Number, and
+					// Deluge refuses the comparison outright: "In Criteria left
+					// expression is of type NUMBER and right expression is of
+					// type TEXT". Converted only for the query; the map key stays
+					// the string.
+					//
+					// isNumber() guards it because a Waste_Master row whose SKU
+					// lookup was never filled gives an empty-ish value, and
+					// toLong() on that throws inside the per-plan loop - taking
+					// the whole report down over one bad remnant row.
+					if(wgMat.isNumber() == true)
+					{
+					for each  wgRm in Raw_Material[ID == wgMat.toLong()]
+					{
+						wgName = ifnull(wgRm.Material_Display_Name,"").toString().trim();
+						if(wgName == "")
+						{
+							wgName = ifnull(wgRm.Name,"").toString();
+						}
+						wgName = wgName.replaceAll("\"","'");
+						wgUnit = ifnull(wgRm.Unit,"").toString();
+					}
+					}
+					wgCur = Map();
+					wgCur.put("matId",wgMat);
+					wgCur.put("name",wgName);
+					wgCur.put("unit",wgUnit);
+					wgCur.put("isFabric",true);
+					wgCur.put("reasons","");
+					wgCur.put("wasteKeptPcs",0);
+					wgCur.put("wasteScrapPcs",0);
+					wgCur.put("wasteArea",0.0);
+					keyList.add(wgMat);
+				}
+
+				wgPcs = ifnull(wg.Piece_Count,0);
+				wgW = ifnull(wg.Piece_Width,0);
+				wgL = ifnull(wg.Piece_Length,0);
+
+				if(wg.Movement_Type == "Scrapped")
+				{
+					wgCur.put("wasteScrapPcs",wgCur.get("wasteScrapPcs") + wgPcs);
+				}
+				else
+				{
+					wgCur.put("wasteKeptPcs",wgCur.get("wasteKeptPcs") + wgPcs);
+				}
+				// cm2 -> m2 here rather than on the widget, so every screen that
+				// reads this agrees about the unit.
+				wgCur.put("wasteArea",wgCur.get("wasteArea") + ((wgW * wgL * wgPcs) / 10000));
+				agg.put(wgMat,wgCur);
+			}
+		}
+	}
+
+	//--------------------------------------------------------------------
+	// Turn the totals into the answer.
+	//--------------------------------------------------------------------
+	for each  k in keyList
+	{
+		e = agg.get(k);
+
+		plannedV = ifnull(e.get("planned"),0);
+		issuedV = ifnull(e.get("issued"),0);
+		lostV = ifnull(e.get("lostQty"),0);
+		spentV = issuedV + lostV;
+		varianceV = spentV - plannedV;
+
+		// Everything the variance is NOT accounted for by a write-off is the
+		// cutting allowance: whole marker rows issued to yield part of a row
+		// of pieces. Named rather than left as a gap, because an unexplained
+		// number invites somebody to go looking for a fault that is not there.
+		cuttingV = varianceV - lostV;
+		if(cuttingV < 0)
+		{
+			cuttingV = 0;
+		}
+
+		reasonsJson = ifnull(e.get("reasons"),"");
+
+		if(cuttingV > 0)
+		{
+			if(reasonsJson != "")
+			{
+				reasonsJson = reasonsJson + ",";
+			}
+			reasonsJson = reasonsJson + "{\"type\":\"Cutting allowance\",\"qty\":" + cuttingV + ",\"isWaste\":false,\"on\":\"\",\"plan\":\"\",\"looked\":\"Cloth is issued in whole marker rows, so part of the last row is paid for whether or not it is cut.\"}";
+		}
+
+		wp = e.get("wastePieces");
+		if(wp > 0)
+		{
+			if(reasonsJson != "")
+			{
+				reasonsJson = reasonsJson + ",";
+			}
+			reasonsJson = reasonsJson + "{\"type\":\"Offcut reuse\",\"qty\":" + wp + ",\"isWaste\":true,\"on\":\"\",\"plan\":\"\",\"looked\":\"Cut from returned offcuts instead of fresh cloth, so this many pieces cost no new material.\"}";
+		}
+
+		if(matJson != "")
+		{
+			matJson = matJson + ",";
+		}
+		// EVERY numeric read through ifnull(). An entry created by the damage or
+		// waste pass never touches the requirement keys, and a Map.get() that
+		// misses emits the word null straight into hand-built JSON - which
+		// parses on the widget as null, not 0, and renders as "null" in the
+		// cell. There are four places an entry can be created now; this makes
+		// forgetting one of them a zero instead of a broken row.
+		//
+		// damaged and waste are reported and NOT rolled into spent or variance -
+		// see the two passes above for why netting them needs provenance first.
+		matJson = matJson + "{\"materialId\":\"" + e.get("matId") + "\",\"material\":\"" + e.get("name") + "\",\"unit\":\"" + ifnull(e.get("unit"),"") + "\",\"isFabric\":" + ifnull(e.get("isFabric"),false) + ",\"planned\":" + plannedV + ",\"reissued\":" + ifnull(e.get("reissued"),0) + ",\"issued\":" + issuedV + ",\"received\":" + ifnull(e.get("received"),0) + ",\"lost\":" + lostV + ",\"lostPieces\":" + ifnull(e.get("lostPieces"),0) + ",\"spent\":" + spentV + ",\"variance\":" + varianceV + ",\"cuttingAllowance\":" + cuttingV + ",\"requiredPieces\":" + ifnull(e.get("reqPieces"),0) + ",\"piecesFromRaw\":" + ifnull(e.get("rawPieces"),0) + ",\"piecesFromWaste\":" + ifnull(e.get("wastePieces"),0) + ",\"damagedQty\":" + ifnull(e.get("damagedQty"),0) + ",\"damagedPieces\":" + ifnull(e.get("damagedPieces"),0) + ",\"wasteKeptPieces\":" + ifnull(e.get("wasteKeptPcs"),0) + ",\"wasteScrapPieces\":" + ifnull(e.get("wasteScrapPcs"),0) + ",\"wasteAreaM2\":" + ifnull(e.get("wasteArea"),0) + ",\"reasons\":[" + reasonsJson + "]}";
+	}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"orders\":[],\"materials\":[],\"orderName\":\"\"}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[],\"orders\":[" + soJson + "],\"materials\":[" + matJson + "],\"orderName\":\"" + orderName + "\"}";
+}

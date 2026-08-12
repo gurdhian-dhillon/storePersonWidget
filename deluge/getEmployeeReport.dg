@@ -1,0 +1,501 @@
+string getEmployeeReport(string dateTxt)
+{
+	// ONE DAY OF THE FLOOR, one row per person.
+	// POST: dateTxt - the day, as "dd-MMM-yyyy". Empty means today.
+	//
+	// Replaces getOperatorPerformance, getDailyProductionTrend,
+	// getRecentActivities and getOrderPipelineCounts with a single call. Those
+	// four were re-run together every ten seconds; this is one call, on demand.
+	//
+	// Dates arrive pre-formatted because Deluge parses "dd-MMM-yyyy" the same way
+	// whatever the org's locale is, while "08-11-2026" is a different day in the
+	// US than it is here.
+	//
+	//-------------------------------------------------------------------------
+	// WHAT "EFFICIENCY" WAS, AND WHY THIS FUNCTION WILL NOT SEND ONE.
+	//
+	// getOperatorPerformance summed Qty_In into a field called "Target" and
+	// divided Qty_Out by it. There is no target anywhere in this app - that was
+	// the pieces the operator was HANDED. So the figure was yield, not
+	// productivity, and saveProductionPhase caps Qty_Out at Qty_In ("you cannot
+	// finish more than you received"), which bounds it at 100 by construction.
+	//
+	// The effect was that a man who cut 500 pieces cleanly and a man who cut 5
+	// cleanly both read 100%, and both counted as "target met". Volume - the
+	// thing actually being asked about - had no card at all.
+	//
+	// So pieces in, pieces out and the loss between them are sent as the plain
+	// counts they are. The widget shows yield as its own column, named yield,
+	// next to the volume that gives it meaning. Nothing here is called
+	// efficiency, because nothing here measures it.
+	//
+	// "stagesDone" and "stagesOpen" count a person's SHARES of stages, not
+	// stages. Three men on one cutting stage is three rows here and one stage on
+	// the floor - the report is about people, so the row each person can see
+	// themselves in is the unit. Only a stage nobody was assigned to is counted
+	// as itself.
+	//
+	// Status is sent from Employee.Status and nowhere else. The old function
+	// wrote the real value into the map and then overwrote it with a badge
+	// derived from that same ratio - so "On Break" meant "lost some pieces" and
+	// "Offline" meant "no finished stage today", and the real Active/Inactive
+	// flag was computed and thrown away.
+	//-------------------------------------------------------------------------
+	//
+	// EVERY LOOKUP IS CACHED, and the employee directory is fetched ONCE rather
+	// than queried per person. The old function ran a Stage_Log query per
+	// employee - cost growing with headcount instead of with work done - which is
+	// the shape that trips the statement-execution limit. That limit is NOT
+	// catchable: it kills the script, so the try/catch never runs and the widget
+	// gets a bare 500 with no error card to explain it.
+
+	workedJson = "";
+	idleJson = "";
+	errJson = "";
+	dayTxt = "";
+	totPeople = 0;
+	totStagesDone = 0;
+	totStagesOpen = 0;
+	totIn = 0;
+	totOpen = 0;
+	totOut = 0;
+
+	try
+	{
+		dTxt = ifnull(dateTxt,"").toString().trim();
+		if(dTxt == "")
+		{
+			dDay = zoho.currentdate;
+		}
+		else
+		{
+			dDay = dTxt.toDate();
+		}
+		dayTxt = dDay.toString("dd-MMM-yyyy");
+
+		//----------------------------------------------------------------------
+		// The employee directory, in ONE query.
+		//
+		// Every employee, not only the active ones: a person made Inactive last
+		// week still did the work that is on last week's logs, and a report that
+		// silently drops their rows makes the day's totals disagree with itself.
+		// The Status field travels with each row so the screen can say so.
+		//----------------------------------------------------------------------
+		// sort by on its own assignment - inline in a for-each header it does not
+		// reliably parse, and a function that will not save is indistinguishable
+		// from one that saved and did nothing.
+		allEmps = Employee[ID != 0] sort by Employee_Name;
+
+		empName = Map();
+		empRole = Map();
+		empStat = Map();
+		empOrder = List();
+
+		for each  emp in allEmps
+		{
+			eKey = emp.ID.toString();
+			eNm = ifnull(emp.Employee_Name,"").toString().trim().replaceAll("\"","'");
+			if(eNm == "")
+			{
+				eNm = "Employee " + eKey;
+			}
+			empName.put(eKey,eNm);
+			empRole.put(eKey,ifnull(emp.Designation,"").toString().trim().replaceAll("\"","'"));
+			empStat.put(eKey,ifnull(emp.Status,"").toString().trim());
+			empOrder.add(eKey);
+		}
+
+		//----------------------------------------------------------------------
+		// The day's stage logs. Bounded by Log_Date, which is what keeps this
+		// safe however long the app has been running.
+		//
+		// BOTH statuses. A stage still running is work in hand - he is standing
+		// at the machine right now - and a report that only counted finished
+		// stages would show an empty row for the man halfway through a long cut.
+		// It is counted separately from finished work and contributes no output,
+		// because it has none yet.
+		//
+		// Ascending on Added_Time: the stamp is written at Start, so this is the
+		// order the shift actually happened in. Log_Date is identical on every
+		// row of a one-day view and can order nothing.
+		//----------------------------------------------------------------------
+		//----------------------------------------------------------------------
+		// A STAGE IS SPLIT BETWEEN SEVERAL OPERATORS, so the unit of one person's
+		// day is a SHARE, not a stage.
+		//
+		// Both sources are read and flattened into one list of rows before any
+		// counting happens:
+		//
+		//   Stage_Assignment - one row per operator per stage. This is what the
+		//   floor produces now.
+		//
+		//   Stage_Log - the stage header. Counted ONLY when it has no shares
+		//   hanging off it, which is every stage logged before the split existed
+		//   and every outsourced one. Counting a split stage's header as well
+		//   would report its pieces twice: once against the header, once against
+		//   the people who actually did the work.
+		//
+		// The unassigned remainder of a split stage - pieces the supervisor never
+		// handed to anybody - is deliberately in NOBODY's row. It is a fact about
+		// the stage, not about a person, and this report only answers questions
+		// about people.
+		//----------------------------------------------------------------------
+		dayShares = Stage_Assignment[Log_Date == dDay] sort by Added_Time;
+		dayLogs = Stage_Log[Log_Date == dDay] sort by Added_Time;
+
+		// Which stage headers have been split. Filled from the shares, read once
+		// per header below - so telling a split stage from a whole one costs no
+		// query at all.
+		splitLogs = Map();
+		workRows = List();
+
+		for each  agD in dayShares
+		{
+			agRow = Map();
+
+			agOpKey = "0";
+			if(agD.Operator != null)
+			{
+				agOpKey = agD.Operator.toString();
+			}
+			agRow.put("op",agOpKey);
+
+			agPlanKey = "";
+			if(agD.Plan != null)
+			{
+				agPlanKey = agD.Plan.toString();
+			}
+			agRow.put("plan",agPlanKey);
+
+			agItemKey = "";
+			if(agD.Plan_Item != null)
+			{
+				agItemKey = agD.Plan_Item.toString();
+			}
+			agRow.put("item",agItemKey);
+
+			if(agD.Stage_Log != null)
+			{
+				splitLogs.put(agD.Stage_Log.toString(),"1");
+			}
+
+			agRow.put("phase",ifnull(agD.Phase_Name,"").toString());
+
+			// Qty_In of a share is what the man was HANDED. Same meaning the
+			// stage's own Qty_In has, one level down.
+			agRow.put("qtyIn",ifnull(agD.Assigned_Qty,0));
+			agRow.put("qtyOut",ifnull(agD.Qty_Out,0));
+			agRow.put("status",ifnull(agD.Assignment_Status,"").toString().trim());
+			agRow.put("start",ifnull(agD.Start_Time,"").toString());
+			agRow.put("end",ifnull(agD.End_Time,"").toString());
+			agRow.put("outsourced","false");
+			agRow.put("remarks",ifnull(agD.Remarks,"").toString());
+
+			workRows.add(agRow);
+		}
+
+		for each  lgD in dayLogs
+		{
+			// Skipped when the stage was split - its people are already above.
+			if(splitLogs.get(lgD.ID.toString()) == null)
+			{
+				lgRow = Map();
+
+				lgOpKey = "0";
+				if(lgD.Operator != null)
+				{
+					lgOpKey = lgD.Operator.toString();
+				}
+				lgRow.put("op",lgOpKey);
+
+				lgPlanKey = "";
+				if(lgD.Plan != null)
+				{
+					lgPlanKey = lgD.Plan.toString();
+				}
+				lgRow.put("plan",lgPlanKey);
+
+				lgItemKey = "";
+				if(lgD.Plan_Item != null)
+				{
+					lgItemKey = lgD.Plan_Item.toString();
+				}
+				lgRow.put("item",lgItemKey);
+
+				lgRow.put("phase",ifnull(lgD.Phase_Name,"").toString());
+				lgRow.put("qtyIn",ifnull(lgD.Qty_In,0));
+				lgRow.put("qtyOut",ifnull(lgD.Qty_Out,0));
+				lgRow.put("status",ifnull(lgD.Stage_Status,"").toString().trim());
+				lgRow.put("start",ifnull(lgD.Start_Time,"").toString());
+				lgRow.put("end",ifnull(lgD.End_Time,"").toString());
+
+				lgOutTxt = "false";
+				if(ifnull(lgD.Is_Outsourced,false) == true)
+				{
+					lgOutTxt = "true";
+				}
+				lgRow.put("outsourced",lgOutTxt);
+				lgRow.put("remarks",ifnull(lgD.Remarks,"").toString());
+
+				workRows.add(lgRow);
+			}
+		}
+
+		// Caches. A miss is STORED as an empty string rather than left absent, so
+		// a plan with no sales order attached is not re-queried on every one of
+		// its rows.
+		planNoM = Map();
+		planSoM = Map();
+		itemNmM = Map();
+
+		// Per-person accumulators, all keyed on the operator's record id as text.
+		opKeys = List();
+		opDone = Map();
+		opOpen = Map();
+		opIn = Map();
+		opHand = Map();
+		opOut = Map();
+		opRows = Map();
+		opSoSeen = Map();
+		opSoJson = Map();
+
+		// Iterating the flattened list, not a query result. A share and an
+		// unsplit stage are the same shape by the time they get here, which is
+		// the whole point of building it.
+		for each  wr in workRows
+		{
+			// "0" is the operator that was never recorded - a stage opened before
+			// anyone was put on it, or an outsourced one. That work has to appear
+			// somewhere or the day's totals stop matching the sum of the rows.
+			oKey = ifnull(wr.get("op"),"0").toString();
+			if(oKey == "")
+			{
+				oKey = "0";
+			}
+
+			if(opDone.get(oKey) == null)
+			{
+				opKeys.add(oKey);
+				opDone.put(oKey,0);
+				opOpen.put(oKey,0);
+				opIn.put(oKey,0);
+				opHand.put(oKey,0);
+				opOut.put(oKey,0);
+				opRows.put(oKey,"");
+				opSoSeen.put(oKey,"");
+				opSoJson.put(oKey,"");
+			}
+
+			//------------------------------------------------------------------
+			// The plan behind the work, and the order behind the plan.
+			//
+			// The row carries the plan's id as text, so the cache is keyed and
+			// queried off the same string whichever source the row came from.
+			//------------------------------------------------------------------
+			pKey = ifnull(wr.get("plan"),"").toString();
+
+			if(pKey != "" && planNoM.get(pKey) == null)
+			{
+				pNo = "";
+				pSo = "";
+				for each  plr in Production_Planning[ID == pKey.toLong()]
+				{
+					pNo = ifnull(plr.Plan_No,"").toString().replaceAll("\"","'");
+					for each  sor in Sales_Order[ID == plr.Sales_Order]
+					{
+						pSo = ifnull(sor.Sales_Order,"").toString().replaceAll("\"","'");
+					}
+				}
+				planNoM.put(pKey,pNo);
+				planSoM.put(pKey,pSo);
+			}
+
+			planNoTxt = "";
+			soTxt = "";
+			if(pKey != "")
+			{
+				planNoTxt = ifnull(planNoM.get(pKey),"").toString();
+				soTxt = ifnull(planSoM.get(pKey),"").toString();
+			}
+
+			//------------------------------------------------------------------
+			// Plan_Item is a LOOKUP, so the row holds the record id. The old
+			// function put that id straight into the payload as "Item"; the name
+			// lives on the Plan_Item record.
+			//------------------------------------------------------------------
+			iKey = ifnull(wr.get("item"),"").toString();
+
+			if(iKey != "" && itemNmM.get(iKey) == null)
+			{
+				iNm = "";
+				for each  pit in Plan_Item[ID == iKey.toLong()]
+				{
+					iNm = ifnull(pit.Item_Name,"").toString().trim().replaceAll("\"","'");
+				}
+				itemNmM.put(iKey,iNm);
+			}
+
+			itemTxt = "";
+			if(iKey != "")
+			{
+				itemTxt = ifnull(itemNmM.get(iKey),"").toString();
+			}
+
+			//------------------------------------------------------------------
+			// Creator fields that were never written are EMPTY, not null, and
+			// toDecimal() throws on empty - normalise through a string first.
+			//------------------------------------------------------------------
+			qiS = ifnull(wr.get("qtyIn"),"0").toString().trim();
+			if(qiS == "")
+			{
+				qiS = "0";
+			}
+			qoS = ifnull(wr.get("qtyOut"),"0").toString().trim();
+			if(qoS == "")
+			{
+				qoS = "0";
+			}
+			qIn = qiS.toDecimal().toLong();
+			qOut = qoS.toDecimal().toLong();
+
+			stat = ifnull(wr.get("status"),"").toString().trim();
+
+			//------------------------------------------------------------------
+			// THE INPUT OF A FINISHED STAGE AND THE INPUT OF A RUNNING ONE ARE
+			// KEPT APART, and the reason is the loss figure.
+			//
+			// Loss is piecesIn minus piecesOut. A running stage has taken pieces
+			// in and produced nothing yet - Qty_Out is only written at End - so
+			// folding its input into the same total would report every piece
+			// currently on the machine as lost. The man halfway through a 200
+			// piece cut would read "200 lost" until he finished.
+			//
+			// So Done contributes to piecesIn, running contributes to
+			// piecesInHand, and the two are shown as the different things they
+			// are: what he got through, and what he is still holding.
+			//------------------------------------------------------------------
+			if(stat == "Done")
+			{
+				opDone.put(oKey,opDone.get(oKey) + 1);
+				opIn.put(oKey,opIn.get(oKey) + qIn);
+				opOut.put(oKey,opOut.get(oKey) + qOut);
+				totStagesDone = totStagesDone + 1;
+				totIn = totIn + qIn;
+				totOut = totOut + qOut;
+			}
+			else
+			{
+				opOpen.put(oKey,opOpen.get(oKey) + 1);
+				opHand.put(oKey,opHand.get(oKey) + qIn);
+				totStagesOpen = totStagesOpen + 1;
+				totOpen = totOpen + qIn;
+			}
+
+			// Distinct sales orders this person touched. Wrapped in pipes so a
+			// contains() test cannot match a number inside a longer one.
+			if(soTxt != "")
+			{
+				seenTxt = ifnull(opSoSeen.get(oKey),"").toString();
+				if(seenTxt.contains("|" + soTxt + "|") == false)
+				{
+					opSoSeen.put(oKey,seenTxt + "|" + soTxt + "|");
+					soAcc = ifnull(opSoJson.get(oKey),"").toString();
+					if(soAcc != "")
+					{
+						soAcc = soAcc + ",";
+					}
+					opSoJson.put(oKey,soAcc + "\"" + soTxt + "\"");
+				}
+			}
+
+			outsTxt = ifnull(wr.get("outsourced"),"false").toString();
+			if(outsTxt != "true")
+			{
+				outsTxt = "false";
+			}
+
+			// Times go out as the raw strings Creator holds. The duration is
+			// worked out in the widget instead, where the several shapes a Time
+			// field can render as ("09:00", "09:00:00", "09:00 AM") can be parsed
+			// defensively and an unreadable one shown as a dash rather than
+			// turned into a confident wrong number.
+			rowJ = "{\"phase\":\"" + ifnull(wr.get("phase"),"").toString().replaceAll("\"","'") + "\",\"item\":\"" + itemTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"salesOrder\":\"" + soTxt + "\",\"qtyIn\":" + qIn + ",\"qtyOut\":" + qOut + ",\"start\":\"" + ifnull(wr.get("start"),"").toString() + "\",\"end\":\"" + ifnull(wr.get("end"),"").toString() + "\",\"status\":\"" + stat + "\",\"outsourced\":" + outsTxt + ",\"remarks\":\"" + ifnull(wr.get("remarks"),"").toString().replaceAll("\"","'") + "\"}";
+
+			prevRows = ifnull(opRows.get(oKey),"").toString();
+			if(prevRows != "")
+			{
+				prevRows = prevRows + ",";
+			}
+			opRows.put(oKey,prevRows + rowJ);
+		}
+
+		//----------------------------------------------------------------------
+		// One object per person who worked.
+		//----------------------------------------------------------------------
+		for each  wk in opKeys
+		{
+			wNm = "Not recorded";
+			wRole = "";
+			wStat = "";
+			unattTxt = "true";
+
+			if(wk != "0")
+			{
+				unattTxt = "false";
+				totPeople = totPeople + 1;
+				wNm = ifnull(empName.get(wk),"").toString();
+				wRole = ifnull(empRole.get(wk),"").toString();
+				wStat = ifnull(empStat.get(wk),"").toString();
+
+				// An operator deleted from Employee since the log was written.
+				// The work still happened, so the row stays and says what it can.
+				if(wNm == "")
+				{
+					wNm = "Employee " + wk;
+				}
+			}
+
+			if(workedJson != "")
+			{
+				workedJson = workedJson + ",";
+			}
+			// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+			workedJson = workedJson + "{\"id\":\"" + wk + "\",\"name\":\"" + wNm + "\",\"role\":\"" + wRole + "\",\"status\":\"" + wStat + "\",\"unattributed\":" + unattTxt + ",\"stagesDone\":" + opDone.get(wk) + ",\"stagesOpen\":" + opOpen.get(wk) + ",\"piecesIn\":" + opIn.get(wk) + ",\"piecesInHand\":" + opHand.get(wk) + ",\"piecesOut\":" + opOut.get(wk) + ",\"orders\":[" + ifnull(opSoJson.get(wk),"").toString() + "],\"stages\":[" + ifnull(opRows.get(wk),"").toString() + "]}";
+		}
+
+		//----------------------------------------------------------------------
+		// Everyone ACTIVE who logged nothing that day.
+		//
+		// Not called idle, and not counted into anything. Most of this list is
+		// store, wash and packing staff who never write a Stage_Log at all - the
+		// screen says so rather than implying they did nothing. It answers one
+		// question only: is somebody's work missing from the report?
+		//
+		// Inactive employees are left out. A person who has left the company
+		// showing up every day as "nothing logged" is noise, and their past work
+		// still appears above on the days they did it.
+		//----------------------------------------------------------------------
+		for each  ik in empOrder
+		{
+			if(opDone.get(ik) == null && ifnull(empStat.get(ik),"").toString() == "Active")
+			{
+				if(idleJson != "")
+				{
+					idleJson = idleJson + ",";
+				}
+				idleJson = idleJson + "{\"id\":\"" + ik + "\",\"name\":\"" + ifnull(empName.get(ik),"").toString() + "\",\"role\":\"" + ifnull(empRole.get(ik),"").toString() + "\"}";
+			}
+		}
+	}
+	catch (e)
+	{
+		// Creator collapses every runtime failure to a widget into a generic
+		// "code 9430", so the real message is carried back in the payload.
+		errJson = "\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"";
+	}
+
+	// Built by hand. Map.toString() stops emitting valid JSON the moment the
+	// structure nests Map -> List -> Map, which is exactly the stages array, and
+	// List.toString() does not wrap in []. That is what the old function did.
+	return "{\"errors\":[" + errJson + "],\"date\":\"" + dayTxt + "\",\"worked\":[" + workedJson + "],\"noLogs\":[" + idleJson + "],\"totals\":{\"people\":" + totPeople + ",\"stagesDone\":" + totStagesDone + ",\"stagesOpen\":" + totStagesOpen + ",\"piecesIn\":" + totIn + ",\"piecesInHand\":" + totOpen + ",\"piecesOut\":" + totOut + "}}";
+}

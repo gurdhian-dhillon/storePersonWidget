@@ -1,0 +1,2989 @@
+/* Base Variables */
+:root {
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --bg-color: #e9eef4;
+    --surface: #ffffff;
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+    --border: #e2e8f0;
+
+    /* The crimson from the Creator top nav and the left rail. This is the app's
+       second brand colour, NOT an alert — it marks the closing action of a pair.
+       Keep it distinct from --status-danger below: that one still means
+       "something is wrong", and the two must never be used interchangeably. */
+    --accent: #e11d48;
+    --accent-hover: #be123c;
+
+    /* Status Colors */
+    --status-success: #10b981;
+    --status-success-bg: #d1fae5;
+    --status-warning: #f59e0b;
+    --status-warning-bg: #fef3c7;
+    --status-danger: #ef4444;
+    --status-danger-bg: #fee2e2;
+
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    --radius: 8px;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-main);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+.app-container {
+    max-width: 100%;
+    margin: 0 auto;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+/* Header */
+.app-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 2rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.app-header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+}
+
+.app-header p {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    margin-top: 0.25rem;
+}
+
+/* Sticky page header so Refresh + the running totals stay reachable
+   while scrolling a long list of supervisors. */
+.app-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--bg-color);
+    padding-top: 0.25rem;
+}
+
+.so-selector-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+/* Empty State */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 4rem 2rem;
+    background: var(--surface);
+    border-radius: var(--radius);
+    border: 1px dashed var(--border);
+    text-align: center;
+}
+
+.empty-state.hidden { display: none; }
+
+.empty-state .icon {
+    font-size: 3rem;
+    margin-bottom: 1rem;
+    opacity: 0.5;
+}
+
+.empty-state h2 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+.empty-state p {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    max-width: 400px;
+}
+
+.plan-container {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+/* Both tabs stack cards into the same rhythm. #prod-content was missing from
+   this rule, so the item cards on Production sat edge to edge with nothing
+   between them - two adjoining borders reading as one divider inside a single
+   long card rather than a boundary between two items. */
+#dynamic-content,
+#prod-content {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+/* Item Card (reused for each supervisor) */
+.item-card {
+    background: #ffffff;
+    border-radius: 4px;
+    border: 1px solid #cbd5e1;
+    box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
+    overflow: hidden;
+    /* Clears the sticky app header when a card is scrolled to, so opening one
+       does not tuck its own title underneath the header. */
+    scroll-margin-top: 5rem;
+}
+
+
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.item-header {
+    padding: 0.625rem 0.875rem;
+    background-color: #f1f5f9;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #f8fafc;
+    cursor: pointer;
+    user-select: none;
+}
+
+
+
+.item-card:not(.open) .item-header {
+    border-bottom: none;
+}
+
+.item-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.item-serial {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #ffffff;
+    flex: 0 0 auto;
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.item-header-info h2 {
+    font-size: 1.125rem;
+    font-weight: 600;
+}
+
+/* The item code, beside the name rather than under it - the name identifies the
+   thing to a person, the code identifies it to the paperwork, and he is holding
+   both. Monospace so a digit is never mistaken for another. */
+.item-sku {
+    margin-left: 0.55rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    background: rgba(15, 23, 42, 0.06);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.item-meta-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    font-family: monospace;
+    margin-top: 0.25rem;
+    font-weight: 500;
+}
+
+.item-qty {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--primary);
+    background: rgba(37, 99, 235, 0.1);
+    padding: 0.35rem 0.85rem;
+    border-radius: 9999px;
+    white-space: nowrap;
+}
+
+.item-qty-ok {
+    color: #047857;
+    background: var(--status-success-bg);
+}
+
+.item-qty-danger {
+    color: var(--status-danger);
+    background: var(--status-danger-bg);
+}
+
+.item-header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+/* Expand/collapse affordance — sized to read as a real button next to
+   the status pill, not a stray glyph. */
+.chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    color: var(--primary);
+    background: rgba(255, 255, 255, 0.75);
+    box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.25);
+    transition: transform 0.2s ease, background-color 0.15s ease;
+}
+
+.item-header:hover .chevron {
+    background: #ffffff;
+    box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.chevron svg {
+    width: 0.95rem;
+    height: 0.95rem;
+    display: block;
+}
+
+.item-card.open .chevron {
+    transform: rotate(90deg);
+}
+
+.item-body {
+    display: none;
+}
+
+.item-card.open .item-body {
+    display: block;
+}
+
+/* Tables Section */
+.tables-container {
+    padding: 1rem 1.25rem;
+}
+
+.section-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 1rem;
+    margin-top: 1.5rem;
+}
+.section-title:first-child {
+    margin-top: 0;
+}
+
+.table-wrapper {
+    overflow: auto;
+    /* Long material lists scroll inside the card instead of pushing the
+       Issue button off-screen. */
+    max-height: 60vh;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+
+table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    text-align: left;
+    white-space: nowrap;
+}
+
+th, td {
+    padding: 0.55rem 0.875rem;
+    font-size: 0.875rem;
+    border-bottom: 1px solid var(--border);
+}
+
+th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background-color: #f1f5f9;
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-muted);
+    border-bottom: 1px solid #cbd5e1;
+}
+
+tr:last-child td {
+    border-bottom: none;
+}
+
+tbody tr {
+    transition: background-color 0.15s ease;
+}
+tbody tr:hover {
+    background-color: #f8fafc;
+}
+
+/* Rows queued for issuing get a clear left rail + tint so a long list
+   reads at a glance. */
+tbody tr.row-selected {
+    background-color: #eff6ff;
+}
+tbody tr.row-selected:hover {
+    background-color: #e0ecfe;
+}
+tbody tr.row-selected td:first-child {
+    box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.material-name-cell .mat-name {
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+.material-name-cell .mat-sku {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.02em;
+    margin-top: 0.1rem;
+}
+
+/* Units sit next to the number but stay visually secondary so the
+   figures themselves line up and stay scannable. */
+.unit {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+    margin-left: 0.25rem;
+}
+
+.is-zero {
+    color: #94a3b8;
+}
+.is-zero .unit {
+    color: #cbd5e1;
+}
+
+.col-strong {
+    font-weight: 700;
+}
+
+/* Sub-line under Required on partially issued rows, so the reduced
+   max on the input has a visible explanation. */
+.qty-sub {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-top: 0.1rem;
+    white-space: nowrap;
+}
+
+/* Stock held back for a higher-priority supervisor. */
+.qty-sub.held {
+    color: #b45309;
+    cursor: help;
+}
+
+/* A fabric material appears once and expands into its supply lines - waste
+   pieces and fresh cloth - so the same material never looks like two separate
+   requirements. */
+.group-row {
+    cursor: pointer;
+}
+
+.group-row:hover {
+    background: rgba(37, 99, 235, 0.03);
+}
+
+.row-chevron {
+    display: inline-flex;
+    width: 0.7rem;
+    margin-right: 0.4rem;
+    color: var(--text-muted);
+    transition: transform 0.15s ease;
+}
+
+.group-row.open .row-chevron {
+    transform: rotate(90deg);
+}
+
+.group-summary {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.sub-row.collapsed {
+    display: none;
+}
+
+.sub-row > td {
+    background: rgba(15, 23, 42, 0.015);
+}
+
+.sub-label {
+    padding-left: 2rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+/* Two sections per card: fabric and everything else. */
+.mat-section + .mat-section {
+    margin-top: 1.5rem;
+}
+
+.section-title {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+}
+
+.section-note {
+    font-size: 0.7rem;
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+    color: #047857;
+}
+
+/* Cut pieces coming out of the waste store instead of fresh fabric. Green
+   because it is the good outcome - reuse rather than cutting new cloth. */
+.qty-sub.from-waste {
+    color: #047857;
+    font-weight: 600;
+    cursor: help;
+    white-space: normal;
+}
+
+.meta-warn {
+    color: #b45309;
+    font-weight: 700;
+}
+
+.item-serial {
+    position: relative;
+}
+
+/* Completed rows: receipt, not a dead input. */
+tbody tr.row-issued {
+    background-color: #f6fdf9;
+}
+tbody tr.row-issued:hover {
+    background-color: #eefaf3;
+}
+tbody tr.row-issued td:first-child {
+    box-shadow: inset 3px 0 0 var(--status-success);
+}
+tbody tr.row-issued .mat-name,
+tbody tr.row-issued .col-strong {
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.issued-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    color: #047857;
+    background: var(--status-success-bg);
+    padding: 0.3rem 0.75rem;
+    border-radius: 9999px;
+    font-variant-numeric: tabular-nums;
+}
+
+.issued-tag .unit {
+    color: #047857;
+    opacity: 0.7;
+}
+
+.fabric-badge {
+    display: inline-block;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    padding: 0.1rem 0.5rem;
+    border-radius: 9999px;
+    background: rgba(37, 99, 235, 0.1);
+    color: var(--primary);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+/* Green, matching the store side: reusing an offcut is the good outcome, and
+   the colour is what separates it at a glance from a fresh-cloth line. */
+.fabric-badge.is-waste {
+    background: rgba(4, 120, 87, 0.1);
+    color: #047857;
+}
+
+/* Says which number is length and which is width, right beside the size
+   rather than left to be inferred from the order they appear in. */
+.cut-axis {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: none;
+    letter-spacing: 0.03em;
+}
+
+/* The headline on the order-finished dialog. Bigger than the table under it
+   because "did the order come out whole" is the question; the per-item split is
+   the supporting detail. */
+.order-done-total {
+    margin: 0.25rem 0 0.9rem;
+    padding: 0.6rem 0.8rem;
+    border-radius: 4px;
+    background: var(--status-success-bg);
+    color: #065f46;
+    font-size: 1rem;
+}
+
+/* Green says "this order is whole". A plan that finished short is not, so it
+   must not be handed back in the same colour as one that is. */
+.order-done-total.is-short {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.order-done-total .is-short-txt {
+    color: #b45309;
+    font-weight: 700;
+}
+
+/* Remake output is real production, but it is not part of "of 36 ordered" -
+   it replaces rejects. Its own line, deliberately quieter than the totals. */
+.order-done-remade {
+    margin-top: 0.25rem;
+    font-size: 0.85rem;
+    opacity: 0.8;
+}
+
+/* An offcut is green throughout this app because reuse is the good outcome; a
+   remake is amber for the same reason in reverse - not an error, but not
+   something to read past either. Matches .exc-remake in the store widget. */
+.remake-tag {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    border-radius: 1rem;
+    background: #fef3c7;
+    color: #b45309;
+    font-size: 0.8rem;
+    font-weight: 600;
+    vertical-align: middle;
+}
+
+/* The row still reads as a normal line - it produced real pieces. The tint is
+   only there so the eye can group it with the original it replaces. */
+.is-remake-row td {
+    background: #fffbeb;
+}
+
+/* Only appears when the cloth on the rows above does not make the item. That
+   is the one case where he has to stop and go back to the store, and it is not
+   visible from four separate row figures. */
+.cut-short {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 4px;
+    border-left: 3px solid var(--status-warning);
+    background: #fffbeb;
+    font-size: 0.8rem;
+    color: #78350f;
+}
+
+.waste-row td {
+    background: #f6fdfa;
+}
+
+.mat-sku {
+    margin-top: 0.15rem;
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+/* "3 of 5 from offcuts" - two different jobs on the same line. */
+.mat-sku.from-waste {
+    color: #047857;
+    font-weight: 600;
+}
+
+/* Status Pills */
+.status-pill {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.status-sufficient {
+    background-color: var(--status-success-bg);
+    color: var(--status-success);
+}
+
+.status-washing {
+    background-color: var(--status-warning-bg);
+    color: var(--status-warning);
+}
+
+.status-done {
+    background-color: var(--status-success-bg);
+    color: #047857;
+}
+
+.status-partial {
+    background-color: var(--status-warning-bg);
+    color: #b45309;
+}
+
+.status-shortfall {
+    background-color: var(--status-danger-bg);
+    color: var(--status-danger);
+}
+
+/* Number columns alignment */
+.col-num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+th.col-num {
+    text-align: right;
+}
+
+.primary-btn {
+    background-color: var(--primary);
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: var(--radius);
+    font-weight: 600;
+    font-size: 0.875rem;
+    cursor: pointer;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.2s ease;
+}
+
+.primary-btn:hover {
+    background-color: var(--primary-hover);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+
+.primary-btn:active {
+    transform: translateY(0);
+}
+
+.primary-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: var(--shadow-sm);
+}
+
+/* Issue controls */
+.issue-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.col-issue {
+    width: 1%;
+}
+
+.issue-checkbox {
+    width: 1.05rem;
+    height: 1.05rem;
+    accent-color: var(--primary);
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+
+/* Master checkbox lives in the "Issue now" header cell. */
+.select-all-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    user-select: none;
+}
+
+.select-all-label .issue-checkbox:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+/* Unit lives inside the input so the number and its unit read as one control. */
+.issue-input-group {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: var(--surface);
+    overflow: hidden;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.issue-input {
+    width: 4.75rem;
+    padding: 0.35rem 0.4rem;
+    border: none;
+    font-family: inherit;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-align: right;
+    outline: none;
+    background: transparent;
+    color: var(--text-main);
+}
+
+.issue-unit {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 0 0.5rem 0 0.25rem;
+    background: transparent;
+}
+
+.issue-input-group:focus-within {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.issue-input-group:has(.issue-input.invalid) {
+    border-color: var(--status-danger);
+    background: var(--status-danger-bg);
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.12);
+}
+
+/* Fallback for browsers without :has() — colour the field itself. */
+.issue-input.invalid {
+    color: var(--status-danger);
+    background: var(--status-danger-bg);
+}
+
+.issue-input-group:has(.issue-input:disabled) {
+    background: #f1f5f9;
+    border-color: var(--border);
+}
+
+.issue-input:disabled,
+.issue-checkbox:disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    opacity: 0.7;
+}
+
+/* Spinners eat horizontal space and are useless for decimal meterage. */
+.issue-input::-webkit-outer-spin-button,
+.issue-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+.issue-input {
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+.card-footer {
+    padding: 0.875rem 1.25rem 1.25rem;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.card-footer .hint,
+.card-footer .sel-count {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    margin-right: auto;
+}
+
+.card-footer .sel-count {
+    font-weight: 600;
+    color: var(--primary);
+}
+
+.card-footer .sel-count.is-empty {
+    font-weight: 400;
+    color: var(--text-muted);
+}
+
+/* Loading skeleton — replaces the bare "Loading…" text. */
+.skeleton-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+
+.skeleton-line {
+    height: 0.85rem;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #eef2f7 25%, #e2e8f0 37%, #eef2f7 63%);
+    background-size: 400% 100%;
+    animation: shimmer 1.4s ease infinite;
+}
+
+.skeleton-line.w-40 { width: 40%; height: 1.15rem; }
+.skeleton-line.w-70 { width: 70%; }
+
+@keyframes shimmer {
+    0% { background-position: 100% 50%; }
+    100% { background-position: 0 50%; }
+}
+
+.issued-locked-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--status-success);
+    background: var(--status-success-bg);
+    padding: 0.5rem 1rem;
+    border-radius: 9999px;
+}
+
+/* ---- Supervisor receive screen ---- */
+
+.sup-select {
+    font-family: inherit;
+    font-size: 0.875rem;
+    font-weight: 500;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: #fff;
+    color: var(--text-main);
+    margin-right: 0.5rem;
+    min-width: 12rem;
+}
+
+/* The quantity is the thing he is checking against the pile, so it carries the
+   visual weight the issue input has on the store screen. */
+.qty-big {
+    font-size: 1.05rem;
+    font-weight: 700;
+}
+
+.recv-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
+/* The receipt check: the quantity and its note are separate columns, so the
+   figures line up with the headings above them instead of drifting down the
+   cell. Middle-aligned because the name cell is two lines and the input is one
+   - top-aligned they read as belonging to different rows. */
+.col-note {
+    width: 14rem;
+}
+
+.material-name-cell,
+.col-num,
+.col-issue,
+.col-note {
+    vertical-align: middle;
+}
+
+/* Sits under the input, so it must not push the row taller as it appears and
+   disappears - hence the reserved line box. */
+.short-hint {
+    min-height: 1rem;
+    margin-top: 0.2rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--status-danger);
+    text-align: right;
+}
+
+.note-input {
+    font-family: inherit;
+    font-size: 0.8rem;
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    width: 100%;
+}
+
+/* Closed until the line is actually short - the server only keeps a remark
+   against a shortfall, so there is nothing to say here otherwise. */
+.note-input:disabled {
+    background: #f8fafc;
+    border-style: dashed;
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
+/* Restates in the footer how many disputes the button is about to raise. */
+.sel-count.is-short {
+    color: var(--status-danger);
+    font-weight: 600;
+}
+
+/* Only shown in edit mode - the split matters only when he is short and has to
+   decide which order goes without. */
+.order-split {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-top: 0.35rem;
+}
+
+.order-chip {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.1rem 0.45rem;
+    border-radius: 9999px;
+    background: rgba(15, 23, 42, 0.05);
+    color: var(--text-muted);
+}
+
+.ghost-btn {
+    font-family: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+    padding: 0.55rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: #fff;
+    color: var(--text-muted);
+    cursor: pointer;
+    margin-right: 0.5rem;
+}
+
+.ghost-btn:hover {
+    color: var(--text-main);
+    border-color: var(--text-muted);
+}
+
+/* -- Production Flow UI -- */
+.flow-trail {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 1.25rem;
+    background: var(--surface);
+}
+.flow-trail-head {
+    display: flex;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: #f8fafc;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+.flow-trail-track {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 1rem 1.25rem;
+}
+.flow-node {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+/* Colour carries state, the way every ERP does it: green behind you, blue where
+   you are, grey ahead. All white read as one undifferentiated row — you could
+   not see where the finished work stopped without reading five labels.
+   The three states use the SAME tokens as the status pills on the stage cards,
+   so the trail and the card underneath never disagree about what "done" looks
+   like. */
+
+/* Not started. Deliberately the quietest thing in the row — it is the only one
+   of the three that is not information yet. */
+.flow-chip {
+    padding: 6px 14px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #94a3b8;
+    background: #f8fafc;
+    white-space: nowrap;
+}
+
+/* Finished. The tick does the work at a glance; the colour confirms it. */
+.flow-chip.is-done {
+    border-color: #6ee7b7;
+    background: var(--status-success-bg);
+    color: #047857;
+}
+.flow-chip.is-done::before {
+    content: "\2713";
+    margin-right: 6px;
+    font-weight: 700;
+}
+
+/* Where the work is. Solid, not tinted — this is the one chip that should be
+   found without looking, and the ring lifts it off the row. */
+.flow-chip.is-active {
+    border-color: var(--primary);
+    background: var(--primary);
+    color: #ffffff;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+
+/* The connector is half the answer to "where does one stage end". A grey run of
+   arrows after a green run shows the boundary without reading a single label. */
+.flow-arrow {
+    color: #cbd5e1;
+    font-weight: 700;
+    line-height: 1;
+}
+.flow-arrow.is-done {
+    color: var(--status-success);
+}
+
+.stage-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+.stage-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+}
+/* A coloured rail down the left edge, in the same three colours as the trail
+   above. It is what makes one card end and the next begin at a glance in a
+   stack — a plain border does not, because every card has one. */
+.stage-card.is-done {
+    border-left: 4px solid var(--status-success);
+}
+.stage-card.is-running {
+    border-left: 4px solid var(--primary);
+    box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.25), var(--shadow-md);
+}
+.stage-card.is-todo {
+    border-left: 4px solid #cbd5e1;
+}
+
+.stage-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 0.875rem 1.125rem;
+    font-size: 0.9rem;
+    font-weight: 700;
+    background: #f8fafc;
+    border-bottom: 1px solid var(--border);
+}
+
+/* The head is tinted to match the rail, so the card reads as one block rather
+   than a coloured edge stuck onto a white box. */
+.stage-card.is-done .stage-card-head {
+    background: #ecfdf5;
+    border-bottom-color: #a7f3d0;
+}
+.stage-card.is-running .stage-card-head {
+    background: #eff6ff;
+    border-bottom-color: #bfdbfe;
+}
+
+/* Status word, coloured to the state. This is the label the eye lands on after
+   the rail, and grey-on-grey made "In progress" and "Not started" look alike. */
+.stage-status {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #94a3b8;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    background: #f1f5f9;
+    white-space: nowrap;
+}
+.stage-card.is-done .stage-status {
+    color: #047857;
+    background: var(--status-success-bg);
+}
+.stage-card.is-running .stage-status {
+    color: #1d4ed8;
+    background: #dbeafe;
+}
+/* Capped, and not because of the viewport. A stage is six short fields; stretched
+   across a 1900px monitor an operator dropdown becomes a 600px bar and the eye
+   has to travel the whole width to pair a label with its value. */
+.stage-card-body {
+    padding: 1.125rem 1.125rem 1.25rem;
+    max-width: 900px;
+}
+
+/* Two columns read as three rows, and each row is one step of the job: who is on
+   it and when they began, what went in and what came out, what happened and when
+   it finished. The action that closes each half sits at the end of its row. */
+.grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem 1.25rem;
+    align-items: start;
+}
+
+/* Qty in is derived, never typed. Matching the height and shape of a disabled
+   input says "this is a value" without pretending to be editable. */
+.qty-static {
+    display: flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #f8fafc;
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--text-main);
+}
+.qty-static .unit {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+/* Remarks shares its row with End time, so it takes the column rather than a
+   fixed width — but it can be dragged taller when there is a real story to tell. */
+.field textarea.phase-remarks {
+    resize: vertical;
+    line-height: 1.45;
+    min-height: 38px;
+}
+
+@media (max-width: 700px) {
+    .grid-2 {
+        grid-template-columns: 1fr;
+    }
+}
+.field label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+}
+/* The time input and the button that commits it. The input takes the slack so
+   the button keeps its size instead of being squeezed onto the next line when
+   the column narrows. */
+.stage-time-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.stage-time-row input[type="time"] {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.stage-time-row .btn-stage {
+    flex: 0 0 auto;
+}
+/* Every control in a field gets the same treatment. Previously only selects,
+   textareas and inputs inside .stage-time-row were covered, so Qty out and
+   Remarks fell back to browser defaults and rendered tiny. */
+.stage-time-row input,
+.field input,
+.field select,
+.field textarea {
+    flex: 1;
+    width: 100%;
+    min-width: 0;
+    padding: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.875rem;
+    background: #fff;
+    color: var(--text-main);
+}
+
+.field input:disabled,
+.field select:disabled {
+    background: #f8fafc;
+    color: var(--text-muted);
+}
+
+/* Qty out sits in its own grid column now, so it no longer needs capping — but
+   it stays bold, because it is the one number on the card he actually decides. */
+.field input.phase-qtyout {
+    font-weight: 700;
+}
+.stage-time-row .btn {
+    flex-shrink: 0;
+    height: 36px;
+    min-width: 72px;
+}
+
+/* The two ends of a stage, in the app's own two colours: blue opens it, the
+   crimson from the top nav closes it. They used to be the other way round in
+   weight — Start was grey and End was blue — so the button he could actually
+   press was the quieter of the two.
+
+   Only ONE of the pair is ever live: Start is disabled once the stage is
+   running, End until it is. The colour is on the live one, so the card always
+   has exactly one obvious next move. */
+.btn-stage {
+    padding: 0.5rem 1rem;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    font-family: inherit;
+    font-weight: 600;
+    color: #ffffff;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.btn-stage-start {
+    background-color: var(--primary);
+}
+.btn-stage-start:hover:not(:disabled) {
+    background-color: var(--primary-hover);
+}
+
+.btn-stage-end {
+    background-color: var(--accent);
+}
+.btn-stage-end:hover:not(:disabled) {
+    background-color: var(--accent-hover);
+}
+
+/* Spent, not broken. A flat grey with the label still readable says "this one
+   is done with" — the half-opacity version read as a rendering fault. */
+.btn-stage:disabled {
+    background-color: #eef2f7;
+    border-color: var(--border);
+    color: #94a3b8;
+    cursor: not-allowed;
+}
+.btn-secondary {
+    background-color: #f1f5f9;
+    color: #334155;
+    border: 1px solid var(--border);
+    padding: 0.5rem 1rem;
+    border-radius: var(--radius);
+    font-weight: 600;
+    cursor: pointer;
+}
+.btn-secondary:hover {
+    background-color: #e2e8f0;
+}
+.btn-secondary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+
+/* ---- Start-production gate ---- */
+
+.start-prod-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.25rem 0 0.25rem;
+}
+
+.start-prod-row .outsource-btn {
+    margin-left: auto;
+}
+
+.start-prod-note {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.stage-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    padding: 1rem 1.25rem 1.125rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+.stage-summary b {
+    color: var(--text-main);
+}
+
+.stage-remark {
+    font-style: italic;
+}
+
+/* Who worked a finished stage. Each name carries what HE finished, because
+   "out 96" on a stage three people shared answers nothing about which of them
+   came up short. Kept as one group so the names read as a list rather than as
+   three more facts of the same weight as the times beside them. */
+.stage-who {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.9rem;
+}
+
+.stage-who-one {
+    white-space: nowrap;
+}
+
+.stage-who-one .unit {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+/* ---- Shares of a stage ----
+
+   One row per operator, which is one row per physical person standing at a
+   table — the same rule the materials list follows. Every column means the
+   same on every row: who, how many he took, when, how many he finished.
+
+   The table sits INSIDE the stage card rather than replacing it, because the
+   stage still has one thing of its own to say: its total, and the button that
+   closes it. */
+
+/* The stage's own numbers, as a strip of labelled figures rather than a
+   sentence — he reads these at a glance while standing at the table, and a
+   sentence has to be read from the start every time. */
+.stage-meter {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.5rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    padding: 0 0 0.9rem;
+}
+
+.stage-meter b {
+    color: var(--text-main);
+    font-weight: 700;
+}
+
+/* Deliberately NOT amber. Pieces nobody has been given yet is the normal state
+   of a stage that has just opened — colouring it made every fresh stage look
+   like something had gone wrong. It becomes a warning at the End button, where
+   it is actually a decision, and only there. */
+.stage-meter-left {
+    color: var(--text-muted);
+}
+
+.stage-meter-all {
+    color: #16a34a;
+    font-weight: 600;
+}
+
+.share-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+/* Fixed columns, so the rows do not re-flow every time somebody's name is
+   longer than the last one's. */
+.share-table th:nth-child(1) { width: 30%; }
+.share-table th:nth-child(2) { width: 14%; }
+.share-table th:nth-child(3) { width: 22%; }
+.share-table th:nth-child(4) { width: 16%; }
+.share-table th:nth-child(5) { width: 18%; }
+
+.share-table th {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    font-weight: 600;
+    text-align: left;
+    padding: 0.35rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+/* Numeric headings and cells are right-aligned by the shared .col-num rules
+   near the top of this file — nothing to repeat here. */
+
+.share-table td {
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid #f1f5f9;
+    font-size: 0.875rem;
+    vertical-align: middle;
+}
+
+.share-table tr:last-child td {
+    border-bottom: none;
+}
+
+.share-who {
+    font-weight: 600;
+    color: var(--text-main);
+    white-space: nowrap;
+}
+
+.share-time {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+/* A finished share is quieter than a live one. The rows he can still act on are
+   the ones worth the ink. */
+.share-row.is-done {
+    background: #f8fafc;
+}
+
+.share-row.is-done .share-who {
+    color: var(--text-muted);
+}
+
+.share-tick {
+    color: #16a34a;
+    font-weight: 700;
+}
+
+/* Correcting a count he has already entered — quiet, because it is a repair,
+   not the next thing to do. Live only while the stage is open, which is the
+   only time this card is drawn at all. */
+.btn-share-fix {
+    border: 1px solid var(--border);
+    background: #fff;
+    color: var(--text-muted);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.2rem 0.5rem;
+    cursor: pointer;
+}
+
+.btn-share-fix:hover {
+    color: var(--text-main);
+    background: #f1f5f9;
+}
+
+.share-table input[type="number"] {
+    width: 5rem;
+    padding: 0.35rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.875rem;
+    text-align: right;
+    background: #fff;
+    color: var(--text-main);
+}
+
+.share-table input.share-out {
+    font-weight: 700;
+}
+
+.share-table select {
+    padding: 0.35rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.875rem;
+    background: #fff;
+    color: var(--text-main);
+    max-width: 12rem;
+}
+
+/* The buttons are laid out by an inner div, NOT by the cell.
+   display:flex on a <td> takes it out of the table's column model, and the
+   column it was supposed to sit under stops lining up with its own heading. */
+.share-act-in {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    justify-content: flex-end;
+}
+
+.share-act .btn-stage {
+    padding: 0.35rem 0.7rem;
+    font-size: 0.8rem;
+    background-color: var(--primary);
+}
+
+.share-act .btn-stage:hover:not(:disabled) {
+    background-color: var(--primary-hover);
+}
+
+/* Taking a man off the stage is a correction, not an action he is being invited
+   to take — so it is a mark beside the row, not a button competing with Done. */
+.btn-share-remove {
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 0 0.25rem;
+    cursor: pointer;
+}
+
+.btn-share-remove:hover {
+    color: var(--status-danger, #dc2626);
+}
+
+/* PUTTING SOMEONE ON THE STAGE IS NOT A TABLE ROW.
+   It was, and it could not line up: the columns a share needs — given, start,
+   finished — are not the fields this control needs, so its button ended up
+   under a heading it had nothing to do with. The table says who is on the
+   stage; this bar is what puts them there. */
+.share-assign {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-top: 0.75rem;
+    padding: 0.7rem 0.75rem;
+    background: #f8fafc;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+}
+
+.share-assign select {
+    flex: 1 1 11rem;
+    min-width: 0;
+    max-width: 16rem;
+    padding: 0.45rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.875rem;
+    background: #fff;
+    color: var(--text-main);
+}
+
+.share-assign-qty {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.share-assign input[type="number"] {
+    width: 5rem;
+    padding: 0.45rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.875rem;
+    font-weight: 700;
+    text-align: right;
+    background: #fff;
+    color: var(--text-main);
+}
+
+.share-assign .unit {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+/* Pushed to the end of the bar, so the action is always in the same place
+   whether or not the row has wrapped. */
+.share-assign .btn-share-add {
+    margin-left: auto;
+    background-color: var(--primary);
+}
+
+.share-assign .btn-share-add:hover:not(:disabled) {
+    background-color: var(--primary-hover);
+}
+
+.share-empty {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    padding: 0.9rem 0;
+}
+
+/* Remarks and the End button, on the stage rather than on any one share.
+   Separated by a rule: everything above it is about one person, everything
+   below it closes the whole stage. */
+.stage-end-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 1rem 1.5rem;
+    align-items: start;
+    margin-top: 1.1rem;
+    padding-top: 1.1rem;
+    border-top: 1px solid var(--border);
+}
+
+.stage-end-row label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+}
+
+.stage-end-remarks textarea {
+    width: 100%;
+    min-width: 0;
+    padding: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.875rem;
+    line-height: 1.45;
+    resize: vertical;
+    background: #fff;
+    color: var(--text-main);
+}
+
+/* Sized to its controls, not to half the card — the End button is one action,
+   and a column of empty space beside it read as a missing field. */
+.stage-end-action {
+    min-width: 15rem;
+}
+
+.stage-end-action input[type="time"] {
+    padding: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.875rem;
+    background: #fff;
+    color: var(--text-main);
+}
+
+.stage-end-action input[type="time"]:disabled {
+    background: #f8fafc;
+    color: var(--text-muted);
+}
+
+@media (max-width: 700px) {
+    .stage-end-row {
+        grid-template-columns: 1fr;
+    }
+    .stage-end-action {
+        min-width: 0;
+    }
+}
+
+/* Why the button is shut, next to the button. */
+.share-note {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    padding-top: 0.4rem;
+    line-height: 1.4;
+    max-width: 22rem;
+}
+
+/* The one case that is not "not yet" but "you are about to write pieces off". */
+.share-note.is-warn {
+    color: #b45309;
+    font-weight: 500;
+}
+
+.all-done-banner {
+    margin-top: 1rem;
+    padding: 1rem;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 8px;
+    text-align: center;
+    font-weight: 600;
+}
+
+/* ---- Waste declaration dialog (Cutting stage End) ---- */
+
+.waste-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 3rem 1rem;
+    overflow-y: auto;
+    z-index: 100;
+}
+
+.waste-modal.hidden {
+    display: none;
+}
+
+.waste-panel {
+    background: #fff;
+    border-radius: 12px;
+    padding: 1.5rem;
+    width: 100%;
+    max-width: 820px;
+    box-shadow: 0 20px 45px rgba(15, 23, 42, 0.25);
+}
+
+.waste-head h3 {
+    margin: 0 0 0.25rem;
+    font-size: 1.1rem;
+}
+
+.waste-head p {
+    margin: 0 0 1rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+.waste-warn {
+    background: #fffbeb;
+    color: #b45309;
+    border-radius: 6px;
+    padding: 0.6rem 0.8rem;
+    font-size: 0.8rem;
+    margin-bottom: 1rem;
+}
+
+.waste-panel table input,
+.waste-panel table select {
+    width: 100%;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.85rem;
+}
+
+.waste-panel .w-actions {
+    width: 1%;
+    white-space: nowrap;
+}
+
+.waste-empty {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 1.5rem;
+}
+
+#waste-add {
+    margin-top: 0.75rem;
+}
+
+.waste-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+}
+
+/* The fabric picker carries the SKU, which is the only thing distinguishing
+   three materials all called "Linen Fabric" — it must not clip. */
+.waste-panel table th:first-child,
+.waste-panel table td:first-child {
+    min-width: 15rem;
+}
+
+.waste-panel table td {
+    white-space: normal;
+}
+
+/* A discarded remnant is still written — as Scrapped — so it stays visible in
+   the dialog rather than disappearing as if it never existed. */
+.w-discarded > td {
+    opacity: 0.55;
+}
+
+.w-discarded input,
+.w-discarded select {
+    text-decoration: line-through;
+    background: #f8fafc;
+}
+
+/* ---- Plan header ---- */
+
+.plan-header {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    margin-bottom: 1.25rem;
+    overflow: hidden;
+}
+
+.plan-header-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.plan-header-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.plan-header-sub {
+    margin-top: 0.15rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.plan-status-pill {
+    padding: 0.3rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+/* Auto-fit rather than fixed columns: six stats on a wide screen sit in one
+   row, and reflow to two or three on a narrow one without a breakpoint. */
+.plan-header-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 1rem 1.5rem;
+    padding: 1rem 1.25rem;
+}
+
+.plan-stat-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+}
+
+.plan-stat-value {
+    font-size: 0.95rem;
+    font-weight: 700;
+}
+
+/* Cut size is an instruction, not a measurement to skim past — set in the
+   monospace face so 45 x 90 lines up down the column. */
+.cut-size {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.is-muted {
+    color: var(--text-muted);
+}
+
+/* ---- Supervisor shell ---- */
+
+.app-header-left {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+}
+
+.app-header h1 {
+    font-size: 1.125rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.app-date {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+}
+
+.app-header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.app-header .primary-btn {
+    padding: 0.4rem 0.9rem;
+    font-size: 0.8125rem;
+    border-radius: 4px;
+    box-shadow: none;
+}
+
+.app-header .primary-btn:hover {
+    transform: none;
+    box-shadow: none;
+}
+
+.tab-strip {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1rem;
+    overflow-x: auto;
+}
+
+.tab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 1rem;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: none;
+    font-family: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.tab-btn:hover {
+    color: var(--text-main);
+    background: #f8fafc;
+}
+
+/* Underline rather than a filled block — a filled tab competes with the
+   content below it for attention. */
+.tab-btn.is-active {
+    color: var(--text-main);
+    border-bottom-color: var(--primary);
+}
+
+.tab-count {
+    min-width: 1.15rem;
+    padding: 0 0.35rem;
+    border-radius: 999px;
+    background: #e2e8f0;
+    color: #334155;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-align: center;
+}
+
+.tab-btn.is-active .tab-count {
+    background: var(--primary);
+    color: #fff;
+}
+
+.tab-count.hidden {
+    display: none;
+}
+
+.tab-panel {
+    display: none;
+}
+
+.tab-panel.is-active {
+    display: block;
+}
+
+/* The list tabs write their cards straight into the panel, so the panel itself
+   has to carry the spacing. Without it two cards meet border to border and read
+   as one table split by a rule, rather than two separate items.
+   Receive and Production are left alone - they have their own containers. */
+#panel-history.is-active,
+#panel-disputes.is-active,
+#panel-waste.is-active {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.prod-toolbar {
+    margin-bottom: 1rem;
+}
+
+.panel-placeholder {
+    padding: 3rem 1.5rem;
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.panel-placeholder h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-main);
+    margin-bottom: 0.35rem;
+}
+
+.panel-loading {
+    padding: 2rem;
+    text-align: center;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+/* ---- Plan header: the order picker sits with the order it names ---- */
+
+.plan-header-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+/* Compact inside the card — it is a control on a header row now, not the one
+   thing on an otherwise empty toolbar. */
+.plan-header-controls .sup-select {
+    margin-right: 0;
+    min-width: 14rem;
+    padding: 0.35rem 0.6rem;
+    font-size: 0.8125rem;
+    border-radius: 4px;
+}
+
+/* Hidden, not removed: the picker is parked back here whenever no plan is
+   open, and there would otherwise be nowhere to choose one from. */
+.prod-toolbar.hidden {
+    display: none;
+}
+
+.plan-header {
+    border-color: #cbd5e1;
+}
+
+.plan-header-top {
+    background: #f1f5f9;
+}
+
+/* An order that is ready to cut is worth seeing from across the room; one still
+   waiting on the store is not the supervisor's problem yet. */
+.plan-status-pill {
+    background: #fff;
+}
+
+/* ---- Dialogs (dispute resolution) ---- */
+
+.exc-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 4rem 1rem;
+    overflow-y: auto;
+    z-index: 100;
+}
+
+.exc-modal.hidden {
+    display: none;
+}
+
+.exc-panel {
+    width: 100%;
+    max-width: 460px;
+    padding: 1.25rem;
+    background: #fff;
+    border-radius: var(--radius);
+    box-shadow: 0 20px 40px rgba(15, 23, 42, 0.2);
+}
+
+.exc-panel h3 {
+    font-size: 1.05rem;
+    font-weight: 700;
+    margin-bottom: 0.15rem;
+}
+
+.exc-sub {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin-bottom: 0.875rem;
+}
+
+.exc-facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+    padding: 0.75rem;
+    margin-bottom: 1rem;
+    background: #f8fafc;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+}
+
+.exc-facts b {
+    color: var(--text-main);
+}
+
+.exc-strong b {
+    color: var(--status-danger);
+}
+
+.exc-label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+}
+
+.exc-panel select,
+.exc-panel input[type="date"],
+.exc-panel input[type="time"],
+.exc-panel input[type="number"],
+.exc-panel textarea {
+    width: 100%;
+    padding: 0.5rem 0.6rem;
+    margin-bottom: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.875rem;
+    color: var(--text-main);
+}
+
+.exc-hint {
+    margin: 0 0 0.75rem;
+    font-size: 0.775rem;
+    color: var(--text-muted);
+}
+
+/* Shown when this answer is the one that writes stock off the books. Amber, not
+   red: nothing has gone wrong yet, but the next click is not reversible. */
+.exc-warn {
+    margin: 0 0 0.75rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid #fcd34d;
+    border-left: 3px solid var(--status-warning);
+    border-radius: 4px;
+    background: #fffbeb;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: #78350f;
+}
+
+.exc-warn b {
+    display: block;
+    margin-bottom: 0.2rem;
+}
+
+/* The other side's own words. What they already checked is the most useful
+   thing on the screen for deciding whether to look again. */
+.exc-warn-quote {
+    margin: 0.35rem 0;
+    padding-left: 0.6rem;
+    border-left: 2px solid #fcd34d;
+    font-style: italic;
+    color: #92400e;
+}
+
+.primary-btn.is-danger {
+    background: var(--status-danger);
+}
+
+.primary-btn.is-danger:hover {
+    background: #dc2626;
+}
+
+/* Replaces his "Not with me" button once he has pressed it - the answer is
+   recorded and cannot be given twice. */
+.denied-tag {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 9999px;
+    background: rgba(15, 23, 42, 0.06);
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: help;
+}
+
+.exc-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+}
+
+.ghost-btn {
+    padding: 0.5rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #fff;
+    font-family: inherit;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.raise-btn {
+    padding: 0.4rem 0.85rem;
+    border: 1px solid var(--primary);
+    border-radius: 4px;
+    background: var(--primary);
+    color: #fff;
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+/* The two dispute answers are NOT equal weight. "I have it" settles the
+   question; "Not with me" is a step towards writing stock off the books, and it
+   needs the other side to agree before anything happens. Rendering both as
+   solid blue slabs made them read as one control with a divider. */
+.raise-btn.is-stale {
+    background: #fff;
+    border-color: #cbd5e1;
+    color: var(--text-main);
+}
+
+.raise-btn.is-stale:hover:not(:disabled) {
+    background: #f1f5f9;
+    border-color: var(--text-muted);
+}
+
+/* They were glued edge to edge because nothing spaced them. */
+.row-actions {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+
+.col-action {
+    width: 1%;
+    white-space: nowrap;
+    text-align: right;
+}
+
+/* Waste disputes are counted in physical pieces, not metres, and the answer to
+   one is about a specific remnant. Same green pill as everywhere else. */
+.waste-badge {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 9999px;
+    background: rgba(4, 120, 87, 0.1);
+    color: #047857;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+/* Which way the material was going. Deliberately quieter than waste-badge: the
+   direction changes which answer he can give, but the material is still what
+   the eye should land on first. Green is the offcut colour throughout, so the
+   pieces-coming-back one borrows it and the issued-out one stays neutral. */
+.dir-badge {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 9999px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.dir-badge.dir-out {
+    background: rgba(15, 23, 42, 0.06);
+    color: var(--text-muted);
+}
+
+.dir-badge.dir-in {
+    background: rgba(4, 120, 87, 0.1);
+    color: #047857;
+}
+
+/* What the store said when it raised the dispute. He is answering a question,
+   and he has to be able to read it. */
+.exc-quote {
+    margin: 0.5rem 0 0;
+    padding-left: 0.6rem;
+    border-left: 2px solid var(--border);
+    font-style: italic;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+/* item-meta-line is monospace, which suits an id or a date but reads badly for
+   a sentence. */
+.item-meta-line.is-prose {
+    font-family: inherit;
+    font-weight: 400;
+}
+
+.raise-btn:hover:not(:disabled) {
+    background: var(--primary-hover);
+}
+
+.col-action {
+    width: 1%;
+    white-space: nowrap;
+    text-align: right;
+}
+
+.cut-size {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.item-header.static-header {
+    cursor: default;
+}
+
+.item-body.is-open {
+    display: block;
+}
+
+/* ---- Production toolbar ---- */
+
+.prod-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.toolbar-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+}
+
+.toolbar-check input {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+}
+
+/* ---- History range bar ---- */
+
+.day-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.6rem 0.875rem;
+    margin-bottom: 0.75rem;
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    flex-wrap: wrap;
+}
+
+.day-bar input[type="date"] {
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.8125rem;
+    color: var(--text-main);
+}
+
+.range-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+/* Presets are shortcuts, not the main action - outlined so they sit behind the
+   dates themselves. */
+.raise-btn.is-ghost {
+    background: #fff;
+    color: var(--primary);
+}
+
+.raise-btn.is-ghost:hover {
+    background: #eff6ff;
+}
+
+.day-bar-sub {
+    margin-left: auto;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+}
+
+/* ---- Assignment note on the Receive tab ---- */
+
+/* States what the receipt list structurally cannot: that orders exist and are
+   waiting on the store. Blue rather than a warning colour - it is information,
+   not a problem to fix. */
+.assign-note {
+    padding: 0.7rem 0.9rem;
+    margin-bottom: 0.75rem;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: #1e40af;
+}
+
+.assign-note b {
+    font-weight: 700;
+}
+
+/* Nothing assigned is not news, so it recedes. */
+.assign-note.is-quiet {
+    background: #f8fafc;
+    border-color: var(--border);
+    color: var(--text-muted);
+}
+
+/* ---- Material damage + Reissue ---- */
+
+/* The damage dialog carries a four-column table whose material names run to
+   "Linen Fabric / Block Print / Wiltshire Green". At 620px the Quantity column
+   was pushed off the right edge entirely - the table scrolled, but the input he
+   most needs was the one out of sight. */
+.exc-panel-wide {
+    max-width: 860px;
+
+    /* The dialog is tall enough that Cancel and Save were falling below the
+       fold, and inside a Creator iframe the outer page is not obviously
+       scrollable - so the buttons read as missing rather than as off-screen.
+       Capping the panel keeps them reachable; 8rem is the modal's own 4rem of
+       padding top and bottom. */
+    max-height: calc(100vh - 8rem);
+    overflow-y: auto;
+}
+
+/* Puts the Report damage button on the same line as the section heading it
+   belongs to, rather than floating above the materials table unattached. */
+.section-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+/* The heading takes the slack, so any action sits hard right. space-between was
+   fine with two children and wrong the moment there were three - it spread them
+   evenly and left the middle button floating, anchored to nothing. */
+.section-title-row > span:first-child {
+    margin-right: auto;
+}
+
+/* Deliberately quiet. Reporting damage is an ordinary part of the job, not an
+   alarm — a red button here would make people avoid pressing it, and unreported
+   damage is the one outcome this whole feature exists to prevent. */
+/* Sized for a tablet on a shop floor, not a mouse. At 0.35rem padding these
+   came out around 30px tall - fine to click, easy to miss with a thumb.
+
+   Still OUTLINE, not solid: both are exceptional actions - damage is a bad day,
+   outsourcing is occasional - and a solid fill would put them level with Start
+   production, which is the thing he actually presses every time. Bigger without
+   being louder. */
+.damage-btn {
+    padding: 0.55rem 1rem;
+    border: 1px solid #fcd34d;
+    border-radius: 6px;
+    background: #fffbeb;
+    color: #b45309;
+    font-family: inherit;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.2;
+    text-transform: none;
+    letter-spacing: 0;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.damage-btn:hover {
+    border-color: #b45309;
+    background: #fef3c7;
+}
+
+/* Shown when the dialog was opened BY a stage ending short, rather than by him
+   pressing the button. It states the figure the system already watched him
+   record, so he is not asked to type it again - and so the count in the box
+   below reads as a default he may correct rather than a question. */
+.dmg-lead {
+    margin-bottom: 0.75rem;
+    padding: 0.55rem 0.7rem;
+    border-radius: 4px;
+    background: #fef3c7;
+    color: #92400e;
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+.dmg-step {
+    margin-bottom: 0.75rem;
+}
+
+.dmg-step label {
+    display: block;
+    margin-bottom: 0.25rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+/* The number inputs sit inside table cells here, so the full-width rule the
+   dialog applies to loose inputs would push the unit label onto its own line.
+   Sized to the numbers actually typed - a piece count is one or two digits, a
+   quantity two or three with a decimal - rather than to a default. */
+.dmg-lines input[type="number"] {
+    width: 4.25rem;
+    margin-bottom: 0;
+    text-align: right;
+}
+
+.dmg-lines .dmg-qty {
+    width: 5.5rem;
+}
+
+/* Tables in this app are nowrap by default, which is right for a row of figures
+   and wrong for a three-part material name - one long name was setting the width
+   of the whole dialog. Wrapping the name is what lets every column fit. */
+.dmg-lines .material-name-cell {
+    white-space: normal;
+    min-width: 13rem;
+}
+
+.dmg-lines .material-name-cell .mat-name {
+    display: block;
+    line-height: 1.35;
+}
+
+/* Keeps the two number columns off each other when a name wraps to two lines. */
+.dmg-lines td.col-num,
+.dmg-lines th.col-num {
+    white-space: nowrap;
+}
+
+.dmg-unit {
+    margin-left: 0.3rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.dmg-lines {
+    max-height: 320px;
+    overflow-y: auto;
+    margin-bottom: 0.75rem;
+}
+
+.col-tick {
+    width: 1%;
+    white-space: nowrap;
+    text-align: center;
+}
+
+.exc-error {
+    margin: 0.5rem 0;
+    padding: 0.6rem 0.75rem;
+    border-radius: 4px;
+    background: #fef2f2;
+    color: #b91c1c;
+    font-size: 0.8rem;
+}
+
+.ri-card {
+    margin-bottom: 1rem;
+    padding: 1rem;
+}
+
+.ri-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+}
+
+.ri-head h2 {
+    font-size: 0.95rem;
+    font-weight: 700;
+}
+
+.ri-sub {
+    margin-top: 0.1rem;
+    font-size: 0.775rem;
+    color: var(--text-muted);
+}
+
+/* The reason the store is being asked twice for the same material. Muted, but
+   present on every row — without it a reissue looks like a planning error. */
+.ri-why {
+    max-width: 18rem;
+    font-size: 0.775rem;
+    color: var(--text-muted);
+}
+
+.ri-phase {
+    display: inline-block;
+    padding: 0.05rem 0.4rem;
+    border-radius: 1rem;
+    background: #eef2ff;
+    color: #4338ca;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
+.ri-when {
+    margin-top: 0.15rem;
+    font-size: 0.7rem;
+    opacity: 0.75;
+}
+
+/* A material line that is partly (or wholly) replacing something ruined in
+   production.
+
+   Amber, matching .remake-tag and the Reissue tab: not an error, but not
+   something to read past either. It exists because both screens MERGE — the
+   production table combines every requirement for one material and cut size, and
+   the receive figure combines every plan behind it — so without a marker the
+   merge silently absorbs the fact that he asked for this himself. */
+.reissue-tag {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 1rem;
+    background: #fef3c7;
+    color: #b45309;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+/* The one chip in the per-order split that is a reissue. Tinted rather than
+   badged again — the row already carries the badge, and this only has to say
+   WHICH of the orders behind the figure it is. The reason rides on the title
+   attribute; there is no room for it inline and it is context, not an
+   instruction. */
+.order-chip.is-reissue {
+    background: #fffbeb;
+    border-color: #fcd34d;
+    color: #92400e;
+    cursor: help;
+}
+
+/* Heading row that opens the reissue group inside the materials table.
+   
+   A row rather than a second table: "You have" and "Pieces to cut" mean exactly
+   the same thing above and below it, and splitting them into two tables would
+   say they do not. */
+.mat-group-head td {
+    padding-top: 0.55rem;
+    padding-bottom: 0.35rem;
+    background: #fffbeb;
+    border-top: 2px solid #fcd34d;
+    color: #92400e;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: normal;
+}
+
+/* The rows under it. Tinted the way waste-row is, for the same reason — the
+   figures mean the same thing, the material behind them came from somewhere
+   else. Deliberately quiet: a reissue is ordinary cloth once it reaches him. */
+.reissue-row td {
+    background: #fffdf5;
+}
+
+/* ---- Third party ---- */
+
+/* Sits beside Report damage. Blue rather than amber: sending work out is an
+   ordinary scheduling decision, not something going wrong. */
+/* Matched to .damage-btn exactly. They are a pair, seen one above the other on
+   the same card, and any difference in height between them reads as a mistake. */
+.outsource-btn {
+    padding: 0.55rem 1rem;
+    border: 1px solid #bfdbfe;
+    border-radius: 6px;
+    background: #eff6ff;
+    color: #1d4ed8;
+    font-family: inherit;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.2;
+    text-transform: none;
+    letter-spacing: 0;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.outsource-btn:hover {
+    border-color: var(--primary);
+    background: #dbeafe;
+}
+
+/* The same button once something is out. Filled, because taking it back is the
+   only move available on this item until it happens. */
+.outsource-btn.is-out {
+    border-color: var(--primary);
+    background: var(--primary);
+    color: #fff;
+}
+
+/* A stage whose pieces are in someone else's workshop. Read-only by design —
+   there is no operator, no machine and no honest quantity to type. */
+.stage-card.is-outsourced {
+    border-left: 3px solid var(--primary);
+    background: #f8fbff;
+}
+
+.stage-card.is-outsourced .stage-status {
+    color: var(--primary);
+    font-weight: 600;
+}
+
+/* Quantity, date and time on one line — they are one fact about one handover
+   and stacking them made the dialog scroll for no reason. */
+.os-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.85rem;
+    margin-bottom: 1rem;
+}
+
+.os-grid label {
+    display: block;
+    margin-bottom: 0.25rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.os-grid input {
+    width: 100%;
+    margin-bottom: 0;
+}
+
+@media (max-width: 640px) {
+    .os-grid { grid-template-columns: 1fr; }
+}
+
+/* A dialog select needs the arrow back — the shared input rule above strips the
+   native appearance on some engines and leaves a flat box with no affordance. */
+.exc-panel select {
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.55rem center;
+    background-size: 1rem;
+    padding-right: 2rem;
+    cursor: pointer;
+}
+
+.exc-panel select:focus,
+.exc-panel input:focus,
+.exc-panel textarea:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+/* Section heading inside a dialog. .section-title is uppercase and muted, which
+   is right in a card and too quiet for a step he has to act on. */
+.os-step-head {
+    margin: 0 0 0.35rem;
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--text-main);
+}
+
+/* The second question, separated from the first. Without the rule and the
+   padding the stage rows ran straight into "Who is it going to?" and the whole
+   lower half of the dialog read as one undifferentiated block. */
+.os-party-block {
+    margin: 1.15rem 0;
+    padding-top: 1.15rem;
+    border-top: 1px solid var(--border);
+}
+
+/* Wider than the other fields on purpose: party names carry a contact after
+   them and the default width truncated both. */
+.os-party-block select {
+    margin-bottom: 0.45rem;
+}
+
+.os-party-block .exc-hint {
+    margin: 0;
+}
+
+/* ---- Stage picker ---- */
+
+.os-stages {
+    margin-bottom: 0.25rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+/* A label, not a cell: the whole row is the hit target. He is ticking these
+   standing at a table, not aiming at a 13px box with a mouse. */
+.os-stage-row {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.55rem 0.7rem;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+}
+
+.os-stage-row:last-child {
+    border-bottom: none;
+}
+
+.os-stage-row:hover:not(.is-off) {
+    background: #f1f5f9;
+}
+
+.os-stage-row input[type="checkbox"] {
+    width: 1rem;
+    height: 1rem;
+    margin: 0;
+    flex: 0 0 auto;
+    accent-color: var(--primary);
+    cursor: pointer;
+}
+
+/* The step number, not Sequence_No — 10/20/30 are spaced for insertion room and
+   read as nonsense next to "step 3 of 5". */
+.os-step-no {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.4rem;
+    height: 1.4rem;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: #eef2ff;
+    color: #4338ca;
+    font-size: 0.7rem;
+    font-weight: 700;
+}
+
+.os-stage-name {
+    flex: 1 1 auto;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+/* Why a stage cannot go out. Pushed right and quiet — it explains a disabled
+   row, it is not a column of its own. */
+.os-stage-why {
+    flex: 0 0 auto;
+    padding: 0.05rem 0.45rem;
+    border-radius: 1rem;
+    background: rgba(15, 23, 42, 0.06);
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.os-stage-row.is-off {
+    background: #f8fafc;
+    cursor: default;
+}
+
+.os-stage-row.is-off .os-step-no,
+.os-stage-row.is-off .os-stage-name {
+    color: var(--text-muted);
+    background: rgba(15, 23, 42, 0.05);
+}
+
+.os-stage-row.is-off .os-stage-name {
+    background: none;
+}
+
+/* A tick with its label, sized like the stage picker rows so the whole line is
+   the hit target. */
+.dmg-check {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+}
+
+.dmg-check input[type="checkbox"] {
+    width: 1rem;
+    height: 1rem;
+    margin: 0;
+    flex: 0 0 auto;
+    accent-color: var(--primary);
+    cursor: pointer;
+}
+
+/* A stage that is eligible but not its turn yet.
+   
+   Deliberately different from .is-off: that one is finished, running or already
+   out and carries a reason pill saying so. This one has nothing wrong with it —
+   it simply cannot be reached until the stage before it is ticked, and a reason
+   pill would have to say something meaningless like "not yet". */
+.os-stage-row.is-locked {
+    cursor: default;
+    opacity: 0.45;
+}
+
+.os-stage-row.is-locked:hover {
+    background: none;
+}

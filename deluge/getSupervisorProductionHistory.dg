@@ -1,0 +1,377 @@
+string getSupervisorProductionHistory(string supervisorId, string dateTxt)
+{
+	// What this supervisor actually produced on a given day.
+	// POST: supervisorId, dateTxt - the day, as "dd-MMM-yyyy".
+	//
+	// ONE DAY, not a range. A supervisor's history is a SHIFT LOG - "what did I
+	// get through today" - where the store's is an audit trail that legitimately
+	// spans weeks. Different question, so a different control, and a single day
+	// also bounds the work naturally.
+	//
+	// SIGNATURE CHANGED: this took fromTxt and toTxt. The Custom API's argument
+	// list must be changed to match, or every call fails.
+	//
+	// Dates arrive pre-formatted because Deluge parses "dd-MMM-yyyy" the same
+	// way whatever the org's locale is, while "01-08-2026" is a different day in
+	// the US than it is here.
+	//
+	// DRIVEN OFF Stage_Log, not off completed plans. Two reasons:
+	//
+	//  - A stage log has a date of its own, so the range means "work done in
+	//    these days" rather than "orders whose plan was raised then". Those are
+	//    different questions and only the first is a production history.
+	//  - It bounds the query. Walking every completed plan ever would grow
+	//    without limit; this reads only the days asked for.
+	//
+	// Stages are grouped under the item they belong to, because a supervisor
+	// thinks in items - "the napkins" - not in isolated stage rows.
+	//
+	// EVERY LOOKUP IN HERE IS CACHED. This function used to run a
+	// Production_Planning query per stage log just to test whose plan it was -
+	// including for logs that turned out not to be his - plus an Employee query
+	// per log and a Raw_Material query per received line. That is one query per
+	// ROW, so the cost grew with how much had been done rather than with how much
+	// is being shown. It is the shape that trips the statement-execution limit,
+	// and that limit is NOT catchable: it kills the script, so the try/catch never
+	// runs and the widget gets a bare 500 with no error card to explain it.
+
+	itemsJson = "";
+	recvJson = "";
+	totalStages = 0;
+	totalOut = 0;
+	totalRecvLines = 0;
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	supTxt = ifnull(supervisorId,"").toString().trim();
+	if(supTxt == "" || supTxt.isNumber() == false)
+	{
+		return "{\"errors\":[],\"items\":[],\"receipts\":[],\"stageCount\":0,\"producedTotal\":0,\"receiptLines\":0}";
+	}
+	supId = supTxt.toLong();
+
+	dDay = dateTxt.trim().toDate();
+
+	if(dDay > zoho.currentdate)
+	{
+		return "{\"errors\":[\"Cannot look at a future date\"],\"items\":[],\"receipts\":[],\"stageCount\":0,\"producedTotal\":0,\"receiptLines\":0}";
+	}
+
+	//--------------------------------------------------------------------------
+	// Caches. Filled on first sight, read for free after that.
+	//
+	// planOwner doubles as the ownership test. A miss is remembered as "0" rather
+	// than left empty, so a plan with no supervisor assigned is not re-queried on
+	// every one of its stage logs - an unassigned plan would otherwise be the
+	// most expensive kind there is.
+	//--------------------------------------------------------------------------
+	planOwner = Map();
+	planNoMap = Map();
+	planSoMap = Map();
+	empCache = Map();
+
+	// Only finished stages. A stage still running is work in hand, not history,
+	// and it is already on the Production tab.
+	//
+	// NEWEST first. Log_Date is the same for every row on a one-day view, so it
+	// can order nothing here - Added_Time is stamped at insert and gives the real
+	// sequence of the shift.
+	logs = Stage_Log[Log_Date == dDay && Stage_Status == "Done"] sort by Added_Time desc;
+	info "stage logs on day: " + logs.count();
+
+	// Grouped by Plan_Item. Because the logs arrive newest-first, an item enters
+	// itemOrder at its most RECENT stage - so the cards read most-recently-worked
+	// first, which is what he is looking for when he opens this.
+	stagesByItem = Map();
+	itemOrder = List();
+
+	for each  lg in logs
+	{
+		itmId = lg.Plan_Item;
+		if(itmId != null)
+		{
+			// Ownership is the plan's, not the log's - a log records who ran the
+			// machine, which is not the same as whose order it was.
+			planKey = ifnull(lg.Plan,"").toString();
+			ownerTxt = ifnull(planOwner.get(planKey),"").toString();
+
+			if(ownerTxt == "" && planKey != "")
+			{
+				for each  pl in Production_Planning[ID == lg.Plan]
+				{
+					ownerTxt = ifnull(pl.Assigned_To,"").toString();
+					planNoMap.put(planKey,ifnull(pl.Plan_No,"").toString());
+
+					soCache = "";
+					for each  so in Sales_Order[ID == pl.Sales_Order]
+					{
+						soCache = ifnull(so.Sales_Order,"").toString().replaceAll("\"","'");
+					}
+					planSoMap.put(planKey,soCache);
+				}
+
+				// "0" is the remembered miss - never a real record id.
+				if(ownerTxt == "")
+				{
+					ownerTxt = "0";
+				}
+				planOwner.put(planKey,ownerTxt);
+			}
+
+			mine = false;
+			if(ownerTxt == supId.toString())
+			{
+				mine = true;
+			}
+
+			if(mine == true)
+			{
+				key = itmId + "";
+
+				//------------------------------------------------------
+				// WHO WORKED IT.
+				//
+				// A stage is split between several operators now, so the
+				// name comes off the shares - the header's own Operator is
+				// only filled on a stage logged before the split existed,
+				// and on nothing written since.
+				//
+				// Queried only when the header has no operator, so an old
+				// row still costs nothing. Several names are joined with a
+				// comma: this is one row per STAGE, and what the supervisor
+				// is looking for is which of his men were on it.
+				//------------------------------------------------------
+				opKey = ifnull(lg.Operator,"").toString();
+				opName = ifnull(empCache.get(opKey),"").toString();
+
+				if(opName == "" && opKey != "")
+				{
+					for each  emp in Employee[ID == lg.Operator]
+					{
+						opName = ifnull(emp.Employee_Name,"").toString().replaceAll("\"","'");
+					}
+					empCache.put(opKey,opName);
+				}
+
+				if(opKey == "")
+				{
+					for each  agH in Stage_Assignment[Stage_Log == lg.ID]
+					{
+						agKey = ifnull(agH.Operator,"").toString();
+						if(agKey != "")
+						{
+							agName = ifnull(empCache.get(agKey),"").toString();
+							if(agName == "")
+							{
+								for each  empA in Employee[ID == agH.Operator]
+								{
+									agName = ifnull(empA.Employee_Name,"").toString().replaceAll("\"","'");
+								}
+								empCache.put(agKey,agName);
+							}
+
+							if(agName != "")
+							{
+								if(opName == "")
+								{
+									opName = agName;
+								}
+								else
+								{
+									opName = opName + ", " + agName;
+								}
+							}
+						}
+					}
+				}
+
+				logDateTxt = "";
+				if(lg.Log_Date != null)
+				{
+					logDateTxt = lg.Log_Date.toString("dd-MMM-yyyy");
+				}
+
+				row = "{\"phase\":\"" + ifnull(lg.Phase_Name,"").toString().replaceAll("\"","'") + "\",\"operator\":\"" + opName + "\",\"date\":\"" + logDateTxt + "\",\"start\":\"" + ifnull(lg.Start_Time,"").toString() + "\",\"end\":\"" + ifnull(lg.End_Time,"").toString() + "\",\"qtyIn\":" + ifnull(lg.Qty_In,0) + ",\"qtyOut\":" + ifnull(lg.Qty_Out,0) + "}";
+
+				existing = stagesByItem.get(key);
+				if(existing == null)
+				{
+					stagesByItem.put(key,row);
+					itemOrder.add(key);
+				}
+				else
+				{
+					// PREPENDED, not appended. The logs arrive newest-first, so
+					// prepending puts the stages back into the order the work
+					// actually happened - Cutting, then Stitching, then Finishing.
+					// A production flow printed backwards is unreadable, however
+					// much the CARDS want to be newest-first.
+					stagesByItem.put(key,row + "," + existing);
+				}
+
+				totalStages = totalStages + 1;
+			}
+		}
+	}
+
+	//--------------------------------------------------------------------
+	// One card per item, with its stages nested.
+	//
+	// qtyOrdered and qtyProduced are facts about the WHOLE item, not about the
+	// day being shown - an item's stages run across days, so a card holding one
+	// day's stitching next to a produced figure earned over three days would
+	// read as "I made that today". The widget labels them as whole-item; they
+	// are sent unchanged because the item's progress is what makes the day's
+	// stages mean anything.
+	//--------------------------------------------------------------------
+	for each  k in itemOrder
+	{
+		itemName = "";
+		qtyOrdered = 0;
+		qtyProduced = 0;
+		itemStatus = "";
+		soNo = "";
+		planNo = "";
+
+		for each  itm in Plan_Item[ID == k.toLong()]
+		{
+			itemName = ifnull(itm.Item_Name,"").toString().replaceAll("\"","'");
+			qtyOrdered = ifnull(itm.Qty_Ordered,0);
+			qtyProduced = ifnull(itm.Qty_Produced,0);
+			itemStatus = ifnull(itm.Item_Status,"").toString();
+
+			// Straight out of the cache the stage pass filled - the plan behind
+			// an item is the same plan its logs pointed at.
+			iPlanKey = ifnull(itm.Plan,"").toString();
+			planNo = ifnull(planNoMap.get(iPlanKey),"").toString();
+			soNo = ifnull(planSoMap.get(iPlanKey),"").toString();
+		}
+
+		// Counted only for finished items - an item still mid-flow has a
+		// Qty_Produced of 0 and would drag the total down for no reason.
+		if(itemStatus == "Complete")
+		{
+			totalOut = totalOut + qtyProduced;
+		}
+
+		if(itemsJson != "")
+		{
+			itemsJson = itemsJson + ",";
+		}
+		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+		itemsJson = itemsJson + "{\"id\":\"" + k + "\",\"item\":\"" + itemName + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"qtyOrdered\":" + qtyOrdered + ",\"qtyProduced\":" + qtyProduced + ",\"status\":\"" + itemStatus + "\",\"stages\":[" + stagesByItem.get(k) + "]}";
+	}
+
+	//--------------------------------------------------------------------
+	// What came IN over the same days.
+	//
+	// "What did I do today" is only half the question - the other half is what
+	// the store handed him to do it with, and until now that lived only on the
+	// store's screen. Same date, same call: two round trips for one question
+	// would be two chances for the two halves to disagree about which day they
+	// were showing.
+	//
+	// Bounded by Issue_Date exactly as the stage logs are bounded by Log_Date,
+	// so adding this cannot turn a safe day into a statement-limit failure.
+	//
+	// The date is when the STORE issued it, which is the only date a handover
+	// has. The status says whether he has confirmed it since, so a row that has
+	// not been answered is visible here rather than only on the Receive tab.
+	//
+	// NO plan or sales order on these rows, for the same reason the store's own
+	// History dropped them: a handover is one press of Issue against a
+	// SUPERVISOR, and issueMaterials fans that quantity across every open plan
+	// he has. Material_Issue.Plan holds only the first plan that took an
+	// allocation, so naming it claimed "this material went to this order" when it
+	// routinely went to three. What he received and how much is the whole of what
+	// a handover can honestly say.
+	//--------------------------------------------------------------------
+	// Newest first, on Added_Time for the same reason as the stage logs: every
+	// handover on a one-day view shares an Issue_Date, so only the insert stamp
+	// can order them.
+	issues = Material_Issue[Issued_To == supId && Issue_Date == dDay] sort by Added_Time desc;
+	info "handovers on day: " + issues.count();
+
+	// The material catalogue, fetched ONCE, rather than a Raw_Material query per
+	// received line. Issue_Lines.Material is a LOOKUP whose display column is the
+	// SKU, so Creator's own form renders it as "RM-00005" - but Deluge reads a
+	// lookup as the record id. The id is the map key, never a displayed value.
+	//
+	// Built only when there is something to look up. A day with no handovers -
+	// most days, for most supervisors - does not pay for the catalogue at all.
+	matNameMap = Map();
+	if(issues.count() > 0)
+	{
+		for each  rmC in Raw_Material[ID != 0]
+		{
+			rmName = ifnull(rmC.Material_Display_Name,"").toString().trim();
+			if(rmName == "")
+			{
+				rmName = ifnull(rmC.Name,"").toString().trim();
+			}
+			matNameMap.put(rmC.ID.toString(),rmName.replaceAll("\"","'"));
+		}
+	}
+
+	for each  mi in issues
+	{
+		rLines = "";
+		for each  rln in mi.Issue_Lines
+		{
+			// Creator fields that were never written are EMPTY, not null, and
+			// toDecimal() throws on empty - normalise to string first.
+			rqStr = ifnull(rln.Qty,"0").toString().trim();
+			if(rqStr == "")
+			{
+				rqStr = "0";
+			}
+
+			rKey = "";
+			if(rln.Material != null)
+			{
+				rKey = rln.Material.toString();
+			}
+			rName = ifnull(matNameMap.get(rKey),"").toString();
+
+			// Falls back to whatever the line itself recorded. Handovers written
+			// before issueMaterials was fixed have the SKU sitting in
+			// Material_Name, and a material later removed from the catalogue
+			// misses the map entirely - in both cases the line's own text beats
+			// an empty cell.
+			if(rName == "")
+			{
+				rName = ifnull(rln.Material_Name,"").toString().trim().replaceAll("\"","'");
+			}
+
+			if(rLines != "")
+			{
+				rLines = rLines + ",";
+			}
+			rLines = rLines + "{\"material\":\"" + rName + "\",\"qty\":" + rqStr.toDecimal() + ",\"unit\":\"" + ifnull(rln.Unit,"").toString() + "\"}";
+			totalRecvLines = totalRecvLines + 1;
+		}
+
+		rDate = "";
+		if(mi.Issue_Date != null)
+		{
+			rDate = mi.Issue_Date.toString("dd-MMM-yyyy");
+		}
+
+		if(recvJson != "")
+		{
+			recvJson = recvJson + ",";
+		}
+		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+		recvJson = recvJson + "{\"id\":\"" + mi.ID + "\",\"date\":\"" + rDate + "\",\"time\":\"" + ifnull(mi.Issue_Time,"").toString() + "\",\"status\":\"" + ifnull(mi.Issue_Status,"").toString() + "\",\"lines\":[" + rLines + "]}";
+	}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"items\":[],\"receipts\":[],\"stageCount\":0,\"producedTotal\":0,\"receiptLines\":0}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[],\"items\":[" + itemsJson + "],\"receipts\":[" + recvJson + "],\"stageCount\":" + totalStages + ",\"producedTotal\":" + totalOut + ",\"receiptLines\":" + totalRecvLines + "}";
+}

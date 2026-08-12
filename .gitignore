@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Build output (widget zip is produced by the packaging step)
+dist/
+
+# Local HTTPS dev certificates — key.pem is a private key, never publish it.
+# Regenerate with:
+#   openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem \
+#     -days 365 -subj "/CN=localhost"
+*.pem
+cert.pem
+key.pem
+
+# Logs
+*.log
+ZET-debug.log
+
+# Local tooling / editor state
+.claude/
+.vscode/
+.idea/
+
+# OS junk
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Business data — real employee and machine records, not source
+Process & Employees.xlsx
+data/
+
+# Temp / scratch
+*.tmp
+*.bak
+*~

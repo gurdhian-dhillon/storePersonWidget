@@ -1,0 +1,75 @@
+string markWasteReceived(list wasteIds)
+{
+	// Custom action for the Waste Master report: the store person ticks the pieces
+	// he is physically holding and marks them received.
+	//
+	// Pending_Receipt means "the supervisor says he sent it back". Available means
+	// "it is on the rack and I have seen it". Only Available rows are offered to the
+	// allocator, which is why this step exists at all - without it the store screen
+	// would promise pieces that are still on the cutting table.
+	//
+	// Bulk action: Creator passes the ticked record ids as a list.
+	//
+	// FULL RECEIPT ONLY. Ticking here says every declared piece in the row is on
+	// the rack. Short returns are the store widget's job - receiveWastePieces
+	// takes a count per row and raises an Inbound Stock_Dispute for the gap. A
+	// report action fires on click with nowhere to type a number, which is the
+	// same reason resolveDispute is a Custom API rather than an action. Use this
+	// when you are already in the report and the count is not in question.
+
+	movedCount = 0;
+	skipCount = 0;
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	for each  wid in wasteIds
+	{
+		for each  rec in Waste_Master[ID == wid]
+		{
+			// Only ever moves Pending_Receipt forward. A Consumed or Scrapped
+			// row caught by a stray tick must not be resurrected as stock.
+			if(rec.Status == "Pending_Receipt")
+			{
+				rec.Status = "Available";
+				movedCount = movedCount + 1;
+
+				// The status says where the piece is now; the movement says when
+				// it got there and who put it on the rack. Both are needed - a
+				// status alone cannot answer "how long did receipt take".
+				newMoveId = insert into Waste_Movement
+				[
+					Movement_Type="Received"
+					Piece_Width=ifnull(rec.Piece_Width,0)
+					Piece_Length=ifnull(rec.Piece_Length,0)
+					Piece_Count=ifnull(rec.Piece_Count,0)
+					Moved_On=zoho.currentdate
+					Added_User=zoho.loginuser
+				];
+
+				for each  mv in Waste_Movement[ID == newMoveId.toLong()]
+				{
+					mv.Waste_Piece = rec.ID;
+				}
+			}
+			else
+			{
+				skipCount = skipCount + 1;
+			}
+		}
+	}
+	}
+	catch (e)
+	{
+		return "Failed: " + e.toString();
+	}
+
+	msg = movedCount + " piece row(s) marked Available.";
+	if(skipCount > 0)
+	{
+		msg = msg + " " + skipCount + " row(s) skipped - not awaiting receipt.";
+	}
+	info msg;
+	return msg;
+}

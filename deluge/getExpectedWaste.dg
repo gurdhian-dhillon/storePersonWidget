@@ -1,0 +1,296 @@
+string getExpectedWaste(string planId, string planItemId, string qtyOut)
+{
+	// Remnants the cutting is expected to produce, for one item on one plan.
+	//
+	// Called when the supervisor ends the Cutting stage. The rows come back as
+	// EDITABLE DEFAULTS - he keeps, changes, deletes or adds to them, and only what
+	// he confirms is written by saveWasteFromCutting. Nothing here is stored.
+	//
+	// Computed on the pieces he actually cut (Qty_Out), against the fabric he was
+	// actually given: the waste pieces he received first, then fresh cloth.
+	//
+	// The remnant maths is INLINED rather than calling calcCutPlan - cross-function
+	// calls do not work in this app. calcCutPlan now has no caller and can be
+	// deleted; this is the only place the generation half is used.
+	//
+	// Grain is fixed throughout: cut width runs across the piece width, cut length
+	// along its length, never rotated.
+	//
+	// fabricOptions is order-wide, not item-wide, because a supervisor adding a
+	// remnant by hand may be holding cloth from any fabric on the order - including
+	// a full-width leftover, which he enters as a piece at the full fabric width.
+
+	fabJson = "";
+	optJson = "";
+	errJson = "";
+
+	// DEBUG WRAPPER: Creator reports every runtime failure as a generic
+	// "code 9430 - There is an error while executing Custom API." Catching it
+	// here surfaces the real Deluge message in the widget console instead.
+	try
+	{
+	pid = planId.trim().toLong();
+
+	// Creator fields that were never written are EMPTY, not null, and
+	// toDecimal() throws on empty - normalise to string first.
+	qStr = ifnull(qtyOut,"0").toString().trim();
+	if(qStr == "")
+	{
+		qStr = "0";
+	}
+	pcsCut = qStr.toDecimal().toLong();
+
+	seenOpt = Map();
+
+	for each  plan in Production_Planning[ID == pid]
+	{
+		for each  mr in Material_Requirement[Plan == plan.ID]
+		{
+			isFab = mr.Is_Fabric;
+			matId = mr.Material;
+
+			if(isFab == true && matId != null)
+			{
+				// Every fabric is called "Linen Fabric", so the name alone tells
+				// the supervisor nothing. The SKU is what actually distinguishes
+				// them - design and colour can join it later.
+				skuText = "";
+				for each  rmL in Raw_Material[ID == matId]
+				{
+					skuText = ifnull(rmL.SKU,"").toString();
+				}
+				matLabel = mr.Material_Name;
+				if(skuText != "")
+				{
+					matLabel = skuText + " - " + mr.Material_Name;
+				}
+
+				// Order-wide picker list, built from every fabric on the plan.
+				if(seenOpt.get(matId + "") == null)
+				{
+					seenOpt.put(matId + "","1");
+					if(optJson != "")
+					{
+						optJson = optJson + ",";
+					}
+					// IDs forced to string - 18-digit ids break JSON.parse.
+					optJson = optJson + "{\"materialId\":\"" + matId + "\",\"material\":\"" + matLabel + "\"}";
+				}
+
+				// Only this item's fabric lines get a prediction.
+				if(mr.Plan_Item != null && mr.Plan_Item.toString() == planItemId && pcsCut > 0)
+				{
+					cutW = ifnull(mr.Cut_Size_Width,0);
+					cutL = ifnull(mr.Cut_Size_Length,0);
+
+					fabricWidthCm = 0.0;
+					for each  rm in Raw_Material[ID == matId]
+					{
+						// Stored as TEXT, in inches.
+						val = rm.Fabric_Width_Inches;
+						if(val != null && val.trim() != "")
+						{
+							fabricWidthCm = val.trim().toDecimal() * 2.54;
+						}
+					}
+
+					if(cutW <= 0 || cutL <= 0 || fabricWidthCm <= 0)
+					{
+						if(errJson != "")
+						{
+							errJson = errJson + ",";
+						}
+						errJson = errJson + "\"" + mr.Material_Name + ": missing cut size or fabric width, nothing predicted\"";
+					}
+					else
+					{
+						genJson = "";
+						remain = pcsCut;
+
+						//--------------------------------------------------
+						// Pass 1 - the waste pieces he actually received.
+						// A piece leaves the store whole, so whatever it does
+						// not yield comes back as waste, including its tail.
+						//--------------------------------------------------
+						// STEP 4b: Issued movements, not the Waste_Issued subform.
+						// Hoisted into its own variable - a query cannot be built
+						// inline in a for-each header.
+						issuedMoves = Waste_Movement[Plan == plan.ID && Movement_Type == "Issued"];
+
+						for each  wi in issuedMoves
+						{
+							// "Received" is no longer a field. It is the sum of the
+							// Received movements pointing back at this issue, which
+							// is what makes a short receipt legible instead of just
+							// a smaller number.
+							avail = 0;
+							for each  rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
+							{
+								avail = avail + ifnull(rv.Piece_Count,0);
+							}
+
+							// The movement carries the piece, not the material - the
+							// material comes off the piece it was cut from.
+							wMatId = "";
+							for each  wmRec in Waste_Master[ID == wi.Waste_Piece]
+							{
+								wMatId = ifnull(wmRec.SKU,"").toString();
+							}
+
+							pieceW = ifnull(wi.Piece_Width,0);
+							pieceL = ifnull(wi.Piece_Length,0);
+
+							if(remain > 0 && avail > 0 && wMatId == matId.toString() && wi.Plan_Item != null && wi.Plan_Item.toString() == planItemId && pieceW >= cutW && pieceL >= cutL)
+							{
+								perRow = (pieceW / cutW).floor();
+								maxRows = (pieceL / cutL).floor();
+								capacity = perRow * maxRows;
+								sideW = pieceW - (perRow * cutW);
+
+								// Pieces spent to their full capacity - each
+								// yields the same two remnants, so they collapse
+								// into one row carrying a count.
+								fullPieces = (remain / capacity).floor();
+								if(fullPieces > avail)
+								{
+									fullPieces = avail;
+								}
+								if(fullPieces > 0)
+								{
+									usedLen = maxRows * cutL;
+									if(sideW > 0)
+									{
+										if(genJson != "")
+										{
+											genJson = genJson + ",";
+										}
+										genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideW + ",\"length\":" + usedLen + ",\"count\":" + fullPieces + ",\"origin\":\"side\"}";
+									}
+									fullTail = pieceL - usedLen;
+									if(fullTail > 0)
+									{
+										if(genJson != "")
+										{
+											genJson = genJson + ",";
+										}
+										genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + pieceW + ",\"length\":" + fullTail + ",\"count\":" + fullPieces + ",\"origin\":\"tail\"}";
+									}
+									remain = remain - (fullPieces * capacity);
+									avail = avail - fullPieces;
+								}
+
+								// At most one part-used piece for the remainder.
+								if(remain > 0 && avail > 0)
+								{
+									take = remain;
+									partRows = (take / perRow).floor();
+									lastRow = take - (partRows * perRow);
+									rows = partRows;
+									if(lastRow > 0)
+									{
+										rows = rows + 1;
+									}
+									lengthUsed = rows * cutL;
+
+									// Side strip - one continuous piece down the
+									// full rows, not one per row.
+									if(partRows > 0 && sideW > 0)
+									{
+										if(genJson != "")
+										{
+											genJson = genJson + ",";
+										}
+										genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideW + ",\"length\":" + (partRows * cutL) + ",\"count\":1,\"origin\":\"side\"}";
+									}
+									// Partial last row - the unused slots and the
+									// side strip in that row are contiguous, so
+									// it is a single piece.
+									if(lastRow > 0)
+									{
+										partW = pieceW - (lastRow * cutW);
+										if(partW > 0)
+										{
+											if(genJson != "")
+											{
+												genJson = genJson + ",";
+											}
+											genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + partW + ",\"length\":" + cutL + ",\"count\":1,\"origin\":\"partial_row\"}";
+										}
+									}
+									tailL = pieceL - lengthUsed;
+									if(tailL > 0)
+									{
+										if(genJson != "")
+										{
+											genJson = genJson + ",";
+										}
+										genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + pieceW + ",\"length\":" + tailL + ",\"count\":1,\"origin\":\"tail\"}";
+									}
+									remain = 0;
+								}
+							}
+						}
+
+						//--------------------------------------------------
+						// Pass 2 - whatever the waste could not cover came off
+						// fresh fabric, cut in whole rows across the width.
+						//--------------------------------------------------
+						freshCm = 0.0;
+						if(remain > 0)
+						{
+							perRowR = (fabricWidthCm / cutW).floor();
+							if(perRowR > 0)
+							{
+								sideWR = fabricWidthCm - (perRowR * cutW);
+								fullRowsR = (remain / perRowR).floor();
+								lastRowR = remain - (fullRowsR * perRowR);
+								rawRows = fullRowsR;
+								if(lastRowR > 0)
+								{
+									rawRows = rawRows + 1;
+								}
+								freshCm = rawRows * cutL;
+
+								if(fullRowsR > 0 && sideWR > 0)
+								{
+									if(genJson != "")
+									{
+										genJson = genJson + ",";
+									}
+									genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideWR + ",\"length\":" + (fullRowsR * cutL) + ",\"count\":1,\"origin\":\"side\"}";
+								}
+								if(lastRowR > 0)
+								{
+									partWR = fabricWidthCm - (lastRowR * cutW);
+									if(partWR > 0)
+									{
+										if(genJson != "")
+										{
+											genJson = genJson + ",";
+										}
+										genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + partWR + ",\"length\":" + cutL + ",\"count\":1,\"origin\":\"partial_row\"}";
+									}
+								}
+							}
+						}
+
+						if(fabJson != "")
+						{
+							fabJson = fabJson + ",";
+						}
+						fabJson = fabJson + "{\"materialId\":\"" + matId + "\",\"material\":\"" + matLabel + "\",\"cutWidth\":" + cutW + ",\"cutLength\":" + cutL + ",\"fabricWidthCm\":" + fabricWidthCm + ",\"piecesCut\":" + pcsCut + ",\"freshMetres\":" + (freshCm / 100) + ",\"waste\":[" + genJson + "]}";
+					}
+				}
+			}
+		}
+	}
+
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"fabrics\":[],\"fabricOptions\":[]}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[" + errJson + "],\"fabrics\":[" + fabJson + "],\"fabricOptions\":[" + optJson + "]}";
+}

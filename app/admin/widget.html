@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin — Order audit</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="app-container">
+
+        <header class="app-header">
+            <div class="app-header-left">
+                <h1>Order audit</h1>
+                <span class="app-date" id="app-date"></span>
+            </div>
+
+            <div class="app-header-right">
+                <!-- Filters the picker, it does not search the data. Matches the
+                     order number, its source and its status. -->
+                <input id="so-filter" class="so-filter" type="search" autocomplete="off"
+                       placeholder="Filter orders…" aria-label="Filter sales orders">
+                <select id="so-select" class="sup-select" aria-label="Choose sales order">
+                    <option value="">Choose sales order…</option>
+                </select>
+                <!-- Orders with no plan never appear here. Selecting one could
+                     only show an empty state, and why it was not planned (no BOM,
+                     no supervisor rule) is not a question this screen answers. -->
+                <span id="so-count" class="so-count"></span>
+                <button id="refresh-btn" class="primary-btn" type="button">Refresh</button>
+            </div>
+        </header>
+
+        <!-- One order picker, two questions about it. Both tabs read the same
+             selected order, so switching does not make you find it again. -->
+        <nav class="tab-strip" id="tab-strip">
+            <button type="button" class="tab-btn is-active" data-tab="calc">Calculation check</button>
+            <button type="button" class="tab-btn" data-tab="used">Material used</button>
+        </nav>
+
+        <div class="tab-panel is-active" id="panel-calc">
+
+        <!-- The three calculations are not the same number and are constantly
+             mistaken for each other. Saying so once, at the top, prevents the
+             most common false alarm: "the plan says 12m but the store was only
+             asked for 7m". -->
+        <div class="legend">
+            <div class="legend-item">
+                <span class="legend-dot dot-plan"></span>
+                <div>
+                    <b>Planned requirement</b>
+                    <span>Settled when the plan was made and never recomputed. Assumes no offcuts exist.</span>
+                </div>
+            </div>
+            <div class="legend-item">
+                <span class="legend-dot dot-issue"></span>
+                <div>
+                    <b>Allocated right now</b>
+                    <span>Re-decided every time this screen loads, before anything is issued. Offcuts first, fresh cloth for the rest — so it is normally lower than the plan.</span>
+                </div>
+            </div>
+            <div class="legend-item">
+                <span class="legend-dot dot-waste"></span>
+                <div>
+                    <b>Waste this will throw off</b>
+                    <span>Predicted, not recorded. The side strip, part row and tail the cutting is expected to leave.</span>
+                </div>
+            </div>
+        </div>
+
+        <main id="content"></main>
+
+        <div class="empty-state" id="empty">
+            <div class="icon">🧮</div>
+            <h2>Pick a sales order</h2>
+            <p>Every fabric line on it will be broken down step by step.</p>
+        </div>
+
+        </div><!-- /panel-calc -->
+
+        <!-- WHAT THE ORDER ACTUALLY ATE, as opposed to what it was planned to.
+             Loaded lazily on first open: it is its own Custom API, deliberately
+             not folded into getAdminCalculation, which already calls two other
+             functions through thisapp and is the heaviest call in the app. -->
+        <div class="tab-panel" id="panel-used"></div>
+
+    </div>
+
+    <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

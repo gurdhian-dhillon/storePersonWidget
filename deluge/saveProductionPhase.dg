@@ -1,0 +1,488 @@
+string saveProductionPhase(string payloadJson)
+{
+	// API for the Production Supervisor Widget
+	// Writes one Stage_Log record per Plan_Item x phase.
+	//
+	// STEP 2 of the migration: Production_Tracking was a subform on the plan, so
+	// every Start and End rewrote the plan record - two supervisors on different
+	// items of the same plan could silently lose each other's writes. Stage_Log is
+	// its own record, so they no longer collide, and cross-plan reports (operator
+	// output, stage throughput) become a query instead of a subform walk.
+	//
+	// payload:
+	// {
+	//   "planId": "123456",
+	//   "planItemId": "789012",
+	//   "phaseName": "Cutting",
+	//   "sequence": 10,
+	//   "isLastStage": false,
+	//   "operatorId": "789",
+	//   "startTime": "10:00",
+	//   "endTime": "11:00",
+	//   "qtyIn": 10,
+	//   "qtyOut": 9,
+	//   "remarks": ""
+	// }
+	//
+	// Qty_In is written ONCE, at Start, and never revised - it is the previous
+	// stage's Qty_Out and the widget sends it read-only. Qty_Out is the only
+	// quantity a person types, and it is capped here at Qty_In: you cannot finish
+	// more than you received, whatever the payload claims.
+	//
+	// A STAGE CAN BE SPLIT BETWEEN SEVERAL OPERATORS. When it is, each share is a
+	// Stage_Assignment record hanging off this stage's Stage_Log, and the two
+	// quantity rules above move down a level: the payload's qtyOut is IGNORED and
+	// the stage's output is the sum of what the operators actually finished.
+	// Ending the stage while somebody is still working is refused outright - the
+	// figure would go forward to the next stage, the item and possibly the sales
+	// order, and none of them can be walked back.
+	//
+	// A stage with NO assignments is the old single-operator stage and behaves
+	// exactly as it always did. That is not only for history: receiveFromThirdParty
+	// closes an outsourced stage through this function with no operator at all.
+	//
+	// Status rolls up on End: the item goes Complete when its last stage ends, the
+	// plan goes "Production Complete" when every item is, and the sales order
+	// mirrors the plan at that same moment. Each field has exactly one writer,
+	// which is what stops the four levels drifting apart.
+	//
+	// "Production Complete" is where the PLAN stops for good. Everything after it
+	// - QC, packing, dispatch - is tracked on Sales_Order.Order_Status, which is a
+	// different field with its own chain. This function is the seam between them,
+	// and it only ever pushes the order forward.
+
+	// Deluge requires a return at the function's top level, so the result is
+	// built into a variable rather than returned from inside the try/catch.
+	res = "{\"success\":false,\"error\":\"Nothing was saved\"}";
+
+	// The order-finished summary. Declared out here so the success line can
+	// always reference them, whether or not this save happened to be the one
+	// that closed the order.
+	orderDone = "false";
+	sumJson = "";
+	soNoTxt = "";
+	planNoTxt = "";
+	totalOrdered = 0;
+	totalProduced = 0;
+	totalRemade = 0;
+
+	try
+	{
+		inp = payloadJson.toMap();
+		planIdStr = ifnull(inp.get("planId"),"").toString().trim();
+		itemIdStr = ifnull(inp.get("planItemId"),"").toString().trim();
+		phaseName = ifnull(inp.get("phaseName"),"").toString().trim();
+		opIdStr = ifnull(inp.get("operatorId"),"").toString().trim();
+		startTStr = ifnull(inp.get("startTime"),"").toString().trim();
+		endTStr = ifnull(inp.get("endTime"),"").toString().trim();
+		rem = ifnull(inp.get("remarks"),"").toString();
+		isLast = ifnull(inp.get("isLastStage"),"false").toString().trim().toLowerCase();
+
+		// Creator fields that were never written are EMPTY, not null, and
+		// toDecimal() throws on empty - normalise to string first.
+		qInStr = ifnull(inp.get("qtyIn"),"0").toString().trim();
+		if (qInStr == "") { qInStr = "0"; }
+		qOutStr = ifnull(inp.get("qtyOut"),"0").toString().trim();
+		if (qOutStr == "") { qOutStr = "0"; }
+		seqStr = ifnull(inp.get("sequence"),"0").toString().trim();
+		if (seqStr == "") { seqStr = "0"; }
+		qtyIn = qInStr.toDecimal().toLong();
+		qtyOut = qOutStr.toDecimal().toLong();
+		seqNo = seqStr.toDecimal().toLong();
+
+		if (planIdStr == "" || itemIdStr == "")
+		{
+			return "{\"success\":false,\"error\":\"Missing planId or planItemId\"}";
+		}
+		planId = planIdStr.toLong();
+		itemId = itemIdStr.toLong();
+
+		opId = null;
+		if (opIdStr != "") { opId = opIdStr.toLong(); }
+
+		newStatus = "In_Progress";
+		if (endTStr != "") { newStatus = "Done"; }
+
+		//------------------------------------------------------------------
+		// One row per Plan_Item x phase - Start creates it, End completes it.
+		//------------------------------------------------------------------
+		existing = Stage_Log[Plan_Item == itemId && Phase_Name == phaseName];
+
+		// The stage's own record id. Needed to find the shares hanging off it,
+		// and returned to the widget so a damage report can name this stage.
+		// Zero until the log exists.
+		logId = 0;
+		for each  lgId in existing
+		{
+			logId = lgId.ID;
+		}
+
+		//------------------------------------------------------------------
+		// A STAGE THAT IS OUT WITH A THIRD PARTY CANNOT BE WORKED IN-HOUSE.
+		//
+		// The widget locks those cards, but this is a Custom API and callable
+		// from anywhere - and the failure is not cosmetic. Starting a stage
+		// in-house while the panels are physically in someone else's workshop
+		// leaves two records claiming the same pieces, and nothing downstream
+		// can tell which one is the lie.
+		//
+		// Returned_On is the test rather than Is_Outsourced, because a block
+		// that has come back is ordinary finished work. receiveFromThirdParty
+		// sets Returned_On on every row BEFORE it closes the last stage through
+		// this function, so its own call passes this guard.
+		//------------------------------------------------------------------
+		for each  lgChk in existing
+		{
+			if (ifnull(lgChk.Is_Outsourced,false) == true && lgChk.Returned_On == null)
+			{
+				partyTxt = "a third party";
+				if (lgChk.Third_Party != null)
+				{
+					for each  tpChk in Third_Party[ID == lgChk.Third_Party]
+					{
+						partyTxt = ifnull(tpChk.Party_Name,"a third party").toString().replaceAll("\"","'");
+					}
+				}
+				return "{\"success\":false,\"code\":\"STAGE_OUTSOURCED\",\"error\":\"" + phaseName.replaceAll("\"","'") + " is out with " + partyTxt + ". Receive it back before recording work on it.\"}";
+			}
+		}
+
+		//------------------------------------------------------------------
+		// THE SHARES THIS STAGE WAS SPLIT INTO, if any.
+		//
+		// Read BEFORE anything is written, because both things it decides -
+		// whether the stage may close at all, and what it produced - have to be
+		// settled before the row is touched.
+		//
+		// asgCount == 0 is the ordinary single-operator stage, and every line
+		// below leaves it exactly as it was.
+		//------------------------------------------------------------------
+		asgCount = 0;
+		asgOpen = 0;
+		asgOut = 0;
+
+		if (logId > 0)
+		{
+			for each  agRoll in Stage_Assignment[Stage_Log == logId]
+			{
+				asgCount = asgCount + 1;
+				asgOut = asgOut + ifnull(agRoll.Qty_Out,0);
+
+				if (ifnull(agRoll.Assignment_Status,"").toString().trim() != "Done")
+				{
+					asgOpen = asgOpen + 1;
+				}
+			}
+		}
+
+		if (endTStr != "" && asgCount > 0)
+		{
+			//----------------------------------------------------------
+			// SOMEBODY IS STILL WORKING. Refused, not truncated.
+			//
+			// Closing here would publish a Qty_Out that is missing his pieces,
+			// and that figure is the next stage's Qty_In - so the pieces still
+			// in his hands would arrive at Stitching already lost, with a
+			// damage prompt asking what happened to cloth that is fine.
+			//----------------------------------------------------------
+			if (asgOpen > 0)
+			{
+				shareWord = "operators have";
+				if (asgOpen == 1) { shareWord = "operator has"; }
+				return "{\"success\":false,\"code\":\"SHARES_OPEN\",\"error\":\"" + asgOpen + " " + shareWord + " not finished their share of " + phaseName.replaceAll("\"","'") + " yet. Close their work first.\"}";
+			}
+
+			// The stage produced what its people produced. The payload's figure
+			// is not consulted at all - it is a total the widget added up, and
+			// the records that were actually written are the better authority.
+			qtyOut = asgOut;
+		}
+
+		if (existing.count() > 0)
+		{
+			for each  lg in existing
+			{
+				if (opId != null) { lg.Operator = opId; }
+				if (startTStr != "") { lg.Start_Time = startTStr; }
+				if (endTStr != "") { lg.End_Time = endTStr; }
+				lg.Remarks = rem;
+				lg.Stage_Status = newStatus;
+
+				// Qty_In is set at Start and never revised - it is the previous
+				// stage's output, not something this stage decides.
+				existingIn = ifnull(lg.Qty_In,0);
+				if (existingIn <= 0 && qtyIn > 0) { lg.Qty_In = qtyIn; existingIn = qtyIn; }
+
+				// You cannot finish more than you received.
+				if (endTStr != "")
+				{
+					capped = qtyOut;
+					if (existingIn > 0 && capped > existingIn) { capped = existingIn; }
+					if (capped < 0) { capped = 0; }
+					lg.Qty_Out = capped;
+				}
+			}
+		}
+		else
+		{
+			capped2 = qtyOut;
+			if (qtyIn > 0 && capped2 > qtyIn) { capped2 = qtyIn; }
+			if (capped2 < 0) { capped2 = 0; }
+
+			newLog = insert into Stage_Log
+			[
+				Plan=planId
+				Plan_Item=itemId
+				Sequence_No=seqNo
+				Phase_Name=phaseName
+				Log_Date=zoho.currentdate
+				Qty_In=qtyIn
+				Stage_Status=newStatus
+				Remarks=rem
+				Added_User=zoho.loginuser
+			];
+
+			logId = newLog.toLong();
+
+			// Lookups and times set after the insert - a null cannot go in the
+			// insert block, and an empty time string is not a valid Time.
+			for each  lg2 in Stage_Log[ID == logId]
+			{
+				if (opId != null) { lg2.Operator = opId; }
+				if (startTStr != "") { lg2.Start_Time = startTStr; }
+				if (endTStr != "") { lg2.End_Time = endTStr; lg2.Qty_Out = capped2; }
+			}
+		}
+
+		//------------------------------------------------------------------
+		// Roll the status up. Only happens on End - a stage starting does not
+		// change what the item or the plan has achieved.
+		//------------------------------------------------------------------
+		if (endTStr != "")
+		{
+			for each  pi in Plan_Item[ID == itemId]
+			{
+				if (isLast == "true")
+				{
+					pi.Item_Status = "Complete";
+					pi.Qty_Produced = qtyOut;
+				}
+				else
+				{
+					pi.Item_Status = "In_Production";
+				}
+			}
+
+			// Plan is complete only when every one of its items is.
+			//------------------------------------------------------------------
+			// SOMETHING IS NOW WAITING FOR QC.
+			//
+			// Set the moment an item finishes with pieces on it, whether or not
+			// the rest of the plan is done - because he cannot wait. An order
+			// with a remake batch still awaiting cloth stays "In Progress" for
+			// days, and the pieces that ARE finished have to be inspectable in
+			// the meantime or they never reach inventory.
+			//
+			// This flag is what the QC form's Sales_Order lookup filters on,
+			// INSTEAD of Order_Status. Filtering on status would either hide
+			// these pieces until the whole order finished, or - if widened to
+			// In Progress - put every live order in the picker with nothing on
+			// most of them.
+			//
+			// It is deliberately the SAME test qcAutoPopulate uses to decide what
+			// to list: produced beyond what has been inspected. Any other rule
+			// drifts, and "the order is in the picker but the subform is empty"
+			// is the exact failure that produces.
+			//
+			// Cleared by createRemakeItems once nothing is left uninspected.
+			//------------------------------------------------------------------
+			if (isLast == "true" && qtyOut > 0)
+			{
+				for each  plQ in Production_Planning[ID == planId]
+				{
+					if (plQ.Sales_Order != null)
+					{
+						for each  soQ in Sales_Order[ID == plQ.Sales_Order]
+						{
+							soQ.Ready_For_QC = true;
+						}
+					}
+				}
+			}
+
+			allItemsDone = true;
+			itemCount = 0;
+			for each  pi2 in Plan_Item[Plan == planId]
+			{
+				itemCount = itemCount + 1;
+				if (pi2.Item_Status != "Complete") { allItemsDone = false; }
+			}
+
+			if (itemCount > 0 && allItemsDone == true)
+			{
+				orderDone = "true";
+
+				for each  pl in Production_Planning[ID == planId]
+				{
+					// Production Complete is the LAST status a plan takes. QC,
+					// packing and dispatch are tracked on the sales order from
+					// here, so the plan stops moving and the order carries on.
+					pl.Order_Status = "Production Complete";
+					planNoTxt = ifnull(pl.Plan_No,"").toString();
+
+					for each  soRec in Sales_Order[ID == pl.Sales_Order]
+					{
+						soNoTxt = ifnull(soRec.Sales_Order,"").toString().replaceAll("\"","'");
+
+						// The handover from plan to order, and the only place it
+						// happens. One plan per sales order - createProductionPlans
+						// inserts exactly one inside its per-order loop - so this
+						// is a mirror, not a roll-up. If an order is ever split
+						// across two plans, this becomes wrong: the order would
+						// complete when the FIRST plan finished.
+						//
+						// FORWARD ONLY. This block re-runs on every stage save,
+						// and allItemsDone stays true once it is true - so a
+						// re-saved last stage would come back through here after
+						// QC had passed the order and drag it from QC Passed back
+						// to Production Complete, silently, putting it in front of
+						// QC a second time. Same rule resolveDispute uses on the
+						// plan and receiveMaterials uses on Item_Status: a status
+						// that has moved on is not this function's to move back.
+						soStNow = ifnull(soRec.Order_Status,"").toString();
+						if(soStNow == "Pending" || soStNow == "In Progress")
+						{
+							soRec.Order_Status = "Production Complete";
+						}
+					}
+				}
+
+				//----------------------------------------------------------
+				// What the whole order produced, gathered HERE rather than
+				// left to the widget.
+				//
+				// The moment this returns, the plan leaves every live query -
+				// getProductionWidgetData only fetches work that is still
+				// open - so the screen loses the ability to summarise what it
+				// has just finished. This is the last point at which the
+				// figures are still reachable.
+				//----------------------------------------------------------
+				// "sort by" on its own assignment - inline in a for-each header it
+				// does not reliably parse, and a function that will not save is
+				// indistinguishable from one that saved and did nothing.
+				doneItems = Plan_Item[Plan == planId] sort by Line_No;
+
+				for each  pi4 in doneItems
+				{
+					ordQ = ifnull(pi4.Qty_Ordered,0);
+					prodQ = ifnull(pi4.Qty_Produced,0);
+
+					// ORDERED means what the customer bought, so a remake line
+					// does not add to it. Without this a 100-piece order that
+					// had 10 rejected and remade would report "ordered 110,
+					// produced 110" - the plan disagreeing with the sales order
+					// about how many were sold.
+					//
+					// PRODUCED is counted on the SAME side of that line. It used
+					// to add every line including remakes, which made a finished
+					// order read "45 of 36" - and worse, let remake output hide a
+					// shortfall: 30 of 36 originals plus 6 remakes also totals 36,
+					// so a plan six pieces short reported itself complete.
+					//
+					// Remake output is real and is still reported - as its own
+					// figure, next to the two it must not be mixed into.
+					//------------------------------------------------------
+					// WHICH REMAKES COUNT AS PRODUCED, and the reason decides.
+					//
+					// QC_Reject replaces a piece that WAS made and then failed -
+					// the original already counted it, so counting the remake
+					// too gives "45 of 36".
+					//
+					// Production_Loss replaces a piece that was NEVER made: the
+					// original produced 8 of 10 and the batch of 2 is the first
+					// time those two exist. Leaving them out reads "8 of 10, 2
+					// short" on an order that is whole.
+					//
+					// Empty reason on an existing remake means QC - every remake
+					// raised before this field existed came from a rejection.
+					//------------------------------------------------------
+					isRm = ifnull(pi4.Is_Remake,false);
+					rmWhy = ifnull(pi4.Remake_Reason,"").toString().trim();
+
+					if(isRm == false)
+					{
+						totalOrdered = totalOrdered + ordQ;
+						totalProduced = totalProduced + prodQ;
+					}
+					else if(rmWhy == "Production_Loss")
+					{
+						totalProduced = totalProduced + prodQ;
+						totalRemade = totalRemade + prodQ;
+					}
+					else
+					{
+						totalRemade = totalRemade + prodQ;
+					}
+
+					// Item_Sku is a LOOKUP to Item_Master, not the SKU text, so
+					// toString() on it gives the record id - which is what was
+					// showing under each item name. The code the shop floor
+					// recognises lives on the master record.
+					skuTxt = "";
+					for each  imRec in Item_Master[ID == pi4.Item_Sku]
+					{
+						skuTxt = ifnull(imRec.SKU,"").toString().replaceAll("\"","'");
+					}
+
+					// A remake repeats its original's name AND its SKU, so without
+					// this flag the two arrive as indistinguishable rows and the
+					// Ordered column silently disagrees with the header total.
+					rmTxt = "false";
+					if(isRm == true) { rmTxt = "true"; }
+					rmWhyTxt = rmWhy;
+					if(isRm == true && rmWhyTxt == "") { rmWhyTxt = "QC_Reject"; }
+
+					if (sumJson != "") { sumJson = sumJson + ","; }
+					sumJson = sumJson + "{\"item\":\"" + ifnull(pi4.Item_Name,"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + skuTxt + "\",\"ordered\":" + ordQ + ",\"produced\":" + prodQ + ",\"isRemake\":" + rmTxt + ",\"remakeReason\":\"" + rmWhyTxt + "\"}";
+				}
+			}
+		}
+		else
+		{
+			// First stage starting is what moves an item off "Ready".
+			for each  pi3 in Plan_Item[ID == itemId]
+			{
+				if (pi3.Item_Status != "Complete") { pi3.Item_Status = "In_Production"; }
+			}
+
+			// ...and the plan with it. Four queries filtered on "In Progress"
+			// and nothing had ever written it, so a plan being actively cut was
+			// indistinguishable from one nobody had touched.
+			//
+			// A plan can be In Progress and still be owed material - one item
+			// ready and cutting while another waits - so the store's issue list
+			// and issueMaterials both accept this status. Without that, starting
+			// item 1 would strand item 2's cloth.
+			for each  plS in Production_Planning[ID == planId]
+			{
+				pStS = ifnull(plS.Order_Status,"").toString();
+				if (pStS != "Production Complete")
+				{
+					plS.Order_Status = "In Progress";
+				}
+			}
+		}
+
+		// logId so the widget can hang a damage report off THIS stage when fewer
+		// pieces came out than went in. Without it the report is still made, but
+		// with no Stage_Log behind it - and "which stage loses most" is then
+		// unanswerable, which is the question the whole feature exists for.
+		res = "{\"success\":true,\"logId\":\"" + logId + "\",\"orderComplete\":" + orderDone + ",\"salesOrder\":\"" + soNoTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"totalOrdered\":" + totalOrdered + ",\"totalProduced\":" + totalProduced + ",\"totalRemade\":" + totalRemade + ",\"summary\":[" + sumJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

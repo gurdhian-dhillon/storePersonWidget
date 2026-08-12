@@ -1,0 +1,479 @@
+string saveMaterialDamage(string payloadJson)
+{
+	// Records material the supervisor ruined during production, and what he wants
+	// replaced. Writes a DRAFT - nothing reaches the store until he raises it
+	// from the Reissue tab.
+	//
+	// Custom API, POST, one argument: payloadJson.
+	//   { "planId":"1", "planItemId":"9", "supervisorId":"5",
+	//     "stageLogId":"", "phaseName":"Cutting",
+	//     "damagedPieces":"3", "note":"needle cut through 3 panels",
+	//     "lines":[ {"matId":"11","name":"Linen / Sylph Green","unit":"Mtr",
+	//                "isFab":true,"qty":1.2,"pieces":3,
+	//                "cutLen":55,"cutWid":40,"reissue":true} ] }
+	//
+	// WHY A DRAFT AND NOT A REQUIREMENT STRAIGHT AWAY. Material_Requirement is
+	// read by getStoreMaterialRequirements, issueMaterials, getStoreCounts and
+	// the offcut allocator. A "draft" status on it would have to be filtered out
+	// of every one of them, and a single missed filter turns an un-raised draft
+	// into phantom demand on the store's issue screen. A separate form cannot
+	// leak: raising is the only thing that ever creates a requirement, and it is
+	// one-way.
+	//
+	// TWO INDEPENDENT FACTS PER REPORT, and conflating them was the mistake this
+	// form exists to avoid:
+	//   Damaged_Pieces - garments/panels spoiled. Can be 0: a wash care label
+	//                    torn while being attached ruins no garment at all, and
+	//                    that case is most of what this is for.
+	//   Damage_Lines   - material gone. Also stands alone.
+	// Hanging material damage off a piece loss would miss every label, cone and
+	// elastic ruined without spoiling a garment.
+	//
+	// Needs a form called Material_Damage with these link names:
+	//   Plan             Lookup   -> Production_Planning
+	//   Plan_Item        Lookup   -> Plan_Item
+	//   Item_Name        Single Line
+	//   Sales_Order_No   Single Line
+	//   Supervisor       Lookup   -> Employee
+	//   Stage_Log        Lookup   -> Stage_Log        (optional)
+	//   Phase_Name       Single Line                  (optional)
+	//   Damaged_Pieces   Number
+	//   Note             Multi Line
+	//   Reported_On      Date
+	//   Status           Dropdown - Open / Closed     (default Open)
+	//   Damage_Lines     Subform  - Material (Lookup -> Raw_Material),
+	//                               Material_Name, Unit  (Single Line)
+	//                               Is_Fabric            (Decision box)
+	//                               Damaged_Qty          (Decimal)
+	//                               Damaged_Pieces       (Number)
+	//                               Cut_Size_Length      (Number)
+	//                               Cut_Size_Width       (Number)
+	//                               Reissue_Status       (Dropdown -
+	//                                   Pending / Requested / Not_Needed)
+	//                               Requirement          (Lookup ->
+	//                                   Material_Requirement)
+	//
+	// Item_Name and Sales_Order_No are DENORMALISED on purpose. The Reissue tab
+	// lists drafts across every plan he is on; resolving each one through
+	// Plan_Item -> Plan -> Sales_Order would be three queries per row, and the
+	// statement-execution limit is not catchable - it kills the script and the
+	// widget sees a bare 500 with no error card.
+
+	res = "{\"success\":false,\"error\":\"Nothing was saved\"}";
+
+	try
+	{
+	inp = payloadJson.toMap();
+
+	itemIdTxt = ifnull(inp.get("planItemId"),"").toString().trim();
+	if(itemIdTxt == "" || itemIdTxt.isNumber() == false)
+	{
+		return "{\"success\":false,\"error\":\"Missing or non-numeric planItemId\"}";
+	}
+	itemId = itemIdTxt.toLong();
+
+	planIdTxt = ifnull(inp.get("planId"),"").toString().trim();
+	supIdTxt = ifnull(inp.get("supervisorId"),"").toString().trim();
+	stageIdTxt = ifnull(inp.get("stageLogId"),"").toString().trim();
+	phaseTxt = ifnull(inp.get("phaseName"),"").toString().trim();
+	noteTxt = ifnull(inp.get("note"),"").toString();
+
+	// Creator fields that were never written are EMPTY, not null.
+	dpStr = ifnull(inp.get("damagedPieces"),"0").toString().trim();
+	if(dpStr == "")
+	{
+		dpStr = "0";
+	}
+	damagedPieces = dpStr.toDecimal().toLong();
+	if(damagedPieces < 0)
+	{
+		damagedPieces = 0;
+	}
+
+	// Does he intend to make these pieces again?
+	//
+	// Independent of the material question. He may need cloth and not remake
+	// (someone else will), or remake with spares and need nothing. Only a piece
+	// loss can be remade - a torn label ruins no garment.
+	wantRemake = ifnull(inp.get("needsRemake"),false);
+	remakeWanted = false;
+	if(wantRemake == true || wantRemake.toString() == "true")
+	{
+		remakeWanted = true;
+	}
+
+	linesRaw = ifnull(inp.get("lines"),list());
+
+	// size() is right - linesRaw is a List, not a query result.
+	if(linesRaw.size() == 0 && damagedPieces == 0)
+	{
+		return "{\"success\":false,\"error\":\"Nothing to record - no pieces and no material\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// The names shown on the Reissue tab, resolved ONCE here rather than on
+	// every read. Item_Sku is a lookup holding a record id, so it cannot be
+	// chained through - the master record has to be fetched.
+	//----------------------------------------------------------------------
+	itemName = "";
+	planIdNum = 0;
+	itemFound = false;
+	for each  pi in Plan_Item[ID == itemId]
+	{
+		itemFound = true;
+		itemName = ifnull(pi.Item_Name,"").toString();
+		if(pi.Plan != null)
+		{
+			planIdNum = pi.Plan;
+		}
+	}
+
+	if(itemFound == false)
+	{
+		return "{\"success\":false,\"error\":\"Item " + itemId + " not found\"}";
+	}
+
+	// The payload's planId is trusted only as a fallback; the item's own plan is
+	// the truth, because an item cannot be on a plan it does not point at.
+	if(planIdNum == 0 && planIdTxt != "" && planIdTxt.isNumber())
+	{
+		planIdNum = planIdTxt.toLong();
+	}
+
+	soNoTxt = "";
+	if(planIdNum != 0)
+	{
+		for each  plR in Production_Planning[ID == planIdNum]
+		{
+			if(plR.Sales_Order != null)
+			{
+				for each  soR in Sales_Order[ID == plR.Sales_Order]
+				{
+					soNoTxt = ifnull(soR.Sales_Order,"").toString();
+				}
+			}
+		}
+	}
+
+	//----------------------------------------------------------------------
+	// The header. Lookups are set AFTER the insert - a null one fails the
+	// whole insert block, and every lookup here can legitimately be missing.
+	//----------------------------------------------------------------------
+	newId = insert into Material_Damage
+	[
+		Item_Name=itemName
+		Sales_Order_No=soNoTxt
+		Phase_Name=phaseTxt
+		Damaged_Pieces=damagedPieces
+		Note=noteTxt
+		Reported_On=zoho.currentdate
+		Status="Open"
+		Added_User=zoho.loginuser
+	];
+
+	damageId = newId.toLong();
+
+	lineCount = 0;
+	pendingLines = 0;
+	logLines = "";
+
+	for each  dmg in Material_Damage[ID == damageId]
+	{
+		dmg.Plan_Item = itemId;
+		if(planIdNum != 0)
+		{
+			dmg.Plan = planIdNum;
+		}
+		if(supIdTxt != "" && supIdTxt.isNumber())
+		{
+			dmg.Supervisor = supIdTxt.toLong();
+		}
+		if(stageIdTxt != "" && stageIdTxt.isNumber())
+		{
+			dmg.Stage_Log = stageIdTxt.toLong();
+		}
+
+		rows = Collection();
+
+		for each  lnRaw in linesRaw
+		{
+			ln = lnRaw.toMap();
+
+			matIdTxt = ifnull(ln.get("matId"),"").toString().trim();
+
+			qStr = ifnull(ln.get("qty"),"0").toString().trim();
+			if(qStr == "")
+			{
+				qStr = "0";
+			}
+			pStr = ifnull(ln.get("pieces"),"0").toString().trim();
+			if(pStr == "")
+			{
+				pStr = "0";
+			}
+			clStr = ifnull(ln.get("cutLen"),"0").toString().trim();
+			if(clStr == "")
+			{
+				clStr = "0";
+			}
+			cwStr = ifnull(ln.get("cutWid"),"0").toString().trim();
+			if(cwStr == "")
+			{
+				cwStr = "0";
+			}
+
+			lnQty = qStr.toDecimal();
+			lnPcs = pStr.toDecimal().toLong();
+
+			// A line with nothing on it is not a record of anything. Skipping it
+			// here keeps the Reissue tab free of rows that can never be raised.
+			if(matIdTxt != "" && matIdTxt.isNumber() && (lnQty > 0 || lnPcs > 0))
+			{
+				// Ticked means he wants it replaced. Unticked is a real and
+				// useful answer - "3 were ruined, I have spares" - so it is
+				// recorded as Not_Needed rather than dropped, which is what
+				// keeps the damage figure complete.
+				wantR = ifnull(ln.get("reissue"),false);
+				rStatus = "Not_Needed";
+				if(wantR == true || wantR.toString() == "true")
+				{
+					rStatus = "Pending";
+				}
+
+				dRow = Material_Damage.Damage_Lines();
+				dRow.Material=matIdTxt.toLong();
+				dRow.Material_Name=ifnull(ln.get("name"),"").toString();
+				dRow.Unit=ifnull(ln.get("unit"),"").toString();
+				dRow.Is_Fabric=ifnull(ln.get("isFab"),false);
+				dRow.Damaged_Qty=lnQty;
+				dRow.Damaged_Pieces=lnPcs;
+				dRow.Cut_Size_Length=clStr.toDecimal().toLong();
+				dRow.Cut_Size_Width=cwStr.toDecimal().toLong();
+				dRow.Reissue_Status=rStatus;
+				rows.insert(dRow);
+
+				lineCount = lineCount + 1;
+				if(rStatus == "Pending")
+				{
+					pendingLines = pendingLines + 1;
+				}
+			}
+		}
+
+		// New subform rows go in as a collection in one call - assigning to the
+		// subform directly does not work.
+		dmg.Damage_Lines.insert(rows);
+	}
+
+	//----------------------------------------------------------------------
+	// THE REMAKE BATCH.
+	//
+	// A second Plan_Item for the pieces he is going to make again, created HERE
+	// and not at QC. He cannot wait for the reissue - cloth takes days - so the
+	// good pieces carry on and finish, and the replacements run as their own
+	// batch whenever the material turns up. Two items, one order, neither
+	// holding the other up.
+	//
+	// This is the same record createRemakeItems builds for a QC rejection. The
+	// only difference is the trigger and the reason, and the reason matters:
+	// a QC remake replaces a piece that WAS made and then failed, so the
+	// original already counted it. A production loss replaces a piece that was
+	// never made at all.
+	//----------------------------------------------------------------------
+	remakeId = 0;
+
+	if(remakeWanted == true && damagedPieces > 0)
+	{
+		// The ROOT line, never the previous remake. A remake of a remake still
+		// hangs off the original, so "how many of line 3 exist in total" stays
+		// one flat query - and Deluge has no recursion.
+		rootId = itemId;
+		srcSku = null;
+		srcBom = null;
+		srcName = itemName;
+		srcPlan = planIdNum;
+
+		for each  srcIt in Plan_Item[ID == itemId]
+		{
+			srcSku = srcIt.Item_Sku;
+			srcBom = srcIt.BOM;
+			if(srcIt.Remake_Of != null)
+			{
+				rootId = srcIt.Remake_Of;
+			}
+		}
+
+		//------------------------------------------------------------------
+		// MERGE INTO A BATCH THAT HAS NOT STARTED, rather than opening a
+		// second one. Two losses on one item would otherwise mean running
+		// every stage twice for two and one piece.
+		//
+		// "Not started" is tested on Stage_Log, not on Item_Status: a batch
+		// can sit at Ready_For_Production for days and still be safe to add
+		// to, but the moment a stage exists its Qty_In is fixed and quietly
+		// raising the order quantity underneath it would leave the stage
+		// short of the item it belongs to.
+		//------------------------------------------------------------------
+		openBatch = 0;
+		for each  cand in Plan_Item[Plan == srcPlan && Remake_Of == rootId]
+		{
+			if(openBatch == 0 && ifnull(cand.Remake_Reason,"").toString() == "Production_Loss")
+			{
+				if(Stage_Log[Plan_Item == cand.ID].count() == 0)
+				{
+					openBatch = cand.ID;
+				}
+			}
+		}
+
+		if(openBatch > 0)
+		{
+			for each  ob in Plan_Item[ID == openBatch]
+			{
+				haveQ = ifnull(ob.Qty_Ordered,"0").toString().trim();
+				if(haveQ == "")
+				{
+					haveQ = "0";
+				}
+				ob.Qty_Ordered = haveQ.toDecimal().toLong() + damagedPieces;
+			}
+			remakeId = openBatch;
+			logLines = "merged " + damagedPieces + " into remake batch " + openBatch;
+		}
+		else
+		{
+			// Highest Line_No on the plan, so the new batch sorts last.
+			maxLine = 0;
+			planItemsAsc = Plan_Item[Plan == srcPlan] sort by Line_No;
+			for each  pl in planItemsAsc
+			{
+				maxLine = ifnull(pl.Line_No,0);
+			}
+
+			newItemId = insert into Plan_Item
+			[
+				Plan=srcPlan
+				Item_Name=srcName
+				Qty_Ordered=damagedPieces
+				Qty_Produced=0
+				Qty_Accepted=0
+				Qty_Rejected=0
+				Item_Status="Awaiting_Material"
+				Line_No=maxLine + 1
+				Is_Remake=true
+				Remake_Reason="Production_Loss"
+				Added_User=zoho.loginuser
+			];
+
+			remakeId = newItemId.toLong();
+
+			// Lookups after the insert - a null one fails the whole block.
+			for each  ni in Plan_Item[ID == remakeId]
+			{
+				if(srcSku != null)
+				{
+					ni.Item_Sku = srcSku;
+				}
+				if(srcBom != null)
+				{
+					ni.BOM = srcBom;
+				}
+				ni.Remake_Of = rootId;
+			}
+			logLines = "opened remake batch " + remakeId + " for " + damagedPieces;
+		}
+
+		//------------------------------------------------------------------
+		// A batch nobody will issue material for is READY, not waiting.
+		//
+		// receiveMaterials only ever moves an item to Ready_For_Production,
+		// and it treats an item with no requirements as not-ready - so a
+		// remake he has spares for would sit at Awaiting_Material for ever
+		// with nothing that could release it.
+		//------------------------------------------------------------------
+		if(lineCount == 0 || pendingLines == 0)
+		{
+			for each  rdy in Plan_Item[ID == remakeId]
+			{
+				if(ifnull(rdy.Item_Status,"").toString() == "Awaiting_Material")
+				{
+					rdy.Item_Status = "Ready_For_Production";
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// THE PLAN HAS TO BE SOMEWHERE HE CAN SEE THE BATCH.
+		//
+		// A shortfall on the LAST stage completes the plan, so the batch is
+		// created against a plan that is already "Production Complete" - and
+		// getProductionWidgetData deliberately leaves those out, because they
+		// are history. The batch would exist, be owed to the customer, and be
+		// invisible to the only person who can build it.
+		//
+		// raiseReissueRequest does the same thing when material is asked for.
+		// This covers the case where none is - he has spares, so nothing else
+		// would ever reopen the plan.
+		//
+		// Forward from a finished state only. A plan already back at work is
+		// left where it is: "In Progress" is production's to own, and Pending or
+		// Partially Received would be a step backwards.
+		//------------------------------------------------------------------
+		for each  plB in Production_Planning[ID == srcPlan]
+		{
+			pStB = ifnull(plB.Order_Status,"").toString();
+			if(pStB == "Material Ready" || pStB == "Production Complete")
+			{
+				plB.Order_Status = "In Progress";
+				logLines = logLines + " | plan pulled back from '" + pStB + "'";
+			}
+		}
+
+		//------------------------------------------------------------------
+		// AND THE SALES ORDER WITH IT.
+		//
+		// saveProductionPhase mirrors the plan onto the order, so a shortfall on
+		// the last stage sets BOTH to Production Complete. Pulling only the plan
+		// back left the order claiming it was finished while it was still owed
+		// pieces - and the order is what most screens and reports read.
+		//
+		// Safe now that QC filters on Ready_For_QC rather than on this status:
+		// the pieces that ARE finished stay inspectable while the batch runs.
+		//
+		// Only from Production Complete, the same rule createRemakeItems applies.
+		// An order already past QC - passed, packed, dispatched - is not dragged
+		// backwards by a late damage report.
+		//------------------------------------------------------------------
+		for each  plO in Production_Planning[ID == srcPlan]
+		{
+			if(plO.Sales_Order != null)
+			{
+				for each  soB in Sales_Order[ID == plO.Sales_Order]
+				{
+					if(ifnull(soB.Order_Status,"").toString() == "Production Complete")
+					{
+						soB.Order_Status = "In Progress";
+					}
+				}
+			}
+		}
+
+		// Written on the damage record so raiseReissueRequest knows which item
+		// the material is really for.
+		for each  dmgU in Material_Damage[ID == damageId]
+		{
+			dmgU.Remake_Item = remakeId;
+		}
+	}
+
+	info logLines;
+
+	res = "{\"success\":true,\"damageId\":\"" + damageId + "\",\"lines\":" + lineCount + ",\"remakeItem\":\"" + remakeId + "\",\"gotRemakeFlag\":" + remakeWanted + ",\"gotPieces\":" + damagedPieces + "}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"" + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

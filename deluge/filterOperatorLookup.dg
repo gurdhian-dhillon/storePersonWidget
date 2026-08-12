@@ -1,0 +1,69 @@
+// Operator_Assignment form workflow: On Load ("loadOperators").
+// Narrows the Operators multi-lookup to active operators.
+//
+// WHY THIS EXISTS INSTEAD OF A FILTER CRITERION ON THE FIELD.
+// The form builder cannot filter on Designation. Designation is a dropdown with
+// NO options configured - every choice it shows is added at runtime by
+// autoPopulateDesignation, from the list on the chosen Department - so the
+// filter builder has nothing to offer and no criterion can be saved against it.
+//
+// The lookup is narrowed here instead, with the SAME client task the dropdown
+// uses. ui.add takes record IDs when the target is a lookup, which is the
+// documented dependent-picker shape:  States:ui.add(statelist.ID.getall());
+//
+//---------------------------------------------------------------------------
+// TWO THINGS THIS FILE GOT WRONG, both fixed here. Keep them fixed.
+//---------------------------------------------------------------------------
+//
+// 1. IT WOULD NOT SAVE - "Error at line number: 0, a technical error occurred
+//    while saving the script", naming no statement because Creator failed to
+//    compile the whole thing. Two causes: `sort by` INLINE in a for-each header
+//    (against the rule in CLAUDE.md, and the Zoho example uses a separate
+//    assignment too), and `input.Operators.getAll()`. Both gone.
+//
+// 2. IT BLANKED THE OPERATORS ALREADY ON THE RECORD. Open a saved assignment to
+//    edit and the field came up "-Select-" while the detail view still showed
+//    Aman and Arjun. `clear` is documented as removing the CHOICES, but on a
+//    multi-select lookup it takes the SELECTION with it - and re-adding the
+//    choices afterwards does not bring the selection back. First person to open
+//    that record and press Update would have saved an empty operator list.
+//
+//    Two changes guard it:
+//      - no `clear`. ui.add already "replaces all the existing choices", so the
+//        clear was redundant as well as destructive. (ui.APPEND is the one that
+//        needs an explicit clear first - that is what the docs are warning about,
+//        and it does not apply here.)
+//      - the saved value is captured BEFORE the field is touched and put back
+//        afterwards, so it survives whatever ui.add does to the field.
+//
+// Bare field name and a colon for the client task - `input.` only when reading
+// or writing a value. On Load / On User Input / subform add-delete row only;
+// this cannot move to On Validate.
+//
+// The same shape will narrow Order_Assignment.Employee to supervisors when that
+// is wired - copy this file and change the designation string.
+
+// BEFORE anything touches the field. On a new record this is simply empty.
+savedOps = input.Operators;
+
+// Queried on the STORED value, not on the field's configured choices - there are
+// none, and there do not need to be. The text in the record is what the picker
+// in getProductionWidgetData matches on too.
+//
+// sort by on its own assignment, never in a for-each header.
+opList = Employee[Designation == "Operator" && Status == "Active"] sort by Employee_Name;
+
+Operators:ui.add(opList.ID.getAll());
+
+// Put the selection back. Assigning a value uses input., unlike the client task
+// above which names the field bare.
+input.Operators = savedOps;
+
+// STILL A GAP, and it is the one worth knowing: an operator saved on this record
+// who has since changed designation or gone Inactive is not in opList, so he is
+// not among the choices, and the line above cannot select someone who is not
+// there. He stays in the stored data - reports and getProductionWidgetData still
+// see him - but the field cannot show him, and saving the record drops him.
+//
+// If that bites, widen the query rather than reach for the field: drop
+// `Status == "Active"` so only a designation change can make someone vanish.

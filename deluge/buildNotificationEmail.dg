@@ -1,0 +1,52 @@
+string buildNotificationEmail(string title, string subtitle, string accentHex, string innerHtml)
+{
+	// The shared shell every notification mail is poured into, so five different
+	// functions produce one recognisable thing rather than five near-misses.
+	//
+	// NOT a Custom API. Nothing calls this from a widget - it is called from other
+	// Deluge functions with thisapp.buildNotificationEmail(...), so it needs no
+	// API wrapper and no argument list to keep in sync.
+	//
+	// Callers pass only what differs:
+	//   title      - the headline in the coloured bar, e.g. "Material issued"
+	//   subtitle   - the line under it, usually who and when
+	//   accentHex  - bar colour. #2563eb for news, #dc2626 when someone must act
+	//   innerHtml  - the body, already built, already escaped
+	//
+	// Email HTML has no stylesheet - no <style> block survives Gmail, no class
+	// ever applies - so every rule is inline. Table layout, not divs: Outlook
+	// renders through Word and ignores flex, grid and inline-block. Colours are
+	// stated explicitly rather than inherited, because Gmail's dark mode inverts
+	// whatever it is not told about.
+	//
+	// Palette is the app's own - #2563eb primary, #e9eef4 page - so the mails and
+	// the widgets read as one system.
+
+	mFont = "-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif";
+
+	accent = ifnull(accentHex,"").toString().trim();
+	if(accent == "")
+	{
+		accent = "#2563eb";
+	}
+
+	// Two nested tables because a max-width div does not centre in Outlook.
+	html = "<div style='background:#e9eef4;padding:24px 12px;font-family:" + mFont + "'>";
+	html = html + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0'><tr><td align='center'>";
+	html = html + "<table role='presentation' width='640' cellpadding='0' cellspacing='0' border='0' style='width:640px;max-width:100%;background:#ffffff;border:1px solid #dbe3ec;border-radius:10px'>";
+
+	html = html + "<tr><td style='background:" + accent + ";padding:18px 24px;border-radius:10px 10px 0 0'>";
+	html = html + "<div style='font-size:17px;font-weight:700;color:#ffffff'>" + ifnull(title,"").toString() + "</div>";
+	html = html + "<div style='font-size:12px;color:#ffffff;opacity:0.85;padding-top:3px'>" + ifnull(subtitle,"").toString() + "</div>";
+	html = html + "</td></tr>";
+
+	html = html + "<tr><td style='padding:20px 24px 4px 24px'>" + ifnull(innerHtml,"").toString() + "</td></tr>";
+
+	html = html + "<tr><td style='padding:18px 24px 22px 24px'>";
+	html = html + "<div style='border-top:1px solid #eef2f6;padding-top:12px;font-size:11px;color:#94a3b8'>Gad Fashions Manufacturing &middot; automatic notification. Nothing to reply to.</div>";
+	html = html + "</td></tr>";
+
+	html = html + "</table></td></tr></table></div>";
+
+	return html;
+}

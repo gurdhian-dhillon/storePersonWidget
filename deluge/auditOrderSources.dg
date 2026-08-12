@@ -1,0 +1,114 @@
+string auditOrderSources()
+{
+	// What Sales_Order.Order_Source ACTUALLY holds, counted, and which values
+	// the priority table will not recognise.
+	//
+	// Read-only. Run it from Creator's Execute before recreating plans.
+	//
+	// WHY IT EXISTS. Editing a dropdown's choices in the form builder does NOT
+	// rewrite the value already stored on records - the old string stays on
+	// every order that was saved with it. So "I fixed the dropdown" and "the
+	// data is fixed" are two different statements, and only this one can tell
+	// them apart.
+	//
+	// The cost of not knowing is not an error. An unrecognised source is ranked
+	// LAST and the plan is created anyway, so the failure looks like a working
+	// system that quietly serves the wrong orders first. That already happened
+	// once: four live plans sat at the bottom of the store screen because the
+	// field said "Fair" and the table looked for "faire".
+	//
+	// Same rank table as createProductionPlans. If the ranks change there they
+	// change here, or this audit will bless a source the live path rejects.
+
+	knownJson = "";
+	unknownJson = "";
+	logTxt = "";
+	totalOrders = 0;
+	unknownRows = 0;
+
+	srcKeys = List();
+	srcCount = Map();
+	srcRankMap = Map();
+
+	// Every order, not only Pending ones. An order that is already In Progress
+	// still has a plan whose key came from this field, and a source that only
+	// appears on older orders is exactly the one nobody remembers changing.
+	for each  so in Sales_Order[ID != 0]
+	{
+		totalOrders = totalOrders + 1;
+
+		// Kept RAW for display - the whole point is to show the stored string,
+		// spaces and capitals included, because those are what break the match.
+		rawSrc = ifnull(so.Order_Source,"").toString();
+		cmpSrc = rawSrc.trim().toLowerCase();
+
+		rnk = 5;
+		if(cmpSrc == "shopify")
+		{
+			rnk = 1;
+		}
+		else if(cmpSrc == "faire")
+		{
+			rnk = 2;
+		}
+		else if(cmpSrc == "custom")
+		{
+			rnk = 3;
+		}
+		else if(cmpSrc == "pr")
+		{
+			rnk = 4;
+		}
+
+		if(rnk == 5)
+		{
+			unknownRows = unknownRows + 1;
+		}
+
+		// Keyed on the RAW string, so "Shopify" and "shopify " are reported as
+		// the two different stored values they are, even though both rank 1.
+		if(srcCount.get(rawSrc) == null)
+		{
+			srcKeys.add(rawSrc);
+			srcCount.put(rawSrc,0);
+			srcRankMap.put(rawSrc,rnk);
+		}
+		srcCount.put(rawSrc,srcCount.get(rawSrc) + 1);
+	}
+
+	for each  sk in srcKeys
+	{
+		skRank = srcRankMap.get(sk);
+		skN = srcCount.get(sk);
+		skEsc = sk.toString().replaceAll("\"","'");
+
+		if(skRank == 5)
+		{
+			logTxt = logTxt + "\n  UNRANKED  '" + sk + "'  x" + skN + "  -> sorts LAST";
+			if(unknownJson != "")
+			{
+				unknownJson = unknownJson + ",";
+			}
+			unknownJson = unknownJson + "{\"source\":\"" + skEsc + "\",\"orders\":" + skN + "}";
+		}
+		else
+		{
+			logTxt = logTxt + "\n  rank " + skRank + "    '" + sk + "'  x" + skN;
+			if(knownJson != "")
+			{
+				knownJson = knownJson + ",";
+			}
+			knownJson = knownJson + "{\"source\":\"" + skEsc + "\",\"rank\":" + skRank + ",\"orders\":" + skN + "}";
+		}
+	}
+
+	verdict = "OK - every order source ranks";
+	if(unknownRows > 0)
+	{
+		verdict = "FIX FIRST - " + unknownRows + " order(s) carry a source the priority table does not know";
+	}
+
+	info verdict + " | orders " + totalOrders + " | distinct stored values " + srcKeys.size() + logTxt;
+
+	return "{\"verdict\":\"" + verdict + "\",\"orders\":" + totalOrders + ",\"unrankedOrders\":" + unknownRows + ",\"known\":[" + knownJson + "],\"unranked\":[" + unknownJson + "]}";
+}

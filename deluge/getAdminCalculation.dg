@@ -1,0 +1,771 @@
+string getAdminCalculation(string salesOrderId)
+{
+	// Every number the fabric maths produces, with the inputs it was produced
+	// from, so an admin can check the arithmetic instead of trusting it.
+	//
+	// POST, one argument: salesOrderId. Empty -> just the order list, so the
+	// widget can fill its picker with one call.
+	//
+	// THREE SEPARATE CALCULATIONS live in this app and they are NOT the same
+	// number. Conflating them is the single most common way to conclude the
+	// system is wrong when it is not:
+	//
+	//   1 PLAN-TIME REQUIREMENT   createProductionPlans. Cut size against fabric
+	//                             width gives pieces per row; the order quantity
+	//                             gives rows; rows times cut length is metres.
+	//                             Assumes NO WASTE EXISTS. Stored on
+	//                             Material_Requirement.Required_Qty and never
+	//                             recomputed.
+	//
+	//   2 ISSUE-TIME ALLOCATION   getStoreMaterialRequirements. Re-decides, at
+	//                             the moment of issue, how much of the demand
+	//                             offcuts can cover, and asks for fresh cloth
+	//                             only for the rest. Always <= (1), and it moves
+	//                             every time waste stock moves.
+	//
+	//   3 WASTE GENERATION        getExpectedWaste. What the cutting throws off:
+	//                             the side strip beside the last column, the
+	//                             stub of a part-filled row, and the tail below
+	//                             the last row.
+	//
+	// (2) IS REPRODUCED GLOBALLY HERE, NOT FOR THIS ORDER ALONE. The store screen
+	// allocates across every open plan, oldest first, claiming pieces as it goes -
+	// so an order's picks depend on what earlier orders already took. Allocating
+	// this order in isolation would produce numbers that look right and disagree
+	// with the screen the store person is actually reading. The full walk is run
+	// and only the buckets this order appears in are returned, each carrying the
+	// competing plans that shaped it.
+	//
+	// (3) IS DELIBERATELY NOT COMPUTED HERE. It is driven by a piece count the
+	// admin types, so it is derived in the widget from the inputs below - a round
+	// trip per keystroke would make the screen unusable. The inputs are the whole
+	// of what it needs: cut size, fabric width, and the pieces on offer.
+
+	soJson = "";
+	orderName = "";
+	planJson = "";
+	bucketJson = "";
+	errJson = "";
+
+	// DEBUG WRAPPER: Creator reports every runtime failure as a generic
+	// "code 9430 - There is an error while executing Custom API." Catching it
+	// here surfaces the real Deluge message in the widget console instead.
+	try
+	{
+	// Newest first - the order somebody is asking about is almost always a
+	// recent one.
+	allOrders = Sales_Order[ID != 0] sort by Added_Time desc;
+
+	//----------------------------------------------------------------------
+	// WHICH ORDERS ACTUALLY HAVE A PLAN.
+	//
+	// One query and a map, not one query per order - the dropdown grows for
+	// ever and a lookup each would put the whole order book through the
+	// statement limit to draw a picker.
+	//
+	// An order with no plan is a DEAD END on this screen: selecting it can only
+	// ever produce "nothing has been planned against it, so there is nothing to
+	// calculate". The widget hides them by default, so the picker offers what
+	// can actually be audited instead of a hundred entries that all lead to the
+	// same empty state.
+	//
+	// Keyed on the id as STRING. The lookup holds a record id and comparing it
+	// to a number is the mixed-type comparison that throws.
+	//----------------------------------------------------------------------
+	plannedMap = Map();
+	for each  pp in Production_Planning[ID != 0]
+	{
+		if(pp.Sales_Order != null)
+		{
+			plannedMap.put(pp.Sales_Order + "","1");
+		}
+	}
+
+	for each  so in allOrders
+	{
+		if(soJson != "")
+		{
+			soJson = soJson + ",";
+		}
+		hasPlan = "false";
+		if(plannedMap.get(so.ID + "") != null)
+		{
+			hasPlan = "true";
+		}
+		// status and source are carried so the picker can be filtered on them
+		// without a second call. Both are plain text on the order.
+		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+		soJson = soJson + "{\"id\":\"" + so.ID + "\",\"name\":\"" + ifnull(so.Sales_Order,"").toString().replaceAll("\"","'") + "\",\"status\":\"" + ifnull(so.Order_Status,"").toString().replaceAll("\"","'") + "\",\"source\":\"" + ifnull(so.Order_Source,"").toString().replaceAll("\"","'") + "\",\"hasPlans\":" + hasPlan + "}";
+	}
+
+	if(salesOrderId == null || salesOrderId.trim() == "")
+	{
+		return "{\"errors\":[],\"orders\":[" + soJson + "],\"orderName\":\"\",\"plans\":[],\"buckets\":[]}";
+	}
+
+	soId = salesOrderId.trim().toLong();
+
+	for each  so2 in Sales_Order[ID == soId]
+	{
+		orderName = ifnull(so2.Sales_Order,"").toString().replaceAll("\"","'");
+	}
+
+	//====================================================================
+	// PART 1 - the issue-time allocation, READ FROM THE REAL FUNCTION.
+	//
+	// This used to be a second copy of the allocator. A copy verifies nothing:
+	// it can agree with itself perfectly while disagreeing with the screen the
+	// store person is reading, and the two drift apart the first time either is
+	// edited. So the numbers now come from getStoreMaterialRequirements itself,
+	// via thisapp, and what this screen shows IS what the store is issuing.
+	//
+	// The split that keeps it honest:
+	//   DECISIONS  - which offcut, how many, how much fresh cloth. Taken from
+	//                the real function's output, never recomputed here.
+	//   GEOMETRY   - pieces per row, capacity, the score for a given remnant.
+	//                Derived here for display, because it is a pure function of
+	//                the piece size and the cut size, and showing it is the
+	//                whole point of an audit screen.
+	//
+	// The allocation is global - across every open plan, oldest first - so an
+	// order's picks depend on what earlier orders already claimed. The real
+	// function already works that way; this filters its output down to the
+	// buckets this order appears in, each still carrying the competing lines.
+	//====================================================================
+
+	// This order's plans, plus the per-plan figures the store function does not
+	// carry: plan number, and demand in PIECES rather than metres.
+	myPlanIds = List();
+	planNoById = Map();
+	soNoById = Map();
+	piecesByPlanMat = Map();
+
+	pendingPlans = Production_Planning[Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress"] sort by Priority_Key;
+
+	for each  gplan in pendingPlans
+	{
+		gpIdTxt = gplan.ID + "";
+		planNoById.put(gpIdTxt,ifnull(gplan.Plan_No,"").toString());
+
+		gSoNo = "";
+		for each  gso in Sales_Order[ID == gplan.Sales_Order]
+		{
+			gSoNo = ifnull(gso.Sales_Order,"").toString().replaceAll("\"","'");
+		}
+		soNoById.put(gpIdTxt,gSoNo);
+
+		if(gplan.Sales_Order == soId)
+		{
+			myPlanIds.add(gpIdTxt);
+		}
+
+		for each  gmr in Material_Requirement[Plan == gplan.ID]
+		{
+			gMat = gmr.Material;
+			if(gMat != null && ifnull(gmr.Is_Fabric,false) == true)
+			{
+				pmKey = gpIdTxt + "|" + gMat;
+				pmCur = piecesByPlanMat.get(pmKey);
+				if(pmCur == null)
+				{
+					pmCur = Map();
+					pmCur.put("req",0);
+					pmCur.put("iss",0);
+				}
+				pmCur.put("req",pmCur.get("req") + ifnull(gmr.Required_Pieces,0));
+				pmCur.put("iss",pmCur.get("iss") + ifnull(gmr.Pieces_From_Waste,0) + ifnull(gmr.Pieces_From_Raw,0));
+				piecesByPlanMat.put(pmKey,pmCur);
+			}
+		}
+	}
+
+	//--------------------------------------------------------------------
+	// The offcuts on hand, for the pool table only. The allocator's own copy
+	// of this list is inside the real function; this one exists so the screen
+	// can show a remnant that was NOT offered and say why - which is the
+	// question an admin actually arrives with.
+	//--------------------------------------------------------------------
+	poolBySku = Map();
+	availableWaste = Waste_Master[Status == "Available"] sort by Added_Time;
+
+	for each  wp in availableWaste
+	{
+		skuId = ifnull(wp.SKU,"").toString();
+
+		// Creator fields that were never written are EMPTY, not null, and
+		// toDecimal() throws on empty - normalise to string first.
+		pwStr = ifnull(wp.Piece_Width,"0").toString().trim();
+		if(pwStr == "")
+		{
+			pwStr = "0";
+		}
+		plStr = ifnull(wp.Piece_Length,"0").toString().trim();
+		if(plStr == "")
+		{
+			plStr = "0";
+		}
+		pcStr = ifnull(wp.Piece_Count,"0").toString().trim();
+		if(pcStr == "")
+		{
+			pcStr = "0";
+		}
+		pw = pwStr.toDecimal();
+		pl = plStr.toDecimal();
+		pc = pcStr.toDecimal().toLong();
+
+		if(skuId != "" && pw > 0 && pl > 0 && pc > 0)
+		{
+			wRow = Map();
+			wRow.put("wasteId",wp.ID + "");
+			wRow.put("width",pw);
+			wRow.put("length",pl);
+			wRow.put("count",pc);
+
+			pList = poolBySku.get(skuId);
+			if(pList == null)
+			{
+				pList = List();
+			}
+			pList.add(wRow);
+			poolBySku.put(skuId,pList);
+		}
+	}
+
+	//--------------------------------------------------------------------
+	// The real allocation. One call; its answer is authoritative here.
+	//
+	// Own try/catch: if the call or the parse fails, the plan-time half of
+	// this screen is still worth showing, and a named error beats a blank
+	// page with a 9430 behind it.
+	//--------------------------------------------------------------------
+	storeTxt = "";
+	storeOk = false;
+	try
+	{
+		storeTxt = thisapp.getStoreMaterialRequirements();
+		storeOk = true;
+	}
+	catch (eCall)
+	{
+		if(errJson != "")
+		{
+			errJson = errJson + ",";
+		}
+		errJson = errJson + "\"Could not read the live allocation: " + eCall.toString().replaceAll("\"","'") + "\"";
+	}
+
+	// What earlier buckets have already taken out of the pool, accumulated as
+	// the response is walked. The real function emits buckets in allocation
+	// order, so adding up the picks it REPORTS reproduces the running state
+	// exactly - without re-deciding anything. This is what lets the pool table
+	// say "claimed by an earlier plan" and be right about it.
+	claimedById = Map();
+
+	if(storeOk == true)
+	{
+		supBlocks = storeTxt.toJSONList();
+
+		for each  supRaw in supBlocks
+		{
+			supMap = supRaw.toMap();
+			supIdTxt = ifnull(supMap.get("supervisorId"),"").toString();
+			supNameTxt = ifnull(supMap.get("supervisorName"),"").toString().replaceAll("\"","'");
+
+			for each  matRaw in supMap.get("materials")
+			{
+				matMap = matRaw.toMap();
+
+				isFabTxt = ifnull(matMap.get("isFabric"),"false").toString();
+				if(isFabTxt == "true")
+				{
+					matIdTxt = ifnull(matMap.get("materialId"),"").toString();
+					cutW = ifnull(matMap.get("cutWidth"),"0").toString().toDecimal();
+					cutL = ifnull(matMap.get("cutLength"),"0").toString().toDecimal();
+					fabWcm = ifnull(matMap.get("fabricWidthCm"),"0").toString().toDecimal();
+
+					reqPcs = ifnull(matMap.get("requiredPieces"),"0").toString().toDecimal().toLong();
+					issPcs = ifnull(matMap.get("issuedPieces"),"0").toString().toDecimal().toLong();
+					outPcs = ifnull(matMap.get("outstandingPieces"),"0").toString().toDecimal().toLong();
+					covPcs = ifnull(matMap.get("piecesCoveredByWaste"),"0").toString().toDecimal().toLong();
+					frshPcs = ifnull(matMap.get("freshPieces"),"0").toString().toDecimal().toLong();
+					frshMtr = ifnull(matMap.get("freshMeters"),"0").toString().toDecimal();
+					washQty = ifnull(matMap.get("availableStock"),"0").toString().toDecimal();
+					unwashQty = ifnull(matMap.get("unwashedStock"),"0").toString().toDecimal();
+
+					//--------------------------------------------------------
+					// The competing lines, and whether this order is among
+					// them. A bucket that does not touch this order is not
+					// this order's business and is dropped.
+					//--------------------------------------------------------
+					mine = false;
+					lineJson = "";
+
+					for each  lnRaw in matMap.get("lines")
+					{
+						lnMap = lnRaw.toMap();
+						lnPlanId = ifnull(lnMap.get("planId"),"").toString();
+
+						lnMineTxt = "false";
+						if(myPlanIds.contains(lnPlanId))
+						{
+							mine = true;
+							lnMineTxt = "true";
+						}
+
+						lnReq = 0;
+						lnIss = 0;
+						pmGot = piecesByPlanMat.get(lnPlanId + "|" + matIdTxt);
+						if(pmGot != null)
+						{
+							lnReq = pmGot.get("req");
+							lnIss = pmGot.get("iss");
+						}
+
+						lnPlanNo = ifnull(planNoById.get(lnPlanId),"").toString();
+						lnSo = ifnull(lnMap.get("salesOrder"),"").toString().replaceAll("\"","'");
+						if(lnSo == "")
+						{
+							lnSo = ifnull(soNoById.get(lnPlanId),"").toString();
+						}
+
+						if(lineJson != "")
+						{
+							lineJson = lineJson + ",";
+						}
+						lineJson = lineJson + "{\"planId\":\"" + lnPlanId + "\",\"planNo\":\"" + lnPlanNo + "\",\"salesOrder\":\"" + lnSo + "\",\"planItemId\":\"" + ifnull(lnMap.get("planItemId"),"").toString() + "\",\"reqPieces\":" + lnReq + ",\"issuedPieces\":" + lnIss + ",\"isThisOrder\":" + lnMineTxt + "}";
+					}
+
+					if(mine == true)
+					{
+						//----------------------------------------------------
+						// Pool. Every offcut of this fabric, including the ones
+						// that did not qualify - "fits" says which, and the
+						// geometry says why.
+						//----------------------------------------------------
+						poolJson = "";
+						myPool = poolBySku.get(matIdTxt);
+						if(myPool != null)
+						{
+							for each  pRow in myPool
+							{
+								pW = pRow.get("width");
+								pL = pRow.get("length");
+								pClaimed = claimedById.get(pRow.get("wasteId"));
+								if(pClaimed == null)
+								{
+									pClaimed = 0;
+								}
+								pLeft = pRow.get("count") - pClaimed;
+
+								// Written as a branch rather than assigning the
+								// comparison directly - Deluge does not reliably
+								// keep a bare boolean expression as a boolean
+								// once it is put in a variable.
+								pFits = false;
+								pPerRow = 0;
+								pMaxRows = 0;
+								if(cutW > 0 && cutL > 0 && pW >= cutW && pL >= cutL)
+								{
+									pFits = true;
+									pPerRow = (pW / cutW).floor();
+									pMaxRows = (pL / cutL).floor();
+								}
+
+								if(poolJson != "")
+								{
+									poolJson = poolJson + ",";
+								}
+								poolJson = poolJson + "{\"wasteId\":\"" + pRow.get("wasteId") + "\",\"width\":" + pW + ",\"length\":" + pL + ",\"opening\":" + pRow.get("count") + ",\"left\":" + pLeft + ",\"fits\":" + pFits + ",\"perRow\":" + pPerRow + ",\"maxRows\":" + pMaxRows + ",\"capacity\":" + (pPerRow * pMaxRows) + "}";
+							}
+						}
+
+						//----------------------------------------------------
+						// What the allocator actually picked. The choice and the
+						// count are its; the geometry and the score beside them
+						// are derived here so the choice can be checked rather
+						// than taken on trust.
+						//----------------------------------------------------
+						passJson = "";
+						passNo = 0;
+						runRemain = outPcs;
+
+						for each  pkRaw in matMap.get("wastePicks")
+						{
+							pkMap = pkRaw.toMap();
+							passNo = passNo + 1;
+
+							pkW = ifnull(pkMap.get("width"),"0").toString().toDecimal();
+							pkL = ifnull(pkMap.get("length"),"0").toString().toDecimal();
+							pkTake = ifnull(pkMap.get("pieces"),"0").toString().toDecimal().toLong();
+
+							kPerRow = 0;
+							kMaxRows = 0;
+							if(cutW > 0 && cutL > 0)
+							{
+								kPerRow = (pkW / cutW).floor();
+								kMaxRows = (pkL / cutL).floor();
+							}
+							kCap = kPerRow * kMaxRows;
+
+							kCovered = pkTake * kCap;
+							if(kCovered > runRemain)
+							{
+								kCovered = runRemain;
+							}
+
+							kScored = kCap;
+							if(kScored > runRemain)
+							{
+								kScored = runRemain;
+							}
+							kScore = 0.0;
+							if(kScored > 0)
+							{
+								kScore = ((pkW * pkL) - (kScored * cutW * cutL)) / kScored;
+							}
+
+							beforeRemain = runRemain;
+							runRemain = runRemain - kCovered;
+
+							if(passJson != "")
+							{
+								passJson = passJson + ",";
+							}
+							passJson = passJson + "{\"pass\":" + passNo + ",\"wasteId\":\"" + ifnull(pkMap.get("wasteId"),"").toString() + "\",\"width\":" + pkW + ",\"length\":" + pkL + ",\"perRow\":" + kPerRow + ",\"maxRows\":" + kMaxRows + ",\"capacity\":" + kCap + ",\"cutsScored\":" + kScored + ",\"score\":" + kScore + ",\"remainBefore\":" + beforeRemain + ",\"take\":" + pkTake + ",\"covered\":" + kCovered + ",\"remainAfter\":" + runRemain + "}";
+						}
+
+						//----------------------------------------------------
+						// Fresh cloth. freshMetres is the REAL figure; the rows
+						// beside it are the derivation, and freshMetresCheck is
+						// that derivation carried out. If the two disagree the
+						// screen is doing its job.
+						//----------------------------------------------------
+						freshPerRow = 0;
+						freshRows = 0;
+						freshCheck = 0.0;
+						if(frshPcs > 0 && cutW > 0 && fabWcm > 0)
+						{
+							freshPerRow = (fabWcm / cutW).floor();
+							if(freshPerRow > 0)
+							{
+								freshRows = ((frshPcs * 1.0) / freshPerRow).ceil();
+								freshCheck = (freshRows * cutL) / 100;
+							}
+							else
+							{
+								if(errJson != "")
+								{
+									errJson = errJson + ",";
+								}
+								errJson = errJson + "\"" + ifnull(matMap.get("material"),"").toString().replaceAll("\"","'") + ": cut width " + cutW + "cm exceeds fabric width " + fabWcm + "cm - nothing can be cut.\"";
+							}
+						}
+
+						// Inches are not in the store payload and are what an
+						// admin checks against a supplier docket, so they are
+						// converted back rather than re-fetched.
+						fabWin = "";
+						if(fabWcm > 0)
+						{
+							fabWin = (fabWcm / 2.54).round(2).toString();
+						}
+
+						//------------------------------------------------
+						// THE JOIN KEY BETWEEN A LINE AND ITS BUCKET.
+						//
+						// Built the SAME way on both sides - see mBucket below -
+						// and neither side may be "obviously equivalent". It was
+						// not: this side came off the JSON through .toDecimal()
+						// and rendered 55, the line side read the Creator Decimal
+						// field directly and rendered 55.00. The strings never
+						// matched, bucketFor returned null for every fabric line,
+						// and the admin screen said "this line is not in the live
+						// allocation" about lines the store was actively
+						// allocating offcuts to.
+						//
+						// Centimetres x100 as a LONG, so there is no decimal
+						// formatting left to disagree about. Ids forced to string
+						// on both sides for the same reason.
+						//
+						// Source is in the key because the STORE's own key has it:
+						// a reissue is a separate bucket there, and merging the two
+						// here would join a plan line to a reissue's allocation.
+						bSrc = "Plan";
+						if(ifnull(matMap.get("isReissue"),"false").toString() == "true")
+						{
+							bSrc = "Reissue";
+						}
+						bKey = supIdTxt + "|" + matIdTxt + "|" + (cutW * 100).toLong() + "x" + (cutL * 100).toLong() + "|" + bSrc;
+
+						if(bucketJson != "")
+						{
+							bucketJson = bucketJson + ",";
+						}
+						bucketJson = bucketJson + "{\"key\":\"" + bKey + "\",\"supervisorId\":\"" + supIdTxt + "\",\"supervisor\":\"" + supNameTxt + "\",\"materialId\":\"" + matIdTxt + "\",\"material\":\"" + ifnull(matMap.get("material"),"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + ifnull(matMap.get("sku"),"").toString().replaceAll("\"","'") + "\",\"unit\":\"" + ifnull(matMap.get("unit"),"").toString() + "\",\"cutWidth\":" + cutW + ",\"cutLength\":" + cutL + ",\"fabricWidthInches\":\"" + fabWin + "\",\"fabricWidthCm\":" + fabWcm + ",\"washStock\":" + washQty + ",\"unwashStock\":" + unwashQty + ",\"requiredPieces\":" + reqPcs + ",\"issuedPieces\":" + issPcs + ",\"outstandingPieces\":" + outPcs + ",\"coveredByWaste\":" + covPcs + ",\"freshPieces\":" + frshPcs + ",\"freshPerRow\":" + freshPerRow + ",\"freshRows\":" + freshRows + ",\"freshMetres\":" + frshMtr + ",\"freshMetresCheck\":" + freshCheck + ",\"pool\":[" + poolJson + "],\"passes\":[" + passJson + "],\"lines\":[" + lineJson + "]}";
+					}
+
+					// Applied AFTER this bucket's pool snapshot and for every
+					// bucket, not only this order's - a piece taken by another
+					// supervisor's requirement is just as unavailable, and the
+					// snapshot has to show the pool as it was when this bucket
+					// ran, not after it took its share.
+					for each  clRaw in matMap.get("wastePicks")
+					{
+						clMap = clRaw.toMap();
+						clId = ifnull(clMap.get("wasteId"),"").toString();
+						clTake = ifnull(clMap.get("pieces"),"0").toString().toDecimal().toLong();
+
+						clNow = claimedById.get(clId);
+						if(clNow == null)
+						{
+							clNow = 0;
+						}
+						claimedById.put(clId,clNow + clTake);
+					}
+				}
+			}
+		}
+	}
+
+	//====================================================================
+	// PART 2 - the order itself: plans, items, and the inputs to the
+	// plan-time requirement for each material line.
+	//
+	// Every plan on the order is walked, not just the pending ones. A
+	// finished plan has no bucket above and so shows its plan-time working
+	// only - which is correct, there is nothing left to allocate.
+	//====================================================================
+	orderPlans = Production_Planning[Sales_Order == soId] sort by Added_Time;
+
+	for each  plan in orderPlans
+	{
+		supName2 = "Unknown";
+		supId2 = plan.Assigned_To;
+		if(supId2 != null)
+		{
+			for each  emp2 in Employee[ID == supId2]
+			{
+				supName2 = ifnull(emp2.Employee_Name,"").toString().replaceAll("\"","'");
+			}
+		}
+
+		itemJson = "";
+		planItems = Plan_Item[Plan == plan.ID] sort by Line_No;
+
+		for each  pi in planItems
+		{
+			// Per-unit quantities for non-fabric live on the BOM, not on the
+			// requirement - the requirement only kept the multiplied answer. To
+			// show the working the BOM row has to be read back.
+			perUnitMap = Map();
+			cutWMap = Map();
+			cutLMap = Map();
+			if(pi.BOM != null)
+			{
+				for each  bomRec in BOM[ID == pi.BOM]
+				{
+					for each  bRow in bomRec.Material_Required
+					{
+						bMat = bRow.Item;
+						if(bMat != null)
+						{
+							perUnitMap.put(bMat + "",ifnull(bRow.Required_Quantity,0));
+							cutWMap.put(bMat + "",ifnull(bRow.Cut_Size_Width,0));
+							cutLMap.put(bMat + "",ifnull(bRow.Cut_Size_Length,0));
+						}
+					}
+				}
+			}
+
+			matJson = "";
+			for each  mr2 in Material_Requirement[Plan_Item == pi.ID]
+			{
+				mMat = mr2.Material;
+				if(mMat != null)
+				{
+					mIsFab = ifnull(mr2.Is_Fabric,false);
+					mCutW = ifnull(mr2.Cut_Size_Width,0);
+					mCutL = ifnull(mr2.Cut_Size_Length,0);
+
+					mSku = "";
+					mDisp = "";
+					mWidthIn = "";
+					mWidthCm = 0.0;
+					for each  rm2 in Raw_Material[ID == mMat]
+					{
+						mSku = ifnull(rm2.SKU,"").toString();
+						mDisp = ifnull(rm2.Material_Display_Name,"").toString().trim();
+						val2 = rm2.Fabric_Width_Inches;
+						if(val2 != null && val2.trim() != "")
+						{
+							mWidthIn = val2.trim();
+							mWidthCm = mWidthIn.toDecimal() * 2.54;
+						}
+					}
+					mName = ifnull(mr2.Material_Name,"").toString().replaceAll("\"","'");
+					if(mDisp != "")
+					{
+						mName = mDisp.replaceAll("\"","'");
+					}
+
+					// Stored figures are returned RAW, never recomputed. The
+					// widget re-derives them from the inputs and compares - a
+					// requirement written before a cut size was corrected will
+					// disagree, and that disagreement is the finding.
+					// WHICH CALCULATION THIS ROW CAME FROM.
+				//
+				// The audit re-derives the plan-time requirement from the BOM and
+				// the item's ORDERED quantity, then compares it to what is stored.
+				// That test is meaningless on a reissue: its Required_Qty was
+				// worked out from the pieces the supervisor ruined, not from the
+				// order, so it can never match and every reissue row would be
+				// reported as a BOM discrepancy that is not one.
+				//
+				// Sent rather than filtered out - the row is real material and
+				// belongs on the audit; it is the COMPARISON that has to be
+				// skipped, and only the widget knows which comparison it is
+				// about to run.
+				mSrcTxt = ifnull(mr2.Source,"").toString().trim();
+				mIsReissue = false;
+				if(mSrcTxt == "Reissue")
+				{
+					mIsReissue = true;
+				}
+
+				mReqStr = ifnull(mr2.Required_Qty,"0").toString().trim();
+					if(mReqStr == "")
+					{
+						mReqStr = "0";
+					}
+					mIssStr = ifnull(mr2.Issued_Qty,"0").toString().trim();
+					if(mIssStr == "")
+					{
+						mIssStr = "0";
+					}
+					mRcvStr = ifnull(mr2.Received_Qty,"0").toString().trim();
+					if(mRcvStr == "")
+					{
+						mRcvStr = "0";
+					}
+
+					// The bucket this line was allocated in, so the widget can
+					// join a line to its share of the global walk without
+					// rebuilding the key itself.
+					// Must be built EXACTLY as bKey is, above. Any difference
+					// in how a number renders silently unjoins the two.
+					mBucket = "";
+					if(mIsFab == true && mr2.Assigned_To != null)
+					{
+						mSrcKey = ifnull(mr2.Source,"").toString().trim();
+						if(mSrcKey != "Reissue")
+						{
+							mSrcKey = "Plan";
+						}
+						mBucket = mr2.Assigned_To.toString() + "|" + mMat.toString() + "|" + (mCutW * 100).toLong() + "x" + (mCutL * 100).toLong() + "|" + mSrcKey;
+					}
+
+					mPerUnit = perUnitMap.get(mMat + "");
+					if(mPerUnit == null)
+					{
+						mPerUnit = 0;
+					}
+					mBomCutW = cutWMap.get(mMat + "");
+					if(mBomCutW == null)
+					{
+						mBomCutW = 0;
+					}
+					mBomCutL = cutLMap.get(mMat + "");
+					if(mBomCutL == null)
+					{
+						mBomCutL = 0;
+					}
+
+					if(matJson != "")
+					{
+						matJson = matJson + ",";
+					}
+					matJson = matJson + "{\"reqId\":\"" + mr2.ID + "\",\"materialId\":\"" + mMat + "\",\"material\":\"" + mName + "\",\"sku\":\"" + mSku + "\",\"unit\":\"" + ifnull(mr2.Unit,"").toString() + "\",\"isFabric\":" + mIsFab + ",\"cutWidth\":" + mCutW + ",\"cutLength\":" + mCutL + ",\"bomCutWidth\":" + mBomCutW + ",\"bomCutLength\":" + mBomCutL + ",\"fabricWidthInches\":\"" + mWidthIn + "\",\"fabricWidthCm\":" + mWidthCm + ",\"perUnit\":" + mPerUnit + ",\"requiredPieces\":" + ifnull(mr2.Required_Pieces,0) + ",\"piecesFromRaw\":" + ifnull(mr2.Pieces_From_Raw,0) + ",\"piecesFromWaste\":" + ifnull(mr2.Pieces_From_Waste,0) + ",\"isReissue\":" + mIsReissue + ",\"storedRequiredQty\":" + mReqStr.toDecimal() + ",\"issuedQty\":" + mIssStr.toDecimal() + ",\"receivedQty\":" + mRcvStr.toDecimal() + ",\"bucketKey\":\"" + mBucket + "\"}";
+				}
+			}
+
+			//--------------------------------------------------------------
+			// Waste actually handed to this item, for the generation half.
+			// Read off the Issued movements and their Received children, not
+			// a field - a short receipt has to stay legible as "3 sent, 2
+			// arrived" rather than collapsing into a smaller number.
+			//--------------------------------------------------------------
+			issuedJson = "";
+			issuedMoves = Waste_Movement[Plan_Item == pi.ID && Movement_Type == "Issued"];
+			for each  wi in issuedMoves
+			{
+				gotQty = 0;
+				for each  rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
+				{
+					gotQty = gotQty + ifnull(rv.Piece_Count,0);
+				}
+				// The movement carries the piece, not the material - the
+				// material comes off the piece it was cut from.
+				wMatId = "";
+				for each  wmRec in Waste_Master[ID == wi.Waste_Piece]
+				{
+					wMatId = ifnull(wmRec.SKU,"").toString();
+				}
+				if(issuedJson != "")
+				{
+					issuedJson = issuedJson + ",";
+				}
+				issuedJson = issuedJson + "{\"materialId\":\"" + wMatId + "\",\"width\":" + ifnull(wi.Piece_Width,0) + ",\"length\":" + ifnull(wi.Piece_Length,0) + ",\"sent\":" + ifnull(wi.Piece_Count,0) + ",\"received\":" + gotQty + "}";
+			}
+
+			hasBomTxt = "false";
+			if(pi.BOM != null)
+			{
+				hasBomTxt = "true";
+			}
+
+			//--------------------------------------------------------------
+			// CALCULATION 3 - waste generation, from the real function.
+			//
+			// The widget used to mirror this maths in JavaScript so it could
+			// react to a typed piece count without a round trip. That made the
+			// screen a check on a copy rather than on the thing that runs. The
+			// authoritative answer for the ORDERED quantity is fetched here;
+			// the widget can still re-derive live for a what-if figure, but now
+			// it has the real one beside it to be measured against.
+			//
+			// Own try/catch per item: one item without a BOM must not cost the
+			// whole screen.
+			//--------------------------------------------------------------
+			expWasteJson = "{}";
+			try
+			{
+				expWasteJson = thisapp.getExpectedWaste(pi.Plan + "",pi.ID + "",ifnull(pi.Qty_Ordered,0) + "");
+			}
+			catch (eEw)
+			{
+				expWasteJson = "{\"errors\":[\"" + eEw.toString().replaceAll("\"","'") + "\"],\"fabrics\":[],\"fabricOptions\":[]}";
+			}
+
+			if(itemJson != "")
+			{
+				itemJson = itemJson + ",";
+			}
+			itemJson = itemJson + "{\"planItemId\":\"" + pi.ID + "\",\"itemName\":\"" + ifnull(pi.Item_Name,"").toString().replaceAll("\"","'") + "\",\"lineNo\":" + ifnull(pi.Line_No,0) + ",\"qtyOrdered\":" + ifnull(pi.Qty_Ordered,0) + ",\"qtyProduced\":" + ifnull(pi.Qty_Produced,0) + ",\"status\":\"" + ifnull(pi.Item_Status,"").toString() + "\",\"hasBom\":" + hasBomTxt + ",\"materials\":[" + matJson + "],\"wasteIssued\":[" + issuedJson + "],\"expectedWaste\":" + expWasteJson + "}";
+		}
+
+		if(planJson != "")
+		{
+			planJson = planJson + ",";
+		}
+		planJson = planJson + "{\"planId\":\"" + plan.ID + "\",\"planNo\":\"" + ifnull(plan.Plan_No,"").toString() + "\",\"status\":\"" + ifnull(plan.Order_Status,"").toString() + "\",\"supervisor\":\"" + supName2 + "\",\"items\":[" + itemJson + "]}";
+	}
+
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"orders\":[],\"orderName\":\"\",\"plans\":[],\"buckets\":[]}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[" + errJson + "],\"orders\":[" + soJson + "],\"orderName\":\"" + orderName + "\",\"plans\":[" + planJson + "],\"buckets\":[" + bucketJson + "]}";
+}

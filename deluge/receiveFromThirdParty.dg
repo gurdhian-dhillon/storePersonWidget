@@ -1,0 +1,247 @@
+string receiveFromThirdParty(string payloadJson)
+{
+	// Closes an outsourced block: everything comes back at once, he confirms the
+	// count, and every stage in the block is finished together.
+	//
+	// Custom API, POST, one argument: payloadJson.
+	//   { "outsourceRef":"OS-9-20260806154000",
+	//     "returnedOn":"2026-08-09", "returnedTime":"11:20",
+	//     "qtyReturned":"9", "remarks":"" }
+	//
+	// NO PARTIAL RETURNS, deliberately. A partial return is only worth anything
+	// if he can carry on producing with what came back, and he cannot: the next
+	// stage would take its Qty_In from a figure still due to change, and if he
+	// had already ENDED that stage the late pieces would have nowhere to go -
+	// one Stage_Log per item x phase, and re-running it overwrites the first run.
+	// Making it work needs the item split into a new Plan_Item, which is the
+	// remake machinery and far too much weight for an exception.
+	//
+	// So: he waits, or he closes short. WAITING IS THE RIGHT ANSWER when a
+	// delivery is merely split - closing short tells the system the rest are
+	// lost, fires a reissue, and he cuts replacements for pieces that are on
+	// their way back. The widget says so on the confirm.
+	//
+	// THE LOSS LANDS ON THE LAST STAGE. A vendor who returns 9 of 10 after three
+	// operations cannot say which one dropped it, so every earlier stage passes
+	// the full quantity through and the last one carries the gap. The earlier
+	// stages then read "10 in, 10 out", which is a fiction - the note written on
+	// EVERY row in the block is what keeps it honest.
+	//
+	// THE LAST STAGE IS CLOSED THROUGH saveProductionPhase, not here. If the
+	// block ends on the item's final stage, closing it has to roll the item to
+	// Complete, write Qty_Produced, roll the plan to Production Complete and
+	// mirror that onto the sales order. All of that already exists in one place
+	// and a second copy would drift.
+
+	res = "{\"success\":false,\"error\":\"Nothing was received\"}";
+	logLines = list();
+
+	try
+	{
+	inp = payloadJson.toMap();
+
+	refTxt = ifnull(inp.get("outsourceRef"),"").toString().trim();
+	if(refTxt == "")
+	{
+		return "{\"success\":false,\"error\":\"Missing outsourceRef\"}";
+	}
+
+	// Creator fields that were never written are EMPTY, not null.
+	qStr = ifnull(inp.get("qtyReturned"),"0").toString().trim();
+	if(qStr == "")
+	{
+		qStr = "0";
+	}
+	backQty = qStr.toDecimal().toLong();
+	if(backQty < 0)
+	{
+		backQty = 0;
+	}
+
+	retOnTxt = ifnull(inp.get("returnedOn"),"").toString().trim();
+	retTimeTxt = ifnull(inp.get("returnedTime"),"").toString().trim();
+	remarkTxt = ifnull(inp.get("remarks"),"").toString().trim();
+
+	//----------------------------------------------------------------------
+	// The block. "sort by" must sit on its own assignment - inline in a
+	// for-each header it does not reliably parse.
+	//----------------------------------------------------------------------
+	blockRows = Stage_Log[Outsource_Ref == refTxt] sort by Sequence_No;
+
+	// .count() is right here - this is a query result, not a List.
+	if(blockRows.count() == 0)
+	{
+		return "{\"success\":false,\"error\":\"No stages found for " + refTxt.replaceAll("\"","'") + "\"}";
+	}
+
+	sentQty = 0;
+	lastLogId = 0;
+	lastPhase = "";
+	lastSeq = 0;
+	planId = 0;
+	itemId = 0;
+	alreadyBack = false;
+
+	for each  b in blockRows
+	{
+		if(b.Returned_On != null)
+		{
+			alreadyBack = true;
+		}
+		sentQty = ifnull(b.Qty_In,0);
+		if(b.Plan != null)
+		{
+			planId = b.Plan;
+		}
+		if(b.Plan_Item != null)
+		{
+			itemId = b.Plan_Item;
+		}
+		// Ascending sort, so the last one read is the highest sequence.
+		lastLogId = b.ID;
+		lastPhase = ifnull(b.Phase_Name,"").toString();
+		lastSeq = ifnull(b.Sequence_No,0);
+	}
+
+	if(alreadyBack == true)
+	{
+		return "{\"success\":false,\"error\":\"This block has already been received\"}";
+	}
+
+	// You cannot get back more than you sent.
+	if(backQty > sentQty)
+	{
+		backQty = sentQty;
+	}
+
+	shortBy = sentQty - backQty;
+
+	//----------------------------------------------------------------------
+	// The note, written on EVERY row in the block.
+	//
+	// Without it the earlier stages read as clean runs for ever - "10 in, 10
+	// out" - and the one place the loss is visible is a stage the vendor may
+	// well not have been the one to lose it on.
+	//----------------------------------------------------------------------
+	noteTxt = retOnTxt + " - returned " + backQty + " of " + sentQty;
+	if(shortBy > 0)
+	{
+		noteTxt = noteTxt + " - " + shortBy + " lost at third party";
+	}
+	if(remarkTxt != "")
+	{
+		noteTxt = noteTxt + " - " + remarkTxt;
+	}
+	noteTxt = noteTxt.replaceAll("\"","'");
+
+	//----------------------------------------------------------------------
+	// Every stage EXCEPT the last is closed here at the full quantity.
+	//
+	// Returned_On is set on all of them first, including the last, because
+	// saveProductionPhase refuses to touch a stage that is outsourced and
+	// still out - which is the guard that stops an in-house Start being
+	// recorded against pieces sitting in someone else's workshop.
+	//----------------------------------------------------------------------
+	closedCount = 0;
+
+	for each  b2 in blockRows
+	{
+		oldRem = ifnull(b2.Remarks,"").toString().trim();
+		if(oldRem != "")
+		{
+			oldRem = oldRem + "\n";
+		}
+		b2.Remarks = oldRem + noteTxt;
+
+		if(retOnTxt != "")
+		{
+			b2.Returned_On = retOnTxt.toDate();
+		}
+
+		if(b2.ID != lastLogId)
+		{
+			b2.Qty_Out = ifnull(b2.Qty_In,0);
+			b2.Stage_Status = "Done";
+			if(retTimeTxt != "")
+			{
+				b2.End_Time = retTimeTxt;
+			}
+			closedCount = closedCount + 1;
+		}
+	}
+
+	//----------------------------------------------------------------------
+	// The last stage goes through saveProductionPhase, so the item, the plan
+	// and the sales order all roll forward exactly as they would for an
+	// in-house finish.
+	//----------------------------------------------------------------------
+	isLast = "false";
+	lastPhaseOfItem = 0;
+	for each  piR in Plan_Item[ID == itemId]
+	{
+		if(piR.BOM != null)
+		{
+			for each  bm in BOM[ID == piR.BOM]
+			{
+				for each  stg in bm.Production_Stages
+				{
+					sqv = ifnull(stg.Sequence_No,0);
+					if(sqv > lastPhaseOfItem)
+					{
+						lastPhaseOfItem = sqv;
+					}
+				}
+			}
+		}
+	}
+	if(lastSeq >= lastPhaseOfItem && lastPhaseOfItem > 0)
+	{
+		isLast = "true";
+	}
+
+	endPayload = "{\"planId\":\"" + planId + "\",\"planItemId\":\"" + itemId + "\",\"phaseName\":\"" + lastPhase.replaceAll("\"","'") + "\",\"sequence\":\"" + lastSeq + "\",\"isLastStage\":\"" + isLast + "\",\"operatorId\":\"\",\"machineId\":\"\",\"startTime\":\"\",\"endTime\":\"" + retTimeTxt + "\",\"qtyIn\":\"" + sentQty + "\",\"qtyOut\":\"" + backQty + "\",\"remarks\":\"" + noteTxt + "\"}";
+
+	inner = thisapp.saveProductionPhase(endPayload);
+	logLines.add("last stage via saveProductionPhase -> " + inner);
+
+	//----------------------------------------------------------------------
+	// THAT REPLY IS PASSED STRAIGHT BACK OUT, nested under "phase".
+	//
+	// If this block closed the last stage of the last item, saveProductionPhase
+	// has just completed the plan, mirrored it onto the sales order, and built
+	// the finished-order summary - orderComplete, the totals and the per-item
+	// lines. All of that was being logged and dropped, so an order finished at
+	// a third party skipped its completion popup and the screen simply moved on
+	// to the next order with nothing said.
+	//
+	// Nested rather than re-emitted field by field: the summary is a list of
+	// objects, and hand-rebuilding Map -> List -> Map is exactly the shape that
+	// does not survive Deluge's own toString(). The inner string is already
+	// valid JSON, so it only has to be spliced in.
+	//
+	// Guarded: if the call returned an error string, or nothing at all, an empty
+	// object goes in instead. A malformed value here would break JSON.parse on
+	// the whole response and lose the receipt result too.
+	//----------------------------------------------------------------------
+	innerTxt = ifnull(inner,"").toString().trim();
+	if(innerTxt == "" || innerTxt.startsWith("{") == false)
+	{
+		innerTxt = "{}";
+	}
+
+	closedCount = closedCount + 1;
+
+	logLines.add("Done. ref " + refTxt + " | closed " + closedCount + " stages | back " + backQty + " of " + sentQty);
+	info logLines;
+
+	res = "{\"success\":true,\"closed\":" + closedCount + ",\"returned\":" + backQty + ",\"sent\":" + sentQty + ",\"short\":" + shortBy + ",\"planItemId\":\"" + itemId + "\",\"phaseName\":\"" + lastPhase.replaceAll("\"","'") + "\",\"phase\":" + innerTxt + "}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"" + e.toString().replaceAll("\"","'") + "\"}";
+		logLines.add(res);
+		info logLines;
+	}
+
+	return res;
+}

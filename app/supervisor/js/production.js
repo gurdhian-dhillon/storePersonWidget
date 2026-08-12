@@ -1,0 +1,2121 @@
+const API = {
+	getProductionData: "getProductionWidgetData",
+	savePhase: "saveProductionPhase",
+	// One call for every kind of change to a share: add, re-size, end, remove.
+	// The action rides in the payload.
+	saveAssignment: "saveStageAssignment",
+	expectedWaste: "getExpectedWaste",
+	saveWaste: "saveWasteFromCutting",
+	sendToThirdParty: "sendToThirdParty",
+	receiveFromThirdParty: "receiveFromThirdParty",
+};
+
+// Cutting is the only stage that produces remnants.
+// Matched exactly to "Cutting" as per business rules.
+function isCuttingPhase(name) {
+	return String(name || "").trim() === "Cutting";
+}
+
+// Waste rows being edited in the End dialog. Kept flat with a rowKey so add and
+// delete do not have to reason about array indices shifting under them.
+let wasteDraft = [];
+let wasteFabricOptions = [];
+let wasteRowSeq = 0;
+let pendingEnd = null; // {card, item, plan, payload} held while he edits waste
+
+let operators = [];
+let supervisors = [];
+let plans = [];
+// Absent until getProductionWidgetData is re-saved in Creator, and an empty
+// list simply means no party covers any stage so the Send button never offers
+// one.
+let parties = [];
+let selectedSupId = null;
+let selectedPlanId = null;
+
+// Items where the supervisor has pressed "Start production" but not yet started
+// a stage. Nothing is written to Creator for that click — it only reveals the
+// flow — so a spurious tracking row never gets created. Once the first stage
+// starts, item.logs is non-empty and this set stops mattering.
+const revealedItems = new Set();
+
+// Which item card is expanded. Held in state rather than in the DOM because
+// every save triggers a full re-render — without this, logging a stage on the
+// third item would snap the page back to the first one.
+// undefined = not chosen yet (default to the first item); null = deliberately
+// collapsed, which must survive the re-render rather than springing back open.
+let openItemId;
+
+function nowHHMM() {
+	const d = new Date();
+	return (
+		String(d.getHours()).padStart(2, "0") +
+		":" +
+		String(d.getMinutes()).padStart(2, "0")
+	);
+}
+
+// A Creator Time comes back as "18:16:00", and seconds on a shop-floor clock are
+// noise — three stages in a row read as a wall of colons. Trimmed for DISPLAY
+// only; what is stored is untouched.
+//
+// Defensive about the shape rather than parsing it: the same field renders as
+// "18:16", "18:16:00" and "06:16 PM" depending on where it came from, so this
+// only ever removes a trailing :SS and leaves anything it does not recognise
+// exactly as it arrived.
+function hhmm(t) {
+	const s = String(t == null ? "" : t).trim();
+	if (!s) return "—";
+	return s.replace(/^(\d{1,2}:\d{2}):\d{2}/, "$1");
+}
+
+// A stage's input quantity is never typed. The first stage receives the whole
+// order; every later one receives exactly what the stage before it produced.
+function qtyInFor(item, phases, idx) {
+	if (idx === 0) return Number(item.qty) || 0;
+	const prev = (item.logs || []).find(
+		(l) => l.phase === phases[idx - 1].operation,
+	);
+	return prev ? Number(prev.qtyOut) || 0 : 0;
+}
+
+// Stage logs carry the operator's id, not their name — resolved here against
+// the list the widget already loaded rather than asking the server to send the
+// name on every log row.
+function operatorName(id) {
+	if (!id) return "";
+	const op = operators.find((o) => String(o.id) === String(id));
+	return op ? op.name : "";
+}
+
+function phaseState(log) {
+	if (!log || !log.start) return "todo";
+	return log.end ? "done" : "active";
+}
+
+// ---- Shares of a stage ----
+//
+// A stage's work is split between several operators, one Stage_Assignment each.
+// The server sends them on the stage log as `assigns`; everything below reads
+// that one array so the card, the buttons and the totals can never disagree
+// about who is on the stage.
+//
+// An OLD stage log has no assigns at all — every stage logged before the split
+// existed, and every outsourced one. Defaulting to [] is what lets those render
+// from the header's own operator and figures instead of throwing.
+function sharesOf(log) {
+	return (log && log.assigns) || [];
+}
+
+function shareTotal(log, key) {
+	return sharesOf(log).reduce((sum, a) => sum + (Number(a[key]) || 0), 0);
+}
+
+function openShares(log) {
+	return sharesOf(log).filter((a) => a.status !== "Done");
+}
+
+// A stage started under the OLD single-operator code: it is running, it has an
+// operator on the header, and nobody has been assigned a share.
+//
+// Kept working rather than migrated. Whatever is mid-run on the floor the day
+// this ships must still be endable — a supervisor who cannot close the stage he
+// is standing at would have to leave it open for ever.
+function isLegacyStage(log) {
+	return !!(log && log.start && log.operator && sharesOf(log).length === 0);
+}
+
+// Who the admin has put on this stage. The server hands every operator a
+// `stages` array, matched here rather than in Deluge.
+//
+// AN ASSIGNMENT IS A RESTRICTION WHEN IT EXISTS; NO ASSIGNMENT IS NOT ONE.
+// Assign Cutting to three men and Cutting offers those three. Leave Stitching
+// unassigned and Stitching offers everyone, rather than nobody — otherwise the
+// morning the admin forgets, every picker on the floor is empty and the whole
+// factory stops. A gate people cannot pass teaches them to work around the
+// record.
+function operatorsForStage(stageName, selectedId) {
+	const want = String(stageName || "").trim();
+	// Exact match, never includes() — "Machine Embroidery" sits inside "Manual
+	// Machine Embroidery", so a substring test offers the wrong men.
+	const assigned = want
+		? operators.filter((o) =>
+				(o.stages || []).some((s) => String(s).trim() === want),
+			)
+		: [];
+	let list = assigned.length > 0 ? assigned : operators;
+
+	// Whoever is already on the stage stays listed, assigned or not. Without
+	// this, re-rendering a running stage drops the operator it is holding out of
+	// its own dropdown and the next save writes back an empty one. Same rule the
+	// server states for inactive third parties: a name that has left the picker
+	// must still show where it is already in use.
+	if (selectedId && !list.some((o) => String(o.id) === String(selectedId))) {
+		const cur = operators.find((o) => String(o.id) === String(selectedId));
+		if (cur) list = [cur].concat(list);
+	}
+	return list;
+}
+
+const elSupSelect = document.getElementById("sup-select");
+const elPlanSelect = document.getElementById("plan-select");
+const elRefreshBtn = document.getElementById("refresh-btn");
+const elPlanContainer = document.getElementById("prod-container");
+const elDynamicContent = document.getElementById("prod-content");
+const elEmptyState = document.getElementById("prod-empty");
+
+function showLoading(msg) {
+	parkPlanSelect();
+	elDynamicContent.innerHTML = `
+        <div class="skeleton-card">
+            <div class="skeleton-line w-40"></div>
+            <div class="skeleton-line w-70"></div>
+            <div class="skeleton-line"></div>
+        </div>
+    `;
+	elEmptyState.classList.add("hidden");
+}
+
+function showError(msg) {
+	parkPlanSelect();
+	elDynamicContent.innerHTML = `
+        <div class="prod-empty" style="border-color: var(--status-danger);">
+            <div class="icon" style="color: var(--status-danger);">⚠️</div>
+            <h2>Error</h2>
+            <p style="color: var(--status-danger);">${msg}</p>
+        </div>
+    `;
+}
+
+// Supervisors who actually have a plan on this screen, worked out from the
+// plans themselves. Used when the server did not send the list.
+function derivedSupervisors() {
+	const seen = {};
+	const out = [];
+	plans.forEach((p) => {
+		const id = String(p.assignedTo || "");
+		if (!id || seen[id]) return;
+		seen[id] = true;
+		const emp = operators.find((o) => String(o.id) === id);
+		out.push({ id: id, name: emp ? emp.name : "Unknown" });
+	});
+	return out;
+}
+
+// The picker is shared across tabs and filled once by Receive. Rebuilding it
+// here would wipe that list and reset the selection every time Production
+// loaded — so this only ADDS supervisors Receive could not know about: someone
+// with production work but nothing left to receive.
+function renderSupDropdown() {
+	const existing = {};
+	Array.prototype.forEach.call(elSupSelect.options, (o) => {
+		existing[String(o.value)] = true;
+	});
+
+	supervisors.forEach((op) => {
+		if (existing[String(op.id)]) return;
+		const opt = document.createElement("option");
+		opt.value = op.id;
+		opt.textContent = op.name;
+		elSupSelect.appendChild(opt);
+	});
+
+	if (selectedSupId) {
+		elSupSelect.value = selectedSupId;
+	}
+}
+
+function renderPlanDropdown() {
+	elPlanSelect.innerHTML = `<option value="">-- Select a Sales Order --</option>`;
+	if (!selectedSupId) {
+		elPlanSelect.disabled = true;
+		selectedPlanId = null;
+		return;
+	}
+	elPlanSelect.disabled = false;
+
+	const filteredPlans = plans.filter((p) => p.assignedTo === selectedSupId);
+	filteredPlans.forEach((p) => {
+		const opt = document.createElement("option");
+		opt.value = p.id;
+		opt.textContent =
+			p.salesOrder +
+			" (" + p.planNo + ")" +
+			(p.orderStatus === "Pending" ? " — awaiting material" : "");
+		elPlanSelect.appendChild(opt);
+	});
+
+	setTabCount("count-production", filteredPlans.length);
+
+	// If the currently selected plan is no longer in the filtered list, reset it.
+	if (selectedPlanId && !filteredPlans.find((p) => p.id === selectedPlanId)) {
+		selectedPlanId = null;
+	}
+
+	// Open an order rather than the "No order open" placeholder. Most
+	// supervisors have one or two, and picking from a dropdown to see the only
+	// thing on your plate is a step that earns nothing.
+	//
+	// A Pending order is skipped in favour of one with material, because it has
+	// nothing he can act on — every stage on it shows "Waiting on Store". It is
+	// still in the dropdown, just not what the tab opens on.
+	if (!selectedPlanId && filteredPlans.length > 0) {
+		const workable = filteredPlans.find((p) => p.orderStatus !== "Pending");
+		selectedPlanId = (workable || filteredPlans[0]).id;
+		// New order on screen, so open its first item rather than carrying over
+		// whichever index was expanded on a previous one.
+		openItemId = undefined;
+	}
+
+	if (selectedPlanId) {
+		elPlanSelect.value = selectedPlanId;
+	} else {
+		elPlanSelect.value = "";
+	}
+}
+
+// afterRender fires once the new data is on screen. The order-complete popup
+// uses it so the next order is already open behind the dialog when it appears -
+// showing it first would announce a move that had not happened yet.
+function fetchAllData(afterRender) {
+	elRefreshBtn.disabled = true;
+	// Scoped server-side now. The picker is filled by Receive from the full
+	// Employee list, so narrowing this does not shrink the dropdown — it only
+	// stops the factory's entire day being fetched to draw one man's screen.
+	const forSup = elSupSelect ? elSupSelect.value || "" : "";
+
+	ZOHO.CREATOR.DATA.invokeCustomApi({
+		api_name: API.getProductionData,
+		http_method: "POST",
+		payload: {
+			supervisorId: String(forSup),
+			// Only this plan comes back with items. Everything else is a
+			// dropdown row, and nothing the dropdown shows comes from an item.
+			planId: String(selectedPlanId || ""),
+		},
+	})
+		.then((response) => {
+			elRefreshBtn.disabled = false;
+			try {
+				const data = JSON.parse(response.result);
+				if (data.errors && data.errors.length > 0) {
+					showError(data.errors.join("<br>"));
+					return;
+				}
+				operators = data.operators || [];
+				plans = data.plans || [];
+
+				// Absent until getProductionWidgetData is re-saved in Creator.
+				// Defaulting to [] means no party covers any stage, which renders
+				// as a Send button that offers nobody rather than throwing on a
+				// key that is not there yet.
+				parties = data.parties || [];
+
+				// Prefer the server's list, but derive it from the plans if the
+				// function has not been re-saved yet. A missing key would otherwise
+				// render an empty dropdown that looks like lost data rather than a
+				// stale deployment.
+				supervisors = data.supervisors || derivedSupervisors();
+
+				// Read from the shared control rather than local state: the
+				// shell may have changed it while this tab was closed.
+				selectedSupId = elSupSelect.value || selectedSupId;
+
+				renderSupDropdown();
+				renderPlanDropdown();
+				renderSelectedPlan();
+
+				if (typeof afterRender === "function") {
+					afterRender();
+				}
+			} catch (e) {
+				console.error(e, response);
+				showError("Failed to parse server data: " + e.message);
+			}
+		})
+		.catch((err) => {
+			elRefreshBtn.disabled = false;
+			showError("Failed to fetch data. Check console.");
+			console.error(err);
+		});
+}
+
+// The order picker belongs with the order it identifies, not floating above the
+// page - so it sits inside the plan header beside the status badge. Parked back
+// in the toolbar whenever no plan is open, otherwise there would be nowhere to
+// pick one from.
+function parkPlanSelect() {
+	const sel = document.getElementById("plan-select");
+	const toolbar = document.querySelector(".prod-toolbar");
+	if (sel && toolbar && sel.parentElement !== toolbar) {
+		// Put it back FIRST, so it sits before the toggle rather than after it.
+		toolbar.insertBefore(sel, toolbar.firstChild);
+	}
+}
+
+function dockPlanSelect() {
+	const sel = document.getElementById("plan-select");
+	const slot = document.getElementById("plan-slot");
+	if (sel && slot) {
+		slot.appendChild(sel);
+	}
+}
+
+function renderSelectedPlan() {
+	// Park BEFORE any innerHTML assignment below. Once docked, the select lives
+	// inside elDynamicContent, and wiping that removes the node from the
+	// document - after which there is nothing left to move back.
+	parkPlanSelect();
+
+	if (!selectedPlanId) {
+		elDynamicContent.innerHTML = "";
+		elEmptyState.classList.remove("hidden");
+		parkPlanSelect();
+		return;
+	}
+	elEmptyState.classList.add("hidden");
+
+	const plan = plans.find((p) => p.id === selectedPlanId);
+	if (!plan) {
+		showError("Selected plan not found.");
+		parkPlanSelect();
+		return;
+	}
+
+	if (!plan.items || plan.items.length === 0) {
+		elDynamicContent.innerHTML = `
+            <div class="prod-empty">
+                <div class="icon">🔍</div>
+                <h2>No Items Found</h2>
+                <p>This plan does not have any finished items attached.</p>
+            </div>
+        `;
+		parkPlanSelect();
+		return;
+	}
+
+	// Once a plan carries QC remake work, the finished originals drop off THIS
+	// list — a dozen completed cards around one live remake reads as "did I not
+	// already finish this?", and the work in hand is the only thing he can act
+	// on. They are still on his History tab in full.
+	//
+	// Filtered here and not on the server on purpose: renderPlanHeader counts
+	// what it is given, so the header keeps describing the whole plan while the
+	// cards show only what is left to do.
+	const hasRemake = plan.items.some((i) => i.isRemake);
+	const visibleItems = hasRemake
+		? plan.items.filter((i) => i.status !== "Complete")
+		: plan.items;
+
+	// Everything finished and only remakes outstanding is a real state, not an
+	// empty one — it is what the moment between QC rejecting and the store
+	// issuing looks like.
+	if (visibleItems.length === 0) {
+		elDynamicContent.innerHTML = renderPlanHeader(plan) +
+			`<div class="prod-empty">
+                <div class="icon">✅</div>
+                <h2>Nothing to work on</h2>
+                <p>Every item on this plan is complete.</p>
+            </div>`;
+		dockPlanSelect();
+		return;
+	}
+
+	// Default to the first item, and recover if the open one has gone away
+	// (plan switched, item removed, or hidden as a finished original).
+	if (openItemId !== null && !visibleItems.find((i) => i.id === openItemId)) {
+		openItemId = visibleItems[0].id;
+	}
+
+	elDynamicContent.innerHTML = renderPlanHeader(plan);
+	dockPlanSelect();
+	visibleItems.forEach((item, index) => {
+		elDynamicContent.appendChild(renderItemCard(plan, item, index));
+	});
+}
+
+// What the supervisor is looking at, stated once at the top. Without it the
+// screen opens straight into item cards and the only clue which order is on
+// screen is a dropdown he set several clicks ago.
+function renderPlanHeader(plan) {
+	const items = plan.items || [];
+
+	// Totals come from the items already on screen rather than a separate server
+	// figure — two numbers for the same thing drift, and the one nobody is
+	// looking at is always the stale one.
+	// "To produce" and "Items" describe THE ORDER, so QC remakes are left out of
+	// both — a 100-piece order that had 10 rejected and remade must not start
+	// reading as 110. "Produced" counts everything, because 110 really were made;
+	// the gap between the two is the scrap, and it should be visible.
+	const orderItems = items.filter((i) => !i.isRemake);
+	const remakeItems = items.filter((i) => i.isRemake);
+
+	const totalQty = orderItems.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
+	const producedQty = items.reduce((sum, i) => sum + (Number(i.produced) || 0), 0);
+	const doneCount = orderItems.filter((i) => i.status === "Complete").length;
+
+	const remakeQty = remakeItems
+		.filter((i) => i.status !== "Complete")
+		.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
+
+	const stats = [
+		["Sales order", plan.salesOrder || "—"],
+		["Plan", plan.planNo || "—"],
+		["Plan date", plan.planDate || "—"],
+		["Items", String(orderItems.length)],
+		["To produce", `${totalQty} pcs`],
+		["Produced", `${producedQty} pcs`]
+	];
+
+	// Only when there is remake work outstanding. On a plan that never had any,
+	// the header is exactly what it always was.
+	if (remakeQty > 0) {
+		stats.push(["Remaking", `${remakeQty} pcs`]);
+	}
+
+	return `
+        <div class="plan-header">
+            <div class="plan-header-top">
+                <div>
+                    <div class="plan-header-title">${plan.salesOrder || plan.planNo || "Plan"}</div>
+                    <div class="plan-header-sub">${doneCount} of ${orderItems.length} items complete${
+		remakeQty > 0 ? ` &middot; remaking ${remakeQty} pcs after QC` : ""
+	}</div>
+                </div>
+                <div class="plan-header-controls">
+                    <div id="plan-slot"></div>
+                    <span class="plan-status-pill">${plan.orderStatus || "—"}</span>
+                </div>
+            </div>
+            <div class="plan-header-stats">
+                ${stats.map(([label, value]) => `
+                    <div class="plan-stat">
+                        <div class="plan-stat-label">${label}</div>
+                        <div class="plan-stat-value">${value}</div>
+                    </div>
+                `).join("")}
+            </div>
+        </div>
+    `;
+}
+
+// Deferred a frame: renderSelectedPlan has only just written the cards, and
+// scrolling to an element the browser has not laid out yet measures the old
+// positions and lands in the wrong place.
+function scrollItemIntoView(itemId) {
+	requestAnimationFrame(() => {
+		const el = elDynamicContent.querySelector(
+			'.item-card[data-item-id="' + itemId + '"]',
+		);
+		if (el) {
+			el.scrollIntoView({ behavior: "smooth", block: "start" });
+		}
+	});
+}
+
+function generateOperatorDropdown(selectedId, disabled, stageName) {
+	// No inline width — the field grid decides how wide this is, and 120px was
+	// clipping longer operator names.
+	let html = `<select class="issue-input" ${disabled ? "disabled" : ""}>`;
+	html += `<option value="">-- Operator --</option>`;
+	operatorsForStage(stageName, selectedId).forEach((op) => {
+		const sel = op.id === selectedId ? "selected" : "";
+		html += `<option value="${op.id}" ${sel}>${op.name}</option>`;
+	});
+	html += `</select>`;
+	return html;
+}
+
+function renderItemCard(plan, item, index) {
+	const card = document.createElement("div");
+	// One item open at a time — a supervisor works one item through its stages,
+	// and several expanded cards of stage controls is a lot to scroll past.
+	card.className = item.id === openItemId ? "item-card open" : "item-card";
+	// Every render builds fresh nodes, so this is how the card is found again
+	// afterwards to scroll to it.
+	card.setAttribute("data-item-id", item.id);
+
+	let statusText = "Ready";
+	let statusColor = "var(--text-muted)";
+
+	if (item.status === "Awaiting_Material") {
+		// "Waiting on store" named who to chase, not what is missing. The two
+		// cases below are what he actually needs to tell apart: nothing has
+		// arrived at all, or some has and he is short the rest.
+		const anyReceived = (item.materials || []).some(
+			(m) => Number(m.received) > 0,
+		);
+		statusText = anyReceived
+			? "Material partially received"
+			: "No material yet";
+		statusColor = "#d97706"; // Amber
+	} else if (item.status === "Ready_For_Production") {
+		statusText = "Ready to start";
+		statusColor = "#2563eb"; // Blue
+	} else if (item.status === "Complete") {
+		statusText = "Completed";
+		statusColor = "#16a34a"; // Green
+	} else {
+		let currentPhase = "In production";
+		if (item.phases && item.phases.length > 0) {
+			const sortedPhases = item.phases
+				.slice()
+				.sort((a, b) => a.sequence - b.sequence);
+			let pIdx = sortedPhases.length;
+			sortedPhases.forEach((p, i) => {
+				const log = (item.logs || []).find((l) => l.phase === p.operation);
+				if (!(log && log.end) && i < pIdx) pIdx = i;
+			});
+			if (pIdx < sortedPhases.length) {
+				currentPhase = "At " + sortedPhases[pIdx].operation;
+			} else {
+				currentPhase = "Finishing";
+			}
+		}
+		statusText = currentPhase;
+		statusColor = "#9333ea"; // Purple
+	}
+
+	// Header
+	const header = document.createElement("div");
+	header.className = "item-header";
+	header.innerHTML = `
+        <div class="item-title-row">
+            <div class="item-serial">${index + 1}</div>
+            <div class="item-header-info">
+                <h2>${item.name}${
+									item.sku
+										? `<span class="item-sku">${item.sku}</span>`
+										: ""
+								}</h2>
+                <div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem;">
+                    <span class="item-qty">${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"} to produce</span>
+                    <span class="item-status-badge" style="color:${statusColor}; font-weight:600; font-size:0.8rem; background: ${statusColor}15; padding: 0.1rem 0.5rem; border-radius: 1rem;">${statusText}</span>
+                    ${
+											// Two kinds now, and they mean different things to
+											// him. A QC remake replaces a piece that failed
+											// inspection days later; a replacement batch
+											// replaces one he lost on the floor and asked for
+											// cloth for. One label for both left him guessing
+											// which — and only one of them is his to explain.
+											item.isRemake
+												? `<span class="remake-tag">${
+														item.remakeReason === "Production_Loss"
+															? "Replacement batch"
+															: "QC remake"
+													}</span>`
+												: ""
+										}
+                </div>
+            </div>
+        </div>
+        <div class="item-header-right">
+            <span class="chevron">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+            </span>
+        </div>
+    `;
+	header.addEventListener("click", () => {
+		openItemId = item.id === openItemId ? null : item.id;
+		renderSelectedPlan();
+		// Opening item 2 collapses item 1, which removes several hundred pixels
+		// from ABOVE the click. The browser keeps the scroll offset, so the page
+		// appears to jump — he lands somewhere in the middle of the stage list he
+		// just opened, or past the end of it. Put its title back under his eyes.
+		if (openItemId) {
+			scrollItemIntoView(openItemId);
+		}
+	});
+	card.appendChild(header);
+
+	const body = document.createElement("div");
+	body.className = "item-body";
+
+	// 1. Materials Section
+	//
+	// ONE row per physical thing, and every column means the same on every row:
+	// what it is, what size to cut, how much of it he is holding, how many
+	// pieces it makes. Fresh cloth and an offcut are the same kind of answer to
+	// the same question, so they sit in the same table.
+	//
+	// Earlier versions split this into grouped blocks with totals. That was more
+	// structure than the question needs - he is standing at a table deciding
+	// what to lay out next, not reconciling an account.
+	let matHtml = `
+        <div class="tables-container" style="border-bottom: 1px solid var(--border);">
+            <div class="section-title section-title-row">
+                <span>Materials for this item</span>
+                <!-- Deliberately NOT tied to a stage ending short. A wash care
+                     label torn while being attached ruins no garment at all —
+                     in 10, out 10, and three labels gone. Hanging this off a
+                     piece loss would miss most of what it is for.
+
+                     Send to third party used to sit here too, which put it in
+                     the middle of a row it had nothing to do with — it is about
+                     STAGES, not material. It now heads the Production Flow
+                     section, where the stages it acts on actually are. -->
+                <button type="button" class="damage-btn">Report damage</button>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Material</th>
+                            <th>Cut piece size <span class="cut-axis">(L &times; W)</span></th>
+                            <th class="col-num">You have</th>
+                            <th class="col-num">Pieces to cut</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+    `;
+
+	// GROUPED, not interleaved: the plan's own material, then the replacements,
+	// then offcuts. The server already merges the three damage reports on one
+	// thread into a single 24-Cone line; this is what stops that line landing
+	// between two plan rows where it reads as more of the same.
+	//
+	// A rank rather than a filter, so the three groups stay in one table with one
+	// set of column headings — "You have" and "Pieces to cut" mean exactly the
+	// same thing in all three, and splitting them into separate tables would say
+	// they do not.
+	const matRank = (m) => (m.isWaste ? 2 : m.isReissue === true ? 1 : 0);
+	const ordered = (item.materials || [])
+		.map((m, i) => ({ m: m, i: i }))
+		// Index as the tie-break keeps the server's order inside each group —
+		// Array.prototype.sort is not required to be stable in older engines.
+		.sort((a, b) => matRank(a.m) - matRank(b.m) || a.i - b.i)
+		.map((x) => x.m);
+
+	let lastRank = -1;
+
+	if (ordered.length > 0) {
+		ordered.forEach((mat) => {
+			// A heading the first time each group appears. Nothing is printed for
+			// a group with no rows, so an item that never had damage looks exactly
+			// as it does today.
+			const rank = matRank(mat);
+			if (rank !== lastRank) {
+				lastRank = rank;
+				if (rank === 1) {
+					matHtml += `
+                <tr class="mat-group-head is-reissue-head">
+                    <td colspan="4">Reissued &mdash; replacing material damaged in production</td>
+                </tr>`;
+				}
+			}
+
+			const hasCut = Number(mat.cutWidth) > 0 && Number(mat.cutLength) > 0;
+			const cutCell = hasCut
+				? `<span class="cut-size">${mat.cutLength} &times; ${mat.cutWidth}<span class="unit">cm</span></span>`
+				: `<span class="is-muted">&mdash;</span>`;
+
+			let nameCell;
+			let haveCell;
+			let cutCount = 0;
+
+			if (mat.isWaste) {
+				// An offcut is a specific piece he has to find and lay out, so it
+				// is named by its size. What it cuts is its yield times how many
+				// actually arrived - a 4-up offcut that never turned up is worth
+				// nothing on the cutting table.
+				const have = Number(mat.received) || 0;
+				cutCount = have * (Number(mat.yields) || 0);
+				// No badge: the name already ends in "(Waste)", the row is tinted,
+				// and the piece size sits underneath. A fourth marker for the
+				// same fact was just noise.
+				nameCell =
+					`<div class="mat-name">&#9851; ${mat.name}</div>` +
+					`<div class="mat-sku">piece ${fmt(mat.pieceLength)} &times; ${fmt(mat.pieceWidth)} cm</div>`;
+				haveCell = `${have} <span class="unit">${have === 1 ? "piece" : "pieces"}</span>`;
+			} else {
+				// The group heading above already says these are reissues, so the
+				// name carries no second badge — a marker repeated on every row
+				// under a heading that says the same thing is noise.
+				nameCell = `<div class="mat-name">${mat.name}</div>`;
+				haveCell = `${fmt(mat.received)} <span class="unit">${mat.unit}</span>`;
+
+				if (mat.isFabric) {
+					// Only the pieces coming off FRESH cloth. The rest are on the
+					// offcut rows below, so adding the requirement here would
+					// count them twice.
+					const fromRaw = Number(mat.piecesFromRaw) || 0;
+					const fromWaste = Number(mat.piecesFromWaste) || 0;
+					cutCount = fromRaw;
+					if (fromRaw === 0 && fromWaste === 0) {
+						cutCount = Number(mat.requiredPieces) || 0;
+					}
+				}
+			}
+
+			const cutCountCell = cutCount > 0
+				? `<b>${cutCount}</b> <span class="unit">pcs</span>`
+				: `<span class="is-muted">&mdash;</span>`;
+
+			matHtml += `
+                <tr${
+									mat.isWaste
+										? ' class="waste-row"'
+										: mat.isReissue === true
+											? ' class="reissue-row"'
+											: ""
+								}>
+                    <td class="material-name-cell">${nameCell}</td>
+                    <td>${cutCell}</td>
+                    <td class="col-num col-strong">${haveCell}</td>
+                    <td class="col-num">${cutCountCell}</td>
+                </tr>
+            `;
+		});
+	} else {
+		matHtml += `<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No materials logged against this item.</td></tr>`;
+	}
+
+	matHtml += `</tbody></table></div>`;
+
+	// One sentence, and only when it matters: the pieces on the rows above do
+	// not add up to the item. That is the case where he has to stop and go back
+	// to the store, and it is not obvious from four separate row totals.
+	const needPcs = Number(item.qty) || 0;
+	let cutTotal = 0;
+	(item.materials || []).forEach((m) => {
+		if (m.isWaste) {
+			cutTotal += (Number(m.received) || 0) * (Number(m.yields) || 0);
+		} else if (m.isFabric) {
+			const fr = Number(m.piecesFromRaw) || 0;
+			const fw = Number(m.piecesFromWaste) || 0;
+			cutTotal += fr === 0 && fw === 0 ? Number(m.requiredPieces) || 0 : fr;
+		}
+	});
+
+	const anyFabric = (item.materials || []).some((m) => m.isFabric || m.isWaste);
+	if (anyFabric && needPcs > 0 && cutTotal < needPcs) {
+		matHtml += `
+            <div class="cut-short">These add up to <b>${cutTotal}</b> of the
+            <b>${needPcs}</b> pieces this item needs &mdash; ${needPcs - cutTotal} short.</div>`;
+	}
+
+	matHtml += `</div>`;
+
+	// 2. Production Phases Section
+	let phHtml = `<div class="tables-container">`;
+
+	const hasPhases = item.phases && item.phases.length > 0;
+	const started = (item.logs || []).length > 0 || revealedItems.has(item.id);
+
+	if (!hasPhases) {
+		phHtml += `<div style="text-align:center; color:var(--text-muted); padding:2rem;">No phases found in BOM.</div>`;
+	} else if (!started) {
+		// Nothing to log until he actually begins, so the flow stays out of the
+		// way and the card is just "here is your material, ready when you are".
+		if (item.status === "Awaiting_Material") {
+			phHtml += `
+                <div class="start-prod-row" style="background:#f8fafc; border-color:#e2e8f0; opacity: 0.8;">
+                    <button type="button" class="primary-btn" disabled style="background:var(--text-muted); cursor:not-allowed;">Cannot start yet</button>
+                    <span class="start-prod-note">Nothing to cut until the store issues the material · ${item.phases.length} stages · ${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"}</span>
+                </div>
+            `;
+		} else {
+			// The outsource button belongs here too: the FIRST stage can go out
+			// to a third party, and it would otherwise only appear once
+			// production had already started in-house. Not offered on the
+			// Awaiting_Material branch above — there is nothing to send yet.
+			phHtml += `
+                <div class="start-prod-row">
+                    <button type="button" class="primary-btn btn-start-production">Start production</button>
+                    <span class="start-prod-note">${item.phases.length} stages · ${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"}</span>
+                    <button type="button" class="outsource-btn"></button>
+                </div>
+            `;
+		}
+	} else {
+		item.phases.sort((a, b) => a.sequence - b.sequence);
+
+		let currentPhaseIndex = item.phases.length; // Assume all done
+		item.phases.forEach((phase, idx) => {
+			const log = (item.logs || []).find((l) => l.phase === phase.operation);
+			if (!(log && log.end) && idx < currentPhaseIndex) currentPhaseIndex = idx;
+		});
+
+		phHtml += `
+            <div class="section-title section-title-row" style="margin-bottom:0.5rem;">
+                <span>Production Flow</span>
+                <button type="button" class="outsource-btn"></button>
+            </div>`;
+		phHtml += `<div class="flow-trail"><div class="flow-trail-track">`;
+		item.phases.forEach((phase, idx) => {
+			let chipClass = "";
+			if (idx < currentPhaseIndex) chipClass = "is-done";
+			else if (idx === currentPhaseIndex) chipClass = "is-active";
+
+			phHtml += `<div class="flow-chip ${chipClass}">${phase.operation}</div>`;
+			if (idx < item.phases.length - 1) {
+				// The connector is green only while it joins two finished stages.
+				// The point the green run stops IS the boundary between what is
+				// done and what is not — no label needed to find it.
+				const armClass = idx < currentPhaseIndex ? "flow-arrow is-done" : "flow-arrow";
+				phHtml += `<div class="${armClass}">→</div>`;
+			}
+		});
+		phHtml += `</div></div>`;
+
+		phHtml += `<div class="stage-stack">`;
+		item.phases.forEach((phase, idx) => {
+			if (idx > currentPhaseIndex) return; // One stage at a time
+
+			const log = (item.logs || []).find((l) => l.phase === phase.operation);
+			const state = phaseState(log);
+			const qtyIn = qtyInFor(item, item.phases, idx);
+
+			// Sequence_No is 10/20/30 for insertion room — showing "10." reads
+			// as a step number when this is step 1 of 5.
+			const stepLabel = `Step ${idx + 1} of ${item.phases.length} &middot; ${phase.operation}`;
+
+			if (state === "done") {
+				// Who worked it. A split stage names each man with what he
+				// personally finished, because "out 96" on a stage three people
+				// shared answers nothing about which of them came up short.
+				//
+				// A stage with no shares falls back to the header's own operator
+				// — that is every stage logged before the split existed, and
+				// every outsourced one.
+				const doneShares = sharesOf(log);
+				const whoHtml = doneShares.length
+					? `<span class="stage-who">${doneShares
+							.map(
+								(a) =>
+									`<span class="stage-who-one">${operatorName(a.operator) || "Not recorded"} <b>${Number(a.qtyOut) || 0}</b> <span class="unit">pcs</span></span>`,
+							)
+							.join("")}</span>`
+					: operatorName(log.operator)
+						? `<span>by <b>${operatorName(log.operator)}</b></span>`
+						: "";
+
+				phHtml += `
+                    <div class="stage-card is-done" data-phase="${phase.operation}">
+                        <div class="stage-card-head">
+                            <span>${stepLabel}</span>
+                            <span class="stage-status">Completed</span>
+                        </div>
+                        <div class="stage-summary">
+                            <span>in <b>${log.qtyIn}</b> &rarr; out <b>${log.qtyOut}</b></span>
+                            <span>${hhmm(log.start)} &ndash; ${hhmm(log.end)}</span>
+                            ${whoHtml}
+                            ${log.remarks ? `<span class="stage-remark">${log.remarks}</span>` : ""}
+                        </div>
+                    </div>
+                `;
+				return;
+			}
+
+			//----------------------------------------------------------------
+			// AT A THIRD PARTY. A locked summary instead of a working card.
+			//
+			// The panels are physically in someone else's workshop, so there is
+			// nobody to put on the stage and no quantity he can honestly
+			// type. Leaving the ordinary card here would let him record
+			// in-house work against pieces that are not in the building — two
+			// records claiming the same panels, with nothing downstream able to
+			// tell which is the lie. saveProductionPhase refuses it as well;
+			// this is only so he never gets as far as pressing the button.
+			//----------------------------------------------------------------
+			if (log && log.outsourced === true && !log.returnedOn) {
+				const party =
+					typeof partyById === "function" ? partyById(log.party) : null;
+				phHtml += `
+                    <div class="stage-card is-outsourced" data-phase="${phase.operation}">
+                        <div class="stage-card-head">
+                            <span>${stepLabel}</span>
+                            <span class="stage-status">At ${party ? party.name : "third party"}</span>
+                        </div>
+                        <div class="stage-summary">
+                            <span>sent <b>${log.qtyIn}</b> pcs</span>
+                            ${log.sentOn ? `<span>on <b>${log.sentOn}</b></span>` : ""}
+                            ${log.remarks ? `<span class="stage-remark">${log.remarks}</span>` : ""}
+                            <span class="stage-remark">Use <b>Take it back</b> above to close this.</span>
+                        </div>
+                    </div>
+                `;
+				return;
+			}
+
+			const isActive = state === "active";
+			const logId = log && log.id ? log.id : "";
+
+			//----------------------------------------------------------------
+			// A STAGE THAT WAS STARTED UNDER THE OLD SINGLE-OPERATOR CODE.
+			//
+			// One man on the header, no shares, already running. It gets the
+			// card it was started with so it can be finished the way it was
+			// begun — the alternative is a supervisor standing at a stage he
+			// cannot close because the screen changed underneath it.
+			//
+			// Only ever a RUNNING stage: anything not yet started gets the
+			// split card below, whatever it is.
+			//----------------------------------------------------------------
+			if (isLegacyStage(log)) {
+				phHtml += `
+                <div class="stage-card is-running" data-phase="${phase.operation}" data-qtyin="${qtyIn}" data-logid="${logId}" data-legacy="1">
+                    <div class="stage-card-head">
+                        <span>${stepLabel}</span>
+                        <span class="stage-status">In progress</span>
+                    </div>
+                    <div class="stage-card-body">
+                        <p class="share-note">Started before the work was split between operators, so it is finished the old way — one operator, one count.</p>
+                        <div class="grid-2">
+                            <div class="field">
+                                <label>Operator</label>
+                                ${generateOperatorDropdown(log.operator, true, phase.operation)}
+                            </div>
+                            <div class="field">
+                                <label>Start time</label>
+                                <input type="time" class="phase-start" value="${log.start}" disabled>
+                            </div>
+                            <div class="field">
+                                <label>Qty in</label>
+                                <div class="qty-static">${qtyIn} <span class="unit">pcs</span></div>
+                            </div>
+                            <div class="field">
+                                <label>Qty out</label>
+                                <input type="number" class="phase-qtyout" min="0" max="${qtyIn}" value="${qtyIn}">
+                            </div>
+                            <div class="field">
+                                <label>Remarks</label>
+                                <textarea class="phase-remarks" rows="2" placeholder="Notes for this stage — e.g. why fewer pieces came out">${log.remarks ? log.remarks : ""}</textarea>
+                            </div>
+                            <div class="field">
+                                <label>End time</label>
+                                <div class="stage-time-row">
+                                    <input type="time" class="phase-end" value="">
+                                    <button type="button" class="btn btn-stage btn-stage-end btn-save" data-action="end">End</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+				return;
+			}
+
+			//----------------------------------------------------------------
+			// THE STAGE, SPLIT BETWEEN OPERATORS.
+			//
+			// One row per man: what he was given, when he started, what he
+			// finished. The supervisor hands out shares as people become free
+			// rather than dividing the whole stage up front — a second cutter
+			// joins at eleven, and a screen that demanded the full split at nine
+			// would have been guessed at.
+			//
+			// The stage closes on its own button, and only once every share is
+			// in. That press is what declares the waste, rolls the item up and
+			// can finish the order, so it stays a deliberate act rather than
+			// something that happens when the last man happens to finish.
+			//----------------------------------------------------------------
+			const shares = sharesOf(log);
+			const assignedQty = shareTotal(log, "assigned");
+			const madeQty = shareTotal(log, "qtyOut");
+			const stillOpen = openShares(log).length;
+			const leftQty = Math.max(0, qtyIn - assignedQty);
+			const canEnd = shares.length > 0 && stillOpen === 0;
+
+			// Nobody can be on the same stage twice — the server refuses it, and
+			// offering the name is only an invitation to find out.
+			const onStage = {};
+			shares.forEach((a) => {
+				onStage[String(a.operator)] = true;
+			});
+			const addable = operatorsForStage(phase.operation, "").filter(
+				(o) => !onStage[String(o.id)],
+			);
+
+			const shareRows = shares
+				.map((a) => {
+					const done = a.status === "Done";
+					const who = operatorName(a.operator) || "Not recorded";
+					const given = Number(a.assigned) || 0;
+
+					if (done) {
+						// STILL CORRECTABLE. The stage has not closed — this card is
+						// only drawn while it is open — so a mistyped count is a
+						// number he can fix, and the server takes it. Locking the row
+						// the moment Done is pressed would leave him with no way back
+						// at all: he cannot re-open the share, and the stage's total
+						// is the sum of these.
+						const short = given - (Number(a.qtyOut) || 0);
+						return `
+                    <tr class="share-row is-done" data-asgid="${a.id}" data-given="${given}">
+                        <td class="share-who">${who}</td>
+                        <td class="col-num">${given}</td>
+                        <td class="share-time">${hhmm(a.start)} &ndash; ${hhmm(a.end)}</td>
+                        <td class="col-num">
+                            <input type="number" class="share-out" min="0" max="${given}" value="${Number(a.qtyOut) || 0}">
+                            ${short > 0 ? `<div class="short-hint">${short} short</div>` : ""}
+                        </td>
+                        <td class="share-act">
+                            <div class="share-act-in">
+                                <span class="share-tick" title="Finished">&#10003;</span>
+                                <button type="button" class="btn-share-fix" title="Correct what he finished">Fix</button>
+                            </div>
+                        </td>
+                    </tr>`;
+					}
+
+					// Assigned qty stays editable while he is working: he was given
+					// 40, Arjun turned up, and 40 was too many. Re-sizing keeps his
+					// start time; removing and re-adding would not.
+					return `
+                    <tr class="share-row" data-asgid="${a.id}" data-given="${given}">
+                        <td class="share-who">${who}</td>
+                        <td class="col-num"><input type="number" class="share-qty" min="1" max="${qtyIn}" value="${given}"></td>
+                        <td class="share-time">${hhmm(a.start)} &ndash; <span class="is-muted">working</span></td>
+                        <td class="col-num"><input type="number" class="share-out" min="0" max="${given}" value="${given}"></td>
+                        <td class="share-act">
+                            <div class="share-act-in">
+                                <button type="button" class="btn btn-stage btn-share-done">Done</button>
+                                <button type="button" class="btn-share-remove" title="Take him off this stage">&times;</button>
+                            </div>
+                        </td>
+                    </tr>`;
+				})
+				.join("");
+
+			// THE ASSIGN CONTROLS ARE NOT A TABLE ROW.
+			//
+			// They were, and they could not line up: the columns a share row needs
+			// (given, start-end, finished) are not the columns "put someone on"
+			// needs, so the button ended up under a heading it had nothing to do
+			// with. The table now lists who is on the stage; this is the control
+			// that puts them there.
+			const assignRow =
+				leftQty > 0
+					? `
+                    <div class="share-assign">
+                        <select class="share-op" aria-label="Operator">
+                            <option value="">Choose an operator…</option>
+                            ${addable.map((o) => `<option value="${o.id}">${o.name}</option>`).join("")}
+                        </select>
+                        <div class="share-assign-qty">
+                            <input type="number" class="share-add-qty" min="1" max="${leftQty}" value="${leftQty}" aria-label="Pieces">
+                            <span class="unit">of ${leftQty} left</span>
+                        </div>
+                        <button type="button" class="btn btn-stage btn-share-add">Add &amp; start</button>
+                    </div>`
+					: "";
+
+			// How much of this stage has been handed to somebody.
+			//
+			// NOT amber while it is simply early. A stage that has just opened has
+			// handed out nothing, which is the normal state of a stage nobody has
+			// started - flagging it made every fresh stage look like a problem. The
+			// warning belongs at the moment it becomes one, which is the End button
+			// below, and it says so there.
+			const meterLeft =
+				leftQty > 0
+					? assignedQty === 0
+						? `<span class="stage-meter-left">${leftQty} to hand out</span>`
+						: `<span class="stage-meter-left">${leftQty} still to hand out</span>`
+					: `<span class="stage-meter-all">all handed out</span>`;
+
+			const meter = `<div class="stage-meter">
+                        <span>Qty in <b>${qtyIn}</b></span>
+                        <span>Handed out <b>${assignedQty}</b></span>
+                        <span>${meterLeft}</span>
+                        ${madeQty > 0 ? `<span>Finished <b>${madeQty}</b></span>` : ""}
+                    </div>`;
+
+			// Why the End button is shut, said where the button is. "Disabled
+			// with no reason given" is the single most common way a screen makes
+			// somebody phone the office.
+			//
+			// The amber one is the LAST case, not the first two: those say "not
+			// yet", and this one says "you are about to write off pieces".
+			let endNote = "";
+			let endWarn = false;
+			if (shares.length === 0) {
+				endNote = "Put someone on this stage first.";
+			} else if (stillOpen > 0) {
+				endNote = `${stillOpen} ${stillOpen === 1 ? "operator is" : "operators are"} still working.`;
+			} else if (leftQty > 0) {
+				endNote = `${leftQty} pcs were never handed to anyone — ending now records them as lost.`;
+				endWarn = true;
+			}
+
+			phHtml += `
+                <div class="stage-card ${isActive ? "is-running" : "is-todo"}" data-phase="${phase.operation}" data-qtyin="${qtyIn}" data-qtyout="${madeQty}" data-logid="${logId}">
+                    <div class="stage-card-head">
+                        <span>${stepLabel}</span>
+                        <span class="stage-status">${isActive ? "In progress" : "Not started"}</span>
+                    </div>
+                    <div class="stage-card-body">
+                        ${meter}
+                        ${
+													shares.length > 0
+														? `<div class="table-wrapper">
+                            <table class="share-table">
+                                <thead>
+                                    <tr>
+                                        <th>Operator</th>
+                                        <th class="col-num">Pieces</th>
+                                        <th>Start &ndash; end</th>
+                                        <th class="col-num">Finished</th>
+                                        <th class="col-act"></th>
+                                    </tr>
+                                </thead>
+                                <tbody>${shareRows}</tbody>
+                            </table>
+                        </div>`
+														: ""
+												}
+                        ${assignRow}
+                        ${
+													shares.length === 0 && !assignRow
+														? `<div class="share-empty">Nothing came out of the stage before this one, so there is nothing to hand out.</div>`
+														: ""
+												}
+                        <div class="stage-end-row">
+                            <div class="stage-end-remarks">
+                                <label>Remarks for the whole stage</label>
+                                <textarea class="phase-remarks" rows="2" placeholder="e.g. why fewer pieces came out">${log && log.remarks ? log.remarks : ""}</textarea>
+                            </div>
+                            <div class="stage-end-action">
+                                <label>End time</label>
+                                <div class="stage-time-row">
+                                    <input type="time" class="phase-end" value="" ${canEnd ? "" : "disabled"}>
+                                    <button type="button" class="btn btn-stage btn-stage-end btn-save" data-action="end" ${canEnd ? "" : "disabled"}>End stage</button>
+                                </div>
+                                ${endNote ? `<div class="share-note${endWarn ? " is-warn" : ""}">${endNote}</div>` : ""}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+		});
+		phHtml += `</div>`;
+
+		if (currentPhaseIndex >= item.phases.length) {
+			const lastLog = (item.logs || []).find(
+				(l) => l.phase === item.phases[item.phases.length - 1].operation,
+			);
+			const produced = lastLog ? lastLog.qtyOut : 0;
+			phHtml += `<div class="all-done-banner">All stages completed &middot; ${produced} pcs produced</div>`;
+		}
+	}
+
+	phHtml += `</div>`;
+
+	body.innerHTML = matHtml + phHtml;
+
+	// Lives in reissue.js. Checked at CLICK time, not at render time — an earlier
+	// version removed the button when the function was missing, which turned "you
+	// forgot to upload js/reissue.js" into "the feature does not exist", with
+	// nothing on screen or in the console to say which.
+	// Send out / take back. Label and action both depend on whether anything of
+	// this item is currently at a third party — one button, two states, because
+	// the two are never both available.
+	const btnOs = body.querySelector(".outsource-btn");
+	if (btnOs) {
+		const blockOut =
+			typeof openOsBlock === "function" ? openOsBlock(item) : null;
+		if (typeof openSendDialog !== "function") {
+			// js/outsource.js not uploaded. Removed rather than left to throw —
+			// unlike Report damage this button has a sibling that still works.
+			btnOs.remove();
+		} else if (blockOut) {
+			btnOs.textContent = "Take it back";
+			btnOs.classList.add("is-out");
+			btnOs.addEventListener("click", () => openReceiveDialog(plan, item));
+		} else {
+			btnOs.textContent = "Send to third party";
+			btnOs.addEventListener("click", () => openSendDialog(plan, item));
+		}
+	}
+
+	const btnDamage = body.querySelector(".damage-btn");
+	if (btnDamage) {
+		btnDamage.addEventListener("click", () => {
+			if (typeof openDamageDialog !== "function") {
+				alert(
+					"Damage reporting is not loaded.\n\n" +
+						"js/reissue.js is missing from the widget upload.",
+				);
+				return;
+			}
+			openDamageDialog(plan, item);
+		});
+	}
+
+	// Reveal-only: no server write, so pressing this by accident costs nothing.
+	const btnStartProd = body.querySelector(".btn-start-production");
+	if (btnStartProd) {
+		btnStartProd.addEventListener("click", () => {
+			revealedItems.add(item.id);
+			renderSelectedPlan();
+		});
+	}
+
+	// Attach event listeners
+	const phaseCards = body.querySelectorAll(".stage-card[data-phase]");
+	phaseCards.forEach((card) => {
+		const cardLogId = card.getAttribute("data-logid");
+		const cardPhase = card.getAttribute("data-phase");
+		const cardQtyIn = Number(card.getAttribute("data-qtyin")) || 0;
+
+		// The stage's position in the BOM, needed by both the share calls and
+		// the stage End. Worked out once here rather than in three handlers.
+		const sortedPhases = (item.phases || [])
+			.slice()
+			.sort((a, b) => a.sequence - b.sequence);
+		const cardIdx = sortedPhases.findIndex((p) => p.operation === cardPhase);
+		const cardSeq = cardIdx >= 0 ? sortedPhases[cardIdx].sequence : 0;
+
+		//--------------------------------------------------------------------
+		// Handing a share out, re-sizing it, closing it, taking it back.
+		//
+		// All four go through one call and one refetch. A share changes what
+		// every other row on the stage may do — how much is left, whether the
+		// stage can close — so re-reading is the only way the card stays
+		// truthful, and the alternative is patching four counters by hand.
+		//--------------------------------------------------------------------
+		const btnAdd = card.querySelector(".btn-share-add");
+		if (btnAdd) {
+			btnAdd.addEventListener("click", () => {
+				const elOp = card.querySelector(".share-op");
+				const elQty = card.querySelector(".share-add-qty");
+				const opId = elOp ? elOp.value : "";
+				const qty = elQty ? Number(elQty.value) : 0;
+
+				if (!opId) {
+					alert("Pick an operator first.");
+					return;
+				}
+				if (!qty || isNaN(qty) || qty < 1) {
+					alert("How many pieces is he taking?");
+					return;
+				}
+
+				saveAssignment(
+					{
+						action: "add",
+						planId: plan.id,
+						planItemId: item.id,
+						phaseName: cardPhase,
+						sequence: cardSeq,
+						qtyIn: cardQtyIn,
+						operatorId: opId,
+						assignedQty: qty,
+						// Stamped on the CLICK, not at render. A page left open
+						// since morning would otherwise say he started then.
+						startTime: nowHHMM(),
+					},
+					btnAdd,
+				);
+			});
+		}
+
+		// Closing a share and correcting a closed one are the same call — "this is
+		// what he finished". Only the label differs, so they share a handler
+		// rather than growing a second copy of the same validation.
+		card.querySelectorAll(".btn-share-done, .btn-share-fix").forEach((btnDone) => {
+			btnDone.addEventListener("click", () => {
+				const row = btnDone.closest("tr");
+				const asgId = row.getAttribute("data-asgid");
+				const elOut = row.querySelector(".share-out");
+				// Read off the row rather than the input: a finished row shows what
+				// he was given as text, and only the open one has a field for it.
+				const given = Number(row.getAttribute("data-given")) || 0;
+				const out = elOut ? Number(elOut.value) : 0;
+
+				if (isNaN(out) || out < 0) {
+					alert("Finished pieces must be zero or more.");
+					return;
+				}
+				// The server caps this too — here only so he finds out before the
+				// round trip.
+				if (out > given) {
+					alert(
+						"He cannot finish more than the " + given + " pieces he was given.",
+					);
+					return;
+				}
+
+				saveAssignment(
+					{
+						action: "end",
+						assignmentId: asgId,
+						qtyOut: out,
+						endTime: nowHHMM(),
+					},
+					btnDone,
+				);
+			});
+		});
+
+		card.querySelectorAll(".btn-share-remove").forEach((btnRm) => {
+			btnRm.addEventListener("click", () => {
+				const row = btnRm.closest("tr");
+				const asgId = row.getAttribute("data-asgid");
+				const who = row.querySelector(".share-who").textContent.trim();
+
+				if (!confirm("Take " + who + " off this stage?")) return;
+
+				saveAssignment({ action: "remove", assignmentId: asgId }, btnRm);
+			});
+		});
+
+		// Re-sizing writes on change rather than behind a Save button — the
+		// number is the whole edit, and a button beside it would be pressed
+		// about half the time.
+		card.querySelectorAll(".share-qty").forEach((elQty) => {
+			elQty.addEventListener("change", () => {
+				const row = elQty.closest("tr");
+				const asgId = row.getAttribute("data-asgid");
+				const qty = Number(elQty.value) || 0;
+
+				if (qty < 1) {
+					alert("A share has to be at least one piece. Remove him instead.");
+					renderSelectedPlan();
+					return;
+				}
+
+				saveAssignment(
+					{ action: "update", assignmentId: asgId, assignedQty: qty },
+					null,
+					elQty,
+				);
+			});
+		});
+
+		const btnsSave = card.querySelectorAll(".btn-save");
+		btnsSave.forEach((btnSave) => {
+			btnSave.addEventListener("click", () => {
+				const action = btnSave.getAttribute("data-action");
+
+				// A stage started under the old code still carries one operator on
+				// the header and one typed count. Everything else is split, and its
+				// output is the sum of the shares — read off the card rather than
+				// typed, so there is no second opinion about it.
+				const isLegacyCard = card.getAttribute("data-legacy") === "1";
+
+				const elEnd = card.querySelector(".phase-end");
+				const elQtyOut = card.querySelector(".phase-qtyout");
+				const elRemarks = card.querySelector(".phase-remarks");
+				const elOpSel = card.querySelector("select.issue-input");
+
+				const qtyIn = cardQtyIn;
+
+				let opSelect = "";
+				if (isLegacyCard) {
+					opSelect = elOpSel ? elOpSel.value : "";
+					if (!opSelect) {
+						alert("Please select an operator.");
+						return;
+					}
+				}
+
+				// Stamp the time NOW, on the click — not when the card was
+				// rendered. A page left open since morning would otherwise
+				// record the moment he opened it, not the moment he acted.
+				// A value he typed himself is left alone.
+				if (action === "end" && elEnd && !elEnd.value) {
+					elEnd.value = nowHHMM();
+				}
+
+				const startTime = "";
+				const endTime = elEnd ? elEnd.value : "";
+				const remarks = elRemarks ? elRemarks.value : "";
+
+				let qtyOut = 0;
+				if (action === "end") {
+					qtyOut = isLegacyCard
+						? elQtyOut
+							? Number(elQtyOut.value)
+							: 0
+						: Number(card.getAttribute("data-qtyout")) || 0;
+
+					if (isNaN(qtyOut) || qtyOut < 0) {
+						alert("Qty out must be zero or more.");
+						return;
+					}
+					// The server caps this too — this is just so he finds out
+					// before the round trip.
+					if (qtyOut > qtyIn) {
+						alert(
+							"Qty out cannot be more than the " +
+								qtyIn +
+								" received by this stage.",
+						);
+						return;
+					}
+				}
+
+				const payload = {
+					planId: plan.id,
+					// item.id is the Plan_Item record id — stage logs hang off
+					// the item now, not off the plan filtered by SKU.
+					planItemId: item.id,
+					phaseName: cardPhase,
+					sequence: cardSeq,
+					// The server rolls the item to Complete on the last stage,
+					// and the plan to Production Complete when every item is.
+					isLastStage: cardIdx === sortedPhases.length - 1,
+					// Empty on a split stage — the people are on the shares, and
+					// the header belongs to nobody.
+					operatorId: opSelect,
+					startTime: startTime,
+					endTime: endTime,
+					qtyIn: qtyIn,
+					// Sent for the legacy single-operator stage. On a split stage
+					// the server ignores this and adds the shares up itself.
+					qtyOut: qtyOut,
+					remarks: remarks,
+				};
+
+				const originalText = btnSave.textContent;
+				btnSave.textContent = "Saving...";
+				btnSave.disabled = true;
+
+				// Fewer out than in. Carried through the save so the material
+				// question is asked at the moment he knows the answer, rather
+				// than waiting for him to remember to press Report damage.
+				const shortBy = action === "end" ? qtyIn - qtyOut : 0;
+				const lost =
+					shortBy > 0 ? { plan: plan, item: item, pieces: shortBy } : null;
+
+				// Ending a cutting stage declares waste first. The phase is not
+				// closed until that is saved, so a failed waste save leaves the
+				// stage open to retry rather than losing the declaration.
+				if (action === "end" && isCuttingPhase(payload.phaseName)) {
+					pendingEnd = {
+						payload: payload,
+						btn: btnSave,
+						originalText: originalText,
+						lost: lost,
+					};
+					// Nothing is saving yet — it is waiting on the waste dialog.
+					// Stays disabled so the modal is the only way forward.
+					btnSave.textContent = originalText;
+					openWasteDialog(plan, item, qtyOut);
+					return;
+				}
+
+				savePhasePayload(payload, btnSave, originalText, lost);
+			});
+		});
+	});
+
+	card.appendChild(body);
+	return card;
+}
+
+// `lost` is {plan, item, pieces} when this save closed a stage with fewer pieces
+// coming out than went in. Null otherwise.
+//
+// THE SHORTFALL PROMPT LIVES HERE and not on the stage card, because both routes
+// into a phase ending — the ordinary one and the cutting one, which detours
+// through the waste dialog first — funnel through this function. Putting it on
+// either caller would have covered one of them and quietly missed the other,
+// and Cutting is exactly where pieces get ruined.
+function savePhasePayload(payload, btnSave, originalText, lost) {
+	ZOHO.CREATOR.DATA.invokeCustomApi({
+		api_name: API.savePhase,
+		http_method: "POST",
+		payload: { payloadJson: JSON.stringify(payload) },
+	})
+		.then((response) => {
+			try {
+				const data = JSON.parse(response.result);
+				// The order-finished popup hangs off orderComplete in this
+				// response, and there is no other signal that it should have
+				// fired. Logged so "no popup" can be told apart from "the order
+				// was not actually finished".
+				console.log("saveProductionPhase ->", data);
+
+				if (data.success) {
+					// Re-fetch so the whole state re-renders cleanly. If that save
+					// finished the last item on the order, the summary is shown
+					// AFTERWARDS - by then the plan has dropped out of the live list
+					// and the next one is already selected behind the dialog.
+					var finished = data.orderComplete ? data : null;
+
+					// Asked AFTER the refetch, so the stage is already saved and
+					// showing its real numbers behind the dialog. He can always
+					// cancel — the pieces are recorded as lost either way, and
+					// the material question is a separate one he may not be able
+					// to answer standing at the machine.
+					//
+					// The finished-order popup wins if both are due. That one
+					// closes the whole order; a material question can wait for
+					// the Report damage button on the item.
+					const askDamage =
+						lost && typeof openDamageDialog === "function"
+							? () =>
+									openDamageDialog(lost.plan, lost.item, {
+										pieces: lost.pieces,
+										phaseName: payload.phaseName,
+										stageLogId: data.logId || "",
+									})
+							: null;
+
+					fetchAllData(function () {
+						if (finished) {
+							// CHAINED, not skipped. The completion popup used to
+							// win outright — so ending the LAST stage short showed
+							// "3 short of the order" and then never asked whether
+							// those pieces were being made again. The one moment
+							// the question matters most was the one moment it was
+							// not asked.
+							afterOrderDone = askDamage;
+							showOrderCompleteDialog(finished);
+						} else if (askDamage) {
+							askDamage();
+						}
+					});
+				} else if (
+					data.code === "SHARES_OPEN" ||
+					data.code === "STAGE_DONE" ||
+					data.code === "STAGE_OUTSOURCED"
+				) {
+					// The stage moved between the page rendering and the click —
+					// somebody's share was reopened, or the stage was closed from
+					// another screen. Nothing was written, so redraw from the
+					// server rather than leaving him arguing with a stale card.
+					alert(data.error);
+					fetchAllData(null);
+				} else {
+					alert("Error saving: " + data.error);
+					btnSave.textContent = originalText;
+					btnSave.disabled = false;
+				}
+			} catch (e) {
+				alert("Error parsing save response: " + e.message);
+				btnSave.textContent = originalText;
+				btnSave.disabled = false;
+			}
+		})
+		.catch((err) => {
+			alert("Network error. Check console.");
+			console.error(err);
+			btnSave.textContent = originalText;
+			btnSave.disabled = false;
+		});
+}
+
+// Add, re-size, close or remove one operator's share of a stage.
+//
+// Every outcome ends in a refetch, success or failure. A share changes what the
+// rest of the stage may do — how many pieces are left, whether the End button
+// opens — and a refused call means the screen was describing a stage that had
+// already moved on, so redrawing from the server is the fix in both directions.
+//
+// `btn` is disabled while the call is in flight; `input` covers the re-size
+// case, where the control is a number field rather than a button.
+function saveAssignment(payload, btn, input) {
+	const wasText = btn ? btn.textContent : "";
+	if (btn) {
+		btn.disabled = true;
+		btn.textContent = "…";
+	}
+	if (input) input.disabled = true;
+
+	ZOHO.CREATOR.DATA.invokeCustomApi({
+		api_name: API.saveAssignment,
+		http_method: "POST",
+		payload: { payloadJson: JSON.stringify(payload) },
+	})
+		.then((response) => {
+			try {
+				const data = JSON.parse(response.result);
+				console.log("saveStageAssignment ->", data);
+
+				if (!data.success) {
+					alert(data.error || "That could not be saved.");
+				}
+				fetchAllData(null);
+			} catch (e) {
+				alert("Error parsing the response: " + e.message);
+				if (btn) {
+					btn.disabled = false;
+					btn.textContent = wasText;
+				}
+				if (input) input.disabled = false;
+			}
+		})
+		.catch((err) => {
+			alert("Network error. Check console.");
+			console.error(err);
+			if (btn) {
+				btn.disabled = false;
+				btn.textContent = wasText;
+			}
+			if (input) input.disabled = false;
+		});
+}
+
+// ---- Order finished ----
+//
+// Shown once, when the last stage of the last item on an order ends. The figures
+// come from saveProductionPhase rather than from the screen, because the moment
+// that call returns the plan leaves every live query and the widget can no
+// longer see what it just finished.
+
+function orderDoneEl() {
+	let el = document.getElementById("order-done-modal");
+	if (!el) {
+		el = document.createElement("div");
+		el.id = "order-done-modal";
+		el.className = "waste-modal hidden";
+		document.body.appendChild(el);
+	}
+	return el;
+}
+
+// Something to do once the completion popup is dismissed. Set before showing it,
+// fired and cleared on close — so two dialogs that are both due appear one after
+// the other instead of one silently winning.
+let afterOrderDone = null;
+
+function closeOrderDone() {
+	orderDoneEl().classList.add("hidden");
+	const next = afterOrderDone;
+	afterOrderDone = null;
+	if (typeof next === "function") next();
+}
+
+function showOrderCompleteDialog(data) {
+	const el = orderDoneEl();
+	const rows = data.summary || [];
+
+	// A remake carries its original's item name AND its SKU, so an unmarked
+	// remake row is indistinguishable from the line it replaces. It also has no
+	// Ordered figure worth showing - nobody ordered it, QC did - and printing
+	// one made the column sum to more than the header total above it.
+	const body = rows
+		.map((r) => {
+			const ordered = Number(r.ordered) || 0;
+			const made = Number(r.produced) || 0;
+			const gap = ordered - made;
+			const rm = r.isRemake === true;
+			return `
+                <tr${rm ? ' class="is-remake-row"' : ""}>
+                    <td class="material-name-cell">
+                        <div class="mat-name">${r.item || "—"}${
+													rm
+														? ` <span class="remake-tag">${
+																r.remakeReason === "Production_Loss"
+																	? "Replacement"
+																	: "QC remake"
+															}</span>`
+														: ""
+												}</div>
+                        ${r.sku ? `<div class="mat-sku">${r.sku}</div>` : ""}
+                    </td>
+                    <td class="col-num">${
+											rm ? `<span class="is-muted">&mdash;</span>` : ordered
+										}</td>
+                    <td class="col-num col-strong">${made}</td>
+                    <td class="col-num">${
+											rm
+												? `<span class="is-muted">replaces ${ordered}</span>`
+												: gap > 0
+													? `<span class="short-hint" style="text-align:right;">${gap} short</span>`
+													: `<span class="is-muted">&mdash;</span>`
+										}</td>
+                </tr>`;
+		})
+		.join("");
+
+	// Ordered and Produced are both ORIGINAL lines only. Mixing remake output
+	// into Produced read as "45 of 36" - and let a genuine shortfall hide, since
+	// 30 originals plus 6 remakes also totals 36. Remakes get their own line.
+	const ordered = Number(data.totalOrdered) || 0;
+	const made = Number(data.totalProduced) || 0;
+	const remade = Number(data.totalRemade) || 0;
+	const shortBy = ordered - made;
+
+	// Where he goes next, worked out AFTER the refresh - so this is what is
+	// actually behind the dialog, not a guess about what should be.
+	const next = plans.find((p) => p.id === selectedPlanId);
+	const nextLine = next
+		? `Next up: <b>${next.salesOrder}</b> (${next.planNo}), already open behind this.`
+		: `Nothing else is open for you right now.`;
+
+	el.classList.remove("hidden");
+	el.innerHTML = `
+        <div class="waste-panel">
+            <div class="waste-head">
+                <div>
+                    <h3>${data.salesOrder || "Order"} is finished</h3>
+                    <p>Every item on ${
+											data.planNo ? data.planNo : "this plan"
+										} has been through its last stage.</p>
+                </div>
+            </div>
+
+            <div class="order-done-total${shortBy > 0 ? " is-short" : ""}">
+                <b>${made}</b> of <b>${ordered}</b> pieces produced${
+									shortBy > 0
+										? ` &middot; <span class="is-short-txt">${shortBy} short of the order</span>`
+										: ""
+								}${
+									remade > 0
+										? `<div class="order-done-remade">plus <b>${remade}</b> remade after QC</div>`
+										: ""
+								}
+            </div>
+
+            <div class="table-wrapper">
+                <table>
+                    <thead><tr>
+                        <th>Item</th>
+                        <th class="col-num">Ordered</th>
+                        <th class="col-num">Produced</th>
+                        <th class="col-num"></th>
+                    </tr></thead>
+                    <tbody>${
+											body ||
+											`<tr><td colspan="4" class="is-muted" style="text-align:center;">No items recorded.</td></tr>`
+										}</tbody>
+                </table>
+            </div>
+
+            <p class="exc-hint" style="margin-top:0.75rem;">${nextLine}</p>
+
+            <div class="waste-foot">
+                <button type="button" class="primary-btn" onclick="closeOrderDone()">
+                    ${next ? "Go to next order" : "Close"}
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+// ---- Waste declaration (Cutting only) ----
+
+function wasteDialogEl() {
+	let el = document.getElementById("waste-modal");
+	if (!el) {
+		el = document.createElement("div");
+		el.id = "waste-modal";
+		el.className = "waste-modal hidden";
+		document.body.appendChild(el);
+	}
+	return el;
+}
+
+function openWasteDialog(plan, item, qtyOut) {
+	const el = wasteDialogEl();
+	el.classList.remove("hidden");
+	el.innerHTML = `<div class="waste-panel"><div class="waste-head">Working out the waste…</div></div>`;
+
+	ZOHO.CREATOR.DATA.invokeCustomApi({
+		api_name: API.expectedWaste,
+		http_method: "POST",
+		payload: { planId: plan.id, planItemId: item.id, qtyOut: String(qtyOut) },
+	})
+		.then((response) => {
+			let data;
+			try {
+				data = JSON.parse(response.result);
+			} catch (e) {
+				console.error(e, response);
+				data = {
+					fabrics: [],
+					fabricOptions: [],
+					errors: ["Could not read the prediction"],
+				};
+			}
+			wasteFabricOptions = data.fabricOptions || [];
+			wasteDraft = [];
+			(data.fabrics || []).forEach((f) => {
+				(f.waste || []).forEach((w) => {
+					wasteDraft.push({
+						key: ++wasteRowSeq,
+						materialId: String(w.materialId),
+						width: w.width,
+						length: w.length,
+						count: w.count,
+						keep: true,
+						predicted: true,
+					});
+				});
+			});
+			renderWasteDialog(data.errors || []);
+		})
+		.catch((err) => {
+			console.error(err);
+			wasteFabricOptions = [];
+			wasteDraft = [];
+			renderWasteDialog([
+				"Could not reach the server — you can still enter the waste by hand.",
+			]);
+		});
+}
+
+function renderWasteDialog(errors) {
+	const el = wasteDialogEl();
+	const opts = wasteFabricOptions;
+
+	const rows = wasteDraft
+		.map((r) => {
+			const sel = opts
+				.map(
+					(o) =>
+						`<option value="${o.materialId}" ${o.materialId === r.materialId ? "selected" : ""}>${o.material}</option>`,
+				)
+				.join("");
+			// Discarding does NOT delete the row — it flips it to scrap, which is
+			// still written so "how much did we throw away this month" stays
+			// answerable. A deleted row is silent loss.
+			return `
+            <tr data-key="${r.key}" class="${r.keep ? "" : "w-discarded"}">
+                <td><select class="w-mat" ${r.keep ? "" : "disabled"}>${sel}</select></td>
+                <td><input type="number" class="w-length" min="0" step="0.01" value="${r.length}" ${r.keep ? "" : "disabled"}></td>
+                <td><input type="number" class="w-width" min="0" step="0.01" value="${r.width}" ${r.keep ? "" : "disabled"}></td>
+                <td><input type="number" class="w-count" min="1" step="1" value="${r.count}" ${r.keep ? "" : "disabled"}></td>
+                <td class="w-actions">
+                    <button type="button" class="btn btn-secondary w-del">${r.keep ? "Discard" : "Keep"}</button>
+                </td>
+            </tr>
+        `;
+		})
+		.join("");
+
+	el.innerHTML = `
+        <div class="waste-panel">
+            <div class="waste-head">
+                <div>
+                    <h3>Waste from this cutting</h3>
+                    <p>Edit anything that is wrong, discard what is not worth keeping, add anything the maths missed.</p>
+                </div>
+            </div>
+            ${errors && errors.length ? `<div class="waste-warn">${errors.join("<br>")}</div>` : ""}
+            <div class="table-wrapper">
+                <table>
+                    <thead><tr>
+                        <th>Fabric</th>
+                        <th class="col-num">Length (cm)</th>
+                        <th class="col-num">Width (cm)</th>
+                        <th class="col-num">Pieces to cut</th>
+                        <th></th>
+                    </tr></thead>
+                    <tbody id="waste-rows">
+                        ${rows || `<tr><td colspan="5" class="waste-empty">No waste — nothing will be sent back to the store.</td></tr>`}
+                    </tbody>
+                </table>
+            </div>
+            <button type="button" class="btn btn-secondary" id="waste-add">+ Add a piece</button>
+            <div class="waste-foot">
+                <button type="button" class="btn btn-secondary" id="waste-cancel">Cancel</button>
+                <button type="button" class="primary-btn" id="waste-confirm">Save waste &amp; end cutting</button>
+            </div>
+        </div>
+    `;
+
+	el.querySelectorAll(".w-del").forEach((btn) => {
+		btn.addEventListener("click", () => {
+			const key = Number(btn.closest("tr").getAttribute("data-key"));
+			syncWasteDraft();
+			const row = wasteDraft.find((r) => r.key === key);
+			if (!row) return;
+			// A row the supervisor added by mistake has nothing worth recording,
+			// so that one really is removed. Anything the maths predicted is
+			// kept and marked scrap.
+			if (!row.keep && row.predicted === false) {
+				wasteDraft = wasteDraft.filter((r) => r.key !== key);
+			} else {
+				row.keep = !row.keep;
+			}
+			renderWasteDialog([]);
+		});
+	});
+
+	document.getElementById("waste-add").addEventListener("click", () => {
+		syncWasteDraft();
+		if (opts.length === 0) {
+			alert("No fabric on this order to attach a piece to.");
+			return;
+		}
+		wasteDraft.push({
+			key: ++wasteRowSeq,
+			materialId: opts[0].materialId,
+			width: 0,
+			length: 0,
+			count: 1,
+			keep: true,
+			predicted: false,
+		});
+		renderWasteDialog([]);
+	});
+
+	document
+		.getElementById("waste-cancel")
+		.addEventListener("click", closeWasteDialog);
+	document
+		.getElementById("waste-confirm")
+		.addEventListener("click", confirmWaste);
+}
+
+// Pull whatever is currently typed back into the draft before re-rendering,
+// otherwise adding a row would wipe edits made to the others.
+function syncWasteDraft() {
+	document.querySelectorAll("#waste-rows tr[data-key]").forEach((tr) => {
+		const key = Number(tr.getAttribute("data-key"));
+		const row = wasteDraft.find((r) => r.key === key);
+		if (!row || !row.keep) return;
+		row.materialId = tr.querySelector(".w-mat").value;
+		row.width = Number(tr.querySelector(".w-width").value) || 0;
+		row.length = Number(tr.querySelector(".w-length").value) || 0;
+		row.count = Number(tr.querySelector(".w-count").value) || 0;
+	});
+}
+
+function closeWasteDialog() {
+	wasteDialogEl().classList.add("hidden");
+	if (pendingEnd) {
+		pendingEnd.btn.textContent = pendingEnd.originalText;
+		pendingEnd.btn.disabled = false;
+		pendingEnd = null;
+	}
+}
+
+function confirmWaste() {
+	syncWasteDraft();
+
+	// Only kept rows have to be valid — a discarded one is scrap, and scrap with
+	// a nonsense size is simply not worth recording.
+	const bad = wasteDraft.find(
+		(r) => r.keep && (r.width <= 0 || r.length <= 0 || r.count <= 0),
+	);
+	if (bad) {
+		alert(
+			"Every piece needs a width, a length and a count greater than zero. Discard the row if it is not real.",
+		);
+		return;
+	}
+
+	const pieces = wasteDraft
+		.filter((r) => r.width > 0 && r.length > 0 && r.count > 0)
+		.map((r) => ({
+			sku: r.materialId,
+			width: r.width,
+			length: r.length,
+			count: r.count,
+			// false lands as Scrapped rather than Pending_Receipt, so thrown-away
+			// cloth stays reportable instead of vanishing.
+			keep: r.keep,
+			remarks: "",
+		}));
+
+	const btn = document.getElementById("waste-confirm");
+	btn.disabled = true;
+	btn.textContent = "Saving…";
+
+	const finishPhase = () => {
+		const p = pendingEnd;
+		wasteDialogEl().classList.add("hidden");
+		pendingEnd = null;
+		savePhasePayload(p.payload, p.btn, p.originalText, p.lost);
+	};
+
+	// Waste is saved BEFORE the phase closes, so a failed phase save leaves the
+	// stage open to retry. Without this flag the retry would write a second set
+	// of remnants — and nothing downstream could tell the duplicate from real
+	// cloth, because a Waste_Master row carries no source.
+	if (pieces.length === 0 || pendingEnd.wasteSaved) {
+		finishPhase();
+		return;
+	}
+
+	ZOHO.CREATOR.DATA.invokeCustomApi({
+		api_name: API.saveWaste,
+		http_method: "POST",
+		payload: {
+			planId: pendingEnd.payload.planId,
+			// These two resolve the Stage_Log server-side, which is what makes a
+			// repeat declaration refusable even after a page reload.
+			planItemId: pendingEnd.payload.planItemId,
+			phaseName: pendingEnd.payload.phaseName,
+			piecesJson: JSON.stringify(pieces),
+		},
+	})
+		.then((response) => {
+			let data;
+			try {
+				data = JSON.parse(response.result);
+			} catch (e) {
+				data = null;
+			}
+			if (data && data.errors && data.errors.length > 0) {
+				alert("Waste not saved:\n" + data.errors.join("\n"));
+				btn.disabled = false;
+				btn.textContent = "Save waste & end cutting";
+				return;
+			}
+			// duplicate:true means the server found a movement already logged against
+			// this stage — the waste is recorded, this is a retry, carry on and close
+			// the stage. Not an error, and nothing to tell the supervisor about.
+			if (data && data.duplicate) {
+				console.info("Waste already declared for this stage; skipping.");
+			}
+			// Saves a round trip on a same-session retry; the server guard is the
+			// one that survives a reload.
+			pendingEnd.wasteSaved = true;
+
+			// The remnants he just declared belong on the Waste returns tab. It
+			// is a different tab holding its own cached copy, so without this it
+			// would keep showing the list as it was before he cut — and the only
+			// way to correct it would be reloading the whole widget.
+			//
+			// Reloaded rather than just invalidated, so the tab badge updates
+			// now. He is looking at Production; the point is that he can see the
+			// count change without going anywhere.
+			if (typeof loadSupWaste === "function" && currentSupervisorId()) {
+				tabsLoaded.waste = true;
+				loadSupWaste();
+			}
+
+			finishPhase();
+		})
+		.catch((err) => {
+			console.error(err);
+			alert(
+				"Could not save the waste. The stage has been left open — try again.",
+			);
+			btn.disabled = false;
+			btn.textContent = "Save waste & end cutting";
+		});
+}
+
+// Initial setup
+// Picker changes are handled by the shell, which reloads whichever tab is
+// open. selectedSupId is read from the shared control at fetch time.
+
+elPlanSelect.addEventListener("change", (e) => {
+	selectedPlanId = e.target.value;
+	// New order, start at its first item rather than carrying over whatever
+	// was open on the previous one.
+	openItemId = undefined;
+
+	// REFETCH, not just re-render. Only the plan that was on screen came back
+	// with items — the rest are dropdown rows — so switching order means asking
+	// for the one he has just picked. One call per switch, and every other
+	// order's items never travel at all.
+	const chosen = plans.find((p) => String(p.id) === String(selectedPlanId));
+	if (selectedPlanId && (!chosen || chosen.hasDetail !== true)) {
+		showLoading();
+		fetchAllData();
+	} else {
+		renderSelectedPlan();
+	}
+});
+
+// Refresh is wired by the shell, off TAB_LOADERS - it reloads every tab that
+// has been opened at least once, this one included. Do NOT add a second
+// listener here: the shell already calls this loader, and a listener of our own
+// would fetch production twice on every click.
+
+// NOT loaded on boot. Production is a lazy tab: the shell calls this the first
+// time it is opened, so arriving at Receive does not pay for it.
+TAB_LOADERS.production = function () {
+	showLoading();
+	fetchAllData();
+};

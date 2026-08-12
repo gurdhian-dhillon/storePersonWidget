@@ -1,0 +1,316 @@
+
+// Quality_Check form workflow: On User Input of Sales_Order.
+// Pulls the order's plan details down and rebuilds the QC_Items subform from
+// the Plan_Item records.
+//
+// KEYED ON THE SALES ORDER, not the plan. The plan now stops at "Production
+// Complete" and everything after it - QC, packing, dispatch - is tracked on
+// Sales_Order.Order_Status. So QC is opened against the order, and the plan is
+// something this script looks UP rather than something the user picks.
+//
+// The previous version had this the other way round and two leftovers from the
+// flip, both fatal and neither of them an obvious error on screen:
+//
+//  1. `input.Plan_No = Plan_No` - a bare identifier that was never assigned.
+//     There is no plan variable in scope at that point; the plan number has to
+//     be read off the record inside the loop below.
+//  2. `Plan_Item[Plan == planId]` - planId was the OLD input field and no longer
+//     exists, so the subform was rebuilt from a query against nothing.
+//
+// Reads Plan_Item, not Production_Planning.Item_Table - step 1 of the module
+// migration moved items out of that subform and it is no longer written.
+//
+// THE TRAPS THAT MADE THE ORIGINAL FAIL SILENTLY, all still guarded here:
+//
+//  - `plan = Production_Planning[...]` returns a COLLECTION, not a record, so
+//    `if(plan != null)` is true even when nothing matched and every `plan.Field`
+//    read after it comes back empty. A for-each is the only reliable way to take
+//    a single record out of a query. Same trap on Item_Master further down.
+//  - `plan.Assigned_To.Employee_Name` chains through a lookup. A lookup holds an
+//    id, not the record, so the second hop yields nothing.
+//  - `item.Qty_Ordered.toLong()` throws the moment the field was never written -
+//    a Creator numeric that was never filled holds an EMPTY STRING, not null, so
+//    ifnull() does not save it either.
+
+salesId = input.Sales_Order;
+
+if(salesId != null)
+{
+	supId = null;
+	planIds = List();
+
+	// Every plan raised against this order. One order produces exactly one plan
+	// today - createProductionPlans inserts one inside its per-order loop and
+	// the order then leaves the Pending queue - but collecting them all costs
+	// nothing and means QC does not quietly cover half an order if that ever
+	// changes. Oldest first, so the numbers read in the order they were raised.
+	orderPlans = Production_Planning[Sales_Order == salesId] sort by Added_Time;
+
+	for each  plan in orderPlans
+	{
+		planIds.add(plan.ID);
+
+		// The first plan's supervisor. With one plan per order this IS the
+		// supervisor; with more it is the one who started the order, which is
+		// the useful name to show against a QC record.
+		if(supId == null)
+		{
+			supId = plan.Assigned_To;
+		}
+	}
+
+	// size() is right here - planIds is a List, not a query result.
+	if(planIds.size() > 0)
+	{
+		//------------------------------------------------------------------
+		// Plan_No is a LOOKUP to Production_Planning, not a text field, so it
+		// takes the plan's RECORD ID. It was being assigned the plan NUMBER -
+		// "PLAN-00012" - which Creator rejects outright with "Invalid value
+		// found for the variable Plan_No", and the whole On User Input script
+		// dies before the subform is ever built.
+		//
+		// A lookup holds one record, so where the old string joined every plan
+		// number with a comma this takes the FIRST - the oldest, which is the
+		// one that started the order. One order produces exactly one plan
+		// today, so there is nothing to lose; if that ever changes, this names
+		// the plan the QC record was raised against and the rest are found
+		// through the order.
+		//------------------------------------------------------------------
+		input.Plan_No = planIds.get(0);
+
+		// Assigned_to is a text field, so it needs the NAME. Assigned_To on the
+		// plan is a lookup holding an id, and a lookup cannot be chained
+		// through - the Employee record has to be fetched to read the name.
+		if(supId != null)
+		{
+			for each  emp in Employee[ID == supId]
+			{
+				input.Assigned_to = emp.Employee_Name;
+			}
+		}
+
+		// WHICH ROUND THIS IS. Counted from the QC records already raised against
+		// this order, so it needs no state of its own and cannot drift. Round 1
+		// is the first inspection; round 2 checks the remakes that came out of
+		// round 1's rejections.
+		//
+		// Set here rather than by the remake function because this is the moment
+		// the record is being built, and the field is read-only on the form.
+		priorQc = Quality_Check[Sales_Order == salesId].count();
+		input.Round = priorQc + 1;
+
+		input.QC_Items.clear();
+
+		rows = Collection();
+
+		//------------------------------------------------------------------
+		// WHAT THE ORDER STILL OWES, counted as the record is built.
+		//
+		// The subform answers "what is in front of me now". It cannot answer
+		// "how much of this order is still outstanding", because everything
+		// already inspected is deliberately left OUT of it - so an inspector
+		// looking at a round-2 record with one row of 2 has no way to tell
+		// whether that finishes the order or whether 30 more are still coming.
+		//
+		// Counted PER ORIGINAL LINE, exactly the way createRemakeItems decides
+		// whether the order has passed: the root's acceptances plus every
+		// Remake_Of child, against what the customer ordered. Any other
+		// arithmetic here would be a second opinion that could disagree with
+		// the function that actually sets QC Passed.
+		//
+		// This is the state going IN to this round - the script runs when the
+		// order is picked, before anything is accepted - which is the useful
+		// moment: it is what is outstanding before he starts.
+		//------------------------------------------------------------------
+		outstandTotal = 0;
+		progressTxt = "";
+
+		for each  pid in planIds
+		{
+			// "sort by" will not parse inline in a for-each header - it has to
+			// sit on its own assignment.
+			planItems = Plan_Item[Plan == pid] sort by Line_No;
+
+			for each  item in planItems
+			{
+				// A numeric field that was never written is an EMPTY STRING, and
+				// toLong() throws on it. Normalise to string, test, then convert.
+				qStr = ifnull(item.Qty_Ordered,"0").toString().trim();
+				if(qStr == "")
+				{
+					qStr = "0";
+				}
+
+				// Qty_Produced is written by saveProductionPhase when the LAST
+				// stage of the item ends, so it is legitimately empty on anything
+				// still in production - hence the same guard, not a shortcut.
+				//
+				// It reads 0 if QC is opened before the order is Production
+				// Complete. That is honest rather than wrong: there is nothing
+				// to inspect yet.
+				pStr = ifnull(item.Qty_Produced,"0").toString().trim();
+				if(pStr == "")
+				{
+					pStr = "0";
+				}
+
+				//------------------------------------------------------
+				// ONLY WHAT STILL NEEDS INSPECTING.
+				//
+				// This used to list every Plan_Item on the plan, which was
+				// right when QC happened once. With remakes it is not: round
+				// 2 would put the 90 pieces that already passed in front of
+				// the inspector again, and re-recording them would double
+				// their accepted count and make the order look complete when
+				// it is not.
+				//
+				// An item is inspected when what has been accepted plus what
+				// has been rejected reaches what it produced. Read off the
+				// item rather than hunted through past QC_Items subforms -
+				// which is exactly why Qty_Accepted and Qty_Rejected live on
+				// Plan_Item, and why this test is one field read.
+				//
+				// Anything still in production has Qty_Produced 0, so it
+				// falls out here too: 0 + 0 is not less than 0. There is
+				// nothing to inspect yet.
+				//------------------------------------------------------
+				accStr = ifnull(item.Qty_Accepted,"0").toString().trim();
+				if(accStr == "")
+				{
+					accStr = "0";
+				}
+				rejStr = ifnull(item.Qty_Rejected,"0").toString().trim();
+				if(rejStr == "")
+				{
+					rejStr = "0";
+				}
+				seenQty = accStr.toDecimal().toLong() + rejStr.toDecimal().toLong();
+				prodQty = pStr.toDecimal().toLong();
+
+				//------------------------------------------------------
+				// The outstanding tally, ORIGINAL LINES ONLY.
+				//
+				// Sits outside the seenQty < prodQty test below on
+				// purpose: a line fully inspected in round 1 contributes
+				// no subform row and must still be counted, or the total
+				// only ever describes this round and says nothing about
+				// the order.
+				//
+				// Is_Remake reads EMPTY, not false, on anything planned
+				// before the field existed, so the false test is the
+				// right way round - those records are original lines.
+				//------------------------------------------------------
+				if(ifnull(item.Is_Remake,false) == false)
+				{
+					ordN = qStr.toDecimal().toLong();
+					accN = accStr.toDecimal().toLong();
+
+					for each  ch in Plan_Item[Remake_Of == item.ID]
+					{
+						chA = ifnull(ch.Qty_Accepted,"0").toString().trim();
+						if(chA == "")
+						{
+							chA = "0";
+						}
+						accN = accN + chA.toDecimal().toLong();
+					}
+
+					leftN = ordN - accN;
+					// Over-acceptance is a data error, not a negative
+					// outstanding - clamping stops one bad line quietly
+					// cancelling out a genuine shortfall on another.
+					if(leftN < 0)
+					{
+						leftN = 0;
+					}
+					outstandTotal = outstandTotal + leftN;
+
+					if(leftN > 0)
+					{
+						progressTxt = progressTxt + ifnull(item.Item_Name,"").toString() + " - " + accN + " of " + ordN + " accepted, " + leftN + " still to come\n";
+					}
+					else
+					{
+						progressTxt = progressTxt + ifnull(item.Item_Name,"").toString() + " - " + ordN + " of " + ordN + " accepted, done\n";
+					}
+				}
+
+				if(seenQty < prodQty)
+				{
+					row = Quality_Check.QC_Items();
+					row.Item_Name=item.Item_Name;
+					// 			row.Planned_Quantity=qStr.toDecimal().toLong();
+
+					// What is left to inspect, not what the item ever made. On
+					// a part-inspected item the inspector should be shown the
+					// remainder, or he will re-count what he has already passed.
+					row.Produced_Quantity=prodQty - seenQty;
+
+					// THE LINK EVERYTHING ELSE HANGS OFF. Hidden on the form,
+					// but createRemakeItems cannot map a rejection back to an
+					// item without it - Plan_Item_SKU is not enough, because
+					// the same SKU can legitimately appear on two lines of one
+					// order, and a remake line repeats its original's SKU by
+					// definition.
+					row.Plan_Item=item.ID;
+
+					//------------------------------------------------
+					// WHICH BATCH THIS IS.
+					//
+					// Two rows of one SKU is the NORMAL case now - the
+					// original run, plus the batch remade after pieces
+					// were spoiled or rejected. On screen they are the
+					// same name, the same SKU and nothing else, so the
+					// inspector has two physical piles in front of him
+					// and no way to tell which is which.
+					//
+					// The rows must stay separate: Plan_Item above is
+					// what createRemakeItems maps a rejection back to,
+					// and a merged line has no single item to attribute
+					// to. So the split is not the problem - being unable
+					// to READ the split is. Hence a label rather than a
+					// merge.
+					//
+					// Remake_Reason reads empty on anything planned
+					// before the field existed. That falls through to a
+					// plain "Remake", which is the honest answer: it is
+					// one, of unknown cause.
+					//------------------------------------------------
+					batchTxt = "Original";
+					if(ifnull(item.Is_Remake,false) == true)
+					{
+						rsn = ifnull(item.Remake_Reason,"").toString().trim();
+						if(rsn == "Production_Loss")
+						{
+							batchTxt = "Remake - spoiled in production";
+						}
+						else if(rsn == "QC_Reject")
+						{
+							batchTxt = "Remake - QC reject";
+						}
+						else
+						{
+							batchTxt = "Remake";
+						}
+					}
+					row.Batch=batchTxt;
+
+					// Same collection-not-a-record trap as the plan lookup above.
+					for each  im in Item_Master[ID == item.Item_Sku]
+					{
+						row.Plan_Item_SKU=im.SKU;
+					}
+
+					rows.insert(row);
+				}
+			}
+		}
+
+		// New subform rows go in as a collection in one call - assigning to the
+		// subform directly does not work.
+		input.QC_Items.insert(rows);
+
+		input.Pieces_Outstanding = outstandTotal;
+		input.Order_Progress = progressTxt;
+	}
+}

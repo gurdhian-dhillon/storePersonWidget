@@ -1,0 +1,463 @@
+string raiseMaterialException(string payloadJson)
+{
+	// Store person reports a blocked material - out of stock, or washed stock is
+	// short while unwashed exists.
+	//
+	// Needs a form called Material_Exception with these link names:
+	//   Type              Dropdown  - Shortage / Wash_Needed / Other
+	//   SKU               Lookup    -> Raw_Material
+	//   Material_Name     Single Line
+	//   Unit              Single Line
+	//   Required_Qty      Decimal   - TOTAL wanted across every order
+	//   Available_Qty     Decimal   - live stock
+	//   Unwashed_Qty      Decimal   - on a Wash_Needed ticket, what is on the rack
+	//   Shortfall_Qty     Decimal   - the number to act on: buy this much / wash this much
+	//   Last_Reported_On  Date
+	//   Note              Multi Line
+	//   Status            Dropdown  - Open / Resolved   (default Open)
+	//   Exception_Lines   Subform   - Plan, Sales_Order, Plan_Item, Supervisor,
+	//                                 Required_Qty, Issued_Qty, Outstanding_Qty
+	//
+	// WHY THE LINES EXIST. The header is the combined request - 120 wanted, 100 in
+	// stock, 20 short. That total is the only place the shortage is visible at all:
+	// stock is shared, so every supervisor's screen correctly shows the same 100 and
+	// no single row is wrong. The lines say where the 120 came from, so the ticket
+	// can answer "which orders wanted this and how much" without anyone guessing.
+	//
+	// The lines deliberately do NOT attribute the shortfall. Which order goes short
+	// is a scheduling decision made later, by priority rules that do not exist yet;
+	// freezing a guess into a record would give it an authority it has not earned.
+	// A line states a fact - that order asked for 60 and has had 40.
+	//
+	// Header Supervisor is no longer written. Every ticket now has at least one
+	// line, and a supervisor is singular there. The field stays on the form until
+	// new tickets are confirmed working, then it can be deleted.
+	//
+	// One OPEN exception per material per type. A second report REPLACES the lines
+	// and the totals - procurement acts on the current picture - and appends a dated
+	// entry to the note, which keeps the history of how it got there.
+	//
+	// payload:
+	// { "materialId":"123", "type":"Shortage",
+	//   "required":120, "available":100, "unwashed":0, "shortfall":20,
+	//   "unit":"Cone", "note":"",
+	//   "lines":[ {"planId":"1","salesOrder":"SO-0001","planItemId":"9",
+	//              "supervisorId":"456","required":60,"issued":60} ] }
+
+	res = "{\"success\":false,\"error\":\"Nothing was raised\"}";
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	inp = payloadJson.toMap();
+
+	matId = ifnull(inp.get("materialId"),"").toString().trim();
+	exType = ifnull(inp.get("type"),"Other").toString().trim();
+	note = ifnull(inp.get("note"),"").toString();
+	unitTxt = ifnull(inp.get("unit"),"").toString();
+
+	// Creator fields that were never written are EMPTY, not null, and
+	// toDecimal() throws on empty - normalise to string first.
+	reqStr = ifnull(inp.get("required"),"0").toString().trim();
+	if(reqStr == "")
+	{
+		reqStr = "0";
+	}
+	availStr = ifnull(inp.get("available"),"0").toString().trim();
+	if(availStr == "")
+	{
+		availStr = "0";
+	}
+	unwStr = ifnull(inp.get("unwashed"),"0").toString().trim();
+	if(unwStr == "")
+	{
+		unwStr = "0";
+	}
+	shortStr = ifnull(inp.get("shortfall"),"0").toString().trim();
+	if(shortStr == "")
+	{
+		shortStr = "0";
+	}
+	reqQty = reqStr.toDecimal();
+	availQty = availStr.toDecimal();
+	unwQty = unwStr.toDecimal();
+	shortQty = shortStr.toDecimal();
+
+	// Nothing complex in a for-each header - hoisted into its own variable.
+	lines = ifnull(inp.get("lines"),"[]").toString().toJSONList();
+
+	// Guarded BEFORE the fetch. An empty or non-numeric id makes .toLong() throw
+	// "Error while fetching record", which says nothing about the real problem -
+	// a payload that never carried the id at all.
+	//
+	// Material_Display_Name, falling back to Name. This used to be
+	// "SKU - Name", which put the code inside the NAME - so the ticket, the wash
+	// job and every mail all read "RM-00011 - Linen Fabric" where every other
+	// screen in the app says "Linen Fabric / Solid / Cinnamon Brown". The code is
+	// kept separately and shown beside the name, not welded into it.
+	matName = "";
+	matSku = "";
+	if(matId != "" && matId.isNumber() == true)
+	{
+		for each  rm in Raw_Material[ID == matId.toLong()]
+		{
+			matSku = ifnull(rm.SKU,"").toString().trim();
+			matName = ifnull(rm.Material_Display_Name,"").toString().trim();
+			if(matName == "")
+			{
+				matName = ifnull(rm.Name,"").toString().trim();
+			}
+			// Last resort only. A ticket with a blank name is unreadable, and
+			// the "material not found" guard below keys off this being empty.
+			if(matName == "")
+			{
+				matName = matSku;
+			}
+		}
+	}
+
+	if(matId == "" || matName == "")
+	{
+		res = "{\"success\":false,\"error\":\"Material not found (id was '" + matId + "')\"}";
+	}
+	else
+	{
+		// Append to an existing open ticket rather than raising another.
+		existing = Material_Exception[SKU == matId.toLong() && Type == exType && Status == "Open"];
+		wasAppended = false;
+		exRec = null;
+
+		if(existing.count() > 0)
+		{
+			for each  ex in existing
+			{
+				oldNote = ifnull(ex.Note,"").toString();
+				addNote = zoho.currentdate.toString("dd-MMM HH:mm") + " - reported again, now short " + shortQty;
+				if(note != "")
+				{
+					addNote = addNote + ": " + note;
+				}
+				if(oldNote != "")
+				{
+					addNote = oldNote + "\n" + addNote;
+				}
+				ex.Note = addNote;
+				ex.Required_Qty = reqQty;
+				ex.Available_Qty = availQty;
+				ex.Unwashed_Qty = unwQty;
+				ex.Shortfall_Qty = shortQty;
+				ex.Last_Reported_On = zoho.currentdate;
+				exRec = ex;
+			}
+			wasAppended = true;
+		}
+		else
+		{
+			newEx = insert into Material_Exception
+			[
+				Type=exType
+				SKU=matId.toLong()
+				Material_Name=matName
+				Unit=unitTxt
+				Required_Qty=reqQty
+				Available_Qty=availQty
+				Unwashed_Qty=unwQty
+				Shortfall_Qty=shortQty
+				Last_Reported_On=zoho.currentdate
+				Note=note
+				Status="Open"
+				Added_User=zoho.loginuser
+			];
+
+			for each  ex2 in Material_Exception[ID == newEx.toLong()]
+			{
+				exRec = ex2;
+			}
+		}
+
+		//------------------------------------------------------------------
+		// Lines. On a repeat these REPLACE what was there - the old set
+		// described a picture that has since changed, and keeping both would
+		// double the apparent demand. The note carries the history instead.
+		//------------------------------------------------------------------
+		if(exRec != null)
+		{
+			// Own try/catch: the ticket itself is already written by this point,
+			// and losing the lines is far better than losing the report. Also the
+			// one call here I could not verify against a live form - if the clear
+			// fails, the info log says so and the ticket still stands.
+			try
+			{
+			if(wasAppended == true)
+			{
+				// deleteAll() here is the LIST method, not a form one - it takes
+				// the collection to remove and will not accept zero arguments.
+				// The rows are gathered into their own list first rather than
+				// passed the live subform, so nothing is mutated mid-iteration.
+				oldRows = List();
+				for each  oldRow in exRec.Exception_Lines
+				{
+					oldRows.add(oldRow);
+				}
+				if(oldRows.size() > 0)
+				{
+					exRec.Exception_Lines.deleteAll(oldRows);
+				}
+			}
+
+			for each  lnRaw in lines
+			{
+				// toJSONList() yields JSON objects, NOT Deluge Maps - .get()
+				// returns null on those without erroring. .toMap() first.
+				ln = lnRaw.toMap();
+
+				lReqStr = ifnull(ln.get("required"),"0").toString().trim();
+				if(lReqStr == "")
+				{
+					lReqStr = "0";
+				}
+				lIssStr = ifnull(ln.get("issued"),"0").toString().trim();
+				if(lIssStr == "")
+				{
+					lIssStr = "0";
+				}
+				lReq = lReqStr.toDecimal();
+				lIss = lIssStr.toDecimal();
+				lOut = lReq - lIss;
+				if(lOut < 0)
+				{
+					lOut = 0;
+				}
+
+				lnRow = Material_Exception.Exception_Lines();
+				lnRow.Sales_Order=ifnull(ln.get("salesOrder"),"").toString();
+				lnRow.Required_Qty=lReq;
+				lnRow.Issued_Qty=lIss;
+				lnRow.Outstanding_Qty=lOut;
+
+				planIdTxt = ifnull(ln.get("planId"),"").toString().trim();
+				if(planIdTxt != "")
+				{
+					lnRow.Plan=planIdTxt.toLong();
+				}
+				itemIdTxt = ifnull(ln.get("planItemId"),"").toString().trim();
+				if(itemIdTxt != "")
+				{
+					lnRow.Plan_Item=itemIdTxt.toLong();
+				}
+				supIdTxt = ifnull(ln.get("supervisorId"),"").toString().trim();
+				if(supIdTxt != "")
+				{
+					lnRow.Supervisor=supIdTxt.toLong();
+				}
+
+				exRec.Exception_Lines.insert(lnRow);
+			}
+			}
+			catch (e2)
+			{
+				info "Exception_Lines not written for " + matName + ": " + e2.toString();
+			}
+		}
+
+		//------------------------------------------------------------------
+		// A wash ticket is not just a note to somebody - it is a job. Raising
+		// the exception also queues the work, so the wash team has a record to
+		// act on and to close, rather than an exception nobody owns.
+		//
+		// Own try/catch: the exception is already written, and failing the
+		// whole report because the job could not be queued would lose the
+		// report as well as the job.
+		//------------------------------------------------------------------
+		if(exType == "Wash_Needed" && shortQty > 0)
+		{
+			try
+			{
+				// One open job per material. A second report while the first is
+				// still on the line updates the quantity instead of queueing
+				// the same cloth twice.
+				openWash = Wash_Request[Material == matId.toLong() && (Status == "Pending" || Status == "In_Progress")];
+
+				if(openWash.count() > 0)
+				{
+					for each  wq in openWash
+					{
+						wq.Requested_Qty = shortQty;
+						if(exRec != null)
+						{
+							wq.Exception = exRec.ID;
+						}
+					}
+				}
+				else
+				{
+					newWash = insert into Wash_Request
+					[
+						Material=matId.toLong()
+						Material_Name=matName
+						Unit=unitTxt
+						Requested_Qty=shortQty
+						Status="Pending"
+						Requested_On=zoho.currentdate
+						Remarks=note
+						Added_User=zoho.loginuser
+					];
+
+					if(exRec != null)
+					{
+						for each  wr in Wash_Request[ID == newWash.toLong()]
+						{
+							wr.Exception = exRec.ID;
+						}
+					}
+				}
+			}
+			catch (e3)
+			{
+				info "Wash_Request not queued for " + matName + ": " + e3.toString();
+			}
+		}
+
+		//------------------------------------------------------------------
+		// NOTIFICATION - live now.
+		//
+		// ROUTED BY TYPE, because the two tickets ask different people for
+		// different things:
+		//   Wash_Needed - the washing side. The cloth is OWNED, it is on the
+		//                 rack unwashed. Nothing is bought; something is washed.
+		//   Shortage    - procurement, AND admin. Money is about to be spent, so
+		//                 the person who signs for it is told at the same time as
+		//                 the person who raises the order. That is two sends per
+		//                 shortage, deliberately.
+		//
+		// Every address is the same one for now - there are no departmental
+		// mailboxes yet - but they are separate constants so switching each on is
+		// a one-line change rather than a re-reading of this block.
+		//
+		// Its own try/catch, and last. The ticket is already written by here, and
+		// a mail failure must never make a raised exception look unraised - the
+		// store person would raise it again and append a duplicate note.
+		//------------------------------------------------------------------
+		washTo = "gurdhian.helios@gmail.com";
+		procurementTo = "gurdhian.helios@gmail.com";
+		adminTo = "gurdhian.helios@gmail.com";
+
+		try
+		{
+			xTh = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:left;font-weight:600";
+			// Numeric headers RIGHT-aligned to sit over their own figures. Left-
+			// aligned headers above right-aligned numbers is what made the table
+			// read as though the data had slid sideways.
+			xThR = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:right;font-weight:600";
+			xTd = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a";
+			xTdR = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a;text-align:right;font-weight:600";
+			xTdBad = "padding:10px 12px;border-bottom:1px solid #fee2e2;font-size:13px;color:#991b1b;text-align:right;font-weight:700";
+			xUnit = "color:#64748b;font-weight:400;font-size:11px";
+
+			xNameCell = "<div>" + matName.replaceAll("\"","'") + "</div>";
+			if(matSku != "")
+			{
+				// Name over code, the same shape the widgets use - mat-name with
+				// mat-sku beneath it - rather than the two run together.
+				xNameCell = xNameCell + "<div style='font-size:11px;color:#64748b;padding-top:2px'>" + matSku + "</div>";
+			}
+
+			// Units on every figure. A bare "17.35" does not say metres, and this
+			// mail is the whole brief for whoever acts on it.
+			xU = "";
+			if(unitTxt != "")
+			{
+				xU = " <span style='" + xUnit + "'>" + unitTxt + "</span>";
+			}
+
+			// The number to act on is the SHORTFALL, so it is the one in red and
+			// the one in the subject. Needed and available are the working.
+			xTable = "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;margin-top:14px;border:1px solid #e2e8f0;border-radius:6px'>";
+			xTable = xTable + "<tr><th style='" + xTh + "'>Material</th><th style='" + xThR + "'>Needed</th><th style='" + xThR + "'>Available</th><th style='" + xThR + "'>Short by</th></tr>";
+			xTable = xTable + "<tr><td style='" + xTd + "'>" + xNameCell + "</td><td style='" + xTdR + "'>" + reqQty + xU + "</td><td style='" + xTdR + "'>" + availQty + xU + "</td><td style='" + xTdBad + "'>" + shortQty + xU + "</td></tr></table>";
+
+			xNote = "";
+			if(note != "")
+			{
+				xNote = "<div style='font-size:12px;color:#64748b;padding-top:14px'><b>Note from the store:</b> " + note.replaceAll("<","&lt;").replaceAll("\"","'") + "</div>";
+			}
+
+			xSubtitle = "Raised by the store &middot; " + zoho.currentdate.toString("dd MMM yyyy") + " " + zoho.currenttime.toString("HH:mm");
+
+			// A repeat report REPLACES the totals rather than adding a second
+			// ticket, so the reader needs telling which of the two this is - the
+			// same material arriving twice otherwise reads as a duplicate mail.
+			xAgain = "";
+			if(wasAppended == true)
+			{
+				xAgain = "<div style='font-size:12px;color:#64748b;padding-top:10px'>This material was already open on a ticket. The figures above <b>replace</b> the previous ones - they are the current picture, not an addition to it.</div>";
+			}
+
+			if(exType == "Wash_Needed")
+			{
+				wInner = "<div style='font-size:14px;color:#0f172a'>The store needs <b>" + shortQty + " " + unitTxt + "</b> more washed. The cloth is already owned and sitting unwashed - nothing needs buying.</div>";
+				wInner = wInner + xTable + xNote + xAgain;
+				wInner = wInner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>Production is held until this is washed. The ticket closes automatically when the wash is completed.</div>";
+
+				sendmail
+				[
+					from :zoho.adminuserid
+					to :washTo
+					subject :"Wash needed: " + shortQty + " " + unitTxt + " of " + matName
+					message :thisapp.buildNotificationEmail("Wash request",xSubtitle,"#2563eb",wInner)
+				]
+			}
+			else
+			{
+				pInner = "<div style='font-size:14px;color:#0f172a'>The store is <b>" + shortQty + " " + unitTxt + "</b> short and cannot issue against open orders.</div>";
+				pInner = pInner + xTable + xNote + xAgain;
+				pInner = pInner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>The ticket lists which orders wanted this and how much each has had, so it can be prioritised without guessing.</div>";
+
+				pHtml = thisapp.buildNotificationEmail("Purchase request",xSubtitle,"#dc2626",pInner);
+				pSubj = "Purchase needed: " + shortQty + " " + unitTxt + " of " + matName;
+
+				sendmail
+				[
+					from :zoho.adminuserid
+					to :procurementTo
+					subject :pSubj
+					message :pHtml
+				]
+
+				// Admin gets its own copy because this one spends money.
+				sendmail
+				[
+					from :zoho.adminuserid
+					to :adminTo
+					subject :"[Admin copy] " + pSubj
+					message :pHtml
+				]
+			}
+
+			info "Exception notification sent for " + matName + " (" + exType + ")";
+		}
+		catch (eMail)
+		{
+			// Logged, never rethrown. The ticket exists whatever happened here.
+			info "Exception notification not sent: " + eMail.toString();
+		}
+
+		if(wasAppended == true)
+		{
+			res = "{\"success\":true,\"appended\":true}";
+		}
+		else
+		{
+			res = "{\"success\":true,\"appended\":false}";
+		}
+	}
+
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

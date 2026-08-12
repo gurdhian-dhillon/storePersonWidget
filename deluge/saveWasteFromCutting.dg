@@ -1,0 +1,211 @@
+string saveWasteFromCutting(string planId, string planItemId, string phaseName, string piecesJson)
+{
+	// Supervisor's post-cutting return. The widget shows him the remnants
+	// calcCutPlan predicted, he edits sizes, discards what is not worth keeping,
+	// and submits. Kept rows land as Pending_Receipt; discarded rows are still
+	// written, as Scrapped, so scrap stays reportable instead of vanishing.
+	//
+	// piecesJson:
+	// [ {"sku":"1234","width":40,"length":165,"count":1,"keep":true,"remarks":""}, ... ]
+	//
+	// keep=false rows are NOT skipped. Deleting them would make "how much did we
+	// throw away this month" unanswerable.
+	//
+	// STEP 4 of the migration: every piece now also gets a Waste_Movement row, and
+	// that row carries the Stage_Log it came out of. That link is the idempotency
+	// key. Waste is saved BEFORE the phase closes, so a failed phase save leaves the
+	// stage open to retry - and until now the retry wrote a second set of remnants
+	// that nothing downstream could tell from real cloth, because a Waste_Master row
+	// carries no source. One movement already logged against this stage means the
+	// declaration has happened, so a repeat is refused rather than duplicated.
+
+	errJson = "";
+	keptCount = 0;
+	scrapCount = 0;
+	wasDuplicate = false;
+
+	// Same debug wrapper as issueMaterials - Creator collapses every runtime
+	// failure into a generic "code 9430", so the real message has to be caught.
+	try
+	{
+	pieces = piecesJson.toJSONList();
+	info "planId=" + planId + " planItemId=" + planItemId + " phase=" + phaseName + " pieceCount=" + pieces.size();
+
+	//----------------------------------------------------------------------
+	// Resolve the stage this declaration belongs to. Start already created the
+	// log, so it exists by the time cutting ends.
+	//----------------------------------------------------------------------
+	itemIdStr = ifnull(planItemId,"").toString().trim();
+	phName = ifnull(phaseName,"").toString().trim();
+
+	stageId = 0;
+	stageOperator = null;
+	if(itemIdStr != "" && phName != "")
+	{
+		for each  sl in Stage_Log[Plan_Item == itemIdStr.toLong() && Phase_Name == phName]
+		{
+			stageId = sl.ID;
+			stageOperator = sl.Operator;
+		}
+	}
+
+	// Anything already logged against this stage means the supervisor has been
+	// here before. Refuse rather than declare the same cloth twice.
+	if(stageId != 0)
+	{
+		if(Waste_Movement[Stage_Log == stageId].count() > 0)
+		{
+			wasDuplicate = true;
+		}
+	}
+
+	if(wasDuplicate == false)
+	{
+	rowNo = 0;
+	for each  pcRaw in pieces
+	{
+		rowNo = rowNo + 1;
+		// toJSONList() yields JSON objects, NOT Deluge Maps - .get() silently
+		// returns null on those. .toMap() converts to a real Map first.
+		pm = pcRaw.toMap();
+
+		skuId = ifnull(pm.get("sku"),"").toString().trim();
+
+		wStr = ifnull(pm.get("width"),"0").toString().trim();
+		if(wStr == "")
+		{
+			wStr = "0";
+		}
+		lStr = ifnull(pm.get("length"),"0").toString().trim();
+		if(lStr == "")
+		{
+			lStr = "0";
+		}
+		cStr = ifnull(pm.get("count"),"0").toString().trim();
+		if(cStr == "")
+		{
+			cStr = "0";
+		}
+		pw = wStr.toDecimal();
+		pl = lStr.toDecimal();
+		pc = cStr.toDecimal().toLong();
+
+		keepFlag = ifnull(pm.get("keep"),"false").toString().trim().toLowerCase();
+		remarks = ifnull(pm.get("remarks"),"").toString();
+
+		matRecs = Raw_Material[ID == skuId.toLong()];
+
+		if(skuId == "" || matRecs.count() == 0)
+		{
+			if(errJson != "")
+			{
+				errJson = errJson + ",";
+			}
+			errJson = errJson + "\"Row " + rowNo + ": material " + skuId + " not found\"";
+		}
+		else if(pw <= 0 || pl <= 0 || pc <= 0)
+		{
+			if(errJson != "")
+			{
+				errJson = errJson + ",";
+			}
+			errJson = errJson + "\"Row " + rowNo + ": width, length and count must all be greater than zero\"";
+		}
+		else
+		{
+			newStatus = "Scrapped";
+			moveType = "Scrapped";
+			if(keepFlag == "true")
+			{
+				newStatus = "Pending_Receipt";
+				moveType = "Declared";
+			}
+
+			// Remarks carries only what the supervisor typed. Source tracking
+			// lives on the Waste_Movement row below, not smuggled into text.
+			newWasteId = insert into Waste_Master
+			[
+				SKU=skuId.toLong()
+				Piece_Width=pw
+				Piece_Length=pl
+				Piece_Count=pc
+				Status=newStatus
+				Remarks=remarks
+			];
+
+			// Confirm the id resolves before linking to it. If it does not, the
+			// movement is still written - losing the link is bad, losing the
+			// whole event is worse.
+			wpId = 0;
+			for each  wchk in Waste_Master[ID == newWasteId.toLong()]
+			{
+				wpId = wchk.ID;
+			}
+
+			newMoveId = insert into Waste_Movement
+			[
+				Movement_Type=moveType
+				Piece_Width=pw
+				Piece_Length=pl
+				Piece_Count=pc
+				Moved_On=zoho.currentdate
+				Remarks=remarks
+				Added_User=zoho.loginuser
+			];
+
+			// Lookups set after the insert - a null cannot go in the insert
+			// block, and any of these four can legitimately be missing.
+			for each  mv in Waste_Movement[ID == newMoveId.toLong()]
+			{
+				if(wpId != 0)
+				{
+					mv.Waste_Piece = wpId;
+				}
+				if(planId.toString().trim() != "")
+				{
+					mv.Plan = planId.toString().trim().toLong();
+				}
+				if(itemIdStr != "")
+				{
+					mv.Plan_Item = itemIdStr.toLong();
+				}
+				if(stageId != 0)
+				{
+					mv.Stage_Log = stageId;
+				}
+				if(stageOperator != null)
+				{
+					mv.Moved_By = stageOperator;
+				}
+			}
+
+			if(newStatus == "Pending_Receipt")
+			{
+				keptCount = keptCount + 1;
+			}
+			else
+			{
+				scrapCount = scrapCount + 1;
+			}
+		}
+	}
+	}
+
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"kept\":0,\"scrapped\":0,\"duplicate\":false}";
+	}
+
+	// A duplicate is NOT an error. The stage is being retried after the phase
+	// save failed; the waste is already recorded and the widget should carry on
+	// and close the stage.
+	dupStr = "false";
+	if(wasDuplicate == true)
+	{
+		dupStr = "true";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[" + errJson + "],\"kept\":" + keptCount + ",\"scrapped\":" + scrapCount + ",\"duplicate\":" + dupStr + "}";
+}

@@ -1,0 +1,282 @@
+
+// Packing form workflow: On User Input of Sales_Order.
+// Builds the Packing_Items subform: one row per line the CUSTOMER ORDERED,
+// quantity = every good piece produced for that line across every QC round.
+//
+// WHY THIS READS Plan_Item AND NOT Quality_Check.
+//
+// Packing used to be built from "the" QC record. That worked while QC happened
+// once. It cannot survive remakes, for three separate reasons:
+//
+//  1. THERE IS NO "THE" QC RECORD any more. A rejection creates remake items and
+//     sends the order back to In Progress; when the remakes finish, the order
+//     returns to Production Complete and a SECOND Quality_Check is raised
+//     against it. Round 2 checks only the remakes.
+//  2. NO SINGLE ROUND HOLDS THE ANSWER. Round 1 accepted 17 of 21 Sylph Throws;
+//     round 2 accepted the 4 remade ones. Packing needs 21. Reading either
+//     record alone under-packs the order.
+//  3. A REMAKE IS NOT A SEPARATE THING TO PACK. It is replacement pieces for a
+//     line the customer already ordered once. Concatenating both rounds' subform
+//     rows gives "Sylph 17" and "Sylph 4" as two lines against an order that has
+//     one - the packer is left to add them up and the box count is wrong.
+//
+// So the total is rolled up per ORIGINAL line. Plan_Item.Qty_Accepted is written
+// by createRemakeItems on every round, cumulatively, and Remake_Of on a remake
+// always points at the ROOT line - never at the previous remake - so the roll-up
+// is one flat pass with no recursion (Deluge has none).
+//
+// This is deliberately the SAME arithmetic createRemakeItems uses to decide the
+// order has passed QC. One rule, two readers: packing can never disagree with
+// the status that let it be packed.
+//
+// FORM REQUIREMENT: QC_No must hold MORE THAN ONE record. A remade order is
+// inspected more than once, and a plain lookup holds one. Either give the lookup
+// Display Type = Multi Select, or make it a text field - the block that fills it
+// carries both lines. Nothing in this app READS Packing.QC_No, so it can also be
+// dropped entirely: Packing.Sales_Order plus Quality_Check[Sales_Order == x]
+// derives every round without storing anything.
+//
+// DELUGE TRAPS GUARDED HERE:
+//  - There is no reliable `break` in a for-each. The old version relied on one
+//    to take a single QC record and stop; the loop ran on regardless, so QC_No
+//    ended up on the last round and the subform got every round's rows appended.
+//    The idiom here is "keep assigning, last write wins" - which is what the
+//    break was trying to express anyway.
+//  - Query results need .count(); .size() is a List method.
+//  - A numeric field never written is an EMPTY STRING, not null and not 0.
+//    ifnull() does not catch it and toDecimal() throws on it.
+//  - A lookup holds a record id, so Item_Sku.SKU does not chain - the master
+//    record has to be fetched.
+//  - `sort by` will not parse inline in a for-each header.
+
+salesId = input.Sales_Order;
+
+input.QC_No = null;
+input.Assigned_To = null;
+input.Packing_Items.clear();
+
+if(salesId != null)
+{
+	//----------------------------------------------------------------------
+	// EVERY QC round on this order, not just one.
+	//
+	// QC_No is a MULTI SELECT lookup. A plain lookup holds one record, and a
+	// remade order is inspected more than once - round 1 passes what it can and
+	// rejects the rest, round 2 checks the remakes. Naming a single round left
+	// the packed quantities traceable to an inspection that never saw most of
+	// them. A multi select takes a LIST of record ids, assigned in one go.
+	//
+	// Oldest first, so the rounds read in the order they happened.
+	//----------------------------------------------------------------------
+	qcRecs = Quality_Check[Sales_Order == salesId] sort by Added_Time;
+
+	qcIds = List();
+	qcTxt = "";
+	roundNo = 0;
+	for each  qcRec in qcRecs
+	{
+		qcIds.add(qcRec.ID);
+
+		// Round is numbered from position, not read off the record. A QC record
+		// deleted and re-raised would leave a gap in Quality_Check.Round, and a
+		// packing slip citing "round 1, round 3" invites a hunt for a round that
+		// no longer exists.
+		roundNo = roundNo + 1;
+		if(qcTxt != "")
+		{
+			qcTxt = qcTxt + " | ";
+		}
+		// QC_Number, not QC_No - QC_No is the field on PACKING that points back
+		// here. Both forms carry a field with a similar name and they are not
+		// the same one.
+		qcTxt = qcTxt + "Round " + roundNo + ": " + ifnull(qcRec.QC_Number,"").toString();
+	}
+
+	// size() is right here - qcIds is a List, not a query result. An empty list
+	// assigned to a lookup is not the same as leaving it null, so guard it.
+	if(qcIds.size() > 0)
+	{
+		//------------------------------------------------------------------
+		// PICK ONE, depending on what QC_No ended up being on the form.
+		//
+		// A) Lookup with Display Type = Multi Select (or Checkbox). Takes a
+		//    LIST of record ids. This is the line below.
+		// B) Single line text. Swap to the commented line - and note it is a
+		//    DIFFERENT field, so the header assignment of null further up has
+		//    to move with it.
+		//
+		// What will NOT work is Creator's plain Multi Select choice field: its
+		// options are fixed at design time and QC numbers are created at
+		// runtime, so a value outside the defined list does not hold. It would
+		// work until the next QC record was raised, then quietly stop.
+		//------------------------------------------------------------------
+		input.QC_No = qcIds;
+		// input.QC_No = qcTxt;
+	}
+
+	//----------------------------------------------------------------------
+	// Every plan on the order. One order produces exactly one plan today -
+	// createProductionPlans inserts one inside its per-order loop - but
+	// collecting them all costs nothing and mirrors what qcAutoPopulate does.
+	//----------------------------------------------------------------------
+	planIds = List();
+	packSup = null;
+	orderPlans = Production_Planning[Sales_Order == salesId] sort by Added_Time;
+	for each  plan in orderPlans
+	{
+		planIds.add(plan.ID);
+
+		//------------------------------------------------------------------
+		// WHO THIS ORDER BELONGS TO, taken straight off the plan.
+		//
+		// This used to go the long way round: read Quality_Check.Assigned_to,
+		// which qcAutoPopulate had filled with the supervisor's NAME, then
+		// find the Employee again with Employee[Employee_Name == thatName].
+		// Three ways to fail silently, and all of them leave the field blank
+		// with no error:
+		//
+		//  - Assigned_to empty on QC records raised before qcAutoPopulate
+		//    wrote it, or under any other link name;
+		//  - the name not matching an Employee exactly - a rename, a double
+		//    space, a change of case;
+		//  - two employees sharing a name, where the last one read wins.
+		//
+		// Production_Planning.Assigned_To is ALREADY an Employee record id, so
+		// there is nothing to match on and no name to get wrong. It is also
+		// the same value qcAutoPopulate started from, so this is the original
+		// source rather than a copy of a copy.
+		//
+		// FIRST plan, not last. One order produces one plan; with more it is
+		// the one that started the order, which is the useful name to put on a
+		// packing slip - and it is the same choice qcAutoPopulate makes.
+		//------------------------------------------------------------------
+		if(packSup == null)
+		{
+			packSup = plan.Assigned_To;
+		}
+	}
+
+	if(packSup != null)
+	{
+		//------------------------------------------------------------------
+		// PICK ONE, the same way QC_No above does.
+		//
+		// A) Assigned_To is a LOOKUP to Employee. It takes the record id -
+		//    this is the line below.
+		// B) Assigned_To is a Single Line text field. Swap to the commented
+		//    block, which fetches the name.
+		//
+		// Getting this wrong throws, and a form workflow that throws stops
+		// dead - so the subform below would come up empty too. An empty
+		// Assigned_To with a populated subform means this block did not run
+		// at all, NOT that it ran and failed.
+		//------------------------------------------------------------------
+		input.Assigned_To = packSup;
+
+		// for each  empA in Employee[ID == packSup]
+		// {
+		// 	input.Assigned_To = empA.Employee_Name;
+		// }
+	}
+
+	rows = Collection();
+
+	// SKU lookups cached across lines. A remake repeats its original's SKU and
+	// the same item can legitimately appear twice on one order, so without this
+	// the same Item_Master record gets fetched several times per order.
+	skuCache = Map();
+
+	for each  pid in planIds
+	{
+		//------------------------------------------------------------------
+		// PASS 1 - accepted totals, keyed on the ROOT line.
+		//
+		// A root line keys on its own id; a remake keys on its Remake_Of. So
+		// one sweep of the plan's items produces the finished-good count for
+		// every customer line, remakes folded in.
+		//
+		// Two passes over two separate queries rather than one query iterated
+		// twice - two live iterators over the same result do not work - and
+		// still far cheaper than the obvious shape, which is a
+		// Plan_Item[Remake_Of == root.ID] query per line.
+		//------------------------------------------------------------------
+		accByRoot = Map();
+
+		allItems = Plan_Item[Plan == pid];
+		for each  it in allItems
+		{
+			rootKey = it.ID.toString();
+			if(it.Remake_Of != null)
+			{
+				rootKey = it.Remake_Of.toString();
+			}
+
+			accS = ifnull(it.Qty_Accepted,"0").toString().trim();
+			if(accS == "")
+			{
+				accS = "0";
+			}
+
+			haveS = ifnull(accByRoot.get(rootKey),"0").toString().trim();
+			if(haveS == "")
+			{
+				haveS = "0";
+			}
+
+			accByRoot.put(rootKey,(haveS.toDecimal().toLong() + accS.toDecimal().toLong()).toString());
+		}
+
+		//------------------------------------------------------------------
+		// PASS 2 - one row per ORIGINAL line, in Line_No order.
+		//
+		// Is_Remake is filtered in code, not in the query. The field was added
+		// to a form that already had records, and a Creator field never written
+		// is EMPTY rather than false - so Plan_Item[Is_Remake == false] would
+		// silently drop every item planned before the field existed, and those
+		// are precisely the original lines.
+		//------------------------------------------------------------------
+		rootItems = Plan_Item[Plan == pid] sort by Line_No;
+		for each  ri in rootItems
+		{
+			if(ifnull(ri.Is_Remake,false) == false)
+			{
+				packQty = ifnull(accByRoot.get(ri.ID.toString()),"0").toString().trim();
+				if(packQty == "")
+				{
+					packQty = "0";
+				}
+
+				skuKey = "";
+				skuTxt = "";
+				if(ri.Item_Sku != null)
+				{
+					skuKey = ri.Item_Sku.toString();
+					skuTxt = ifnull(skuCache.get(skuKey),"").toString();
+					if(skuTxt == "")
+					{
+						for each  im in Item_Master[ID == ri.Item_Sku]
+						{
+							skuTxt = ifnull(im.SKU,"").toString();
+						}
+						skuCache.put(skuKey,skuTxt);
+					}
+				}
+
+				//----------------------------------------------------------
+				// A line with nothing accepted is still listed, at 0. The
+				// packing list mirrors the sales order line for line - a line
+				// that silently vanished would look packed rather than short,
+				// which is the one reading nobody can recover from.
+				//----------------------------------------------------------
+				row = Packing.Packing_Items();
+				row.Item_Name=ifnull(ri.Item_Name,"").toString();
+				row.SKU=skuTxt;
+				row.Quantity_Packed=packQty.toDecimal().toLong();
+				row.No_Of_Box=0;
+				rows.insert(row);
+			}
+		}
+	}
+
+	input.Packing_Items.insert(rows);
+}

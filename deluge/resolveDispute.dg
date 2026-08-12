@@ -1,0 +1,1054 @@
+string resolveDispute(string payloadJson)
+{
+	// Resolve part or all of a stock dispute. Called from BOTH widgets.
+	// POST, one argument: payloadJson.
+	//
+	// WHY THIS EXISTS ALONGSIDE resolveStockDispute. A widget cannot trigger a form
+	// workflow - Creator fires those on user submission, not on a Deluge write - so
+	// the resolution logic cannot simply be reused from here. This is the single
+	// implementation now. If the widget is the only way people resolve disputes,
+	// DELETE the resolveStockDispute form workflow: two copies of stock arithmetic
+	// that must agree is a bug waiting for the day somebody edits one of them.
+	//
+	// DIRECTION. Every dispute has a sender and a receiver, and Direction says
+	// which way round they are. Outbound is the store issuing material out;
+	// Inbound is the supervisor sending offcuts back after cutting. An EMPTY
+	// Direction means Outbound - every dispute raised before this field existed
+	// was one, and they must keep working untouched.
+	//
+	// WHO MAY SAY WHAT. Each side can only answer for its own side, because that is
+	// the only side it can actually check. Found always means "the RECEIVING side
+	// has it after all"; the sender's correction always means "it never left me":
+	//
+	//   Found            outbound: supervisor only. He had it after all; it
+	//                    reached production. Nothing returns to the shelf - it was
+	//                    never there. Disputed -q, and the receipt is credited.
+	//
+	//                    inbound: STORE only. The pieces were on the rack after
+	//                    all, so this is what puts them there: Disputed -q,
+	//                    Piece_Count +q, Available. The receiver IS the rack on
+	//                    this leg, which is the whole reason the stock effect
+	//                    differs while the meaning does not.
+	//
+	//   Store_Correction outbound only, store only. It never left the shelf; the
+	//                    handover was over-recorded. Disputed -q, on-hand +q,
+	//                    requirement re-opened so the rest gets issued.
+	//
+	//   Supervisor_Correction
+	//                    inbound only, supervisor only. "I declared more than I
+	//                    actually sent back." Those pieces never existed, so
+	//                    nothing lands anywhere - the disputed count just drops.
+	//
+	//   Supervisor_Resending
+	//                    inbound only, supervisor only. "I still have them and I
+	//                    am sending them now." The pieces DO exist, so they go
+	//                    back to Pending_Receipt and the store checks them in
+	//                    through the ordinary waste-receipt flow. Without this
+	//                    answer his only exits were to claim pieces that exist
+	//                    never did, or to deny them into a write-off.
+	//
+	//   Denied           either side, either direction: "not with me". Records who
+	//                    looked and what they found, and resolves NOTHING on its own.
+	//
+	// NO REQUIREMENT SIDE-EFFECTS ON INBOUND. Offcuts coming back are not owed to
+	// any order: there is no Issued movement to read a yield from, no
+	// Pieces_From_Waste to wind back, and re-running the Item_Status sweep would
+	// move plan state on evidence that has nothing to do with this dispute.
+	//
+	// LOST IS NOT A CHOICE. Nobody can prove material is lost - it is what is left
+	// once both sides have looked and neither has it. So it is never accepted as an
+	// input. When the second side denies, this function writes the loss off itself,
+	// for whatever is still outstanding. That way no single person can write stock
+	// off the books, and the two denials are the record of why it happened.
+	//
+	// WHAT RE-OPENING MEANS. Correction and Lost differ ONLY in whether stock comes
+	// back; both re-open the requirement, because production still needs the
+	// material either way. Re-opening has to touch every counter the store screen
+	// reads, not just the obvious one:
+	//
+	//   Issued_Qty         everything. Metres, cones, labels.
+	//   Pieces_From_Raw    fabric. Fulfilment is counted in CUT PIECES, so a row
+	//                      whose pieces still read as issued looks complete however
+	//                      few metres it has.
+	//   Pieces_From_Waste  waste pieces. Same again: one lost remnant was covering
+	//                      N cut pieces, and those N have to go back on the bill.
+	//
+	// Issued_Qty is reduced NEWEST-SHORT-FIRST, the mirror of the oldest-first fan
+	// that filled the rows. Oldest-first would re-open a line that was fully
+	// satisfied while leaving a genuinely short one still looking complete.
+	//
+	// payload:
+	// { "disputeId":"123", "qty":2,
+	//   "resolution":"Found"|"Store_Correction"|"Supervisor_Correction"|"Denied",
+	//   "side":"supervisor"|"store", "note":"found on rack B" }
+
+	res = "{\"success\":false,\"error\":\"Nothing was resolved\"}";
+
+	try
+	{
+	inp = payloadJson.toMap();
+
+	dispId = ifnull(inp.get("disputeId"),"").toString().trim();
+	resType = ifnull(inp.get("resolution"),"").toString().trim();
+	side = ifnull(inp.get("side"),"").toString().trim().toLowerCase();
+	note = ifnull(inp.get("note"),"").toString();
+
+	qStr = ifnull(inp.get("qty"),"0").toString().trim();
+	if(qStr == "")
+	{
+		qStr = "0";
+	}
+	q = qStr.toDecimal();
+
+	sideOk = false;
+	if(side == "supervisor" || side == "store")
+	{
+		sideOk = true;
+	}
+
+	// Which way round this one is, read before the validation rather than inside
+	// the loop below, so the whole else-chain that follows can stay as it is. One
+	// extra fetch of a record this function is about to open anyway.
+	dirTxt = "";
+	if(dispId != "" && dispId.isNumber() == true)
+	{
+		for each  dq in Stock_Dispute[ID == dispId.toLong()]
+		{
+			dirTxt = ifnull(dq.Direction,"").toString().trim();
+		}
+	}
+	if(dirTxt == "")
+	{
+		dirTxt = "Outbound";
+	}
+	inbound = false;
+	if(dirTxt == "Inbound")
+	{
+		inbound = true;
+	}
+
+	typeOk = false;
+	if(resType == "Found" || resType == "Store_Correction" || resType == "Supervisor_Correction" || resType == "Supervisor_Resending" || resType == "Denied")
+	{
+		typeOk = true;
+	}
+
+	// Checked here and not only in the widget. A Custom API is callable from
+	// anywhere, and this split is the whole point of separating the outcomes by
+	// side - a store person who can still post the supervisor's answer can close
+	// a dispute by asserting something only the supervisor could know.
+	//
+	// The correction belongs to whoever SENT the material, and that swaps with
+	// the direction. Posting the other leg's answer is rejected by name rather
+	// than as "unknown", so a stale widget says something a person can act on.
+	authErr = "";
+	if(inbound == true)
+	{
+		if(resType == "Found" && side != "store")
+		{
+			authErr = "Only the store can report that it has the pieces after all";
+		}
+		if(resType == "Supervisor_Correction" && side != "supervisor")
+		{
+			authErr = "Only the supervisor can report that he declared more than he sent back";
+		}
+		if(resType == "Supervisor_Resending" && side != "supervisor")
+		{
+			authErr = "Only the supervisor can say he still has the pieces and is sending them";
+		}
+		if(resType == "Store_Correction")
+		{
+			authErr = "Store_Correction answers material issued out - this dispute is about waste coming back";
+		}
+	}
+	else
+	{
+		if(resType == "Found" && side != "supervisor")
+		{
+			authErr = "Only the supervisor can report that he found it";
+		}
+		if(resType == "Store_Correction" && side != "store")
+		{
+			authErr = "Only the store can report that it over-recorded the handover";
+		}
+		if(resType == "Supervisor_Correction")
+		{
+			authErr = "Supervisor_Correction answers waste coming back - this dispute is about material issued out";
+		}
+		if(resType == "Supervisor_Resending")
+		{
+			authErr = "Supervisor_Resending answers waste coming back - this dispute is about material issued out";
+		}
+	}
+
+	if(dispId == "" || dispId.isNumber() == false)
+	{
+		res = "{\"success\":false,\"error\":\"Missing dispute id\"}";
+	}
+	else if(sideOk == false)
+	{
+		res = "{\"success\":false,\"error\":\"Missing or unknown side '" + side + "'\"}";
+	}
+	else if(resType == "Lost")
+	{
+		res = "{\"success\":false,\"error\":\"Lost is not something either side declares - it is recorded once both sides have said they do not have it\"}";
+	}
+	else if(typeOk == false)
+	{
+		res = "{\"success\":false,\"error\":\"Unknown resolution '" + resType + "'\"}";
+	}
+	else if(authErr != "")
+	{
+		res = "{\"success\":false,\"error\":\"" + authErr + "\"}";
+	}
+	else if(note.trim() == "")
+	{
+		// Every outcome here either closes a question or feeds a write-off. A
+		// note is the only part of it a person can read afterwards.
+		res = "{\"success\":false,\"error\":\"A note is required - say what you checked and what you found\"}";
+	}
+	else if(resType != "Denied" && q <= 0)
+	{
+		res = "{\"success\":false,\"error\":\"Quantity must be greater than zero\"}";
+	}
+	else
+	{
+		found = false;
+
+		for each  dsp in Stock_Dispute[ID == dispId.toLong() && Status == "Open"]
+		{
+			found = true;
+
+			dStr = ifnull(dsp.Disputed_Qty,"0").toString().trim();
+			if(dStr == "")
+			{
+				dStr = "0";
+			}
+
+			alreadyRes = 0.0;
+			supDenied = false;
+			storeDenied = false;
+
+			for each  ln0 in dsp.Resolution_Lines
+			{
+				l0 = ifnull(ln0.Resolved_Qty,"0").toString().trim();
+				if(l0 == "")
+				{
+					l0 = "0";
+				}
+				alreadyRes = alreadyRes + l0.toDecimal();
+
+				// Denials carry a zero quantity, so they never disturb the
+				// arithmetic above - they are a record of who has looked.
+				r0 = ifnull(ln0.Resolution,"").toString();
+				if(r0 == "Supervisor_Denied")
+				{
+					supDenied = true;
+				}
+				if(r0 == "Store_Denied")
+				{
+					storeDenied = true;
+				}
+			}
+
+			// Cannot resolve more than is actually outstanding.
+			remaining = dStr.toDecimal() - alreadyRes;
+
+			//--------------------------------------------------------------
+			// Work out what, if anything, this call actually applies. A
+			// denial usually applies nothing; the second one applies a loss.
+			//--------------------------------------------------------------
+			applyKind = "";
+			applyQty = 0.0;
+			denyLine = "";
+			bothNow = false;
+
+			if(resType == "Denied")
+			{
+				sameAgain = false;
+				if(side == "supervisor" && supDenied == true)
+				{
+					sameAgain = true;
+				}
+				if(side == "store" && storeDenied == true)
+				{
+					sameAgain = true;
+				}
+
+				if(sameAgain == true)
+				{
+					res = "{\"success\":false,\"error\":\"You have already said this one is not with you\"}";
+				}
+				else if(remaining <= 0)
+				{
+					res = "{\"success\":false,\"error\":\"Nothing left outstanding on this dispute\"}";
+				}
+				else
+				{
+					denyLine = "Store_Denied";
+					if(side == "supervisor")
+					{
+						denyLine = "Supervisor_Denied";
+					}
+
+					// The OTHER side having already denied is what turns this
+					// into a write-off. A denial on its own leaves the dispute
+					// open, sitting on the other person's screen.
+					if(side == "supervisor" && storeDenied == true)
+					{
+						bothNow = true;
+					}
+					if(side == "store" && supDenied == true)
+					{
+						bothNow = true;
+					}
+
+					if(bothNow == true)
+					{
+						applyKind = "Lost";
+						applyQty = remaining;
+					}
+				}
+			}
+			else
+			{
+				take = q;
+				if(take > remaining)
+				{
+					take = remaining;
+				}
+				if(take > 0)
+				{
+					applyKind = resType;
+					applyQty = take;
+				}
+				else
+				{
+					res = "{\"success\":false,\"error\":\"Nothing left outstanding on this dispute\"}";
+				}
+			}
+
+			//--------------------------------------------------------------
+			// The denial itself, written before any write-off it triggers so
+			// the pair reads in the order it happened.
+			//--------------------------------------------------------------
+			if(denyLine != "")
+			{
+				dnRow = Stock_Dispute.Resolution_Lines();
+				dnRow.Resolved_Qty=0;
+				dnRow.Resolution=denyLine;
+				dnRow.Resolved_On=zoho.currentdate;
+				dnRow.Note=note;
+				dnRow.Processed=true;
+				dsp.Resolution_Lines.insert(dnRow);
+
+				if(bothNow == false)
+				{
+					waitingOn = "the store";
+					if(side == "store")
+					{
+						waitingOn = "the supervisor";
+					}
+					res = "{\"success\":true,\"resolved\":0,\"remaining\":" + remaining + ",\"status\":\"Open\",\"waitingOn\":\"" + waitingOn + "\"}";
+				}
+			}
+
+			if(applyKind != "")
+			{
+				take = applyQty;
+				isWaste = ifnull(dsp.Is_Waste,false);
+
+				// The one outcome that puts stock back, and which one that is
+				// swaps with the direction. Outbound it is the store saying the
+				// material never left the shelf; inbound it is the store saying
+				// the pieces were on the rack after all - on that leg the
+				// receiver IS the rack, so "found" and "restored" are the same
+				// event. Everything downstream keys off this flag alone.
+				restore = false;
+				if(inbound == true)
+				{
+					if(applyKind == "Found")
+					{
+						restore = true;
+					}
+				}
+				else
+				{
+					if(applyKind == "Store_Correction")
+					{
+						restore = true;
+					}
+				}
+
+				// He still has them and is sending them now. Not a restore: the
+				// pieces are not store stock yet, they go back to the check-in
+				// queue and the store confirms them the ordinary way.
+				resend = false;
+				if(inbound == true && applyKind == "Supervisor_Resending")
+				{
+					resend = true;
+				}
+
+				// Filled in only when the re-sent pieces need a row of their own.
+				resendNew = false;
+				rsCount = 0;
+				rsW = 0;
+				rsL = 0;
+				rsSku = null;
+
+				//------------------------------------------------------
+				// 1. The stock side
+				//------------------------------------------------------
+				if(isWaste == true && dsp.Waste_Piece != null)
+				{
+					for each  wm in Waste_Master[ID == dsp.Waste_Piece]
+					{
+						wdStr = ifnull(wm.Disputed_Count,"0").toString().trim();
+						if(wdStr == "")
+						{
+							wdStr = "0";
+						}
+						wpStr = ifnull(wm.Piece_Count,"0").toString().trim();
+						if(wpStr == "")
+						{
+							wpStr = "0";
+						}
+						witStr = ifnull(wm.In_Transit_Count,"0").toString().trim();
+						if(witStr == "")
+						{
+							witStr = "0";
+						}
+						wdCount = wdStr.toDecimal().toLong();
+						wpCount = wpStr.toDecimal().toLong();
+						witCount = witStr.toDecimal().toLong();
+
+						takeD = take.toLong();
+						if(takeD > wdCount)
+						{
+							takeD = wdCount;
+						}
+						wm.Disputed_Count = wdCount - takeD;
+
+						// Only a store correction puts pieces back on the rack.
+						if(restore == true)
+						{
+							wm.Piece_Count = wpCount + takeD;
+							wm.Status = "Available";
+						}
+						else if(resend == true)
+						{
+							// THE TRAP. If part of this row is already Available -
+							// the pieces the store did find and check in - then
+							// putting the whole row back to Pending_Receipt offers
+							// those for check-in a SECOND time and the count is
+							// invented out of nothing. So the re-sent pieces only
+							// reuse this row when it holds no live stock; otherwise
+							// they become a row of their own, which is also what
+							// "one record per generation event" already says.
+							if(wpCount <= 0)
+							{
+								wm.Piece_Count = takeD;
+								wm.Status = "Pending_Receipt";
+							}
+							else
+							{
+								resendNew = true;
+								rsCount = takeD;
+								rsSku = wm.SKU;
+
+								wSt = ifnull(wm.Piece_Width,"0").toString().trim();
+								if(wSt == "")
+								{
+									wSt = "0";
+								}
+								lSt = ifnull(wm.Piece_Length,"0").toString().trim();
+								if(lSt == "")
+								{
+									lSt = "0";
+								}
+								rsW = wSt.toDecimal();
+								rsL = lSt.toDecimal();
+							}
+						}
+						else if(wpCount <= 0 && witCount <= 0 && (wdCount - takeD) <= 0)
+						{
+							// Nothing left anywhere. receiveMaterials has the
+							// same rule but cannot apply it while the piece is
+							// still disputed, so without this the row sits at
+							// zero on every counter with a status that says it
+							// is still out - neither available nor finished.
+							if(applyKind == "Lost")
+							{
+								wm.Status = "Lost";
+							}
+							else if(applyKind == "Supervisor_Correction")
+							{
+								// Over-declared: these pieces were never cut, so
+								// nothing was used AND nothing was thrown away.
+								//
+								// NOT Scrapped. saveWasteFromCutting writes that
+								// when he cuts a real remnant and discards it, and
+								// it is what makes "how much did we throw away
+								// this month" answerable. A miscounted piece put
+								// in there inflates scrap with fabric that never
+								// existed. Consumed would be worse still - it
+								// would claim the piece was used.
+								wm.Status = "Miscounted";
+							}
+							else
+							{
+								wm.Status = "Consumed";
+							}
+						}
+					}
+
+					// Written after the loop, not inside it - inserting into the
+					// same form that is being iterated is not worth finding out
+					// about in production.
+					if(resendNew == true)
+					{
+						try
+						{
+							newWmId = insert into Waste_Master
+							[
+								Piece_Width=rsW
+								Piece_Length=rsL
+								Piece_Count=rsCount
+								Status="Pending_Receipt"
+								Remarks=note
+							];
+
+							// Lookups cannot go in an insert block - a null one
+							// fails the whole insert.
+							for each  wmN in Waste_Master[ID == newWmId.toLong()]
+							{
+								if(rsSku != null)
+								{
+									wmN.SKU = rsSku;
+								}
+							}
+
+							// The store's check-in list reads the plan, order and
+							// supervisor off the Declared movement, not off the
+							// piece. A new row with no Declared movement would show
+							// up there with no idea where it came from.
+							newDcId = insert into Waste_Movement
+							[
+								Movement_Type="Declared"
+								Piece_Width=rsW
+								Piece_Length=rsL
+								Piece_Count=rsCount
+								Moved_On=zoho.currentdate
+								Remarks=note
+								Added_User=zoho.loginuser
+							];
+
+							for each  dcN in Waste_Movement[ID == newDcId.toLong()]
+							{
+								dcN.Waste_Piece = newWmId;
+								if(dsp.Plan != null)
+								{
+									dcN.Plan = dsp.Plan;
+								}
+								if(dsp.Plan_Item != null)
+								{
+									dcN.Plan_Item = dsp.Plan_Item;
+								}
+								if(dsp.Supervisor != null)
+								{
+									dcN.Moved_By = dsp.Supervisor;
+								}
+							}
+						}
+						catch (eRs)
+						{
+							info "Re-sent waste row not created for piece " + dsp.Waste_Piece + ": " + eRs.toString();
+						}
+					}
+				}
+				else if(dsp.Material != null)
+				{
+					for each  rm in Raw_Material[ID == dsp.Material]
+					{
+						rdStr = ifnull(rm.Disputed_Qty,"0").toString().trim();
+						if(rdStr == "")
+						{
+							rdStr = "0";
+						}
+						rdQty = rdStr.toDecimal();
+
+						takeD = take;
+						if(takeD > rdQty)
+						{
+							takeD = rdQty;
+						}
+						rm.Disputed_Qty = rdQty - takeD;
+
+						if(restore == true)
+						{
+							isFab = ifnull(rm.Is_Fabric,false);
+							if(isFab == true)
+							{
+								onStr = ifnull(rm.Wash_Quantity,"0").toString().trim();
+								if(onStr == "")
+								{
+									onStr = "0";
+								}
+								rm.Wash_Quantity = onStr.toDecimal() + takeD;
+							}
+							else
+							{
+								onStr = ifnull(rm.Quantity,"0").toString().trim();
+								if(onStr == "")
+								{
+									onStr = "0";
+								}
+								rm.Quantity = onStr.toDecimal() + takeD;
+							}
+						}
+					}
+				}
+
+				//------------------------------------------------------
+				// 2i. Inbound only - the record of pieces turning up.
+				//
+				// Sections 2, 3 and 3b below are all about a requirement, and an
+				// offcut coming back is owed to nobody, so they are skipped
+				// entirely on this leg. But the rack count still changed, and a
+				// count that moves with no movement behind it cannot be answered
+				// for later. The Declared movement is the parent here - there is
+				// no Issued one on this leg.
+				//------------------------------------------------------
+				if(inbound == true && restore == true && dsp.Waste_Piece != null)
+				{
+					try
+					{
+						declParent = null;
+						for each  dmv2 in Waste_Movement[Waste_Piece == dsp.Waste_Piece && Movement_Type == "Declared"]
+						{
+							declParent = dmv2.ID;
+						}
+
+						newInId = insert into Waste_Movement
+						[
+							Movement_Type="Received"
+							Piece_Count=take.toLong()
+							Moved_On=zoho.currentdate
+							Remarks=note
+							Added_User=zoho.loginuser
+						];
+
+						for each  inN in Waste_Movement[ID == newInId.toLong()]
+						{
+							inN.Waste_Piece = dsp.Waste_Piece;
+							if(declParent != null)
+							{
+								inN.Parent_Movement = declParent;
+							}
+							if(dsp.Plan != null)
+							{
+								inN.Plan = dsp.Plan;
+							}
+							if(dsp.Plan_Item != null)
+							{
+								inN.Plan_Item = dsp.Plan_Item;
+							}
+							if(dsp.Supervisor != null)
+							{
+								inN.Moved_By = dsp.Supervisor;
+							}
+						}
+					}
+					catch (eIn)
+					{
+						info "Late receipt movement not written for waste piece " + dsp.Waste_Piece + ": " + eIn.toString();
+					}
+				}
+
+				//------------------------------------------------------
+				// 2. The requirement side - waste pieces
+				//
+				// A waste dispute is counted in PHYSICAL remnants, but the
+				// requirement is counted in CUT pieces, and one remnant can
+				// yield several. The movement that issued it carries the
+				// yield, so the conversion comes from what was actually
+				// recorded rather than being re-derived.
+				//------------------------------------------------------
+				if(inbound == false && isWaste == true && dsp.Waste_Piece != null && dsp.Plan != null)
+				{
+					mvYield = 1;
+					parentMv = null;
+					issuedMvs = Waste_Movement[Waste_Piece == dsp.Waste_Piece && Movement_Type == "Issued"];
+
+					for each  mv in issuedMvs
+					{
+						if(mv.Plan != null && mv.Plan.toString() == dsp.Plan.toString())
+						{
+							parentMv = mv.ID;
+							yv = ifnull(mv.Pieces_Yielded,0);
+							if(yv > 0)
+							{
+								mvYield = yv;
+							}
+						}
+					}
+
+					cutPieces = take.toLong() * mvYield;
+
+					if(applyKind == "Found")
+					{
+						// It reached him after all, so the handover completes.
+						// Waste receipt is a child movement, not a counter, so
+						// this has to be written the same way a receipt writes
+						// it or the piece stays pending forever.
+						if(parentMv != null)
+						{
+							try
+							{
+								newRvId = insert into Waste_Movement
+								[
+									Movement_Type="Received"
+									Piece_Count=take.toLong()
+									Moved_On=zoho.currentdate
+									Remarks=note
+									Added_User=zoho.loginuser
+								];
+
+								for each  rvN in Waste_Movement[ID == newRvId.toLong()]
+								{
+									rvN.Parent_Movement = parentMv;
+									rvN.Waste_Piece = dsp.Waste_Piece;
+									rvN.Plan = dsp.Plan;
+									if(dsp.Plan_Item != null)
+									{
+										rvN.Plan_Item = dsp.Plan_Item;
+									}
+									if(dsp.Supervisor != null)
+									{
+										rvN.Moved_By = dsp.Supervisor;
+									}
+								}
+							}
+							catch (eRv)
+							{
+								info "Received movement not written for waste piece " + dsp.Waste_Piece + ": " + eRv.toString();
+							}
+						}
+					}
+					else if(dsp.Material != null)
+					{
+						// Never arrived. Those cut pieces go back on the bill,
+						// newest-short-first like the metres below.
+						wasteRows = Material_Requirement[Plan == dsp.Plan] sort by Added_Time desc;
+						toPull = cutPieces;
+
+						for each  rowW in wasteRows
+						{
+							if(toPull > 0 && rowW.Material != null && rowW.Material.toString() == dsp.Material.toString())
+							{
+								fromW = ifnull(rowW.Pieces_From_Waste,0);
+								if(fromW > 0)
+								{
+									pullW = fromW;
+									if(pullW > toPull)
+									{
+										pullW = toPull;
+									}
+									rowW.Pieces_From_Waste = fromW - pullW;
+									toPull = toPull - pullW;
+								}
+							}
+						}
+					}
+				}
+
+				//------------------------------------------------------
+				// 3. The requirement side - measured material
+				//------------------------------------------------------
+				if(inbound == false && dsp.Plan != null && dsp.Material != null && isWaste == false)
+				{
+					if(applyKind == "Found")
+					{
+						// It reached production after all - credit the short
+						// rows oldest first, exactly as a receipt would.
+						toCredit = take;
+						for each  rowF in Material_Requirement[Plan == dsp.Plan]
+						{
+							if(toCredit > 0 && rowF.Material != null && rowF.Material.toString() == dsp.Material.toString())
+							{
+								fIss = ifnull(rowF.Issued_Qty,"0").toString().trim();
+								if(fIss == "")
+								{
+									fIss = "0";
+								}
+								fRec = ifnull(rowF.Received_Qty,"0").toString().trim();
+								if(fRec == "")
+								{
+									fRec = "0";
+								}
+								gap = fIss.toDecimal() - fRec.toDecimal();
+								if(gap > 0)
+								{
+									give = gap;
+									if(give > toCredit)
+									{
+										give = toCredit;
+									}
+									rowF.Received_Qty = fRec.toDecimal() + give;
+									toCredit = toCredit - give;
+								}
+							}
+						}
+					}
+					else
+					{
+						// Correction or loss - it never arrived, so the line is
+						// owed again. Reduced newest-short-first.
+						shortRows = Material_Requirement[Plan == dsp.Plan] sort by Added_Time desc;
+						toUnissue = take;
+						for each  rowU in shortRows
+						{
+							if(toUnissue > 0 && rowU.Material != null && rowU.Material.toString() == dsp.Material.toString())
+							{
+								uIss = ifnull(rowU.Issued_Qty,"0").toString().trim();
+								if(uIss == "")
+								{
+									uIss = "0";
+								}
+								uRec = ifnull(rowU.Received_Qty,"0").toString().trim();
+								if(uRec == "")
+								{
+									uRec = "0";
+								}
+								gapU = uIss.toDecimal() - uRec.toDecimal();
+								if(gapU > 0)
+								{
+									pull = gapU;
+									if(pull > toUnissue)
+									{
+										pull = toUnissue;
+									}
+									rowU.Issued_Qty = uIss.toDecimal() - pull;
+									toUnissue = toUnissue - pull;
+
+									// Fabric is counted in CUT PIECES. Dropping
+									// the metres alone re-opens a thread or a
+									// label, but leaves cloth reading as fully
+									// issued - so the store was never asked for
+									// it and the supervisor never got it.
+									if(ifnull(rowU.Is_Fabric,false) == true)
+									{
+										rawPcs = ifnull(rowU.Pieces_From_Raw,0);
+										issuedMtr = uIss.toDecimal();
+
+										if(rawPcs > 0 && issuedMtr > 0)
+										{
+											// Converted at the row's OWN rate
+											// rather than re-deriving the
+											// cutting geometry - the fabric
+											// width may have been edited since,
+											// and this has to undo what was
+											// actually recorded.
+											//
+											// Rounded UP: a part-row of cloth
+											// cuts no whole piece, and leaving
+											// it down hands back metres he
+											// still cannot use.
+											backPcs = ((rawPcs * pull) / issuedMtr).ceil();
+											if(backPcs > rawPcs)
+											{
+												backPcs = rawPcs;
+											}
+											rowU.Pieces_From_Raw = rawPcs - backPcs;
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+
+				//------------------------------------------------------
+				// 3b. Whether the item can now be started - or can no longer be.
+				//
+				// Item_Status is what the production screen gates on, and until
+				// now receiveMaterials was the only thing that ever moved it.
+				// That left "I found it" as a dead end: the receipt was credited,
+				// but nothing set the item ready, and no further receipt was ever
+				// coming - so the supervisor could not start cutting cloth he was
+				// standing next to.
+				//
+				// It has to run the other way too. Re-opening a requirement while
+				// the plan sits at Material Ready hides the line from the store,
+				// because the issue list only looks at plans that are still open.
+				//------------------------------------------------------
+				if(inbound == false && dsp.Plan != null)
+				{
+					planItemCount = 0;
+					planReadyCount = 0;
+
+					for each  pit in Plan_Item[Plan == dsp.Plan]
+					{
+						planItemCount = planItemCount + 1;
+
+						itemOk = true;
+						rowSeen = 0;
+
+						for each  rq in Material_Requirement[Plan_Item == pit.ID]
+						{
+							rowSeen = rowSeen + 1;
+
+							rqReq = ifnull(rq.Required_Qty,"0").toString().trim();
+							if(rqReq == "")
+							{
+								rqReq = "0";
+							}
+							rqIss = ifnull(rq.Issued_Qty,"0").toString().trim();
+							if(rqIss == "")
+							{
+								rqIss = "0";
+							}
+							rqRec = ifnull(rq.Received_Qty,"0").toString().trim();
+							if(rqRec == "")
+							{
+								rqRec = "0";
+							}
+
+							// Anything issued but not confirmed is still in the air.
+							if(rqRec.toDecimal() < rqIss.toDecimal())
+							{
+								itemOk = false;
+							}
+
+							// Same rule as receiveMaterials: cloth is judged on cut
+							// pieces, everything else on quantity.
+							if(ifnull(rq.Is_Fabric,false) == true)
+							{
+								rqPcs = ifnull(rq.Required_Pieces,0);
+								gotPcs = ifnull(rq.Pieces_From_Waste,0) + ifnull(rq.Pieces_From_Raw,0);
+								if(rqPcs <= 0 || gotPcs < rqPcs)
+								{
+									itemOk = false;
+								}
+							}
+							else
+							{
+								if(rqReq.toDecimal() <= 0 || rqIss.toDecimal() < rqReq.toDecimal())
+								{
+									itemOk = false;
+								}
+							}
+						}
+
+						if(rowSeen == 0)
+						{
+							itemOk = false;
+						}
+
+						// Waste pieces owed to this item, receipt summed from the
+						// movements that answer each issue.
+						for each  wIss in Waste_Movement[Plan_Item == pit.ID && Movement_Type == "Issued"]
+						{
+							wOut = ifnull(wIss.Piece_Count,0);
+							wIn = 0;
+							for each  wRv in Waste_Movement[Parent_Movement == wIss.ID && Movement_Type == "Received"]
+							{
+								wIn = wIn + ifnull(wRv.Piece_Count,0);
+							}
+							if(wIn < wOut)
+							{
+								itemOk = false;
+							}
+						}
+
+						curSt = ifnull(pit.Item_Status,"").toString();
+
+						// Only the two states BEFORE cutting are moved. Once he has
+						// started, pulling the item back to Awaiting_Material would
+						// deny work that really happened.
+						if(curSt == "Awaiting_Material" || curSt == "Ready_For_Production")
+						{
+							if(itemOk == true)
+							{
+								pit.Item_Status = "Ready_For_Production";
+							}
+							else
+							{
+								pit.Item_Status = "Awaiting_Material";
+							}
+						}
+
+						if(itemOk == true || curSt == "In_Production" || curSt == "Complete")
+						{
+							planReadyCount = planReadyCount + 1;
+						}
+					}
+
+					for each  plR in Production_Planning[ID == dsp.Plan]
+					{
+						pSt = ifnull(plR.Order_Status,"").toString();
+
+						// In Progress and Production Complete are left alone -
+						// those are production's to own, not the store's.
+						if(pSt == "Pending" || pSt == "Partially Received" || pSt == "Material Ready")
+						{
+							if(planItemCount > 0 && planReadyCount == planItemCount)
+							{
+								plR.Order_Status = "Material Ready";
+							}
+							else if(pSt == "Material Ready")
+							{
+								plR.Order_Status = "Partially Received";
+							}
+						}
+					}
+				}
+
+				//------------------------------------------------------
+				// 4. The record of what was decided. Processed is set true
+				// here because this function has already done the work -
+				// the flag exists so the form workflow, if it is still in
+				// place, does not do it a second time.
+				//------------------------------------------------------
+				lnRow = Stock_Dispute.Resolution_Lines();
+				lnRow.Resolved_Qty=take;
+				lnRow.Resolution=applyKind;
+				lnRow.Resolved_On=zoho.currentdate;
+				lnRow.Note=note;
+				lnRow.Processed=true;
+				dsp.Resolution_Lines.insert(lnRow);
+
+				// Closed once the lines account for the whole disputed amount.
+				// A partial resolution leaves it open with the remainder,
+				// because "one of the two turned up" is a real answer.
+				closed = false;
+				if((alreadyRes + take) >= dStr.toDecimal())
+				{
+					dsp.Status = "Resolved";
+					closed = true;
+				}
+
+				stTxt = "Open";
+				if(closed == true)
+				{
+					stTxt = "Resolved";
+				}
+
+				res = "{\"success\":true,\"applied\":\"" + applyKind + "\",\"resolved\":" + take + ",\"remaining\":" + (remaining - take) + ",\"status\":\"" + stTxt + "\"}";
+			}
+		}
+
+		if(found == false)
+		{
+			res = "{\"success\":false,\"error\":\"Dispute not found or already resolved\"}";
+		}
+	}
+
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

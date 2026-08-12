@@ -1,0 +1,432 @@
+string saveStageAssignment(string payloadJson)
+{
+	// API for the Production Supervisor Widget. One Custom API, one argument.
+	//
+	// A STAGE IS NO LONGER ONE PERSON'S WORK. The supervisor splits the stage's
+	// pieces between several operators, each finishes their own share, and the
+	// stage closes only when every share is in.
+	//
+	// Stage_Log stays exactly what it was - ONE row per Plan_Item x Phase_Name,
+	// the stage HEADER. That uniqueness is load-bearing: saveWasteFromCutting
+	// resolves the cutting log by item + phase, sendToThirdParty reuses it,
+	// saveMaterialDamage hangs off it, and the next stage reads its Qty_Out as
+	// its own Qty_In. Splitting the stage into several Stage_Log rows would have
+	// broken all four at once.
+	//
+	// So the split lives one level down, in Stage_Assignment - one record per
+	// operator per stage. Its own form rather than a subform on Stage_Log, for
+	// the same reason Plan_Item and Stage_Log became forms: two operators
+	// finishing minutes apart both rewrite the parent, and the second write
+	// silently loses the first.
+	//
+	// payload:
+	// {
+	//   "action": "add" | "end" | "update" | "remove",
+	//   "planId": "123456",
+	//   "planItemId": "789012",
+	//   "phaseName": "Cutting",
+	//   "sequence": 10,
+	//   "qtyIn": 100,
+	//   "operatorId": "345",
+	//   "assignedQty": 40,
+	//   "assignmentId": "901234",
+	//   "qtyOut": 38,
+	//   "startTime": "09:15",
+	//   "endTime": "11:40",
+	//   "remarks": ""
+	// }
+	//
+	// Every rule below is enforced HERE and not only in the widget, because a
+	// Custom API is callable from anywhere and the ones that matter - handing out
+	// more pieces than the stage received, putting one man on the same stage
+	// twice, working a stage that is out with a third party - all corrupt the
+	// piece count rather than merely looking untidy.
+
+	// Deluge requires a return at the function's top level, so the result is
+	// built into a variable rather than returned from inside the try/catch.
+	res = "{\"success\":false,\"error\":\"Nothing was saved\"}";
+
+	try
+	{
+		inp = payloadJson.toMap();
+
+		actTxt = ifnull(inp.get("action"),"").toString().trim().toLowerCase();
+		planIdStr = ifnull(inp.get("planId"),"").toString().trim();
+		itemIdStr = ifnull(inp.get("planItemId"),"").toString().trim();
+		phaseName = ifnull(inp.get("phaseName"),"").toString().trim();
+		opIdStr = ifnull(inp.get("operatorId"),"").toString().trim();
+		asgIdStr = ifnull(inp.get("assignmentId"),"").toString().trim();
+		startTStr = ifnull(inp.get("startTime"),"").toString().trim();
+		endTStr = ifnull(inp.get("endTime"),"").toString().trim();
+		remTxt = ifnull(inp.get("remarks"),"").toString();
+
+		// Creator fields that were never written are EMPTY, not null, and
+		// toDecimal() throws on empty - normalise through a string first.
+		qAsgStr = ifnull(inp.get("assignedQty"),"0").toString().trim();
+		if (qAsgStr == "") { qAsgStr = "0"; }
+		qOutStr = ifnull(inp.get("qtyOut"),"0").toString().trim();
+		if (qOutStr == "") { qOutStr = "0"; }
+		qInStr = ifnull(inp.get("qtyIn"),"0").toString().trim();
+		if (qInStr == "") { qInStr = "0"; }
+		seqStr = ifnull(inp.get("sequence"),"0").toString().trim();
+		if (seqStr == "") { seqStr = "0"; }
+
+		asgQty = qAsgStr.toDecimal().toLong();
+		outQty = qOutStr.toDecimal().toLong();
+		inQty = qInStr.toDecimal().toLong();
+		seqNo = seqStr.toDecimal().toLong();
+
+		//------------------------------------------------------------------
+		// ADD - hand a share of the stage to one operator, and start his clock.
+		//
+		// Adding IS starting. A row that exists but has not begun would be a
+		// third state to explain on a screen that is already a table, and the
+		// supervisor types a name at the moment the man picks up the work.
+		//------------------------------------------------------------------
+		if (actTxt == "add")
+		{
+			if (planIdStr == "" || itemIdStr == "" || phaseName == "")
+			{
+				return "{\"success\":false,\"error\":\"Missing planId, planItemId or phaseName\"}";
+			}
+			if (opIdStr == "")
+			{
+				return "{\"success\":false,\"error\":\"Pick an operator first.\"}";
+			}
+			if (asgQty <= 0)
+			{
+				return "{\"success\":false,\"error\":\"Enter how many pieces he is taking.\"}";
+			}
+
+			itemId = itemIdStr.toLong();
+			opId = opIdStr.toLong();
+
+			//----------------------------------------------------------
+			// The stage header. Found, or opened.
+			//----------------------------------------------------------
+			logId = 0;
+			stageIn = 0;
+
+			for each  lgA in Stage_Log[Plan_Item == itemId && Phase_Name == phaseName]
+			{
+				logId = lgA.ID;
+				stageIn = ifnull(lgA.Qty_In,0);
+
+				if (ifnull(lgA.Stage_Status,"").toString().trim() == "Done")
+				{
+					return "{\"success\":false,\"code\":\"STAGE_DONE\",\"error\":\"" + phaseName.replaceAll("\"","'") + " has already been closed. Nobody else can be put on it.\"}";
+				}
+
+				//--------------------------------------------------
+				// A STAGE THAT IS OUT WITH A THIRD PARTY CANNOT BE WORKED
+				// IN-HOUSE. The panels are in someone else's workshop, so an
+				// operator recorded against them puts two records on the same
+				// pieces with nothing able to say which is the lie. Same guard
+				// saveProductionPhase applies, and for the same reason:
+				// Returned_On is the test, not Is_Outsourced, because a block
+				// that has come back is ordinary finished work.
+				//--------------------------------------------------
+				if (ifnull(lgA.Is_Outsourced,false) == true && lgA.Returned_On == null)
+				{
+					return "{\"success\":false,\"code\":\"STAGE_OUTSOURCED\",\"error\":\"" + phaseName.replaceAll("\"","'") + " is out with a third party. Receive it back before putting anyone on it.\"}";
+				}
+			}
+
+			//----------------------------------------------------------
+			// No header yet, so this is the first man on the stage and the
+			// stage is starting now.
+			//
+			// Opened THROUGH saveProductionPhase rather than inserted here.
+			// Starting a stage also moves Plan_Item to In_Production and the
+			// plan to In Progress, and those two fields have exactly one
+			// writer each - which is the only reason the four status levels
+			// have stayed in step. A second insert site would be a second
+			// writer, and the copy that drifts is always the one nobody is
+			// looking at.
+			//
+			// operatorId is deliberately EMPTY. Under the split model the
+			// stage itself belongs to nobody; the people are on the
+			// assignments. Stage_Log.Operator being null is what the reports
+			// use to tell a split stage from a legacy single-operator one.
+			//----------------------------------------------------------
+			if (logId == 0)
+			{
+				startJson = "{\"planId\":\"" + planIdStr + "\",\"planItemId\":\"" + itemIdStr + "\",\"phaseName\":\"" + phaseName.replaceAll("\"","'") + "\",\"sequence\":\"" + seqNo + "\",\"isLastStage\":\"false\",\"operatorId\":\"\",\"startTime\":\"" + startTStr + "\",\"endTime\":\"\",\"qtyIn\":\"" + inQty + "\",\"qtyOut\":\"0\",\"remarks\":\"\"}";
+
+				openTxt = thisapp.saveProductionPhase(startJson);
+				info "saveStageAssignment opened stage -> " + openTxt;
+
+				for each  lgB in Stage_Log[Plan_Item == itemId && Phase_Name == phaseName]
+				{
+					logId = lgB.ID;
+					stageIn = ifnull(lgB.Qty_In,0);
+				}
+			}
+
+			if (logId == 0)
+			{
+				return "{\"success\":false,\"error\":\"The stage could not be opened, so nobody was assigned. Try again.\"}";
+			}
+
+			// Qty_In is the previous stage's output and is written once, at
+			// Start. A header opened before this field carried anything still
+			// needs it, or the "how many are left to hand out" test below has
+			// nothing to measure against.
+			if (stageIn <= 0 && inQty > 0)
+			{
+				for each  lgC in Stage_Log[ID == logId]
+				{
+					lgC.Qty_In = inQty;
+				}
+				stageIn = inQty;
+			}
+
+			//----------------------------------------------------------
+			// What is already handed out, and to whom.
+			//
+			// Ids compared AS STRINGS. A lookup field holds a record id and
+			// mixed-type comparison throws in Deluge, so the same man added
+			// twice would surface as "code 9430" rather than as the plain
+			// refusal below.
+			//----------------------------------------------------------
+			already = 0;
+			for each  asA in Stage_Assignment[Stage_Log == logId]
+			{
+				already = already + ifnull(asA.Assigned_Qty,0);
+
+				if (ifnull(asA.Operator,"").toString().trim() == opIdStr)
+				{
+					return "{\"success\":false,\"code\":\"ALREADY_ON\",\"error\":\"He is already on this stage. Change his share instead of adding him twice.\"}";
+				}
+			}
+
+			if (stageIn > 0 && already + asgQty > stageIn)
+			{
+				leftQty = stageIn - already;
+				if (leftQty < 0) { leftQty = 0; }
+				return "{\"success\":false,\"code\":\"OVER_ASSIGNED\",\"error\":\"Only " + leftQty + " of the " + stageIn + " pieces are left to hand out.\"}";
+			}
+
+			newAsg = insert into Stage_Assignment
+			[
+				Stage_Log=logId
+				Plan=planIdStr.toLong()
+				Plan_Item=itemId
+				Operator=opId
+				Phase_Name=phaseName
+				Sequence_No=seqNo
+				Assigned_Qty=asgQty
+				Qty_Out=0
+				Assignment_Status="In_Progress"
+				Log_Date=zoho.currentdate
+				Remarks=remTxt
+				Added_User=zoho.loginuser
+			];
+
+			asgNewId = newAsg.toLong();
+
+			// Set after the insert - an empty time string is not a valid Time,
+			// and a null cannot go in an insert block.
+			for each  asB in Stage_Assignment[ID == asgNewId]
+			{
+				if (startTStr != "") { asB.Start_Time = startTStr; }
+			}
+
+			// Ids stringified - an 18-digit id breaks JSON.parse on the widget.
+			res = "{\"success\":true,\"assignmentId\":\"" + asgNewId + "\",\"stageLogId\":\"" + logId + "\",\"assigned\":" + (already + asgQty) + ",\"qtyIn\":" + stageIn + "}";
+		}
+		//------------------------------------------------------------------
+		// UPDATE - re-size a share that has not been finished yet.
+		//
+		// He hands Aman 40, then Arjun turns up and 40 was too many. Re-sizing
+		// beats remove-and-re-add, which would throw away the start time and
+		// make a man who has been cutting since nine look like he began now.
+		//------------------------------------------------------------------
+		else if (actTxt == "update")
+		{
+			if (asgIdStr == "")
+			{
+				return "{\"success\":false,\"error\":\"Missing assignmentId\"}";
+			}
+			if (asgQty <= 0)
+			{
+				return "{\"success\":false,\"error\":\"Enter how many pieces he is taking.\"}";
+			}
+
+			asgId = asgIdStr.toLong();
+
+			uLog = 0;
+			uDone = false;
+			for each  asC in Stage_Assignment[ID == asgId]
+			{
+				if (asC.Stage_Log != null) { uLog = asC.Stage_Log; }
+				if (ifnull(asC.Assignment_Status,"").toString().trim() == "Done") { uDone = true; }
+			}
+
+			if (uLog == 0)
+			{
+				return "{\"success\":false,\"error\":\"That share no longer exists. Refresh the screen.\"}";
+			}
+			if (uDone == true)
+			{
+				return "{\"success\":false,\"error\":\"His work is already finished, so his share cannot be re-sized.\"}";
+			}
+
+			uIn = 0;
+			for each  lgD in Stage_Log[ID == uLog]
+			{
+				uIn = ifnull(lgD.Qty_In,0);
+			}
+
+			// Everyone else's share. Ids as strings for the same reason as above.
+			othersQ = 0;
+			for each  asD in Stage_Assignment[Stage_Log == uLog]
+			{
+				if (asD.ID.toString() != asgIdStr)
+				{
+					othersQ = othersQ + ifnull(asD.Assigned_Qty,0);
+				}
+			}
+
+			if (uIn > 0 && othersQ + asgQty > uIn)
+			{
+				uLeft = uIn - othersQ;
+				if (uLeft < 0) { uLeft = 0; }
+				return "{\"success\":false,\"code\":\"OVER_ASSIGNED\",\"error\":\"Only " + uLeft + " of the " + uIn + " pieces can go to him.\"}";
+			}
+
+			for each  asE in Stage_Assignment[ID == asgId]
+			{
+				asE.Assigned_Qty = asgQty;
+			}
+
+			res = "{\"success\":true,\"assignmentId\":\"" + asgIdStr + "\",\"stageLogId\":\"" + uLog + "\",\"assigned\":" + (othersQ + asgQty) + ",\"qtyIn\":" + uIn + "}";
+		}
+		//------------------------------------------------------------------
+		// END - one operator is finished. The STAGE is not; that is a separate
+		// press, because ending the stage is what declares waste, closes the
+		// item and can finish the whole order.
+		//------------------------------------------------------------------
+		else if (actTxt == "end")
+		{
+			if (asgIdStr == "")
+			{
+				return "{\"success\":false,\"error\":\"Missing assignmentId\"}";
+			}
+
+			asgId = asgIdStr.toLong();
+
+			eLog = 0;
+			eAsg = 0;
+			for each  asF in Stage_Assignment[ID == asgId]
+			{
+				if (asF.Stage_Log != null) { eLog = asF.Stage_Log; }
+				eAsg = ifnull(asF.Assigned_Qty,0);
+			}
+
+			if (eLog == 0)
+			{
+				return "{\"success\":false,\"error\":\"That share no longer exists. Refresh the screen.\"}";
+			}
+
+			// Re-ending an open stage's share is allowed - a mistyped count has
+			// to be correctable. Once the STAGE has closed it is not, because
+			// its Qty_Out has already flowed into the next stage's Qty_In, the
+			// item's produced figure and possibly the sales order.
+			eStageDone = false;
+			for each  lgE in Stage_Log[ID == eLog]
+			{
+				if (ifnull(lgE.Stage_Status,"").toString().trim() == "Done") { eStageDone = true; }
+			}
+			if (eStageDone == true)
+			{
+				return "{\"success\":false,\"code\":\"STAGE_DONE\",\"error\":\"That stage has already been closed - its figures have gone forward to the next one.\"}";
+			}
+
+			// You cannot finish more than you were given.
+			eCap = outQty;
+			if (eAsg > 0 && eCap > eAsg) { eCap = eAsg; }
+			if (eCap < 0) { eCap = 0; }
+
+			for each  asG in Stage_Assignment[ID == asgId]
+			{
+				asG.Qty_Out = eCap;
+				asG.Assignment_Status = "Done";
+				if (endTStr != "") { asG.End_Time = endTStr; }
+				if (remTxt != "") { asG.Remarks = remTxt; }
+			}
+
+			// What the stage now stands at, so the widget can open or keep
+			// shut its "End stage" button without a second round trip.
+			eOpen = 0;
+			eOut = 0;
+			for each  asH in Stage_Assignment[Stage_Log == eLog]
+			{
+				eOut = eOut + ifnull(asH.Qty_Out,0);
+				if (ifnull(asH.Assignment_Status,"").toString().trim() != "Done") { eOpen = eOpen + 1; }
+			}
+
+			res = "{\"success\":true,\"assignmentId\":\"" + asgIdStr + "\",\"stageLogId\":\"" + eLog + "\",\"qtyOut\":" + eCap + ",\"openShares\":" + eOpen + ",\"stageOut\":" + eOut + "}";
+		}
+		//------------------------------------------------------------------
+		// REMOVE - he was put on the wrong stage, or never picked the work up.
+		//
+		// Only while the share is still open. Finished work is a record of
+		// something that happened and is not the supervisor's to delete; a
+		// wrong count is corrected by ending it again with the right number.
+		//------------------------------------------------------------------
+		else if (actTxt == "remove")
+		{
+			if (asgIdStr == "")
+			{
+				return "{\"success\":false,\"error\":\"Missing assignmentId\"}";
+			}
+
+			asgId = asgIdStr.toLong();
+
+			rFound = false;
+			rDone = false;
+			rLog = 0;
+			for each  asI in Stage_Assignment[ID == asgId]
+			{
+				rFound = true;
+				if (asI.Stage_Log != null) { rLog = asI.Stage_Log; }
+				if (ifnull(asI.Assignment_Status,"").toString().trim() == "Done") { rDone = true; }
+			}
+
+			// Already gone is the outcome he asked for, not a failure.
+			if (rFound == false)
+			{
+				res = "{\"success\":true,\"assignmentId\":\"" + asgIdStr + "\",\"removed\":false}";
+			}
+			else if (rDone == true)
+			{
+				res = "{\"success\":false,\"error\":\"His work is already recorded, so it cannot be removed. End it again with the right count instead.\"}";
+			}
+			else
+			{
+				delete from Stage_Assignment[ID == asgId];
+
+				rLeft = 0;
+				for each  asJ in Stage_Assignment[Stage_Log == rLog]
+				{
+					rLeft = rLeft + ifnull(asJ.Assigned_Qty,0);
+				}
+
+				res = "{\"success\":true,\"assignmentId\":\"" + asgIdStr + "\",\"removed\":true,\"stageLogId\":\"" + rLog + "\",\"assigned\":" + rLeft + "}";
+			}
+		}
+		else
+		{
+			res = "{\"success\":false,\"error\":\"Unknown action '" + actTxt.replaceAll("\"","'") + "'\"}";
+		}
+	}
+	catch (e)
+	{
+		// Creator collapses every runtime failure to a widget into a generic
+		// "code 9430", so the real message is carried back in the payload.
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

@@ -1,0 +1,207 @@
+string getStoreWasteHistory(string offsetTxt, string limitTxt)
+{
+	// Every remnant a supervisor has declared, newest first, one page at a time.
+	// Custom API, POST, two arguments: offsetTxt, limitTxt.
+	//
+	// THE STORE SEES EVERY SUPERVISOR'S RETURNS, which is what makes this
+	// different from getSupervisorWasteReturns - one man's cutting bounded by a
+	// date window is a short list, the whole factory's is not. A date window wide
+	// enough to be useful here is wide enough to kill the script.
+	//
+	// PAGED ON THE QUERY, NOT IN THE LOOP. This is the whole design and it is
+	// worth being precise about, because the obvious version does not work:
+	//
+	//   for each mv in <everything> { if(built < 20) { ...build... } }
+	//
+	// That caps the TABLE, not the COST. Deluge has no reliable break, so the
+	// loop still runs once per record in the form - 5,000 declarations means
+	// 5,000 iterations however few rows come out. The statement-execution limit
+	// is NOT catchable: it kills the script and the widget gets a bare HTTP 500
+	// with no error card, so there is no recovering from having tried.
+	//
+	// "range from A to B" makes Creator return the page, so the loop iterates at
+	// most `limit` times no matter how many records exist. Cost per call is flat
+	// - page 1 and page 200 are the same work - which is what lets this run with
+	// no date window at all.
+	//
+	// NOTHING IS FILTERED OUT, deliberately. Offset paging only adds up if the
+	// query decides which rows exist; drop rows in code afterwards and page 1
+	// returns 17 of 20 while page 2 silently starts in the wrong place. So a
+	// piece still at Pending_Receipt appears here as well as on the receipt card
+	// above it - the same fact from two sides, and the Status column says which.
+	//
+	// Status has to come off Waste_Master: the movement only knows the piece was
+	// declared, never what became of it. That is also what makes this the only
+	// screen that can answer "where did that piece go" for a remnant the store
+	// found none of - it goes to Status = "Disputed" and vanishes from the
+	// receipt list entirely.
+
+	rowsJson = "";
+	total = 0;
+	offset = 0;
+	limit = 20;
+
+	// Creator collapses every runtime failure to a generic "code 9430", so the
+	// real message has to be carried out inside the payload.
+	try
+	{
+	// A numeric that was never written arrives as an EMPTY STRING, and
+	// toDecimal() throws on it - normalise to string, test, then convert.
+	oStr = ifnull(offsetTxt,"").toString().trim();
+	if(oStr == "" || oStr.isNumber() == false)
+	{
+		oStr = "0";
+	}
+	offset = oStr.toDecimal().toLong();
+	if(offset < 0)
+	{
+		offset = 0;
+	}
+
+	lStr = ifnull(limitTxt,"").toString().trim();
+	if(lStr == "" || lStr.isNumber() == false)
+	{
+		lStr = "20";
+	}
+	limit = lStr.toDecimal().toLong();
+	if(limit < 1)
+	{
+		limit = 1;
+	}
+	// Hard ceiling regardless of what the caller asks for. A Custom API is
+	// callable from anywhere, so "limit=100000" has to cost the same as any
+	// other page rather than being the one call that takes the app down.
+	if(limit > 50)
+	{
+		limit = 50;
+	}
+
+	// ONE statement, and it is the honest figure - counting 4,812 records costs
+	// the same as counting 4. This is what lets the pager say "of 240" without
+	// fetching anything it is not going to show.
+	total = Waste_Movement[Movement_Type == "Declared"].count();
+
+	// range is 1-BASED and INCLUSIVE at both ends, so page 1 of 20 is 1 to 20
+	// and page 2 is 21 to 40 - not 20 to 40, which would repeat a row on every
+	// page boundary.
+	rFrom = offset + 1;
+	rTo = offset + limit;
+
+	// Newest first. What came back this morning is what is being asked about,
+	// and it means paging forward walks backwards in time the way "older" reads.
+	//
+	// sort by sits on its own assignment - it will not parse inline in a
+	// for-each header.
+	pageQ = Waste_Movement[Movement_Type == "Declared"] sort by Added_Time desc range from rFrom to rTo;
+
+	// Resolved once per distinct id rather than once per row. A cutting session
+	// declares several offcuts against one plan and they are usually the same
+	// couple of fabrics, so within a page these collapse hard - and every lookup
+	// saved is a statement not spent.
+	planCache = Map();
+	matCache = Map();
+
+	for each  mv in pageQ
+	{
+		//--------------------------------------------------------------
+		// Where it came from. A Waste_Movement carries no supervisor of
+		// its own - ownership comes from the plan it points at, which is
+		// also why filtering this screen by supervisor could never reduce
+		// the work: the plan has to be read before you know whose it is.
+		//--------------------------------------------------------------
+		soNo = "";
+		planNo = "";
+		supName = "";
+
+		if(mv.Plan != null)
+		{
+			pKey = mv.Plan.toString();
+			pHit = ifnull(planCache.get(pKey),"").toString();
+
+			if(pHit == "")
+			{
+				for each  pl in Production_Planning[ID == pKey.toLong()]
+				{
+					planNo = ifnull(pl.Plan_No,"").toString().replaceAll("\"","'");
+					for each  so in Sales_Order[ID == pl.Sales_Order]
+					{
+						soNo = ifnull(so.Sales_Order,"").toString().replaceAll("\"","'");
+					}
+					for each  emp in Employee[ID == pl.Assigned_To]
+					{
+						supName = ifnull(emp.Employee_Name,"").toString().replaceAll("\"","'");
+					}
+				}
+				// Cached as one delimited string. Deluge Maps nest badly and
+				// three parallel Maps would be three lookups where one does.
+				// "|" cannot appear in any of the three - they are a plan
+				// number, an order number and a person's name.
+				planCache.put(pKey,planNo + "|" + soNo + "|" + supName);
+			}
+			else
+			{
+				pParts = pHit.toList("|");
+				planNo = pParts.get(0);
+				soNo = pParts.get(1);
+				supName = pParts.get(2);
+			}
+		}
+
+		//--------------------------------------------------------------
+		// What became of the piece. The movement says it was declared and
+		// nothing more, so both the status and the material come off
+		// Waste_Master.
+		//--------------------------------------------------------------
+		pStatus = "";
+		matName = "";
+		skuId = null;
+
+		for each  wp in Waste_Master[ID == mv.Waste_Piece]
+		{
+			pStatus = ifnull(wp.Status,"").toString();
+			skuId = wp.SKU;
+		}
+
+		if(skuId != null)
+		{
+			mKey = skuId.toString();
+			matName = ifnull(matCache.get(mKey),"").toString();
+
+			if(matName == "")
+			{
+				for each  rm in Raw_Material[ID == mKey.toLong()]
+				{
+					matName = ifnull(rm.Material_Display_Name,"").toString().trim();
+					if(matName == "")
+					{
+						matName = ifnull(rm.Name,"").toString();
+					}
+					matName = matName.replaceAll("\"","'");
+				}
+				matCache.put(mKey,matName);
+			}
+		}
+
+		declaredOn = "";
+		if(mv.Moved_On != null)
+		{
+			declaredOn = mv.Moved_On.toString("dd-MMM-yyyy");
+		}
+
+		if(rowsJson != "")
+		{
+			rowsJson = rowsJson + ",";
+		}
+		// Ids forced to string - an 18-digit id breaks JSON.parse on the widget.
+		rowsJson = rowsJson + "{\"id\":\"" + mv.ID + "\",\"material\":\"" + matName + "\",\"width\":" + ifnull(mv.Piece_Width,0) + ",\"length\":" + ifnull(mv.Piece_Length,0) + ",\"count\":" + ifnull(mv.Piece_Count,0) + ",\"status\":\"" + pStatus + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"supervisor\":\"" + supName + "\",\"declaredOn\":\"" + declaredOn + "\"}";
+	}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"pieces\":[],\"total\":0,\"offset\":0,\"limit\":20}";
+	}
+
+	// Built by hand - Map.toString() does not emit valid JSON once the structure
+	// nests, and List.toString() does not wrap in [].
+	return "{\"errors\":[],\"pieces\":[" + rowsJson + "],\"total\":" + total + ",\"offset\":" + offset + ",\"limit\":" + limit + "}";
+}

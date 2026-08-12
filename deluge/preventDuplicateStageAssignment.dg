@@ -1,0 +1,51 @@
+// Operator_Assignment form workflow: On Validate, on CREATE only.
+// One assignment record per stage.
+//
+// Creator does not offer a Unique constraint on a Drop Down field, so the
+// one-record-per-stage rule cannot be a field property and has to be a
+// validation. Same intent, different place.
+//
+// WHY IT MATTERS, given getProductionWidgetData unions duplicates rather than
+// picking a winner and so copes with two records anyway: the union is there to
+// stop bad data being DANGEROUS, this is here to stop it being CONFUSING. An
+// admin who wanted to change Cutting's operators and created a second record
+// instead ends up with two rows in the report, both looking authoritative,
+// neither one describing what the supervisor actually sees. Telling him at the
+// moment he does it is the only cheap place to fix that.
+//
+// Deliberately NOT latest-wins. That would leave the older record sitting in the
+// report doing nothing, with nothing on screen to say so.
+//
+// SCOPED TO CREATE, NOT "CREATE OR EDIT". On edit the record has to exclude
+// itself from the check, which needs input.ID, and that is not something to rely
+// on unverified after the trouble the client tasks gave. The hole this leaves is
+// small and the union closes it safely: editing an existing record's Stage to
+// one that is already taken makes a duplicate that merges rather than hides.
+// If it ever matters, the edit version is at the bottom.
+//
+// .count() not .size() - size() is a List method, a query result needs count().
+
+if(Operator_Assignment[Stage == input.Stage].count() > 0)
+{
+	alert "There is already an assignment for " + input.Stage + ". Open that record and change its operators instead of adding a second one.";
+	cancel submit;
+}
+
+// Create-or-edit version, IF the self-exclusion is ever needed. Ids forced to
+// string before comparing - mixed-type comparison throws, and this app has
+// shipped 18-digit id bugs twice.
+//
+//	thisId = ifnull(input.ID,"").toString();
+//	dupFound = false;
+//	for each  oaRec in Operator_Assignment[Stage == input.Stage]
+//	{
+//		if(oaRec.ID.toString() != thisId)
+//		{
+//			dupFound = true;
+//		}
+//	}
+//	if(dupFound == true)
+//	{
+//		alert "There is already an assignment for " + input.Stage + ".";
+//		cancel submit;
+//	}

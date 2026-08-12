@@ -1,0 +1,20 @@
+string Admin_Space.getRecentActivities()
+{
+	activityList = List();
+	recentLogs = Stage_Log[ID != 0] sort by Added_Time desc;
+	count = 0;
+	for each  log in recentLogs
+	{
+		if(count >= 10)
+		{
+			break;
+		}
+		tempMap = Map();
+		tempMap.put("User",ifnull(log.Operator,"System").toString());
+		tempMap.put("Time",log.Added_Time.toString("hh:mm a"));
+		tempMap.put("Desc","Produced " + ifnull(log.Qty_Out,0) + " pieces");
+		activityList.add(tempMap);
+		count = count + 1;
+	}
+	return activityList.toString();
+}

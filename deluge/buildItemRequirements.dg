@@ -1,0 +1,156 @@
+string buildItemRequirements(string bomIdTxt, string produceQtyTxt, string contextTxt)
+{
+	// The plan-time material requirement for ONE item, as a JSON array string.
+	//
+	// Extracted from createProductionPlans so the QC rework flow can build the
+	// same requirements the same way. This is the most delicate arithmetic in the
+	// app - fabric width, cut size, pieces per row, rows, metres - and a second
+	// copy of it would drift silently: the remake would get slightly wrong cloth
+	// and nobody would find out until the store came up short.
+	//
+	// NOT a Custom API. Called from other Deluge functions with
+	// thisapp.buildItemRequirements(...), so it needs no API wrapper.
+	//
+	// Returns "[]" when there is no BOM, so the caller can insert the result
+	// without testing it. Shape of each element, unchanged from the original:
+	//   {"mat":"id","name":"...","isFab":true,"unit":"Mtr",
+	//    "req":12.5,"cutLen":55,"cutWid":55,"pcs":100}
+	//
+	// contextTxt only labels the info log - "SO-00008" or "rework of PLAN-00010
+	// line 3" - so a warning can be traced back to what was being planned.
+	//
+	// THIS IS CALCULATION 1 OF THREE, and they are never the same number:
+	//   1. plan-time requirement  - here. Assumes no offcuts exist at all.
+	//   2. issue-time allocation  - getStoreMaterialRequirements, re-decides how
+	//      much offcuts cover, and moves whenever waste stock moves.
+	//   3. waste generation       - getExpectedWaste.
+	// Conflating them is the most common way to conclude the maths is broken
+	// when it is not.
+
+	matsJson = "";
+
+	bomTxt = ifnull(bomIdTxt,"").toString().trim();
+	if(bomTxt == "" || bomTxt.isNumber() == false)
+	{
+		return "[]";
+	}
+
+	// Creator fields that were never written are EMPTY, not null, and
+	// toDecimal() throws on empty - normalise to string first.
+	qStr = ifnull(produceQtyTxt,"0").toString().trim();
+	if(qStr == "")
+	{
+		qStr = "0";
+	}
+	produceQty = qStr.toDecimal().toLong();
+
+	ctx = ifnull(contextTxt,"").toString().trim();
+	if(ctx == "")
+	{
+		ctx = "(no context)";
+	}
+
+	for each  bomRec in BOM[ID == bomTxt.toLong()]
+	{
+		for each  matRow in bomRec.Material_Required
+		{
+			rawMatId = matRow.Item;
+			for each  rm in Raw_Material[ID == rawMatId]
+			{
+				isFab = rm.Is_Fabric;
+				reqQty = 0.0;
+				cutLen = 0;
+				cutWid = 0;
+				piecesNeeded = 0;
+
+				// The two RATES behind the answer, emitted alongside it so a
+				// caller can re-scale to a different piece count without
+				// re-deriving the arithmetic. Initialised out here because each
+				// is assigned in only one branch below, and a caller reading a
+				// key that was never set would get nothing rather than zero.
+				piecesPerRow = 0;
+				perUnit = 0;
+
+				if(isFab)
+				{
+					widthCm = 0.0;
+					val = rm.Fabric_Width_Inches;
+					if(val != null && val.trim() != "")
+					{
+						// Stored as TEXT, in inches.
+						widthCm = val.trim().toDecimal() * 2.54;
+					}
+					cutLen = ifnull(matRow.Cut_Size_Length,0);
+					cutWid = ifnull(matRow.Cut_Size_Width,0);
+
+					// One cut piece per finished item, always. BOM
+					// Required_Quantity is only meaningful for non-fabric
+					// (cones, kg) and is deliberately not read here.
+					piecesNeeded = produceQty;
+
+					if(widthCm <= 0 || cutWid <= 0 || cutLen <= 0)
+					{
+						// Left at zero deliberately - a visibly empty
+						// requirement gets questioned, a silently wrong one
+						// does not.
+						reqQty = 0;
+						info "WARN (missing width/cut size) -> " + ctx + " | " + rm.Name + " | fabricWidthCm=" + widthCm + " cut=" + cutWid + "x" + cutLen;
+					}
+					else if(cutWid > widthCm)
+					{
+						// Grain cannot be rotated, so a cut wider than the
+						// fabric is impossible - not "1 per row".
+						reqQty = 0;
+						info "ERROR (cut width " + cutWid + "cm exceeds fabric width " + widthCm + "cm) -> " + ctx + " | " + rm.Name;
+					}
+					else
+					{
+						piecesPerRow = (widthCm / cutWid).floor();
+
+						// * 1.0 FIRST. Both of these are integers, and Deluge
+						// truncates integer division BEFORE .ceil() ever sees
+						// the result - so 100 pieces at 3 per row gave
+						// 100/3 = 33, ceil(33) = 33 rows, which lays out 99
+						// pieces and silently plans one row short. The .ceil()
+						// looks like it guards this and does not.
+						//
+						// This was the live behaviour in createProductionPlans
+						// until this function was extracted. Every other .ceil()
+						// in the app already carried the * 1.0.
+						totalRows = ((piecesNeeded * 1.0) / piecesPerRow).ceil();
+						reqQty = (totalRows * cutLen) / 100;
+					}
+				}
+				else
+				{
+					perUnit = ifnull(matRow.Required_Quantity,0);
+					reqQty = perUnit * produceQty;
+				}
+
+				if(matsJson != "")
+				{
+					matsJson = matsJson + ",";
+				}
+
+				// Material_Name on the requirement is the snapshot every
+				// downstream screen reads, so the display name has to be
+				// captured HERE - fixing it only where it is rendered would
+				// leave each screen to decide for itself what a material is
+				// called.
+				matDisp = ifnull(rm.Material_Display_Name,"").toString().trim();
+				if(matDisp == "")
+				{
+					matDisp = ifnull(rm.Name,"").toString();
+				}
+				// Free text, and a stray quote would break the JSON this is
+				// being built into by hand.
+				matDisp = matDisp.replaceAll("\"","'");
+
+				// IDs forced to string - 18-digit ids break JSON.parse.
+				matsJson = matsJson + "{\"mat\":\"" + rawMatId + "\",\"name\":\"" + matDisp + "\",\"isFab\":" + isFab + ",\"unit\":\"" + rm.Unit + "\",\"req\":" + reqQty + ",\"cutLen\":" + cutLen + ",\"cutWid\":" + cutWid + ",\"pcs\":" + piecesNeeded + ",\"perRow\":" + piecesPerRow + ",\"perUnit\":" + perUnit + "}";
+			}
+		}
+	}
+
+	return "[" + matsJson + "]";
+}

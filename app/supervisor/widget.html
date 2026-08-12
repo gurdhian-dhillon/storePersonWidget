@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Supervisor</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="app-container">
+
+        <header class="app-header">
+            <div class="app-header-left">
+                <h1>Supervisor</h1>
+                <span class="app-date" id="app-date"></span>
+            </div>
+
+            <div class="app-header-right">
+                <!-- One picker for every tab. Standing in for a login until
+                     zoho.loginuser can be resolved to an Employee record. -->
+                <select id="sup-select" class="sup-select" aria-label="Choose supervisor">
+                    <option value="">Choose supervisor…</option>
+                </select>
+                <button id="refresh-btn" class="primary-btn" type="button">Refresh</button>
+            </div>
+        </header>
+
+        <nav class="tab-strip" id="tab-strip">
+            <button type="button" class="tab-btn is-active" data-tab="receive">
+                Receive<span class="tab-count hidden" id="count-receive"></span>
+            </button>
+            <button type="button" class="tab-btn" data-tab="production">
+                Production<span class="tab-count hidden" id="count-production"></span>
+            </button>
+            <!-- Sits next to Production because that is where the damage is
+                 reported. The badge is what sends him here — a draft he never
+                 raises is material the store never hears about. -->
+            <button type="button" class="tab-btn" data-tab="reissue">
+                Reissue<span class="tab-count hidden" id="count-reissue"></span>
+            </button>
+            <button type="button" class="tab-btn" data-tab="history">
+                History
+            </button>
+            <button type="button" class="tab-btn" data-tab="disputes">
+                Disputes<span class="tab-count hidden" id="count-disputes"></span>
+            </button>
+            <!-- "Waste returns", not "My waste": these are the offcuts he is
+                 sending BACK to the store, and the tab tells him whether they
+                 arrived. "My waste" said neither of those things. -->
+            <button type="button" class="tab-btn" data-tab="waste">
+                Waste returns<span class="tab-count hidden" id="count-waste"></span>
+            </button>
+        </nav>
+
+        <main class="tab-body">
+
+            <section class="tab-panel is-active" id="panel-receive">
+                <!-- The old wording told him to choose a supervisor, which is
+                     already done and showing in the header. What he needs to
+                     know is that there is genuinely nothing waiting. -->
+                <div class="empty-state hidden" id="rcv-empty">
+                    <h2>Nothing to receive</h2>
+                    <p>Everything the store has issued to you has been confirmed.</p>
+                </div>
+                <div id="rcv-content"></div>
+            </section>
+
+            <section class="tab-panel" id="panel-production">
+                <div class="prod-toolbar">
+                    <select id="plan-select" class="sup-select" aria-label="Choose order" disabled>
+                        <option value="">-- Select a Sales Order --</option>
+                    </select>
+                </div>
+                <div id="prod-container" class="plan-container">
+                    <div class="empty-state hidden" id="prod-empty">
+                        <h2>No order open</h2>
+                        <p>Pick an order above to log its production stages.</p>
+                    </div>
+                    <div id="prod-content"></div>
+                </div>
+            </section>
+
+            <section class="tab-panel" id="panel-reissue"></section>
+            <section class="tab-panel" id="panel-history"></section>
+            <section class="tab-panel" id="panel-disputes"></section>
+            <section class="tab-panel" id="panel-waste"></section>
+
+        </main>
+
+    </div>
+
+    <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+
+    <!-- Shell first: it owns the tabs, the shared picker and Refresh. The two
+         tab scripts then attach their own listeners to those shared controls. -->
+    <script src="js/shell.js"></script>
+    <script src="js/receive.js"></script>
+    <script src="js/production.js"></script>
+    <script src="js/tabs.js"></script>
+    <!-- After production.js: the item card looks up openDamageDialog by name
+         when it wires the Report damage button. -->
+    <script src="js/reissue.js"></script>
+    <!-- After production.js and reissue.js: the item card looks these up by
+         name, and a short return hands straight to openDamageDialog. -->
+    <script src="js/outsource.js"></script>
+</body>
+</html>

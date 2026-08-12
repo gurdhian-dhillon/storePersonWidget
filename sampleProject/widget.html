@@ -1,0 +1,1410 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Employee Dashboard - Leave Portal</title>
+  <script src="https://js.zohostatic.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --brand: #6366f1;
+      --brand-dark: #4f46e5;
+      --brand-light: #eef2ff;
+      --success: #10b981;
+      --success-bg: #ecfdf5;
+      --danger: #ef4444;
+      --danger-bg: #fef2f2;
+      --warning: #f59e0b;
+      --warning-bg: #fffbeb;
+      --bg: #f5f7fb;
+      --surface: #ffffff;
+      --border: #e5e7eb;
+      --text: #111827;
+      --muted: #6b7280;
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
+      --shadow-sm: 0 1px 3px rgba(0, 0, 0, .08);
+      --shadow-md: 0 4px 16px rgba(0, 0, 0, .10);
+      --shadow-lg: 0 8px 32px rgba(0, 0, 0, .14);
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .page-wrapper {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px 20px 60px;
+    }
+
+    /* HEADER */
+    .page-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    .header-brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .header-logo {
+      width: 48px;
+      height: 48px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, var(--brand), var(--brand-dark));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      box-shadow: var(--shadow-sm);
+      flex-shrink: 0;
+    }
+
+    .header-brand h1 {
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--text);
+      line-height: 1.2;
+    }
+
+    .header-brand p {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .header-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--brand-light);
+      color: var(--brand-dark);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 20px;
+    }
+
+    .header-badge::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--brand);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+        transform: scale(1)
+      }
+
+      50% {
+        opacity: .5;
+        transform: scale(.85)
+      }
+    }
+
+    /* EMPLOYEE SELECTOR */
+    .emp-selector {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 20px 24px;
+      margin-bottom: 24px;
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .emp-selector label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+    }
+
+    .emp-selector select {
+      flex: 1;
+      padding: 10px 14px;
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-family: inherit;
+      font-size: 13px;
+      color: var(--text);
+      background: var(--surface);
+      outline: none;
+      transition: border-color .2s;
+      cursor: pointer;
+    }
+
+    .emp-selector select:focus {
+      border-color: var(--brand);
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, .1);
+    }
+
+    /* STATS */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      transition: box-shadow .2s, transform .2s;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .stat-card:hover {
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+    }
+
+    .stat-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      flex-shrink: 0;
+    }
+
+    .stat-icon.pending {
+      background: var(--warning-bg)
+    }
+
+    .stat-icon.approved {
+      background: var(--success-bg)
+    }
+
+    .stat-icon.rejected {
+      background: var(--danger-bg)
+    }
+
+    .stat-info {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    .stat-value {
+      font-size: 26px;
+      font-weight: 800;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    /* SECTION ROW */
+    .section-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+
+    .section-row h2 {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .count-badge {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    /* BUTTON */
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: linear-gradient(135deg, var(--brand), var(--brand-dark));
+      color: #fff;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 10px 20px;
+      border: none;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: opacity .2s, transform .2s, box-shadow .2s;
+      box-shadow: 0 4px 12px rgba(99, 102, 241, .35);
+    }
+
+    .btn-primary:hover {
+      opacity: .92;
+      transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(99, 102, 241, .4);
+    }
+
+    .btn-primary:active {
+      transform: translateY(0);
+    }
+
+    .btn-primary:disabled {
+      opacity: .45;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    /* LEAVE CARDS */
+    .leave-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      margin-bottom: 14px;
+      overflow: hidden;
+      box-shadow: var(--shadow-sm);
+      transition: box-shadow .2s, transform .2s;
+    }
+
+    .leave-card:hover {
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+    }
+
+    .leave-card.sl-approved {
+      border-left: 4px solid var(--success)
+    }
+
+    .leave-card.sl-rejected {
+      border-left: 4px solid var(--danger)
+    }
+
+    .leave-card.sl-pending {
+      border-left: 4px solid var(--warning)
+    }
+
+    .lc-header {
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid #f3f4f6;
+    }
+
+    .lc-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .lc-sub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .badge.pending {
+      background: var(--warning-bg);
+      color: #92400e
+    }
+
+    .badge.approved {
+      background: var(--success-bg);
+      color: #065f46
+    }
+
+    .badge.rejected {
+      background: var(--danger-bg);
+      color: #991b1b
+    }
+
+    .lc-body {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      padding: 16px 20px;
+    }
+
+    .detail-pill {
+      background: #f9fafb;
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+    }
+
+    .dp-label {
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .dp-val {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .lc-footer {
+      padding: 12px 20px;
+      background: #f9fafb;
+      border-top: 1px solid #f3f4f6;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .comment-quote {
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-style: italic;
+      font-size: 12px;
+      margin-top: 8px;
+    }
+
+    .comment-quote.app-q {
+      background: var(--success-bg);
+      border-left: 3px solid var(--success);
+      color: #065f46
+    }
+
+    .comment-quote.rej-q {
+      background: var(--danger-bg);
+      border-left: 3px solid var(--danger);
+      color: #991b1b
+    }
+
+    /* EMPTY / LOADING */
+    .empty-state {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 50px 20px;
+      text-align: center;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .empty-icon {
+      font-size: 38px;
+      margin-bottom: 10px;
+    }
+
+    .empty-state h3 {
+      font-size: 15px;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+
+    .empty-state p {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .loading-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 36px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid var(--border);
+      border-top-color: var(--brand);
+      border-radius: 50%;
+      animation: spin .75s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg)
+      }
+    }
+
+    /* MODAL */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(17, 24, 39, .55);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      padding: 20px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .25s;
+      backdrop-filter: blur(4px);
+    }
+
+    .modal-overlay.open {
+      opacity: 1;
+      pointer-events: all;
+    }
+
+    .modal-card {
+      background: var(--surface);
+      border-radius: var(--radius-lg);
+      width: 100%;
+      max-width: 560px;
+      box-shadow: var(--shadow-lg);
+      overflow: hidden;
+      transform: translateY(24px) scale(.97);
+      transition: transform .3s cubic-bezier(.16, 1, .3, 1), opacity .3s;
+      opacity: 0;
+    }
+
+    .modal-overlay.open .modal-card {
+      transform: translateY(0) scale(1);
+      opacity: 1;
+    }
+
+    .modal-header {
+      padding: 24px 28px 20px;
+      background: linear-gradient(135deg, var(--brand), var(--brand-dark));
+      color: #fff;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .modal-header h2 {
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+
+    .modal-header p {
+      font-size: 12px;
+      opacity: .85;
+      margin-top: 4px;
+    }
+
+    .modal-close {
+      background: rgba(255, 255, 255, .2);
+      border: none;
+      color: #fff;
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background .15s;
+    }
+
+    .modal-close:hover {
+      background: rgba(255, 255, 255, .35);
+    }
+
+    .modal-body {
+      padding: 24px 28px;
+      max-height: 65vh;
+      overflow-y: auto;
+    }
+
+    .modal-footer {
+      padding: 18px 28px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 12px;
+      background: #fafafa;
+    }
+
+    /* FORM */
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .form-row.full {
+      grid-template-columns: 1fr;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .form-group label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .req-star {
+      color: var(--danger);
+    }
+
+    .form-group input,
+    .form-group select,
+    .form-group textarea {
+      padding: 10px 13px;
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-family: inherit;
+      font-size: 13px;
+      color: var(--text);
+      background: var(--surface);
+      outline: none;
+      transition: border-color .2s, box-shadow .2s;
+    }
+
+    .form-group input:focus,
+    .form-group select:focus,
+    .form-group textarea:focus {
+      border-color: var(--brand);
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, .12);
+    }
+
+    .form-group input.invalid,
+    .form-group select.invalid,
+    .form-group textarea.invalid {
+      border-color: var(--danger);
+    }
+
+    .form-group textarea {
+      resize: vertical;
+      min-height: 80px;
+    }
+
+    .field-error {
+      font-size: 11px;
+      color: var(--danger);
+      display: none;
+    }
+
+    .field-error.show {
+      display: block;
+    }
+
+    .info-box {
+      background: var(--brand-light);
+      border: 1px solid #c7d2fe;
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      font-size: 12px;
+      color: var(--brand-dark);
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .info-box span {
+      line-height: 1.5;
+    }
+
+    /* BUTTONS */
+    .btn-cancel {
+      padding: 10px 20px;
+      background: none;
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .btn-cancel:hover {
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .btn-submit {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 24px;
+      background: linear-gradient(135deg, var(--brand), var(--brand-dark));
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-sm);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity .2s, transform .15s;
+      box-shadow: 0 4px 12px rgba(99, 102, 241, .35);
+    }
+
+    .btn-submit:hover {
+      opacity: .92;
+      transform: translateY(-1px);
+    }
+
+    .btn-submit:active {
+      transform: translateY(0);
+    }
+
+    .btn-submit:disabled {
+      opacity: .55;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    /* TOAST */
+    .toast-wrap {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      z-index: 2000;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .toast {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      font-size: 13px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: var(--shadow-lg);
+      min-width: 280px;
+      max-width: 380px;
+      transform: translateX(110%);
+      transition: transform .35s cubic-bezier(.16, 1, .3, 1);
+    }
+
+    .toast.show {
+      transform: translateX(0);
+    }
+
+    .toast.success {
+      border-left: 4px solid var(--success)
+    }
+
+    .toast.error {
+      border-left: 4px solid var(--danger)
+    }
+
+    .toast.info {
+      border-left: 4px solid var(--brand)
+    }
+
+    /* RESPONSIVE */
+    @media(max-width:768px) {
+      .summary-grid {
+        grid-template-columns: 1fr
+      }
+
+      .lc-body {
+        grid-template-columns: 1fr
+      }
+
+      .form-row {
+        grid-template-columns: 1fr
+      }
+
+      .emp-selector {
+        flex-direction: column;
+        align-items: stretch
+      }
+
+      .page-header {
+        flex-direction: column;
+        align-items: flex-start
+      }
+
+      .section-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px
+      }
+    }
+
+    @media(max-width:500px) {
+      .page-wrapper {
+        padding: 16px 14px 40px
+      }
+
+      .modal-body {
+        padding: 18px
+      }
+
+      .modal-header {
+        padding: 18px 20px 16px
+      }
+
+      .modal-footer {
+        padding: 14px 20px
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
+
+  <div class="page-wrapper">
+
+    <div class="page-header">
+      <div class="header-brand">
+        <div class="header-logo">&#128197;</div>
+        <div>
+          <h1>Employee Leave Portal</h1>
+          <p>Raise and track your leave requests</p>
+        </div>
+      </div>
+      <div class="header-badge">Employee Dashboard</div>
+    </div>
+
+    <div class="emp-selector">
+      <label for="employeeSelect">&#128100; Logged in as:</label>
+      <select id="employeeSelect">
+        <option value="">Select your name...</option>
+      </select>
+    </div>
+
+    <div class="summary-grid">
+      <div class="stat-card">
+        <div class="stat-icon pending">&#9203;</div>
+        <div class="stat-info">
+          <span class="stat-label">Pending</span>
+          <span class="stat-value" id="cntPending">0</span>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon approved">&#9989;</div>
+        <div class="stat-info">
+          <span class="stat-label">Approved</span>
+          <span class="stat-value" id="cntApproved">0</span>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon rejected">&#10060;</div>
+        <div class="stat-info">
+          <span class="stat-label">Rejected</span>
+          <span class="stat-value" id="cntRejected">0</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-row">
+      <h2>My Leave Requests</h2>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <span class="count-badge" id="reqCount"></span>
+        <button class="btn-primary" id="btnApplyLeave" disabled>&#43; Apply for Leave</button>
+      </div>
+    </div>
+
+    <div id="requestsContainer">
+      <div class="empty-state">
+        <div class="empty-icon">&#128070;</div>
+        <h3>Select your name above</h3>
+        <p>Choose your name from the dropdown to view your leave history and apply for new leave.</p>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- MODAL -->
+  <div class="modal-overlay" id="leaveModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="modalTitle">Apply for Leave</h2>
+          <p>Fill in the details below. Your manager will be notified automatically.</p>
+        </div>
+        <button class="modal-close" id="btnCloseModal" aria-label="Close">&#10005;</button>
+      </div>
+      <div class="modal-body">
+        <div class="info-box">
+          <span>&#8505;&#65039;</span>
+          <span>Once you submit this form, your leave request will be sent directly to your manager's email for
+            approval.</span>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="fStartDate">Start Date <span class="req-star">*</span></label>
+            <input type="date" id="fStartDate" />
+            <span class="field-error" id="errStartDate">Please select a start date.</span>
+          </div>
+          <div class="form-group">
+            <label for="fEndDate">End Date <span class="req-star">*</span></label>
+            <input type="date" id="fEndDate" />
+            <span class="field-error" id="errEndDate">End date must be on or after start date.</span>
+          </div>
+        </div>
+        <div class="form-row full">
+          <div class="form-group">
+            <label for="fLeaveType">Leave Type <span class="req-star">*</span></label>
+            <select id="fLeaveType">
+              <option value="">-- Select leave type --</option>
+              <option value="Sick Leave">Sick Leave</option>
+              <option value="Casual Leave">Casual Leave</option>
+              <option value="Annual Leave">Annual Leave</option>
+              <option value="Maternity Leave">Maternity Leave</option>
+              <option value="Paternity Leave">Paternity Leave</option>
+              <option value="Emergency Leave">Emergency Leave</option>
+              <option value="Unpaid Leave">Unpaid Leave</option>
+              <option value="Other">Other</option>
+            </select>
+            <span class="field-error" id="errLeaveType">Please select a leave type.</span>
+          </div>
+        </div>
+        <div class="form-row full">
+          <div class="form-group">
+            <label for="fManagerEmail">Manager Email <span class="req-star">*</span></label>
+            <input type="email" id="fManagerEmail" placeholder="Auto-filled from your profile" readonly
+              style="background:#f9fafb;cursor:not-allowed;" />
+            <span class="field-error" id="errManagerEmail">Manager email could not be found. Please contact HR.</span>
+          </div>
+        </div>
+        <div class="form-row full">
+          <div class="form-group">
+            <label for="fReason">Reason <span class="req-star">*</span></label>
+            <textarea id="fReason" rows="3" placeholder="Briefly describe the reason for your leave..."></textarea>
+            <span class="field-error" id="errReason">Please provide a reason for your leave.</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-cancel" id="btnCancelLeave">Cancel</button>
+        <button class="btn-submit" id="btnSubmitLeave">
+          <span id="submitBtnText">Submit Request</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /* =====================================================
+       CONFIGURATION — update to match your Zoho Creator app
+    ===================================================== */
+    const APP_NAME = "leave-management";
+    const EMPLOYEE_REPORT = "All_Employee_Details";
+    const LEAVE_REPORT = "All_Requests";
+    const LEAVE_FORM = "leave_request_form";
+
+    /* =====================================================
+       DOM REFS
+    ===================================================== */
+    const employeeSelect = document.getElementById("employeeSelect");
+    const container = document.getElementById("requestsContainer");
+    const cntPending = document.getElementById("cntPending");
+    const cntApproved = document.getElementById("cntApproved");
+    const cntRejected = document.getElementById("cntRejected");
+    const reqCount = document.getElementById("reqCount");
+    const btnApplyLeave = document.getElementById("btnApplyLeave");
+    const leaveModal = document.getElementById("leaveModal");
+    const btnCloseModal = document.getElementById("btnCloseModal");
+    const btnCancelLeave = document.getElementById("btnCancelLeave");
+    const btnSubmitLeave = document.getElementById("btnSubmitLeave");
+    const submitBtnText = document.getElementById("submitBtnText");
+    const fStartDate = document.getElementById("fStartDate");
+    const fEndDate = document.getElementById("fEndDate");
+    const fLeaveType = document.getElementById("fLeaveType");
+    const fManagerEmail = document.getElementById("fManagerEmail");
+    const fReason = document.getElementById("fReason");
+
+    let currentEmployee = null;
+    let allEmployeesCache = [];
+
+    /* =====================================================
+       UTILITIES
+    ===================================================== */
+    const extractName = (val) => {
+      if (!val) return "";
+      if (typeof val === "object") {
+        return (
+          val.zc_display_value ||
+          val.display_value ||
+          `${val.first_name || ""} ${val.last_name || ""}`.trim() ||
+          val.name || val.value || ""
+        );
+      }
+      return String(val).trim();
+    };
+
+    const getRecordVal = (record, keys, pattern) => {
+      for (const k of keys) {
+        if (record[k] !== undefined && record[k] !== null && record[k] !== "") {
+          const v = record[k];
+          return typeof v === "object" ? extractName(v) : String(v).trim();
+        }
+      }
+      if (pattern) {
+        for (const k of Object.keys(record)) {
+          if (pattern.test(k) && record[k] !== undefined && record[k] !== null && record[k] !== "") {
+            const v = record[k];
+            return typeof v === "object" ? extractName(v) : String(v).trim();
+          }
+        }
+      }
+      return "";
+    };
+
+    const formatDate = (val) => {
+      if (!val || val === "-") return "-";
+      try {
+        const d = new Date(val);
+        if (!isNaN(d)) return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+      } catch (_) { }
+      return val;
+    };
+
+    /* =====================================================
+       TOAST
+    ===================================================== */
+    const showToast = (msg, type = "info") => {
+      const icons = { success: "&#9989;", error: "&#10060;", info: "&#8505;" };
+      const wrap = document.getElementById("toastWrap");
+      const t = document.createElement("div");
+      t.className = `toast ${type}`;
+      t.innerHTML = `<span>${icons[type]}</span><span>${msg}</span>`;
+      wrap.appendChild(t);
+      requestAnimationFrame(() => requestAnimationFrame(() => t.classList.add("show")));
+      setTimeout(() => {
+        t.classList.remove("show");
+        setTimeout(() => t.parentNode?.removeChild(t), 400);
+      }, 5000);
+    };
+
+    /* =====================================================
+       LOAD EMPLOYEES
+       SDK v2: ZOHO.CREATOR.DATA.getRecords({ app_name, report_name })
+       No init() required for Widget SDK v2.
+    ===================================================== */
+    const loadEmployees = async () => {
+      try {
+        const res = await ZOHO.CREATOR.DATA.getRecords({
+          app_name: APP_NAME,
+          report_name: EMPLOYEE_REPORT,
+          max_records: 200
+        });
+
+        // ── API RESPONSE LOG ────────────────────────────────────
+        console.log("[Employee API] Full response:", res);
+        console.log("[Employee API] Response code:", res.code);
+        // ────────────────────────────────────────────────────────
+
+        if (res.code !== 3000) {
+          showToast("Unable to load employees.", "error");
+          return;
+        }
+
+        const employees = Array.isArray(res.data) ? res.data : [];
+        allEmployeesCache = employees;
+
+        // ── LOG EACH EMPLOYEE: ID + MANAGER EMAIL ───────────────
+        console.log("[Employee API] Total records returned:", employees.length);
+        console.table(employees.map((emp) => ({
+          Employee_ID: emp.Employee_ID || emp.ID || "(not found)",
+          Manager_Email: emp.Manager_Email || emp.Manager_email || emp.manager_email || "(not found)",
+          Employee_Type: emp.Employee_Type || "(not found)",
+          Name: extractName(emp.Name) || extractName(emp.Employee_Name) || emp.zc_display_value || "(not found)"
+        })));
+        // ────────────────────────────────────────────────────────
+
+        employeeSelect.innerHTML = '<option value="">Select your name...</option>';
+
+        employees.forEach((emp) => {
+          const empType = String(emp.Employee_Type || "").trim().toLowerCase();
+          if (empType === "manager") return;
+
+          const empId = emp.Employee_ID || emp.ID || "";
+          const empName = extractName(emp.Name) || extractName(emp.Employee_Name) ||
+            emp.zc_display_value || emp.display_value || empId || "Employee";
+
+          // ── PER-EMPLOYEE LOG ─────────────────────────────────
+          console.log(
+            "[Employee]",
+            "ID:", empId,
+            "| Manager Email:", emp.Manager_Email || emp.Manager_email || emp.manager_email || "(not found)",
+            "| Raw record:", emp
+          );
+          // ────────────────────────────────────────────────────
+
+          const opt = document.createElement("option");
+          opt.value = empId;
+          opt.textContent = empName;
+          opt.dataset.record = JSON.stringify(emp);
+          employeeSelect.appendChild(opt);
+        });
+
+      } catch (err) {
+        console.error("[Employee API] Request failed:", err);
+        showToast("Failed to load employee list.", "error");
+      }
+    };
+
+    /* =====================================================
+       EMPLOYEE SELECTION
+    ===================================================== */
+    employeeSelect.addEventListener("change", () => {
+      const selected = employeeSelect.options[employeeSelect.selectedIndex];
+      if (!selected?.dataset.record) {
+        currentEmployee = null;
+        btnApplyLeave.disabled = true;
+        resetStats();
+        container.innerHTML = `<div class="empty-state"><div class="empty-icon">&#128070;</div><h3>Select your name above</h3><p>Choose your name from the dropdown to view your leave history.</p></div>`;
+        return;
+      }
+      try { currentEmployee = JSON.parse(selected.dataset.record); }
+      catch (_) { currentEmployee = null; }
+      btnApplyLeave.disabled = false;
+      loadMyLeaveRequests();
+    });
+
+    /* =====================================================
+       LOAD MY LEAVE REQUESTS
+       SDK v2: ZOHO.CREATOR.DATA.getRecords({ app_name, report_name })
+    ===================================================== */
+    const loadMyLeaveRequests = async () => {
+      if (!currentEmployee) return;
+      container.innerHTML = `<div class="loading-box"><div class="spinner"></div><span>Loading your leave history...</span></div>`;
+      resetStats();
+      reqCount.textContent = "";
+
+      try {
+        const res = await ZOHO.CREATOR.DATA.getRecords({
+          app_name: APP_NAME,
+          report_name: LEAVE_REPORT,
+          max_records: 200
+        });
+
+        if (res.code !== 3000) {
+          container.innerHTML = `<div class="empty-state"><div class="empty-icon">&#9888;</div><h3>Could not load requests</h3><p>Please try again later.</p></div>`;
+          return;
+        }
+
+        const all = Array.isArray(res.data) ? res.data : [];
+        const myId = String(currentEmployee.Employee_ID || currentEmployee.ID || "").trim().toLowerCase();
+        const myEmail = String(currentEmployee.Email_ID || currentEmployee.Email || "").trim().toLowerCase();
+        const myName = String(extractName(currentEmployee.Name) || extractName(currentEmployee.Employee_Name) || "").trim().toLowerCase();
+
+        const mine = all.filter((r) => {
+          const empField = r.Employee || r.Regular_Employee || r.Applicant || {};
+          const recEmpId = String(
+            (typeof empField === "object"
+              ? empField.ID || empField.Employee_ID || empField.zc_display_value || ""
+              : empField) ||
+            r.Employee_ID || r.Emp_ID || ""
+          ).trim().toLowerCase();
+          const recEmpEmail = String(
+            r.Employee_Email || r.Email_ID || r.Email ||
+            (typeof empField === "object" ? empField.Email_ID || empField.Email || "" : "") || ""
+          ).trim().toLowerCase();
+
+          if (myId && (recEmpId === myId || recEmpId === myEmail)) return true;
+          if (myEmail && (recEmpEmail === myEmail || recEmpId === myEmail)) return true;
+
+          const empDisplay = String(
+            r.Regular_Employee_display_value || r.Employee_display_value || r.Employee_Name || ""
+          ).trim().toLowerCase();
+          return myName && empDisplay === myName;
+        });
+
+        updateStats(mine);
+        renderMyRequests(mine);
+
+      } catch (err) {
+        console.error("[Leave API] Request failed:", err);
+        container.innerHTML = `<div class="empty-state"><div class="empty-icon">&#9888;</div><h3>Something went wrong</h3><p>Unable to load leave history.</p></div>`;
+      }
+    };
+
+    /* =====================================================
+       STATS
+    ===================================================== */
+    const resetStats = () => {
+      cntPending.textContent = "0";
+      cntApproved.textContent = "0";
+      cntRejected.textContent = "0";
+    };
+
+    const updateStats = (records) => {
+      let p = 0, a = 0, r = 0;
+      records.forEach((rec) => {
+        const s = String(rec.Status || "Pending").trim().toLowerCase();
+        if (s === "approved") a++;
+        else if (s === "rejected") r++;
+        else p++;
+      });
+      cntPending.textContent = p;
+      cntApproved.textContent = a;
+      cntRejected.textContent = r;
+    };
+
+    /* =====================================================
+       RENDER MY REQUESTS
+    ===================================================== */
+    const renderMyRequests = (records) => {
+      container.innerHTML = "";
+
+      if (!records.length) {
+        reqCount.textContent = "0 requests";
+        container.innerHTML = `<div class="empty-state"><div class="empty-icon">&#128235;</div><h3>No leave requests yet</h3><p>Click "Apply for Leave" to raise your first leave request.</p></div>`;
+        return;
+      }
+
+      reqCount.textContent = `${records.length} ${records.length === 1 ? "request" : "requests"}`;
+
+      records.sort((a, b) => {
+        const sa = String(a.Status || "Pending").toLowerCase();
+        const sb = String(b.Status || "Pending").toLowerCase();
+        if (sa === "pending" && sb !== "pending") return -1;
+        if (sb === "pending" && sa !== "pending") return 1;
+        return 0;
+      });
+
+      records.forEach((rec) => {
+        const status = String(rec.Status || "Pending").trim();
+        const statusLow = status.toLowerCase();
+        const leaveType = getRecordVal(rec, ["Leave_Type", "Type_of_Leave", "Leave_Category"], /leave_type|type/i) || "-";
+        const startDate = getRecordVal(rec, ["Start_Date", "Leave_Start_Date", "From_Date", "From"], /start|from/i) || "-";
+        const endDate = getRecordVal(rec, ["End_Date", "Leave_End_Date", "To_Date", "To"], /(end|to)/i) || "-";
+        const reason = getRecordVal(rec, ["Reason", "Reason_for_Leave", "Leave_Reason", "Description"], /reason|remark|desc/i) || "-";
+        const comment = getRecordVal(rec, ["Approval_Comment", "Manager_Comment", "Comment"], /comment|remark/i) || "";
+        const mgrEmail = String(rec.Manager_Email || "").trim();
+
+        const badgeClass = statusLow === "approved" ? "approved" : statusLow === "rejected" ? "rejected" : "pending";
+        const badgeIcon = statusLow === "approved" ? "&#9989;" : statusLow === "rejected" ? "&#10060;" : "&#9203;";
+        const slClass = `sl-${badgeClass}`;
+
+        const card = document.createElement("div");
+        card.className = `leave-card ${slClass}`;
+
+        const commentHtml = comment
+          ? `<div class="comment-quote ${statusLow === "approved" ? "app-q" : "rej-q"}"><strong>Manager comment:</strong> ${comment}</div>`
+          : "";
+
+        card.innerHTML = `
+          <div class="lc-header">
+            <div>
+              <div class="lc-title">${leaveType}</div>
+              <div class="lc-sub">${formatDate(startDate)} &rarr; ${formatDate(endDate)}</div>
+            </div>
+            <span class="badge ${badgeClass}">${badgeIcon} ${status}</span>
+          </div>
+          <div class="lc-body">
+            <div class="detail-pill"><span class="dp-label">Start Date</span><span class="dp-val">${formatDate(startDate)}</span></div>
+            <div class="detail-pill"><span class="dp-label">End Date</span><span class="dp-val">${formatDate(endDate)}</span></div>
+            <div class="detail-pill"><span class="dp-label">Leave Type</span><span class="dp-val">${leaveType}</span></div>
+            <div class="detail-pill" style="grid-column:1/-1"><span class="dp-label">Reason</span><span class="dp-val" style="font-weight:400;">${reason}</span></div>
+          </div>
+          <div class="lc-footer">&#128231; Manager: ${mgrEmail || "-"}${commentHtml}</div>`;
+
+        container.appendChild(card);
+      });
+    };
+
+    /* =====================================================
+       MODAL
+    ===================================================== */
+    const getManagerEmail = (emp) => {
+      // 1. Get the lookup ID from Reports_To
+      const reportsTo = emp.Reports_To || emp.reports_to || emp.Reports_to;
+      if (reportsTo) {
+        const managerId = typeof reportsTo === "object" ? (reportsTo.ID || reportsTo.zc_display_value) : reportsTo;
+        // 2. Find the manager's record in our cached employee list
+        const manager = allEmployeesCache.find(e => String(e.ID) === String(managerId) || String(e.Employee_ID) === String(managerId));
+        if (manager) {
+          return String(manager.Email_ID || manager.Email || manager.Email_id || "").trim();
+        }
+      }
+      // Fallback
+      return String(emp.Manager_Email || emp.Manager_email || emp.manager_email || "").trim();
+    };
+
+    const openModal = () => {
+      fManagerEmail.value = getManagerEmail(currentEmployee);
+      const today = new Date().toISOString().split("T")[0];
+      fStartDate.min = today;
+      fEndDate.min = today;
+      fStartDate.value = today;
+      fEndDate.value = today;
+      fLeaveType.value = "";
+      fReason.value = "";
+      clearErrors();
+      leaveModal.classList.add("open");
+      document.body.style.overflow = "hidden";
+    };
+
+    const closeModal = () => {
+      leaveModal.classList.remove("open");
+      document.body.style.overflow = "";
+    };
+
+    btnApplyLeave.addEventListener("click", openModal);
+    btnCloseModal.addEventListener("click", closeModal);
+    btnCancelLeave.addEventListener("click", closeModal);
+    leaveModal.addEventListener("click", (e) => { if (e.target === leaveModal) closeModal(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && leaveModal.classList.contains("open")) closeModal(); });
+
+    /* =====================================================
+       FORM VALIDATION
+    ===================================================== */
+    const clearErrors = () => {
+      document.querySelectorAll(".field-error").forEach((el) => el.classList.remove("show"));
+      document.querySelectorAll(".invalid").forEach((el) => el.classList.remove("invalid"));
+    };
+
+    const showError = (fieldId, errId) => {
+      document.getElementById(fieldId)?.classList.add("invalid");
+      document.getElementById(errId)?.classList.add("show");
+    };
+
+    const validateForm = () => {
+      clearErrors();
+      let valid = true;
+      if (!fStartDate.value) { showError("fStartDate", "errStartDate"); valid = false; }
+      if (!fEndDate.value || fEndDate.value < fStartDate.value) { showError("fEndDate", "errEndDate"); valid = false; }
+      if (!fLeaveType.value) { showError("fLeaveType", "errLeaveType"); valid = false; }
+      if (!fManagerEmail.value.trim()) { showError("fManagerEmail", "errManagerEmail"); valid = false; }
+      if (!fReason.value.trim()) { showError("fReason", "errReason"); valid = false; }
+      return valid;
+    };
+
+    /* =====================================================
+       SUBMIT LEAVE REQUEST
+       SDK v2: ZOHO.CREATOR.DATA.addRecords({ app_name, form_name, payload })
+       — There is no ZOHO.CREATOR.API namespace in v2.
+       — Fields go inside payload.data, as an array of records.
+       — The Deluge "On Add" workflow on leave_request_form
+         automatically emails the manager.
+    ===================================================== */
+    btnSubmitLeave.addEventListener("click", async () => {
+      if (!validateForm()) return;
+
+      const empId = currentEmployee.Employee_ID || currentEmployee.ID || "";
+
+      btnSubmitLeave.disabled = true;
+      submitBtnText.textContent = "Submitting...";
+
+      try {
+        const res = await ZOHO.CREATOR.DATA.addRecords({
+          app_name: APP_NAME,
+          form_name: LEAVE_FORM,
+          payload: {
+            data: [{
+              Start_Date: fStartDate.value,
+              End_Date: fEndDate.value,
+              Leave_Type: fLeaveType.value,
+              Manager_Email: fManagerEmail.value.trim(),
+              Reason: fReason.value.trim(),
+              Status: "Pending",
+              Employee: empId
+            }]
+          }
+        });
+
+        console.log("[addRecords] Full response:", res);
+
+        btnSubmitLeave.disabled = false;
+        submitBtnText.textContent = "Submit Request";
+
+        // addRecords reports per-record status inside res.result[]
+        const row = Array.isArray(res.result) ? res.result[0] : null;
+        const ok = res.code === 3000 && (!row || row.code === 3000);
+
+        if (ok) {
+          closeModal();
+          showToast("Leave request submitted! Your manager has been notified.", "success");
+          loadMyLeaveRequests();
+        } else {
+          const msg = row?.message ?? row?.error?.message ?? res.error?.message
+            ?? "Failed to submit. Please try again.";
+          showToast(msg, "error");
+        }
+      } catch (err) {
+        btnSubmitLeave.disabled = false;
+        submitBtnText.textContent = "Submit Request";
+        showToast("Unexpected error occurred.", "error");
+        console.error("[addRecords] Error:", err);
+      }
+    });
+
+    fStartDate.addEventListener("change", () => {
+      if (fEndDate.value && fEndDate.value < fStartDate.value) fEndDate.value = fStartDate.value;
+      fEndDate.min = fStartDate.value;
+    });
+
+    /* =====================================================
+       INITIALIZE
+       Widget SDK v2 — No ZOHO.CREATOR.init() required.
+    ===================================================== */
+    if (typeof ZOHO !== "undefined") {
+      loadEmployees();
+    } else {
+      container.innerHTML = `<div class="empty-state"><div class="empty-icon">&#9888;</div><h3>SDK Not Available</h3><p>Zoho Creator SDK could not be loaded.</p></div>`;
+    }
+  </script>
+
+</body>
+
+</html>

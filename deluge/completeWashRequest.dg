@@ -1,0 +1,140 @@
+void completeWashRequest()
+{
+	// Report custom action on the Wash Request report, Detail View ->
+	// "For Selected Record" -> "Mark washed".
+	//
+	// Runs against ONE record - the one open in the detail view. Creator gives the
+	// script the current record's ID, so nothing has to be passed in.
+	//
+	// NOTE ON INPUT. A custom action fires the moment it is pressed and cannot
+	// prompt for anything, so Washed_Qty has to be typed into the record BEFORE the
+	// button is used - either by editing the record, or inline in the list if
+	// inline edit is enabled on that column. Left blank it assumes the full
+	// requested amount came back, which is the common case but not always true.
+	//
+	// Completing a job does three things, in this order:
+	//   1. moves the cloth from Unwash_Quantity to Wash_Quantity
+	//   2. stamps the request Completed
+	//   3. resolves the Material_Exception that queued it
+	//
+	// Washed_Qty is what moves, not Requested_Qty. You send 3.8m and 3.5m survives
+	// the wash; moving the requested figure would put stock on the shelf that does
+	// not physically exist. It is NOT capped at the amount requested - washing more
+	// than was asked for is normal, and the only real ceiling is how much unwashed
+	// cloth there actually is.
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic error, so catch the real message.
+	try
+	{
+	// The current record. If the workflow editor rejects a bare ID here, the
+	// other form Creator uses is input.ID - one of the two resolves.
+	recId = ID;
+
+	for each  wr in Wash_Request[ID == recId]
+	{
+		// A Completed or Cancelled row must never be processed twice - there
+		// is no undo on a quantity move.
+		if(wr.Status == "Pending" || wr.Status == "In_Progress")
+		{
+			// Creator fields that were never written are EMPTY, not null, and
+			// toDecimal() throws on empty - normalise to string first.
+			reqStr = ifnull(wr.Requested_Qty,"0").toString().trim();
+			if(reqStr == "")
+			{
+				reqStr = "0";
+			}
+			washStr = ifnull(wr.Washed_Qty,"0").toString().trim();
+			if(washStr == "")
+			{
+				washStr = "0";
+			}
+			reqQty = reqStr.toDecimal();
+			gotQty = washStr.toDecimal();
+
+			// Nothing typed means all of it came back.
+			if(gotQty <= 0)
+			{
+				gotQty = reqQty;
+			}
+
+			matRec = null;
+			for each  rm in Raw_Material[ID == wr.Material]
+			{
+				matRec = rm;
+			}
+
+			if(matRec != null && gotQty > 0)
+			{
+				unwStr = ifnull(matRec.Unwash_Quantity,"0").toString().trim();
+				if(unwStr == "")
+				{
+					unwStr = "0";
+				}
+				wshStr = ifnull(matRec.Wash_Quantity,"0").toString().trim();
+				if(wshStr == "")
+				{
+					wshStr = "0";
+				}
+				unwQty = unwStr.toDecimal();
+				wshQty = wshStr.toDecimal();
+
+				// Cannot wash cloth that is not there. Capped rather than
+				// refused - the cloth has physically been washed either way,
+				// and letting unwashed go negative leaves the ledger further
+				// from the truth than a capped figure does.
+				moveQty = gotQty;
+				if(moveQty > unwQty)
+				{
+					moveQty = unwQty;
+					info "capped: entered " + gotQty + " but only " + unwQty + " unwashed";
+				}
+
+				if(moveQty > 0)
+				{
+					matRec.Unwash_Quantity = unwQty - moveQty;
+					matRec.Wash_Quantity = wshQty + moveQty;
+				}
+
+				wr.Washed_Qty = moveQty;
+				wr.Status = "Completed";
+				wr.Completed_On = zoho.currentdate;
+
+				//------------------------------------------------------
+				// Close the ticket that queued this. Resolved rather than
+				// deleted - the exception is the record of why the wash
+				// happened at all.
+				//
+				// Closed even when the wash came back short. If the material
+				// is still not enough, the store summary shows it as short
+				// again on the next load and a fresh request can be raised. A
+				// ticket left open on a finished job reads as work in hand.
+				//------------------------------------------------------
+				if(wr.Exception != null)
+				{
+					for each  ex in Material_Exception[ID == wr.Exception]
+					{
+						if(ex.Status == "Open")
+						{
+							oldNote = ifnull(ex.Note,"").toString();
+							addNote = zoho.currentdate.toString("dd-MMM HH:mm") + " - washed " + moveQty + ", request closed";
+							if(oldNote != "")
+							{
+								addNote = oldNote + "\n" + addNote;
+							}
+							ex.Note = addNote;
+							ex.Status = "Resolved";
+						}
+					}
+				}
+
+				info "wash completed: " + wr.Material_Name + " moved " + moveQty;
+			}
+		}
+	}
+	}
+	catch (e)
+	{
+		info "completeWashRequest failed: " + e.toString();
+	}
+}
