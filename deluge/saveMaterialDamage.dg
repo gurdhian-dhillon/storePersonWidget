@@ -38,6 +38,7 @@ string saveMaterialDamage(string payloadJson)
 	//   Stage_Log        Lookup   -> Stage_Log        (optional)
 	//   Phase_Name       Single Line                  (optional)
 	//   Damaged_Pieces   Number
+	//   Damage_Reason    Single Line
 	//   Note             Multi Line
 	//   Reported_On      Date
 	//   Status           Dropdown - Open / Closed     (default Open)
@@ -77,6 +78,7 @@ string saveMaterialDamage(string payloadJson)
 	stageIdTxt = ifnull(inp.get("stageLogId"),"").toString().trim();
 	phaseTxt = ifnull(inp.get("phaseName"),"").toString().trim();
 	noteTxt = ifnull(inp.get("note"),"").toString();
+	reasonTxt = ifnull(inp.get("reason"),"").toString().trim();
 
 	// Creator fields that were never written are EMPTY, not null.
 	dpStr = ifnull(inp.get("damagedPieces"),"0").toString().trim();
@@ -165,6 +167,7 @@ string saveMaterialDamage(string payloadJson)
 		Sales_Order_No=soNoTxt
 		Phase_Name=phaseTxt
 		Damaged_Pieces=damagedPieces
+		Damage_Reason=reasonTxt
 		Note=noteTxt
 		Reported_On=zoho.currentdate
 		Status="Open"
