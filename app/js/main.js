@@ -2986,8 +2986,24 @@ document.getElementById('refresh-btn').addEventListener('click', function () {
 
 var MATERIALS_DATA = null;
 var RAW_MATERIAL_FILTER = 'fabric'; // 'fabric' or 'other'
-var EXPANDED_PATTERNS = {}; // patternName -> boolean
+var EXPANDED_PATTERNS = {}; // grpName -> boolean
 var MATERIAL_SEARCH_TERM = '';
+
+// Helper to get base group name
+function getBaseGroupName(rm) {
+    var name = rm.name || '';
+    var parts = name.split('/').map(function (s) { return s.trim(); });
+    if (rm.isFabric) {
+        if (parts.length >= 2) {
+            return parts[0] + ' / ' + parts[1];
+        }
+    } else {
+        if (parts.length >= 1) {
+            return parts[0];
+        }
+    }
+    return name;
+}
 
 function loadMaterials() {
     var panel = document.getElementById('panel-materials');
@@ -3008,8 +3024,8 @@ function loadMaterials() {
             // Initialize expanded patterns to true for the first load
             if (Object.keys(EXPANDED_PATTERNS).length === 0) {
                 MATERIALS_DATA.forEach(function (rm) {
-                    var pat = rm.pattern || 'No Pattern';
-                    EXPANDED_PATTERNS[pat] = true;
+                    var grp = getBaseGroupName(rm);
+                    EXPANDED_PATTERNS[grp] = true;
                 });
             }
             
@@ -3046,18 +3062,18 @@ function renderMaterials() {
         return true;
     });
 
-    // 2. Group by Pattern
+    // 2. Group by Base Name
     var grouped = {};
-    var patternOrder = [];
+    var groupOrder = [];
     filtered.forEach(function (rm) {
-        var pat = rm.pattern || 'No Pattern';
-        if (!grouped[pat]) {
-            grouped[pat] = [];
-            patternOrder.push(pat);
+        var grp = getBaseGroupName(rm);
+        if (!grouped[grp]) {
+            grouped[grp] = [];
+            groupOrder.push(grp);
         }
-        grouped[pat].push(rm);
+        grouped[grp].push(rm);
     });
-    patternOrder.sort();
+    groupOrder.sort();
 
     // 3. Sub-tabs HTML
     var activeClassFabric = RAW_MATERIAL_FILTER === 'fabric' ? ' is-active' : '';
@@ -3086,11 +3102,11 @@ function renderMaterials() {
         return;
     }
 
-    // 4. Accordion Pattern Groups HTML
+    // 4. Accordion Groups HTML
     html += '<div class="materials-accordion">';
-    patternOrder.forEach(function (pat) {
-        var list = grouped[pat];
-        var isExpanded = EXPANDED_PATTERNS[pat] !== false;
+    groupOrder.forEach(function (grp) {
+        var list = grouped[grp];
+        var isExpanded = EXPANDED_PATTERNS[grp] !== false;
         var icon = isExpanded ? '▼' : '▶';
         var tableHtml = '';
 
@@ -3105,6 +3121,7 @@ function renderMaterials() {
                     '<td style="font-weight:600; white-space:nowrap;">' + escapeHtml(rm.sku) + '</td>' +
                     '<td style="font-weight:700;">' + escapeHtml(rm.name) + '</td>' +
                     '<td>' + (escapeHtml(rm.type) || '<span class="muted">—</span>') + '</td>' +
+                    '<td>' + (escapeHtml(rm.pattern) || '<span class="muted">—</span>') + '</td>' +
                     '<td>' + (escapeHtml(rm.color) || '<span class="muted">—</span>') + '</td>' +
                     '<td class="r ' + stockClass + '" style="font-variant-numeric:tabular-nums; font-weight:600;">' + stockLabel + unitLabel + '</td>' +
                     '</tr>';
@@ -3114,10 +3131,11 @@ function renderMaterials() {
                 '<table class="rep-table" style="margin-bottom:0;">' +
                 '<thead><tr>' +
                 '<th style="width:15%">SKU</th>' +
-                '<th style="width:40%">Item Name</th>' +
+                '<th style="width:35%">Item Name</th>' +
                 '<th style="width:15%">Type</th>' +
-                '<th style="width:15%">Color</th>' +
-                '<th class="r" style="width:15%">Stock</th>' +
+                '<th style="width:15%">Pattern</th>' +
+                '<th style="width:10%">Color</th>' +
+                '<th class="r" style="width:10%">Stock</th>' +
                 '</tr></thead>' +
                 '<tbody>' + rows + '</tbody>' +
                 '</table>' +
@@ -3127,8 +3145,8 @@ function renderMaterials() {
         // Card header style matching disputes or issues
         var expandedHeaderStyle = isExpanded ? 'border-bottom-left-radius:0; border-bottom-right-radius:0;' : '';
         html += '<div style="margin-bottom:12px; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow-sm);">' +
-            '<button type="button" class="group-header-btn" data-pattern="' + escapeHtml(pat) + '" style="display:flex; width:100%; align-items:center; justify-content:space-between; padding:12px 16px; background:#f8fafc; border:none; text-align:left; font:inherit; font-weight:700; color:var(--text-main); cursor:pointer; ' + expandedHeaderStyle + '">' +
-            '<span>' + escapeHtml(pat) + ' <span style="font-weight:400; color:var(--text-muted); font-size:12px; margin-left:6px;">(' + list.length + ')</span></span>' +
+            '<button type="button" class="group-header-btn" data-pattern="' + escapeHtml(grp) + '" style="display:flex; width:100%; align-items:center; justify-content:space-between; padding:12px 16px; background:#f8fafc; border:none; text-align:left; font:inherit; font-weight:700; color:var(--text-main); cursor:pointer; ' + expandedHeaderStyle + '">' +
+            '<span>' + escapeHtml(grp) + ' <span style="font-weight:400; color:var(--text-muted); font-size:12px; margin-left:6px;">(' + list.length + ')</span></span>' +
             '<span style="font-size:10px; color:var(--text-muted); transition:transform 0.15s ease;">' + icon + '</span>' +
             '</button>' +
             tableHtml +
