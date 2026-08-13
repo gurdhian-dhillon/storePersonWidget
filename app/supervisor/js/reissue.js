@@ -18,6 +18,22 @@
 var reissueItems = [];
 var damageCtx = null;
 
+// ---- Damage reason options ----
+//
+// Shown in the Report damage modal as a mandatory dropdown. High-level
+// reason — the detail goes into the "What happened?" note.
+var DAMAGE_REASONS = [
+    'Store person sent damaged material',
+    'Store person sent wrong material',
+    'Cutting mistake',
+    'Stitching / sewing mistake',
+    'Printing / embroidery mistake',
+    'Pressing / ironing damage',
+    'Handling damage',
+    'Machine malfunction',
+    'Other'
+];
+
 // ---- Shared modal shell ----
 //
 // Its own element rather than supModalEl(): the damage dialog can be opened from
@@ -73,59 +89,59 @@ function openDamageDialog(plan, item, opts) {
     el.classList.remove('hidden');
     el.innerHTML =
         '<div class="exc-panel exc-panel-wide">' +
-            '<h3>' + (fromStage ? 'Pieces did not come through' : 'Report damage') + '</h3>' +
-            '<p class="exc-sub">' + escapeHtml(item.name || '') +
-                (item.sku ? ' &middot; ' + escapeHtml(item.sku) : '') +
-                (o.phaseName ? ' &middot; ' + escapeHtml(o.phaseName) : '') + '</p>' +
+        '<h3>' + (fromStage ? 'Pieces did not come through' : 'Report damage') + '</h3>' +
+        '<p class="exc-sub">' + escapeHtml(item.name || '') +
+        (item.sku ? ' &middot; ' + escapeHtml(item.sku) : '') +
+        (o.phaseName ? ' &middot; ' + escapeHtml(o.phaseName) : '') + '</p>' +
 
-            (fromStage
-                // Says what it already knows rather than asking. He can still
-                // change the number — the stage figure is what came out, and how
-                // many were RUINED is a different question: some may simply be
-                // sitting unfinished on the bench.
-                ? '<div class="dmg-lead">' +
-                      '<b>' + o.pieces + '</b> fewer piece' + (o.pieces === 1 ? '' : 's') +
-                      ' came out of ' + escapeHtml(o.phaseName || 'this stage') +
-                      ' than went in. What material went with them?' +
-                  '</div>'
-                : '') +
+        (fromStage
+            // Says what it already knows rather than asking. He can still
+            // change the number — the stage figure is what came out, and how
+            // many were RUINED is a different question: some may simply be
+            // sitting unfinished on the bench.
+            ? '<div class="dmg-lead">' +
+            '<b>' + o.pieces + '</b> fewer piece' + (o.pieces === 1 ? '' : 's') +
+            ' came out of ' + escapeHtml(o.phaseName || 'this stage') +
+            ' than went in. What material went with them?' +
+            '</div>'
+            : '') +
 
-            '<div class="dmg-step">' +
-                '<label for="dmg-pieces">How many pieces were spoiled?</label>' +
-                '<input type="number" id="dmg-pieces" min="0" step="1" value="' +
-                    (fromStage ? o.pieces : 1) + '">' +
-                // A label torn while being attached ruins no garment. Saying so
-                // here stops him typing 1 to get past the box and inventing a
-                // piece loss that never happened.
-                '<p class="exc-hint">Put <b>0</b> if no garment was spoiled &mdash; ' +
-                    'a torn label or a snapped thread still costs material.</p>' +
-            '</div>' +
+        '<div class="dmg-step">' +
+        '<label for="dmg-pieces">How many pieces were spoiled?</label>' +
+        '<input type="number" id="dmg-pieces" min="0" step="1" value="' +
+        (fromStage ? o.pieces : 1) + '">' +
+        // A label torn while being attached ruins no garment. Saying so
+        // here stops him typing 1 to get past the box and inventing a
+        // piece loss that never happened.
+        '<p class="exc-hint">Put <b>0</b> if no garment was spoiled &mdash; ' +
+        'a torn label or a snapped thread still costs material.</p>' +
+        '</div>' +
 
-            // THE REMAKE DECISION, separate from the material one.
-            //
-            // He cannot wait for the cloth — a reissue takes days — so the good
-            // pieces carry on and finish, and ticking this opens a second batch
-            // for the replacements that runs whenever the material turns up.
-            // Without it the order simply ends short.
-            //
-            // Only meaningful when a garment was actually spoiled: a torn label
-            // ruins no piece, so there is nothing to make again.
-            '<div class="dmg-step" id="dmg-remake-wrap">' +
-                '<label class="dmg-check">' +
-                    '<input type="checkbox" id="dmg-remake" checked>' +
-                    '<span>These pieces need making again</span>' +
-                '</label>' +
-                '<p class="exc-hint">A second batch is opened for them straight away. ' +
-                    'The pieces you already have carry on and finish without waiting.</p>' +
-            '</div>' +
+        // THE REMAKE DECISION, separate from the material one.
+        //
+        // He cannot wait for the cloth — a reissue takes days — so the good
+        // pieces carry on and finish, and ticking this opens a second batch
+        // for the replacements that runs whenever the material turns up.
+        // Without it the order simply ends short.
+        //
+        // Only meaningful when a garment was actually spoiled: a torn label
+        // ruins no piece, so there is nothing to make again.
+        '<div class="dmg-step" id="dmg-remake-wrap">' +
+        '<label class="dmg-check">' +
+        '<input type="checkbox" id="dmg-remake" checked>' +
+        '<span>These pieces need making again</span>' +
+        '</label>' +
+        '<p class="exc-hint">A second batch is opened for them straight away. ' +
+        'The pieces you already have carry on and finish without waiting.</p>' +
+        '</div>' +
 
-            '<div id="dmg-mats"></div>' +
+        '<div id="dmg-mats"></div>' +
 
-            '<div class="exc-foot">' +
-                '<button type="button" class="ghost-btn" onclick="closeDamageDialog()">' +
-                    (fromStage ? 'Not now' : 'Cancel') + '</button>' +
-                '<button type="button" class="primary-btn" id="dmg-next">Choose materials</button>' +
-            '</div>' +
+        '<div class="exc-foot">' +
+        '<button type="button" class="ghost-btn" onclick="closeDamageDialog()">' +
+        (fromStage ? 'Not now' : 'Cancel') + '</button>' +
+        '<button type="button" class="primary-btn" id="dmg-next">Choose materials</button>' +
+        '</div>' +
         '</div>';
 
     document.getElementById('dmg-next').addEventListener('click', function () {
@@ -271,41 +287,41 @@ function renderDamageProposal() {
     var rows = damageCtx.materials.map(function (m, i) {
         return '<tr>' +
             '<td class="col-tick">' +
-                '<input type="checkbox" class="dmg-use" data-i="' + i + '" checked>' +
+            '<input type="checkbox" class="dmg-use" data-i="' + i + '" checked>' +
             '</td>' +
             '<td class="material-name-cell">' +
-                '<div class="mat-name">' + escapeHtml(m.name || '') + '</div>' +
-                (m.sku ? '<div class="mat-sku">' + escapeHtml(m.sku) + '</div>' : '') +
+            '<div class="mat-name">' + escapeHtml(m.name || '') + '</div>' +
+            (m.sku ? '<div class="mat-sku">' + escapeHtml(m.sku) + '</div>' : '') +
             '</td>' +
             '<td class="col-num">' +
-                '<input type="number" class="dmg-pcs" data-i="' + i + '" min="0" step="1" value="' + seed + '">' +
+            '<input type="number" class="dmg-pcs" data-i="' + i + '" min="0" step="1" value="' + seed + '">' +
             '</td>' +
             // Still editable. The spoiled count is the quick way to fill this
             // in, not a replacement for it — a part-used cone or a length he
             // measured himself is a number only he knows.
             '<td class="col-num">' +
-                '<input type="number" class="dmg-qty" data-i="' + i + '" min="0" step="0.01" value="' +
-                    damageQtyFor(m, seed) + '">' +
-                '<span class="dmg-unit">' + escapeHtml(m.unit || '') + '</span>' +
+            '<input type="number" class="dmg-qty" data-i="' + i + '" min="0" step="0.01" value="' +
+            damageQtyFor(m, seed) + '">' +
+            '<span class="dmg-unit">' + escapeHtml(m.unit || '') + '</span>' +
             '</td>' +
-        '</tr>';
+            '</tr>';
     }).join('');
 
     box.innerHTML =
         '<div class="section-title">What was used up</div>' +
         '<p class="exc-hint">Type how many pieces of each material were spoiled and the ' +
-            'quantity works itself out &mdash; overwrite it if you need to. ' +
-            'Untick anything you already have spares of; it is still recorded as damaged.</p>' +
+        'quantity works itself out &mdash; overwrite it if you need to. ' +
+        'Untick anything you already have spares of; it is still recorded as damaged.</p>' +
         '<div class="table-wrapper dmg-lines">' +
-            '<table>' +
-                '<thead><tr>' +
-                    '<th class="col-tick">Reissue</th>' +
-                    '<th>Material</th>' +
-                    '<th class="col-num">Pieces spoiled</th>' +
-                    '<th class="col-num">Quantity</th>' +
-                '</tr></thead>' +
-                '<tbody>' + rows + '</tbody>' +
-            '</table>' +
+        '<table>' +
+        '<thead><tr>' +
+        '<th class="col-tick">Reissue</th>' +
+        '<th>Material</th>' +
+        '<th class="col-num">Pieces spoiled</th>' +
+        '<th class="col-num">Quantity</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>' +
         '</div>' +
         noteFieldHtml();
 
@@ -340,10 +356,21 @@ function renderDamageProposal() {
 }
 
 function noteFieldHtml() {
+    var opts = DAMAGE_REASONS.map(function (r) {
+        return '<option value="' + escapeHtml(r) + '">' + escapeHtml(r) + '</option>';
+    }).join('');
+
     return '<div class="dmg-step">' +
-        '<label for="dmg-note">What happened?</label>' +
+        '<label for="dmg-reason">Reason for damage <span class="dmg-req">*</span></label>' +
+        '<select id="dmg-reason" class="sup-select">' +
+        '<option value="">-- Select a reason --</option>' +
+        opts +
+        '</select>' +
+        '</div>' +
+        '<div class="dmg-step">' +
+        '<label for="dmg-note">What happened? <span class="dmg-req">*</span></label>' +
         '<textarea id="dmg-note" rows="2" placeholder="printer smudged, unreadable"></textarea>' +
-    '</div>';
+        '</div>';
 }
 
 function wireDamageSave() {
@@ -395,13 +422,28 @@ function saveDamage() {
 
     var pieces = damageCtx.pieces || 0;
     if (lines.length === 0 && pieces <= 0) {
-        alert('Nothing to record — set a quantity, or say how many pieces were spoiled.');
+        alert('Nothing to record \u2014 set a quantity, or say how many pieces were spoiled.');
+        return;
+    }
+
+    var reasonEl = document.getElementById('dmg-reason');
+    var reason = reasonEl ? reasonEl.value.trim() : '';
+    if (!reason) {
+        alert('Please select a reason for the damage.');
+        if (reasonEl) reasonEl.focus();
         return;
     }
 
     var noteEl = document.getElementById('dmg-note');
+    var noteText = noteEl ? noteEl.value.trim() : '';
+    if (!noteText) {
+        alert('Please describe what happened.');
+        if (noteEl) noteEl.focus();
+        return;
+    }
+
     var btn = document.getElementById('dmg-save');
-    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving\u2026'; }
 
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'saveMaterialDamage',
@@ -421,7 +463,8 @@ function saveDamage() {
                     var b = document.getElementById('dmg-remake');
                     return pieces > 0 && b ? b.checked : false;
                 })(),
-                note: noteEl ? noteEl.value : '',
+                reason: reason,
+                note: noteText,
                 lines: lines
             })
         }
@@ -523,52 +566,52 @@ function renderReissue() {
             var isFab = l.isFab === true;
             return '<tr>' +
                 '<td class="col-tick">' +
-                    '<input type="checkbox" class="ri-pick" data-item="' + idx + '" data-line="' + li + '" checked>' +
+                '<input type="checkbox" class="ri-pick" data-item="' + idx + '" data-line="' + li + '" checked>' +
                 '</td>' +
                 '<td class="material-name-cell">' +
-                    '<div class="mat-name">' + escapeHtml(l.name || '') + '</div>' +
-                    (l.sku ? '<div class="mat-sku">' + escapeHtml(l.sku) + '</div>' : '') +
+                '<div class="mat-name">' + escapeHtml(l.name || '') + '</div>' +
+                (l.sku ? '<div class="mat-sku">' + escapeHtml(l.sku) + '</div>' : '') +
                 '</td>' +
                 '<td class="col-num">' +
-                    (isFab && Number(l.pieces) > 0
-                        ? fmt(l.pieces)
-                        : '<span class="is-muted">&mdash;</span>') +
+                (isFab && Number(l.pieces) > 0
+                    ? fmt(l.pieces)
+                    : '<span class="is-muted">&mdash;</span>') +
                 '</td>' +
                 '<td class="col-num col-strong">' + fmt(l.qty) + ' ' + escapeHtml(l.unit || '') + '</td>' +
                 // The note is the store's only answer to "why am I issuing this
                 // again". It travels onto the requirement too, so they see it
                 // without opening anything.
                 '<td class="ri-why">' +
-                    (l.phase ? '<span class="ri-phase">' + escapeHtml(l.phase) + '</span> ' : '') +
-                    escapeHtml(l.note || '') +
-                    '<div class="ri-when">' + escapeHtml(l.reportedOn || '') + '</div>' +
+                (l.phase ? '<span class="ri-phase">' + escapeHtml(l.phase) + '</span> ' : '') +
+                escapeHtml(l.note || '') +
+                '<div class="ri-when">' + escapeHtml(l.reportedOn || '') + '</div>' +
                 '</td>' +
-            '</tr>';
+                '</tr>';
         }).join('');
 
         return '<div class="item-card ri-card">' +
             '<div class="ri-head">' +
-                '<div>' +
-                    '<h2>' + escapeHtml(it.item || 'Item') + '</h2>' +
-                    '<div class="ri-sub">' + escapeHtml(it.salesOrder || '') + '</div>' +
-                '</div>' +
-                '<button type="button" class="primary-btn ri-raise" data-item="' + idx + '">' +
-                    'Ask the store' +
-                '</button>' +
+            '<div>' +
+            '<h2>' + escapeHtml(it.item || 'Item') + '</h2>' +
+            '<div class="ri-sub">' + escapeHtml(it.salesOrder || '') + '</div>' +
+            '</div>' +
+            '<button type="button" class="primary-btn ri-raise" data-item="' + idx + '">' +
+            'Ask the store' +
+            '</button>' +
             '</div>' +
             '<div class="table-wrapper">' +
-                '<table>' +
-                    '<thead><tr>' +
-                        '<th class="col-tick">Ask</th>' +
-                        '<th>Material</th>' +
-                        '<th class="col-num">Pieces</th>' +
-                        '<th class="col-num">Quantity</th>' +
-                        '<th>Why</th>' +
-                    '</tr></thead>' +
-                    '<tbody>' + rows + '</tbody>' +
-                '</table>' +
+            '<table>' +
+            '<thead><tr>' +
+            '<th class="col-tick">Ask</th>' +
+            '<th>Material</th>' +
+            '<th class="col-num">Pieces</th>' +
+            '<th class="col-num">Quantity</th>' +
+            '<th>Why</th>' +
+            '</tr></thead>' +
+            '<tbody>' + rows + '</tbody>' +
+            '</table>' +
             '</div>' +
-        '</div>';
+            '</div>';
     }).join('');
 
     panel.querySelectorAll('.ri-raise').forEach(function (btn) {

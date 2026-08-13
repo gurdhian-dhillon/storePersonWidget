@@ -2574,6 +2574,15 @@ th.col-num {
     font-weight: 600;
 }
 
+.dmg-req {
+    color: #ef4444;
+    margin-left: 0.15rem;
+}
+
+.dmg-step select {
+    width: 100%;
+}
+
 /* The number inputs sit inside table cells here, so the full-width rule the
    dialog applies to loose inputs would push the unit label onto its own line.
    Sized to the numbers actually typed - a piece count is one or two digits, a
