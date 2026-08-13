@@ -140,8 +140,8 @@ function operatorsForStage(stageName, selectedId) {
 	// Machine Embroidery", so a substring test offers the wrong men.
 	const assigned = want
 		? operators.filter((o) =>
-				(o.stages || []).some((s) => String(s).trim() === want),
-			)
+			(o.stages || []).some((s) => String(s).trim() === want),
+		)
 		: [];
 	let list = assigned.length > 0 ? assigned : operators;
 
@@ -430,7 +430,35 @@ function renderSelectedPlan() {
 	elDynamicContent.innerHTML = renderPlanHeader(plan);
 	dockPlanSelect();
 	visibleItems.forEach((item, index) => {
-		elDynamicContent.appendChild(renderItemCard(plan, item, index));
+		const card = renderItemCard(plan, item, index);
+		elDynamicContent.appendChild(card);
+		
+		const hasFabric = (item.materials || []).some((m) => m.isFabric && !m.isWaste);
+		if (hasFabric) {
+			ZOHO.CREATOR.DATA.invokeCustomApi({
+				api_name: API.expectedWaste,
+				http_method: "POST",
+				payload: { planId: plan.id, planItemId: item.id, qtyOut: String(item.qty || 0) },
+			}).then((response) => {
+				try {
+					const data = JSON.parse(response.result);
+					(data.fabrics || []).forEach((f) => {
+						const el = document.getElementById(`exp-waste-${item.id}-${f.materialId}`);
+						if (el) {
+							if (f.waste && f.waste.length > 0) {
+								el.innerHTML = f.waste.map(w => `<div style="padding: 2px 0;"><b>${w.count}</b> <span class="unit">pc${w.count > 1 ? 's' : ''}</span> of ${w.length}&times;${w.width}<span class="unit">cm</span></div>`).join("");
+								el.style.opacity = "1";
+								el.classList.remove("is-muted");
+							} else {
+								el.innerHTML = "No waste";
+							}
+						}
+					});
+				} catch(e) {
+					console.error("Waste parse error", e);
+				}
+			});
+		}
 	});
 }
 
@@ -478,9 +506,8 @@ function renderPlanHeader(plan) {
             <div class="plan-header-top">
                 <div>
                     <div class="plan-header-title">${plan.salesOrder || plan.planNo || "Plan"}</div>
-                    <div class="plan-header-sub">${doneCount} of ${orderItems.length} items complete${
-		remakeQty > 0 ? ` &middot; remaking ${remakeQty} pcs after QC` : ""
-	}</div>
+                    <div class="plan-header-sub">${doneCount} of ${orderItems.length} items complete${remakeQty > 0 ? ` &middot; remaking ${remakeQty} pcs after QC` : ""
+		}</div>
                 </div>
                 <div class="plan-header-controls">
                     <div id="plan-slot"></div>
@@ -583,29 +610,27 @@ function renderItemCard(plan, item, index) {
         <div class="item-title-row">
             <div class="item-serial">${index + 1}</div>
             <div class="item-header-info">
-                <h2>${item.name}${
-									item.sku
-										? `<span class="item-sku">${item.sku}</span>`
-										: ""
-								}</h2>
+                <h2>${item.name}${item.sku
+			? `<span class="item-sku">${item.sku}</span>`
+			: ""
+		}</h2>
                 <div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem;">
                     <span class="item-qty">${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"} to produce</span>
                     <span class="item-status-badge" style="color:${statusColor}; font-weight:600; font-size:0.8rem; background: ${statusColor}15; padding: 0.1rem 0.5rem; border-radius: 1rem;">${statusText}</span>
                     ${
-											// Two kinds now, and they mean different things to
-											// him. A QC remake replaces a piece that failed
-											// inspection days later; a replacement batch
-											// replaces one he lost on the floor and asked for
-											// cloth for. One label for both left him guessing
-											// which — and only one of them is his to explain.
-											item.isRemake
-												? `<span class="remake-tag">${
-														item.remakeReason === "Production_Loss"
-															? "Replacement batch"
-															: "QC remake"
-													}</span>`
-												: ""
-										}
+		// Two kinds now, and they mean different things to
+		// him. A QC remake replaces a piece that failed
+		// inspection days later; a replacement batch
+		// replaces one he lost on the floor and asked for
+		// cloth for. One label for both left him guessing
+		// which — and only one of them is his to explain.
+		item.isRemake
+			? `<span class="remake-tag">${item.remakeReason === "Production_Loss"
+				? "Replacement batch"
+				: "QC remake"
+			}</span>`
+			: ""
+		}
                 </div>
             </div>
         </div>
@@ -645,25 +670,16 @@ function renderItemCard(plan, item, index) {
         <div class="tables-container" style="border-bottom: 1px solid var(--border);">
             <div class="section-title section-title-row">
                 <span>Materials for this item</span>
-                <!-- Deliberately NOT tied to a stage ending short. A wash care
-                     label torn while being attached ruins no garment at all —
-                     in 10, out 10, and three labels gone. Hanging this off a
-                     piece loss would miss most of what it is for.
-
-                     Send to third party used to sit here too, which put it in
-                     the middle of a row it had nothing to do with — it is about
-                     STAGES, not material. It now heads the Production Flow
-                     section, where the stages it acts on actually are. -->
-                <button type="button" class="damage-btn">Report damage</button>
             </div>
             <div class="table-wrapper">
                 <table>
                     <thead>
                         <tr>
                             <th>Material</th>
-                            <th>Cut piece size <span class="cut-axis">(L &times; W)</span></th>
+                            <th>Per piece size <span class="cut-axis">(L &times; W)</span></th>
                             <th class="col-num">You have</th>
                             <th class="col-num">Pieces to cut</th>
+                            <th class="col-num">Expected waste</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -699,7 +715,7 @@ function renderItemCard(plan, item, index) {
 				if (rank === 1) {
 					matHtml += `
                 <tr class="mat-group-head is-reissue-head">
-                    <td colspan="4">Reissued &mdash; replacing material damaged in production</td>
+                    <td colspan="5">Reissued &mdash; replacing material damaged in production</td>
                 </tr>`;
 				}
 			}
@@ -751,23 +767,27 @@ function renderItemCard(plan, item, index) {
 				? `<b>${cutCount}</b> <span class="unit">pcs</span>`
 				: `<span class="is-muted">&mdash;</span>`;
 
+			const expectedWasteCell = mat.isFabric && !mat.isWaste
+				? `<span class="is-muted" id="exp-waste-${item.id}-${mat.materialId}" style="font-size: 0.85em; opacity: 0.7;">Loading...</span>`
+				: `<span class="is-muted">&mdash;</span>`;
+
 			matHtml += `
-                <tr${
-									mat.isWaste
-										? ' class="waste-row"'
-										: mat.isReissue === true
-											? ' class="reissue-row"'
-											: ""
-								}>
+                <tr${mat.isWaste
+					? ' class="waste-row"'
+					: mat.isReissue === true
+						? ' class="reissue-row"'
+						: ""
+				}>
                     <td class="material-name-cell">${nameCell}</td>
                     <td>${cutCell}</td>
                     <td class="col-num col-strong">${haveCell}</td>
                     <td class="col-num">${cutCountCell}</td>
+                    <td class="col-num">${expectedWasteCell}</td>
                 </tr>
             `;
 		});
 	} else {
-		matHtml += `<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No materials logged against this item.</td></tr>`;
+		matHtml += `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No materials logged against this item.</td></tr>`;
 	}
 
 	matHtml += `</tbody></table></div>`;
@@ -881,11 +901,11 @@ function renderItemCard(plan, item, index) {
 				const doneShares = sharesOf(log);
 				const whoHtml = doneShares.length
 					? `<span class="stage-who">${doneShares
-							.map(
-								(a) =>
-									`<span class="stage-who-one">${operatorName(a.operator) || "Not recorded"} <b>${Number(a.qtyOut) || 0}</b> <span class="unit">pcs</span></span>`,
-							)
-							.join("")}</span>`
+						.map(
+							(a) =>
+								`<span class="stage-who-one">${operatorName(a.operator) || "Not recorded"} <b>${Number(a.qtyOut) || 0}</b> <span class="unit">pcs</span></span>`,
+						)
+						.join("")}</span>`
 					: operatorName(log.operator)
 						? `<span>by <b>${operatorName(log.operator)}</b></span>`
 						: "";
@@ -1147,9 +1167,8 @@ function renderItemCard(plan, item, index) {
                     </div>
                     <div class="stage-card-body">
                         ${meter}
-                        ${
-													shares.length > 0
-														? `<div class="table-wrapper">
+                        ${shares.length > 0
+					? `<div class="table-wrapper">
                             <table class="share-table">
                                 <thead>
                                     <tr>
@@ -1163,14 +1182,13 @@ function renderItemCard(plan, item, index) {
                                 <tbody>${shareRows}</tbody>
                             </table>
                         </div>`
-														: ""
-												}
+					: ""
+				}
                         ${assignRow}
-                        ${
-													shares.length === 0 && !assignRow
-														? `<div class="share-empty">Nothing came out of the stage before this one, so there is nothing to hand out.</div>`
-														: ""
-												}
+                        ${shares.length === 0 && !assignRow
+					? `<div class="share-empty">Nothing came out of the stage before this one, so there is nothing to hand out.</div>`
+					: ""
+				}
                         <div class="stage-end-row">
                             <div class="stage-end-remarks">
                                 <label>Remarks for the whole stage</label>
@@ -1229,19 +1247,6 @@ function renderItemCard(plan, item, index) {
 		}
 	}
 
-	const btnDamage = body.querySelector(".damage-btn");
-	if (btnDamage) {
-		btnDamage.addEventListener("click", () => {
-			if (typeof openDamageDialog !== "function") {
-				alert(
-					"Damage reporting is not loaded.\n\n" +
-						"js/reissue.js is missing from the widget upload.",
-				);
-				return;
-			}
-			openDamageDialog(plan, item);
-		});
-	}
 
 	// Reveal-only: no server write, so pressing this by accident costs nothing.
 	const btnStartProd = body.querySelector(".btn-start-production");
@@ -1440,8 +1445,8 @@ function renderItemCard(plan, item, index) {
 					if (qtyOut > qtyIn) {
 						alert(
 							"Qty out cannot be more than the " +
-								qtyIn +
-								" received by this stage.",
+							qtyIn +
+							" received by this stage.",
 						);
 						return;
 					}
@@ -1548,11 +1553,11 @@ function savePhasePayload(payload, btnSave, originalText, lost) {
 					const askDamage =
 						lost && typeof openDamageDialog === "function"
 							? () =>
-									openDamageDialog(lost.plan, lost.item, {
-										pieces: lost.pieces,
-										phaseName: payload.phaseName,
-										stageLogId: data.logId || "",
-									})
+								openDamageDialog(lost.plan, lost.item, {
+									pieces: lost.pieces,
+									phaseName: payload.phaseName,
+									stageLogId: data.logId || "",
+								})
 							: null;
 
 					fetchAllData(function () {
@@ -1697,28 +1702,24 @@ function showOrderCompleteDialog(data) {
 			return `
                 <tr${rm ? ' class="is-remake-row"' : ""}>
                     <td class="material-name-cell">
-                        <div class="mat-name">${r.item || "—"}${
-													rm
-														? ` <span class="remake-tag">${
-																r.remakeReason === "Production_Loss"
-																	? "Replacement"
-																	: "QC remake"
-															}</span>`
-														: ""
-												}</div>
+                        <div class="mat-name">${r.item || "—"}${rm
+					? ` <span class="remake-tag">${r.remakeReason === "Production_Loss"
+						? "Replacement"
+						: "QC remake"
+					}</span>`
+					: ""
+				}</div>
                         ${r.sku ? `<div class="mat-sku">${r.sku}</div>` : ""}
                     </td>
-                    <td class="col-num">${
-											rm ? `<span class="is-muted">&mdash;</span>` : ordered
-										}</td>
+                    <td class="col-num">${rm ? `<span class="is-muted">&mdash;</span>` : ordered
+				}</td>
                     <td class="col-num col-strong">${made}</td>
-                    <td class="col-num">${
-											rm
-												? `<span class="is-muted">replaces ${ordered}</span>`
-												: gap > 0
-													? `<span class="short-hint" style="text-align:right;">${gap} short</span>`
-													: `<span class="is-muted">&mdash;</span>`
-										}</td>
+                    <td class="col-num">${rm
+					? `<span class="is-muted">replaces ${ordered}</span>`
+					: gap > 0
+						? `<span class="short-hint" style="text-align:right;">${gap} short</span>`
+						: `<span class="is-muted">&mdash;</span>`
+				}</td>
                 </tr>`;
 		})
 		.join("");
@@ -1744,22 +1745,19 @@ function showOrderCompleteDialog(data) {
             <div class="waste-head">
                 <div>
                     <h3>${data.salesOrder || "Order"} is finished</h3>
-                    <p>Every item on ${
-											data.planNo ? data.planNo : "this plan"
-										} has been through its last stage.</p>
+                    <p>Every item on ${data.planNo ? data.planNo : "this plan"
+		} has been through its last stage.</p>
                 </div>
             </div>
 
             <div class="order-done-total${shortBy > 0 ? " is-short" : ""}">
-                <b>${made}</b> of <b>${ordered}</b> pieces produced${
-									shortBy > 0
-										? ` &middot; <span class="is-short-txt">${shortBy} short of the order</span>`
-										: ""
-								}${
-									remade > 0
-										? `<div class="order-done-remade">plus <b>${remade}</b> remade after QC</div>`
-										: ""
-								}
+                <b>${made}</b> of <b>${ordered}</b> pieces produced${shortBy > 0
+			? ` &middot; <span class="is-short-txt">${shortBy} short of the order</span>`
+			: ""
+		}${remade > 0
+			? `<div class="order-done-remade">plus <b>${remade}</b> remade after QC</div>`
+			: ""
+		}
             </div>
 
             <div class="table-wrapper">
@@ -1770,10 +1768,9 @@ function showOrderCompleteDialog(data) {
                         <th class="col-num">Produced</th>
                         <th class="col-num"></th>
                     </tr></thead>
-                    <tbody>${
-											body ||
-											`<tr><td colspan="4" class="is-muted" style="text-align:center;">No items recorded.</td></tr>`
-										}</tbody>
+                    <tbody>${body ||
+		`<tr><td colspan="4" class="is-muted" style="text-align:center;">No items recorded.</td></tr>`
+		}</tbody>
                 </table>
             </div>
 

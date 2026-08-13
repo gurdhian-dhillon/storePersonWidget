@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin — Employee report</title>
+    <title>Production & Stock Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <!-- The shared design system, not a copy of it. Tokens, header, tables,
          pills, chevrons and empty states all come from the audit page's
@@ -17,7 +17,7 @@
 
         <header class="app-header">
             <div class="app-header-left">
-                <h1>Employee report</h1>
+                <h1>Production & Stock Dashboard</h1>
                 <span class="app-date" id="app-date"></span>
             </div>
 
@@ -49,6 +49,8 @@
                     aria-selected="true" aria-controls="employee-panel">Employee report</button>
             <button id="pipeline-tab" class="tab-btn" type="button" role="tab"
                     aria-selected="false" aria-controls="pipeline-panel">Sales order pipeline</button>
+            <button id="materials-tab" class="tab-btn" type="button" role="tab"
+                    aria-selected="false" aria-controls="materials-panel">Raw materials</button>
         </nav>
 
         <section id="employee-panel" class="tab-panel is-active" role="tabpanel" aria-labelledby="employee-tab">
@@ -62,6 +64,8 @@
         <section id="pipeline-panel" class="tab-panel" role="tabpanel" aria-labelledby="pipeline-tab">
             <div class="pipeline-section" id="pipeline-section"></div>
         </section>
+
+        <section id="materials-panel" class="tab-panel" role="tabpanel" aria-labelledby="materials-tab"></section>
 
     </div>
 

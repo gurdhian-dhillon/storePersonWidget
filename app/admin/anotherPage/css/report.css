@@ -403,3 +403,39 @@
     .app-header-right { width: 100%; flex-wrap: wrap; }
     .tile-value { font-size: 17px; }
 }
+
+/* ---- override tables to match store widget table appearance ---- */
+.table-wrapper {
+    overflow: auto !important;
+    max-height: 60vh !important;
+}
+
+.rep-table,
+.progress-table,
+.stage-table {
+    font-size: 0.875rem !important; /* 14px */
+}
+
+.rep-table th,
+.progress-table th,
+.stage-table th {
+    padding: 0.55rem 0.875rem !important;
+    font-size: 0.75rem !important; /* 12px */
+    background-color: #f1f5f9 !important;
+    border-bottom: 1px solid #cbd5e1 !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.03em !important;
+    color: var(--text-muted) !important;
+    white-space: nowrap !important;
+}
+
+.rep-table td,
+.progress-table td,
+.stage-table td {
+    padding: 0.55rem 0.875rem !important;
+    font-size: 0.875rem !important;
+    border-bottom: 1px solid var(--border) !important;
+    vertical-align: middle !important;
+    white-space: nowrap !important;
+}
