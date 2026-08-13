@@ -59,6 +59,30 @@ string getEmployeeReport(string dateTxt)
 	totIn = 0;
 	totOpen = 0;
 	totOut = 0;
+	pendingCount = 0;
+	inProgressCount = 0;
+	completedCount = 0;
+	qcCount = 0;
+	packedCount = 0;
+	dispatchedCount = 0;
+
+	// This summary must not depend on the selected day's Stage_Log report.
+	// If an employee/report query below has a problem, the dashboard can still
+	// show the current, live Sales_Order status totals.
+	try
+	{
+		pendingCount = Sales_Order[Order_Status == "Pending"].count();
+		inProgressCount = Sales_Order[Order_Status == "In Progress"].count();
+		completedCount = Sales_Order[Order_Status == "Production Complete"].count();
+		qcCount = Sales_Order[Order_Status == "QC Passed"].count();
+		packedCount = Sales_Order[Order_Status == "Packed"].count();
+		dispatchedCount = Sales_Order[Order_Status == "Dispatched"].count();
+	}
+	catch (pipelineError)
+	{
+		// Keep the report response valid; the visible zeroes indicate that this
+		// particular count query could not be read.
+	}
 
 	try
 	{
@@ -246,6 +270,7 @@ string getEmployeeReport(string dateTxt)
 		// its rows.
 		planNoM = Map();
 		planSoM = Map();
+		planSoStatM = Map();
 		itemNmM = Map();
 
 		// Per-person accumulators, all keyed on the operator's record id as text.
@@ -298,24 +323,29 @@ string getEmployeeReport(string dateTxt)
 			{
 				pNo = "";
 				pSo = "";
+				pSoStat = "";
 				for each  plr in Production_Planning[ID == pKey.toLong()]
 				{
 					pNo = ifnull(plr.Plan_No,"").toString().replaceAll("\"","'");
 					for each  sor in Sales_Order[ID == plr.Sales_Order]
 					{
 						pSo = ifnull(sor.Sales_Order,"").toString().replaceAll("\"","'");
+						pSoStat = ifnull(sor.Order_Status,"").toString().replaceAll("\"","'");
 					}
 				}
 				planNoM.put(pKey,pNo);
 				planSoM.put(pKey,pSo);
+				planSoStatM.put(pKey,pSoStat);
 			}
 
 			planNoTxt = "";
 			soTxt = "";
+			soStatTxt = "";
 			if(pKey != "")
 			{
 				planNoTxt = ifnull(planNoM.get(pKey),"").toString();
 				soTxt = ifnull(planSoM.get(pKey),"").toString();
+				soStatTxt = ifnull(planSoStatM.get(pKey),"").toString();
 			}
 
 			//------------------------------------------------------------------
@@ -419,7 +449,7 @@ string getEmployeeReport(string dateTxt)
 			// field can render as ("09:00", "09:00:00", "09:00 AM") can be parsed
 			// defensively and an unreadable one shown as a dash rather than
 			// turned into a confident wrong number.
-			rowJ = "{\"phase\":\"" + ifnull(wr.get("phase"),"").toString().replaceAll("\"","'") + "\",\"item\":\"" + itemTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"salesOrder\":\"" + soTxt + "\",\"qtyIn\":" + qIn + ",\"qtyOut\":" + qOut + ",\"start\":\"" + ifnull(wr.get("start"),"").toString() + "\",\"end\":\"" + ifnull(wr.get("end"),"").toString() + "\",\"status\":\"" + stat + "\",\"outsourced\":" + outsTxt + ",\"remarks\":\"" + ifnull(wr.get("remarks"),"").toString().replaceAll("\"","'") + "\"}";
+			rowJ = "{\"phase\":\"" + ifnull(wr.get("phase"),"").toString().replaceAll("\"","'") + "\",\"item\":\"" + itemTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"salesOrder\":\"" + soTxt + "\",\"salesOrderStatus\":\"" + soStatTxt + "\",\"qtyIn\":" + qIn + ",\"qtyOut\":" + qOut + ",\"start\":\"" + ifnull(wr.get("start"),"").toString() + "\",\"end\":\"" + ifnull(wr.get("end"),"").toString() + "\",\"status\":\"" + stat + "\",\"outsourced\":" + outsTxt + ",\"remarks\":\"" + ifnull(wr.get("remarks"),"").toString().replaceAll("\"","'") + "\"}";
 
 			prevRows = ifnull(opRows.get(oKey),"").toString();
 			if(prevRows != "")
@@ -497,5 +527,5 @@ string getEmployeeReport(string dateTxt)
 	// Built by hand. Map.toString() stops emitting valid JSON the moment the
 	// structure nests Map -> List -> Map, which is exactly the stages array, and
 	// List.toString() does not wrap in []. That is what the old function did.
-	return "{\"errors\":[" + errJson + "],\"date\":\"" + dayTxt + "\",\"worked\":[" + workedJson + "],\"noLogs\":[" + idleJson + "],\"totals\":{\"people\":" + totPeople + ",\"stagesDone\":" + totStagesDone + ",\"stagesOpen\":" + totStagesOpen + ",\"piecesIn\":" + totIn + ",\"piecesInHand\":" + totOpen + ",\"piecesOut\":" + totOut + "}}";
+	return "{\"errors\":[" + errJson + "],\"date\":\"" + dayTxt + "\",\"worked\":[" + workedJson + "],\"noLogs\":[" + idleJson + "],\"totals\":{\"people\":" + totPeople + ",\"stagesDone\":" + totStagesDone + ",\"stagesOpen\":" + totStagesOpen + ",\"piecesIn\":" + totIn + ",\"piecesInHand\":" + totOpen + ",\"piecesOut\":" + totOut + "},\"pipeline\":{\"pending\":" + pendingCount + ",\"inProgress\":" + inProgressCount + ",\"completed\":" + completedCount + ",\"qcPassed\":" + qcCount + ",\"packed\":" + packedCount + ",\"dispatched\":" + dispatchedCount + "}}";
 }

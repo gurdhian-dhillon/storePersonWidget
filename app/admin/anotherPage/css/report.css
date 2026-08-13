@@ -3,7 +3,11 @@
    .ans-toggle, .empty-state, .work-row) comes from there. Only what this
    screen adds is below. */
 
-/* ---- day picker ---- */
+.day-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
 
 .day-nav {
     display: flex;
@@ -225,6 +229,175 @@
 }
 
 .nolog-chip span { color: var(--text-muted); }
+
+/* ---- sales order pipeline ---- */
+
+.pipeline-section {
+    margin: 16px 0 12px;
+    padding: 14px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+}
+
+.pipeline-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.pipeline-header h2 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.pipeline-toolbar { gap: 12px; }
+.pipeline-help { display: block; margin-top: 3px; font-size: 12px; color: var(--text-muted); }
+.pipeline-stage-tabs {
+    display: flex;
+    align-items: flex-end;
+    gap: 4px;
+    margin: 0 12px;
+    overflow-x: auto;
+}
+.pipeline-stage-tab {
+    flex: 0 0 auto;
+    padding: 9px 10px;
+    margin-bottom: -1px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.pipeline-stage-tab:hover { color: var(--primary); }
+.pipeline-stage-tab.is-active { color: var(--primary); border-bottom-color: var(--primary); }
+.stage-tab-count {
+    display: inline-block;
+    min-width: 16px;
+    margin-left: 5px;
+    padding: 1px 5px;
+    border-radius: 10px;
+    background: #e8f0ff;
+    color: inherit;
+    font-size: 10px;
+    line-height: 1.3;
+    text-align: center;
+}
+
+.pipe-total {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--primary);
+    background: #eff6ff;
+    padding: 2px 8px;
+    border-radius: 12px;
+}
+
+.pipeline-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 8px;
+}
+
+.pipe-card {
+    display: flex;
+    flex-direction: column;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: #f8fafc;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.pipe-card:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+}
+
+.pipe-card.is-selected { box-shadow: 0 0 0 2px currentColor; }
+
+.pipe-count {
+    font-size: 18px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+}
+
+.pipe-label {
+    font-size: 11px;
+    font-weight: 600;
+    margin-top: 2px;
+}
+
+.pipe-card.so-pending { border-left: 3px solid #f59e0b; background: #fffbeb; }
+.pipe-card.so-pending .pipe-count, .pipe-card.so-pending .pipe-label { color: #b45309; }
+
+.pipe-card.so-progress { border-left: 3px solid #3b82f6; background: #eff6ff; }
+.pipe-card.so-progress .pipe-count, .pipe-card.so-progress .pipe-label { color: #1d4ed8; }
+
+.pipe-card.so-complete { border-left: 3px solid #06b6d4; background: #ecfeff; }
+.pipe-card.so-complete .pipe-count, .pipe-card.so-complete .pipe-label { color: #0e7490; }
+
+.pipe-card.so-qc { border-left: 3px solid #10b981; background: #ecfdf5; }
+.pipe-card.so-qc .pipe-count, .pipe-card.so-qc .pipe-label { color: #047857; }
+
+.pipe-card.so-packed { border-left: 3px solid #8b5cf6; background: #f5f3ff; }
+.pipe-card.so-packed .pipe-count, .pipe-card.so-packed .pipe-label { color: #6d28d9; }
+
+.pipe-card.so-dispatched { border-left: 3px solid #64748b; background: #f8fafc; }
+.pipe-card.so-dispatched .pipe-count, .pipe-card.so-dispatched .pipe-label { color: #334155; }
+
+.pipeline-error {
+    margin: 10px 0 0;
+    color: #b91c1c;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.progress-section {
+    margin-top: 16px;
+    padding: 14px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+}
+
+.progress-section .pipeline-header { margin-bottom: 12px; }
+.progress-empty { margin: 0; color: var(--text-muted); font-size: 13px; }
+.progress-table td { vertical-align: middle; }
+
+/* ---- sales order status pills ---- */
+
+.pill-so-status {
+    display: inline-block;
+    padding: 2px 6px;
+    font-size: 10px;
+    font-weight: 700;
+    border-radius: 4px;
+    letter-spacing: 0.02em;
+    vertical-align: middle;
+    margin-left: 4px;
+}
+
+.pill-so-status.so-pending { background: #fef3c7; color: #92400e; }
+.pill-so-status.so-progress { background: #dbeafe; color: #1e40af; }
+.pill-so-status.so-complete { background: #cffafe; color: #155e75; }
+.pill-so-status.so-qc { background: #d1fae5; color: #065f46; }
+.pill-so-status.so-packed { background: #ede9fe; color: #5b21b6; }
+.pill-so-status.so-dispatched { background: #e2e8f0; color: #334155; }
+.pill-so-status.so-default { background: #f1f5f9; color: #475569; }
 
 @media (max-width: 720px) {
     .app-header-right { width: 100%; flex-wrap: wrap; }

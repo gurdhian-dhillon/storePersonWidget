@@ -1,0 +1,127 @@
+// Employee Report -> Sales Order Pipeline
+// Returns live progress for every Sales_Order that is currently In Progress.
+// An optional salesOrderId limits the result to one order.
+map Admin_Space.getSalesOrderProgress(string salesOrderId)
+{
+	response = Map();
+	ordersOut = List();
+	orders = Sales_Order[Order_Status == "In Progress"] sort by Added_Time desc;
+
+	for each so in orders
+	{
+		if(salesOrderId != null && salesOrderId.trim() != "" && so.ID.toString() != salesOrderId.trim())
+		{
+			continue;
+		}
+
+		orderRow = Map();
+		orderRow.put("id",so.ID.toString());
+		orderRow.put("salesOrder",ifnull(so.Sales_Order,"").toString());
+		orderRow.put("status",ifnull(so.Order_Status,"").toString());
+
+		planNo = "";
+		supervisor = "";
+		currentStage = "";
+		currentStageStatus = "";
+		lastCompletedStage = "";
+		nextStep = "Production has not started";
+		totalOrdered = 0;
+		totalProduced = 0;
+		itemCount = 0;
+		completeItems = 0;
+		stageRows = List();
+
+		for each plan in Production_Planning[Sales_Order == so.ID]
+		{
+			planNo = ifnull(plan.Plan_No,"").toString();
+			if(plan.Assigned_To != null)
+			{
+				for each emp in Employee[ID == plan.Assigned_To]
+				{
+					supervisor = ifnull(emp.Employee_Name,"").toString();
+				}
+			}
+
+			for each item in Plan_Item[Plan == plan.ID]
+			{
+				itemCount = itemCount + 1;
+				totalOrdered = totalOrdered + ifnull(item.Qty_Ordered,0);
+				totalProduced = totalProduced + ifnull(item.Qty_Produced,0);
+				if(ifnull(item.Item_Status,"").toString() == "Complete")
+				{
+					completeItems = completeItems + 1;
+				}
+			}
+
+			// Stage_Status is In_Progress while a supervisor has an open stage.
+			openLogs = Stage_Log[Plan == plan.ID && Stage_Status == "In_Progress"] sort by Added_Time desc;
+			hasOpenLog = false;
+			for each openLog in openLogs
+			{
+				if(!hasOpenLog)
+				{
+					currentStage = ifnull(openLog.Phase_Name,"").toString();
+					currentStageStatus = "Running";
+					nextStep = "Finish " + currentStage;
+					stageRow = Map();
+					stageRow.put("name",currentStage);
+					stageRow.put("state","running");
+					stageRow.put("qtyIn",ifnull(openLog.Qty_In,0));
+					stageRow.put("qtyOut",ifnull(openLog.Qty_Out,0));
+					stageRows.add(stageRow);
+					hasOpenLog = true;
+				}
+			}
+
+			if(currentStage == "")
+			{
+				doneLogs = Stage_Log[Plan == plan.ID && Stage_Status == "Done"] sort by Added_Time desc;
+				hasDoneLog = false;
+				for each doneLog in doneLogs
+				{
+					if(!hasDoneLog)
+					{
+						lastCompletedStage = ifnull(doneLog.Phase_Name,"").toString();
+						stageRow = Map();
+						stageRow.put("name",lastCompletedStage);
+						stageRow.put("state","done");
+						stageRow.put("qtyIn",ifnull(doneLog.Qty_In,0));
+						stageRow.put("qtyOut",ifnull(doneLog.Qty_Out,0));
+						stageRows.add(stageRow);
+						hasDoneLog = true;
+					}
+				}
+				if(lastCompletedStage != "")
+				{
+					currentStage = lastCompletedStage;
+					currentStageStatus = "Completed";
+					nextStep = "Start next production stage";
+				}
+			}
+		}
+
+		if(itemCount > 0 && completeItems == itemCount)
+		{
+			currentStage = "QC";
+			currentStageStatus = "Waiting";
+			nextStep = "Complete quality check";
+		}
+
+		orderRow.put("planNo",planNo);
+		orderRow.put("supervisor",supervisor);
+		orderRow.put("orderedQty",totalOrdered);
+		orderRow.put("producedQty",totalProduced);
+		orderRow.put("itemCount",itemCount);
+		orderRow.put("completedItems",completeItems);
+		orderRow.put("currentStage",currentStage);
+		orderRow.put("currentStageStatus",currentStageStatus);
+		orderRow.put("lastCompletedStage",lastCompletedStage);
+		orderRow.put("nextStep",nextStep);
+		orderRow.put("stages",stageRows);
+		ordersOut.add(orderRow);
+	}
+
+	response.put("orders",ordersOut);
+	response.put("count",ordersOut.size());
+	return response;
+}

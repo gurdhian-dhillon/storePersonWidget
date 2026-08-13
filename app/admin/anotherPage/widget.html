@@ -26,27 +26,42 @@
                  naturally — which is what keeps this away from the
                  statement-execution limit as the app fills up. -->
             <div class="app-header-right">
-                <div class="day-nav">
-                    <button id="day-prev" class="day-btn" type="button" aria-label="Previous day">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-                             stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
-                    </button>
-                    <input id="day-input" class="day-input" type="date" aria-label="Report date">
-                    <button id="day-next" class="day-btn" type="button" aria-label="Next day">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-                             stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
-                    </button>
+                <div class="day-controls" id="day-controls">
+                    <div class="day-nav">
+                        <button id="day-prev" class="day-btn" type="button" aria-label="Previous day">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                                 stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+                        </button>
+                        <input id="day-input" class="day-input" type="date" aria-label="Report date">
+                        <button id="day-next" class="day-btn" type="button" aria-label="Next day">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                                 stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+                        </button>
+                    </div>
+                    <button id="day-today" class="ghost-btn" type="button">Today</button>
                 </div>
-                <button id="day-today" class="ghost-btn" type="button">Today</button>
                 <button id="refresh-btn" class="primary-btn" type="button">Refresh</button>
             </div>
         </header>
 
-        <div class="tiles" id="tiles"></div>
+        <nav class="tab-strip report-tabs" aria-label="Admin report views" role="tablist">
+            <button id="employee-tab" class="tab-btn is-active" type="button" role="tab"
+                    aria-selected="true" aria-controls="employee-panel">Employee report</button>
+            <button id="pipeline-tab" class="tab-btn" type="button" role="tab"
+                    aria-selected="false" aria-controls="pipeline-panel">Sales order pipeline</button>
+        </nav>
 
-        <main id="content"></main>
+        <section id="employee-panel" class="tab-panel is-active" role="tabpanel" aria-labelledby="employee-tab">
+            <div class="tiles" id="tiles"></div>
 
-        <section id="nolog-wrap"></section>
+            <main id="content"></main>
+
+            <section id="nolog-wrap"></section>
+        </section>
+
+        <section id="pipeline-panel" class="tab-panel" role="tabpanel" aria-labelledby="pipeline-tab">
+            <div class="pipeline-section" id="pipeline-section"></div>
+        </section>
 
     </div>
 

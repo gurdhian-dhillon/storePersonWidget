@@ -21,6 +21,7 @@
 // the machine release and the QC-ready flag.
 
 var DATA = null;
+var PIPELINE_STATUS = 'In Progress';
 
 // Which rows are expanded, keyed by employee id. Survives a re-render so
 // refreshing does not collapse everything that was open.
@@ -235,6 +236,248 @@ function renderTiles() {
     }).join('');
 }
 
+// ---- sales order pipeline summary ----
+
+function soStatusClass(status) {
+    var s = String(status || '').toLowerCase().trim();
+    if (s === 'pending') return 'so-pending';
+    if (s === 'in progress') return 'so-progress';
+    if (s === 'production complete') return 'so-complete';
+    if (s === 'qc passed') return 'so-qc';
+    if (s === 'packed') return 'so-packed';
+    if (s === 'dispatched') return 'so-dispatched';
+    return 'so-default';
+}
+
+function soStatusPill(status) {
+    if (!status) return '';
+    var cls = soStatusClass(status);
+    return '<span class="pill pill-so-status ' + cls + '">' + esc(status) + '</span>';
+}
+
+function renderPipeline() {
+    var el = document.getElementById('pipeline-section');
+    if (!el) return;
+
+    var p = (DATA && DATA.pipeline) ? DATA.pipeline : {};
+    var hasLiveCounts = p.pending !== undefined || p.inProgress !== undefined ||
+        p.completed !== undefined || p.qcPassed !== undefined ||
+        p.packed !== undefined || p.dispatched !== undefined;
+    var items = [
+        { label: 'Pending', count: p.pending, cls: 'so-pending' },
+        { label: 'In Progress', count: p.inProgress, cls: 'so-progress' },
+        { label: 'Prod Complete', count: p.completed, cls: 'so-complete' },
+        { label: 'QC Passed', count: p.qcPassed, cls: 'so-qc' },
+        { label: 'Packed', count: p.packed, cls: 'so-packed' },
+        { label: 'Dispatched', count: p.dispatched, cls: 'so-dispatched' }
+    ];
+    var totalOrders = 0;
+    for (var i = 0; i < items.length; i++) {
+        totalOrders += n(items[i].count);
+    }
+
+    var cardsHtml = items.map(function(x) {
+        return '<button type="button" class="pipe-card ' + x.cls + (x.label === PIPELINE_STATUS ? ' is-selected' : '') + '" data-status="' + esc(x.label) + '">' +
+            '<span class="pipe-count">' + (hasLiveCounts ? n(x.count) : '—') + '</span>' +
+            '<span class="pipe-label">' + esc(x.label) + '</span>' +
+            '</button>';
+    }).join('');
+
+    el.innerHTML = '<div class="pipeline-header pipeline-toolbar">' +
+        '<div><h2>Sales Order Pipeline</h2><span class="pipeline-help">Follow each sales order through the workflow.</span></div>' +
+        '<span class="pipe-total">' + (hasLiveCounts ? totalOrders + ' total sales orders' : 'Loading live counts…') + '</span>' +
+        '</div>' +
+        '<div class="pipeline-grid">' + cardsHtml + '</div>' +
+        (DATA && DATA.pipelineError
+            ? '<p class="pipeline-error">Could not load live status counts: ' + esc(DATA.pipelineError) + '</p>'
+            : '') +
+        renderInProgressOrders();
+
+    Array.prototype.forEach.call(el.querySelectorAll('.pipe-card'), function (tab) {
+        tab.addEventListener('click', function () {
+            PIPELINE_STATUS = tab.getAttribute('data-status');
+            renderPipeline();
+        });
+    });
+}
+
+function renderInProgressOrders() {
+    var orders = DATA && Array.isArray(DATA.progressOrders) ? DATA.progressOrders : null;
+    var h = '<section class="progress-section"><div class="pipeline-header">' +
+        '<h2>' + esc(PIPELINE_STATUS) + ' Orders</h2>';
+
+    if (PIPELINE_STATUS !== 'In Progress') {
+        return h + '</div><p class="progress-empty">Choose In Progress to see the live production stage, quantities and next step.</p></section>';
+    }
+
+    if (orders === null) {
+        return h + '<span class="pipe-total">Loading live order progress…</span></div></section>';
+    }
+    if (!orders.length) {
+        return h + '</div><p class="progress-empty">No sales orders are currently In Progress.</p></section>';
+    }
+
+    h += '<span class="pipe-total">' + orders.length + ' live orders</span></div>' +
+        '<div class="table-wrapper"><table class="progress-table"><thead><tr>' +
+        '<th>Sales order</th><th>Plan</th><th>Supervisor</th><th>Current stage</th>' +
+        '<th class="r">Produced / ordered</th><th>Next step</th></tr></thead><tbody>';
+
+    orders.forEach(function (order) {
+        var stage = order.currentStage
+            ? esc(order.currentStage) + (order.currentStageStatus ? ' <span class="pill pill-running">' + esc(order.currentStageStatus) + '</span>' : '')
+            : '<span class="muted">Not started</span>';
+        h += '<tr><td><strong>' + esc(order.salesOrder || '—') + '</strong></td>' +
+            '<td>' + esc(order.planNo || '—') + '</td>' +
+            '<td>' + esc(order.supervisor || '—') + '</td>' +
+            '<td>' + stage + '</td>' +
+            '<td class="r">' + n(order.producedQty) + ' / ' + n(order.orderedQty) + '</td>' +
+            '<td>' + esc(order.nextStep || '—') + '</td></tr>';
+    });
+    return h + '</tbody></table></div></section>';
+}
+
+function activateTab(name) {
+    var isEmployee = name === 'employee';
+    var employeeTab = document.getElementById('employee-tab');
+    var pipelineTab = document.getElementById('pipeline-tab');
+    var employeePanel = document.getElementById('employee-panel');
+    var pipelinePanel = document.getElementById('pipeline-panel');
+
+    employeeTab.classList.toggle('is-active', isEmployee);
+    pipelineTab.classList.toggle('is-active', !isEmployee);
+    employeeTab.setAttribute('aria-selected', String(isEmployee));
+    pipelineTab.setAttribute('aria-selected', String(!isEmployee));
+    employeePanel.classList.toggle('is-active', isEmployee);
+    pipelinePanel.classList.toggle('is-active', !isEmployee);
+
+    var appDate = document.getElementById('app-date');
+    var dayControls = document.getElementById('day-controls');
+    if (appDate) appDate.classList.toggle('hidden', !isEmployee);
+    if (dayControls) dayControls.classList.toggle('hidden', !isEmployee);
+}
+
+// The pipeline is intentionally loaded from its own small custom function.
+// It remains available even when the day-specific employee report is slow or
+// when that report function has not yet been deployed in Creator.
+function loadPipeline() {
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getOrderPipelineCounts',
+        // Required for this externally hosted widget: it tells the SDK which
+        // Creator workspace owns the custom API endpoint shown in Creator.
+        workspace_name: 'livelinenstore',
+        http_method: 'POST',
+        payload: {}
+    }).then(function (response) {
+        try {
+            // Creator SDK versions return custom-API payloads either in
+            // response.result or directly on response. External widgets can
+            // use either shape, so accept both.
+            var result = response && response.result !== undefined ? response.result : response;
+            var pipeline = typeof result === 'string' ? JSON.parse(result) : result;
+            // Custom APIs configured with Creator's "Standard" response put
+            // a map returned by Deluge inside `data`.
+            if (pipeline && pipeline.data !== undefined) {
+                pipeline = typeof pipeline.data === 'string' ? JSON.parse(pipeline.data) : pipeline.data;
+            }
+            if (!pipeline || typeof pipeline !== 'object') throw new Error('No pipeline data returned');
+            if (pipeline.pending === undefined && pipeline.inProgress === undefined &&
+                pipeline.completed === undefined && pipeline.qcPassed === undefined &&
+                pipeline.packed === undefined && pipeline.dispatched === undefined) {
+                throw new Error('Response did not contain status counts');
+            }
+            DATA = DATA || {};
+            DATA.pipeline = pipeline;
+            DATA.pipelineError = '';
+            renderPipeline();
+        } catch (e) {
+            console.error('getOrderPipelineCounts parse failed:', e, response);
+            DATA = DATA || {};
+            DATA.pipelineError = e.message || String(e);
+            renderPipeline();
+        }
+    }).catch(function (err) {
+        console.error('getOrderPipelineCounts error:', err);
+        // Order Audit already uses this endpoint in the same Creator app. If
+        // a newly configured pipeline endpoint is unavailable, derive the
+        // exact same live totals from its current Sales_Order list instead.
+        loadPipelineFromOrderAudit(err);
+    });
+}
+
+function loadPipelineFromOrderAudit(originalError) {
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getAdminCalculation',
+        http_method: 'POST',
+        payload: { salesOrderId: '' }
+    }).then(function (response) {
+        try {
+            var result = response && response.result !== undefined ? response.result : response;
+            var data = typeof result === 'string' ? JSON.parse(result) : result;
+            if (data && data.data) data = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
+            var orders = data && data.orders;
+            if (!Array.isArray(orders)) throw new Error('Order Audit did not return an order list');
+
+            var counts = { pending: 0, inProgress: 0, completed: 0, qcPassed: 0, packed: 0, dispatched: 0 };
+            orders.forEach(function (order) {
+                var status = String(order.status || '').trim().toLowerCase();
+                if (status === 'pending') counts.pending++;
+                else if (status === 'in progress') counts.inProgress++;
+                else if (status === 'production complete') counts.completed++;
+                else if (status === 'qc passed') counts.qcPassed++;
+                else if (status === 'packed') counts.packed++;
+                else if (status === 'dispatched') counts.dispatched++;
+            });
+            DATA = DATA || {};
+            DATA.pipeline = counts;
+            DATA.pipelineError = '';
+            renderPipeline();
+        } catch (e) {
+            console.error('getAdminCalculation pipeline fallback failed:', e, response);
+            DATA = DATA || {};
+            DATA.pipelineError = 'Status API: ' + ((originalError && (originalError.message || originalError.toString())) || 'failed') +
+                '. Order Audit fallback: ' + (e.message || String(e));
+            renderPipeline();
+        }
+    }).catch(function (fallbackError) {
+        console.error('getAdminCalculation pipeline fallback error:', fallbackError);
+        DATA = DATA || {};
+        DATA.pipelineError = 'Could not reach the status or Order Audit API.';
+        renderPipeline();
+    });
+}
+
+function loadSalesOrderProgress() {
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getSalesOrderProgress',
+        workspace_name: 'livelinenstore',
+        http_method: 'POST',
+        content_type: 'application/json',
+        payload: { salesOrderId: '' }
+    }).then(function (response) {
+        try {
+            var result = response && response.result !== undefined ? response.result : response;
+            var data = typeof result === 'string' ? JSON.parse(result) : result;
+            if (data && data.data !== undefined) data = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
+            if (!data || !Array.isArray(data.orders)) throw new Error('Response did not contain order progress');
+            DATA = DATA || {};
+            DATA.progressOrders = data.orders;
+            renderPipeline();
+        } catch (e) {
+            console.error('getSalesOrderProgress parse failed:', e, response);
+            DATA = DATA || {};
+            DATA.progressOrders = [];
+            DATA.progressError = e.message || String(e);
+            renderPipeline();
+        }
+    }).catch(function (err) {
+        console.error('getSalesOrderProgress error:', err);
+        DATA = DATA || {};
+        DATA.progressOrders = [];
+        DATA.progressError = (err && (err.message || err.toString())) || 'Request failed';
+        renderPipeline();
+    });
+}
+
 // ---- the stage breakdown behind the chevron ----
 
 function renderStages(emp) {
@@ -259,8 +502,9 @@ function renderStages(emp) {
             : '<span class="pill pill-running">Running</span>';
         if (s.outsourced) status += ' <span class="pill pill-outsourced">Out</span>';
 
+        var soPill = s.salesOrderStatus ? ' ' + soStatusPill(s.salesOrderStatus) : '';
         var order = s.salesOrder
-            ? esc(s.salesOrder) + (s.planNo ? '<div class="emp-sub">' + esc(s.planNo) + '</div>' : '')
+            ? esc(s.salesOrder) + soPill + (s.planNo ? '<div class="emp-sub">' + esc(s.planNo) + '</div>' : '')
             : '<span class="muted">—</span>';
 
         return '<tr>' +
@@ -497,12 +741,22 @@ function load() {
         payload: { dateTxt: toApiDate(iso) }
     }).then(function (response) {
         try {
-            DATA = JSON.parse(response.result);
+            var result = response && response.result !== undefined ? response.result : response;
+            var payload = typeof result === 'string' ? JSON.parse(result) : result;
+            if (payload && payload.data !== undefined) {
+                payload = typeof payload.data === 'string' ? JSON.parse(payload.data) : payload.data;
+            }
+            var existingPipeline = DATA && DATA.pipeline;
+            var existingProgress = DATA && DATA.progressOrders;
+            DATA = payload;
+            if (!DATA.pipeline && existingPipeline) DATA.pipeline = existingPipeline;
+            if (!DATA.progressOrders && existingProgress) DATA.progressOrders = existingProgress;
         } catch (e) {
-            console.error('getEmployeeReport parse failed:', e, response.result);
+            console.error('getEmployeeReport parse failed:', e, response);
             DATA = { errors: ['Could not read the response — see the browser console.'], worked: [], noLogs: [], totals: {} };
         }
         setBusy(false);
+        renderPipeline();
         renderTiles();
         renderTable();
         renderNoLogs();
@@ -511,8 +765,9 @@ function load() {
         // bare 500 with no message at all is usually the statement-execution
         // limit, which cannot be caught server-side.
         console.error('getEmployeeReport error:', err);
-        DATA = { errors: ['Could not load: ' + err], worked: [], noLogs: [], totals: {} };
+        DATA = { errors: ['Could not load: ' + err], worked: [], noLogs: [], totals: {}, pipeline: (DATA && DATA.pipeline) || {} };
         setBusy(false);
+        renderPipeline();
         renderTiles();
         renderTable();
         renderNoLogs();
@@ -531,6 +786,15 @@ document.addEventListener('DOMContentLoaded', function () {
     input.max = todayIso();
 
     input.addEventListener('change', load);
+
+    document.getElementById('employee-tab').addEventListener('click', function () {
+        activateTab('employee');
+    });
+    document.getElementById('pipeline-tab').addEventListener('click', function () {
+        activateTab('pipeline');
+        loadPipeline();
+        loadSalesOrderProgress();
+    });
 
     document.getElementById('day-prev').addEventListener('click', function () {
         input.value = shiftDays(currentIso(), -1);
@@ -553,7 +817,16 @@ document.addEventListener('DOMContentLoaded', function () {
     // seconds; a report of a day that is mostly already over does not change
     // fast enough to be worth the load, and the operator whose row was open
     // would have had it re-rendered under his name mid-read.
-    document.getElementById('refresh-btn').addEventListener('click', load);
+    document.getElementById('refresh-btn').addEventListener('click', function () {
+        load();
+        loadPipeline();
+        loadSalesOrderProgress();
+    });
 
+    // Render an explicit loading state. Only counts returned by the Creator
+    // backend are displayed; zero is shown only when the backend returns zero.
+    renderPipeline();
+    loadPipeline();
+    loadSalesOrderProgress();
     load();
 });
