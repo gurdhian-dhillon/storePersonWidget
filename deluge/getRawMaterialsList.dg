@@ -21,12 +21,12 @@ string getRawMaterialsList()
 			skuText = ifnull(rm.SKU, "").toString().trim().replaceAll("\"", "'");
 			isFab = ifnull(rm.Is_Fabric, false);
 			
-			matType = ifnull(rm.Type, "").toString().trim().replaceAll("\"", "'");
+			matType = ifnull(rm.Type_field, "").toString().trim().replaceAll("\"", "'");
 			matPattern = ifnull(rm.Pattern, "").toString().trim().replaceAll("\"", "'");
 			matColor = ifnull(rm.Color, "").toString().trim().replaceAll("\"", "'");
 			if(matColor == "")
 			{
-				matColor = ifnull(rm.Colour, "").toString().trim().replaceAll("\"", "'");
+				matColor = ifnull(rm.Color, "").toString().trim().replaceAll("\"", "'");
 			}
 			
 			unitVal = ifnull(rm.Unit, "").toString().trim().replaceAll("\"", "'");
