@@ -2995,7 +2995,7 @@ function loadMaterials() {
 
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getRawMaterialsList',
-        http_method: 'POST',
+        http_method: 'GET',
         payload: {}
     }).then(function (response) {
         try {
