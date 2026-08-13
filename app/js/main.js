@@ -2986,24 +2986,7 @@ document.getElementById('refresh-btn').addEventListener('click', function () {
 
 var MATERIALS_DATA = null;
 var RAW_MATERIAL_FILTER = 'fabric'; // 'fabric' or 'other'
-var EXPANDED_PATTERNS = {}; // grpName -> boolean
 var MATERIAL_SEARCH_TERM = '';
-
-// Helper to get base group name
-function getBaseGroupName(rm) {
-    var name = rm.name || '';
-    var parts = name.split('/').map(function (s) { return s.trim(); });
-    if (rm.isFabric) {
-        if (parts.length >= 2) {
-            return parts[0] + ' / ' + parts[1];
-        }
-    } else {
-        if (parts.length >= 1) {
-            return parts[0];
-        }
-    }
-    return name;
-}
 
 function loadMaterials() {
     var panel = document.getElementById('panel-materials');
@@ -3020,15 +3003,6 @@ function loadMaterials() {
                 data = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
             }
             MATERIALS_DATA = data.materials || [];
-            
-            // Initialize expanded patterns to true for the first load
-            if (Object.keys(EXPANDED_PATTERNS).length === 0) {
-                MATERIALS_DATA.forEach(function (rm) {
-                    var grp = getBaseGroupName(rm);
-                    EXPANDED_PATTERNS[grp] = true;
-                });
-            }
-            
             renderMaterials();
         } catch (e) {
             console.error('getRawMaterialsList parse failed:', e, response);
@@ -3048,10 +3022,22 @@ function renderMaterials() {
         return;
     }
 
-    // 1. Filter by search term and isFabric
+    var isFabricTab = RAW_MATERIAL_FILTER === 'fabric';
+
+    // 1. Filter by search term and category
     var filtered = MATERIALS_DATA.filter(function (rm) {
-        var isFabricTab = RAW_MATERIAL_FILTER === 'fabric';
-        if (rm.isFabric !== isFabricTab) return false;
+        var isPrinted = (rm.type || '').toLowerCase().indexOf('printed') > -1;
+        var belongsToTab = false;
+        
+        if (isFabricTab) {
+            // Fabric tab: isFabric must be true AND it must NOT be printed fabric
+            belongsToTab = (rm.isFabric === true && !isPrinted);
+        } else {
+            // Other materials: isFabric is false OR it is printed fabric
+            belongsToTab = (rm.isFabric === false || isPrinted);
+        }
+
+        if (!belongsToTab) return false;
 
         if (MATERIAL_SEARCH_TERM.trim() !== '') {
             var term = MATERIAL_SEARCH_TERM.toLowerCase();
@@ -3062,18 +3048,14 @@ function renderMaterials() {
         return true;
     });
 
-    // 2. Group by Base Name
-    var grouped = {};
-    var groupOrder = [];
-    filtered.forEach(function (rm) {
-        var grp = getBaseGroupName(rm);
-        if (!grouped[grp]) {
-            grouped[grp] = [];
-            groupOrder.push(grp);
-        }
-        grouped[grp].push(rm);
+    // Sort by name
+    filtered.sort(function (a, b) {
+        var nameA = (a.name || '').toLowerCase();
+        var nameB = (b.name || '').toLowerCase();
+        if (nameA < nameB) return -1;
+        if (nameA > nameB) return 1;
+        return 0;
     });
-    groupOrder.sort();
 
     // 3. Sub-tabs HTML
     var activeClassFabric = RAW_MATERIAL_FILTER === 'fabric' ? ' is-active' : '';
@@ -3102,57 +3084,36 @@ function renderMaterials() {
         return;
     }
 
-    // 4. Accordion Groups HTML
-    html += '<div class="materials-accordion">';
-    groupOrder.forEach(function (grp) {
-        var list = grouped[grp];
-        var isExpanded = EXPANDED_PATTERNS[grp] !== false;
-        var icon = isExpanded ? '▼' : '▶';
-        var tableHtml = '';
+    // Render single table
+    var rows = filtered.map(function (rm) {
+        // Stock styling
+        var stockClass = rm.stock > 0 ? 'yes' : 'no';
+        var stockLabel = rm.stock > 0 ? fmt(rm.stock) : 'Out';
+        var unitLabel = rm.stock > 0 ? ' <span class="unit" style="color:var(--text-muted); font-size:11px;">' + escapeHtml(rm.unit) + '</span>' : '';
+        
+        return '<tr>' +
+            '<td style="font-weight:600; white-space:nowrap;">' + (escapeHtml(rm.sku) || '<span class="muted">—</span>') + '</td>' +
+            '<td style="font-weight:700;">' + escapeHtml(rm.name) + '</td>' +
+            '<td>' + (escapeHtml(rm.type) || '<span class="muted">—</span>') + '</td>' +
+            '<td>' + (escapeHtml(rm.pattern) || '<span class="muted">—</span>') + '</td>' +
+            '<td>' + (escapeHtml(rm.color) || '<span class="muted">—</span>') + '</td>' +
+            '<td class="r ' + stockClass + '" style="font-variant-numeric:tabular-nums; font-weight:600;">' + stockLabel + unitLabel + '</td>' +
+            '</tr>';
+    }).join('');
 
-        if (isExpanded) {
-            var rows = list.map(function (rm) {
-                // Stock styling
-                var stockClass = rm.stock > 0 ? 'yes' : 'no';
-                var stockLabel = rm.stock > 0 ? fmt(rm.stock) : 'Out';
-                var unitLabel = rm.stock > 0 ? ' <span class="unit" style="color:var(--text-muted); font-size:11px;">' + escapeHtml(rm.unit) + '</span>' : '';
-                
-                return '<tr>' +
-                    '<td style="font-weight:600; white-space:nowrap;">' + escapeHtml(rm.sku) + '</td>' +
-                    '<td style="font-weight:700;">' + escapeHtml(rm.name) + '</td>' +
-                    '<td>' + (escapeHtml(rm.type) || '<span class="muted">—</span>') + '</td>' +
-                    '<td>' + (escapeHtml(rm.pattern) || '<span class="muted">—</span>') + '</td>' +
-                    '<td>' + (escapeHtml(rm.color) || '<span class="muted">—</span>') + '</td>' +
-                    '<td class="r ' + stockClass + '" style="font-variant-numeric:tabular-nums; font-weight:600;">' + stockLabel + unitLabel + '</td>' +
-                    '</tr>';
-            }).join('');
-
-            tableHtml = '<div class="table-wrapper" style="margin-top:0; border-top:none; border-top-left-radius:0; border-top-right-radius:0;">' +
-                '<table class="rep-table" style="margin-bottom:0;">' +
-                '<thead><tr>' +
-                '<th style="width:15%">SKU</th>' +
-                '<th style="width:35%">Item Name</th>' +
-                '<th style="width:15%">Type</th>' +
-                '<th style="width:15%">Pattern</th>' +
-                '<th style="width:10%">Color</th>' +
-                '<th class="r" style="width:10%">Stock</th>' +
-                '</tr></thead>' +
-                '<tbody>' + rows + '</tbody>' +
-                '</table>' +
-                '</div>';
-        }
-
-        // Card header style matching disputes or issues
-        var expandedHeaderStyle = isExpanded ? 'border-bottom-left-radius:0; border-bottom-right-radius:0;' : '';
-        html += '<div style="margin-bottom:12px; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow-sm);">' +
-            '<button type="button" class="group-header-btn" data-pattern="' + escapeHtml(grp) + '" style="display:flex; width:100%; align-items:center; justify-content:space-between; padding:12px 16px; background:#f8fafc; border:none; text-align:left; font:inherit; font-weight:700; color:var(--text-main); cursor:pointer; ' + expandedHeaderStyle + '">' +
-            '<span>' + escapeHtml(grp) + ' <span style="font-weight:400; color:var(--text-muted); font-size:12px; margin-left:6px;">(' + list.length + ')</span></span>' +
-            '<span style="font-size:10px; color:var(--text-muted); transition:transform 0.15s ease;">' + icon + '</span>' +
-            '</button>' +
-            tableHtml +
-            '</div>';
-    });
-    html += '</div>';
+    html += '<div class="table-wrapper" style="margin-top:0; box-shadow:var(--shadow-sm); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;">' +
+        '<table class="rep-table" style="margin-bottom:0;">' +
+        '<thead><tr>' +
+        '<th style="width:15%">SKU</th>' +
+        '<th style="width:35%">Item Name</th>' +
+        '<th style="width:15%">Type</th>' +
+        '<th style="width:15%">Pattern</th>' +
+        '<th style="width:10%">Color</th>' +
+        '<th class="r" style="width:10%">Stock</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>' +
+        '</div>';
 
     panel.innerHTML = html;
     setupMaterialsListeners();
@@ -3191,15 +3152,6 @@ function setupMaterialsListeners() {
             renderMaterials();
         });
     }
-
-    // Accordion expand/collapse
-    panel.querySelectorAll('.group-header-btn').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            var pat = btn.getAttribute('data-pattern');
-            EXPANDED_PATTERNS[pat] = EXPANDED_PATTERNS[pat] === false ? true : false;
-            renderMaterials();
-        });
-    });
 }
 
 setTodayLabel();
