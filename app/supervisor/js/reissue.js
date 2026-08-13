@@ -138,8 +138,6 @@ function openDamageDialog(plan, item, opts) {
         '<div id="dmg-mats"></div>' +
 
         '<div class="exc-foot">' +
-        '<button type="button" class="ghost-btn" onclick="closeDamageDialog()">' +
-        (fromStage ? 'Not now' : 'Cancel') + '</button>' +
         '<button type="button" class="primary-btn" id="dmg-next">Choose materials</button>' +
         '</div>' +
         '</div>';
@@ -377,7 +375,6 @@ function wireDamageSave() {
     var foot = document.querySelector('#damage-modal .exc-foot');
     if (!foot) return;
     foot.innerHTML =
-        '<button type="button" class="ghost-btn" onclick="closeDamageDialog()">Cancel</button>' +
         '<button type="button" class="primary-btn" id="dmg-save">Save to Reissue</button>';
     document.getElementById('dmg-save').addEventListener('click', saveDamage);
 }
