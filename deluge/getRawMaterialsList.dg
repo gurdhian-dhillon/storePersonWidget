@@ -1,0 +1,61 @@
+string getRawMaterialsList()
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		rowsJson = "";
+		allMats = Raw_Material[ID != 0] sort by Material_Display_Name;
+		for each rm in allMats
+		{
+			if(rowsJson != "")
+			{
+				rowsJson = rowsJson + ",";
+			}
+			
+			matName = ifnull(rm.Material_Display_Name, "").toString().trim().replaceAll("\"", "'");
+			if(matName == "")
+			{
+				matName = ifnull(rm.Name, "").toString().trim().replaceAll("\"", "'");
+			}
+			
+			skuText = ifnull(rm.SKU, "").toString().trim().replaceAll("\"", "'");
+			isFab = ifnull(rm.Is_Fabric, false);
+			
+			matType = ifnull(rm.Type_field, "").toString().trim().replaceAll("\"", "'");
+			matPattern = ifnull(rm.Pattern, "").toString().trim().replaceAll("\"", "'");
+			matColor = ifnull(rm.Color, "").toString().trim().replaceAll("\"", "'");
+			if(matColor == "")
+			{
+				matColor = ifnull(rm.Color, "").toString().trim().replaceAll("\"", "'");
+			}
+			
+			unitVal = ifnull(rm.Unit, "").toString().trim().replaceAll("\"", "'");
+			
+			availStock = 0.0;
+			if(isFab == true)
+			{
+				availStock = ifnull(rm.Wash_Quantity, 0.0).toDecimal();
+			}
+			else
+			{
+				availStock = ifnull(rm.Quantity, 0.0).toDecimal();
+			}
+			
+			rowsJson = rowsJson + "{\"id\":\"" + rm.ID + "\","
+				+ "\"name\":\"" + matName + "\","
+				+ "\"sku\":\"" + skuText + "\","
+				+ "\"isFabric\":" + isFab + ","
+				+ "\"type\":\"" + matType + "\","
+				+ "\"pattern\":\"" + matPattern + "\","
+				+ "\"color\":\"" + matColor + "\","
+				+ "\"unit\":\"" + unitVal + "\","
+				+ "\"stock\":" + availStock + "}";
+		}
+		res = "{\"errors\":[],\"materials\":[" + rowsJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

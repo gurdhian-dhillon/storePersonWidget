@@ -1464,7 +1464,8 @@ var TAB_LOADERS = {
     history: loadHistory,
     waste: loadWasteReceipt,
     disputes: loadDisputes,
-    requests: loadRequests
+    requests: loadRequests,
+    materials: loadMaterials
 };
 
 var tabsLoaded = {};
@@ -2982,6 +2983,177 @@ document.getElementById('refresh-btn').addEventListener('click', function () {
         }
     });
 });
+
+var MATERIALS_DATA = null;
+var RAW_MATERIAL_FILTER = 'fabric'; // 'fabric' or 'other'
+var MATERIAL_SEARCH_TERM = '';
+
+function loadMaterials() {
+    var panel = document.getElementById('panel-materials');
+    panel.innerHTML = '<div class="panel-loading">Loading raw materials…</div>';
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getRawMaterialsList',
+        http_method: 'GET'
+    }).then(function (response) {
+        try {
+            var result = response && response.result !== undefined ? response.result : response;
+            var data = typeof result === 'string' ? JSON.parse(result) : result;
+            if (data && data.data !== undefined) {
+                data = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
+            }
+            MATERIALS_DATA = data.materials || [];
+            renderMaterials();
+        } catch (e) {
+            console.error('getRawMaterialsList parse failed:', e, response);
+            panel.innerHTML = '<div class="panel-placeholder"><h2>Could not read materials</h2><p>Check the browser console.</p></div>';
+        }
+    }).catch(function (err) {
+        console.error('getRawMaterialsList error:', err);
+        panel.innerHTML = '<div class="panel-placeholder"><h2>Failed to load</h2><p>Check the browser console.</p></div>';
+    });
+}
+
+function renderMaterials() {
+    var panel = document.getElementById('panel-materials');
+    if (!panel) return;
+    if (!MATERIALS_DATA) {
+        panel.innerHTML = '<div class="panel-placeholder"><h2>No data loaded</h2></div>';
+        return;
+    }
+
+    var isFabricTab = RAW_MATERIAL_FILTER === 'fabric';
+
+    // 1. Filter by search term and category
+    var filtered = MATERIALS_DATA.filter(function (rm) {
+        var isPrinted = (rm.type || '').toLowerCase().indexOf('printed') > -1;
+        var belongsToTab = false;
+        
+        if (isFabricTab) {
+            // Fabric tab: isFabric must be true AND it must NOT be printed fabric
+            belongsToTab = (rm.isFabric === true && !isPrinted);
+        } else {
+            // Other materials: isFabric is false OR it is printed fabric
+            belongsToTab = (rm.isFabric === false || isPrinted);
+        }
+
+        if (!belongsToTab) return false;
+
+        if (MATERIAL_SEARCH_TERM.trim() !== '') {
+            var term = MATERIAL_SEARCH_TERM.toLowerCase();
+            var name = (rm.name || '').toLowerCase();
+            var sku = (rm.sku || '').toLowerCase();
+            return name.indexOf(term) > -1 || sku.indexOf(term) > -1;
+        }
+        return true;
+    });
+
+    // Sort by name
+    filtered.sort(function (a, b) {
+        var nameA = (a.name || '').toLowerCase();
+        var nameB = (b.name || '').toLowerCase();
+        if (nameA < nameB) return -1;
+        if (nameA > nameB) return 1;
+        return 0;
+    });
+
+    // 3. Sub-tabs HTML
+    var activeClassFabric = RAW_MATERIAL_FILTER === 'fabric' ? ' is-active' : '';
+    var activeClassOther = RAW_MATERIAL_FILTER === 'other' ? ' is-active' : '';
+    
+    var html = '';
+    
+    // Sub-tab strip for Fabric / Other Materials
+    html += '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">' +
+        '<nav class="tab-strip" style="margin-bottom:0; box-shadow:none; border:none; background:none; padding:0;">' +
+        '<button type="button" class="tab-btn' + activeClassFabric + '" id="subtab-fabric">Fabric</button>' +
+        '<button type="button" class="tab-btn' + activeClassOther + '" id="subtab-other">Other Materials</button>' +
+        '</nav>' +
+        '<div style="display:flex; align-items:center; gap:8px;">' +
+        '<input type="search" id="mat-search" class="so-filter" placeholder="Search by name or SKU…" value="' + escapeHtml(MATERIAL_SEARCH_TERM) + '" style="margin:0; width:220px; font-size:13px; padding:6px 10px;">' +
+        '</div>' +
+        '</div>';
+
+    if (filtered.length === 0) {
+        html += '<div class="panel-placeholder" style="padding:40px 20px;">' +
+            '<h2>No materials found</h2>' +
+            '<p>Try adjusting your search filter or category selection.</p>' +
+            '</div>';
+        panel.innerHTML = html;
+        setupMaterialsListeners();
+        return;
+    }
+
+    // Render single table
+    var rows = filtered.map(function (rm) {
+        // Stock styling
+        var stockClass = rm.stock > 0 ? 'yes' : 'no';
+        var stockLabel = rm.stock > 0 ? fmt(rm.stock) : 'Out';
+        var unitLabel = rm.stock > 0 ? ' <span class="unit" style="color:var(--text-muted); font-size:11px;">' + escapeHtml(rm.unit) + '</span>' : '';
+        
+        return '<tr>' +
+            '<td style="font-weight:600; white-space:nowrap;">' + (escapeHtml(rm.sku) || '<span class="muted">—</span>') + '</td>' +
+            '<td style="font-weight:700;">' + escapeHtml(rm.name) + '</td>' +
+            '<td>' + (escapeHtml(rm.type) || '<span class="muted">—</span>') + '</td>' +
+            '<td>' + (escapeHtml(rm.pattern) || '<span class="muted">—</span>') + '</td>' +
+            '<td>' + (escapeHtml(rm.color) || '<span class="muted">—</span>') + '</td>' +
+            '<td class="r ' + stockClass + '" style="font-variant-numeric:tabular-nums; font-weight:600;">' + stockLabel + unitLabel + '</td>' +
+            '</tr>';
+    }).join('');
+
+    html += '<div class="table-wrapper" style="margin-top:0; box-shadow:var(--shadow-sm); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;">' +
+        '<table class="rep-table" style="margin-bottom:0;">' +
+        '<thead><tr>' +
+        '<th style="width:15%">SKU</th>' +
+        '<th style="width:35%">Item Name</th>' +
+        '<th style="width:15%">Type</th>' +
+        '<th style="width:15%">Pattern</th>' +
+        '<th style="width:10%">Color</th>' +
+        '<th class="r" style="width:10%">Stock</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>' +
+        '</div>';
+
+    panel.innerHTML = html;
+    setupMaterialsListeners();
+}
+
+function setupMaterialsListeners() {
+    var panel = document.getElementById('panel-materials');
+    if (!panel) return;
+
+    // Sub-tab toggles
+    var subFabric = document.getElementById('subtab-fabric');
+    if (subFabric) {
+        subFabric.addEventListener('click', function () {
+            RAW_MATERIAL_FILTER = 'fabric';
+            renderMaterials();
+        });
+    }
+
+    var subOther = document.getElementById('subtab-other');
+    if (subOther) {
+        subOther.addEventListener('click', function () {
+            RAW_MATERIAL_FILTER = 'other';
+            renderMaterials();
+        });
+    }
+
+    // Search bar input
+    var search = document.getElementById('mat-search');
+    if (search) {
+        search.addEventListener('input', function () {
+            MATERIAL_SEARCH_TERM = search.value;
+            renderMaterials();
+        });
+        search.addEventListener('search', function () {
+            MATERIAL_SEARCH_TERM = search.value;
+            renderMaterials();
+        });
+    }
+}
+
 setTodayLabel();
 loadRequirements();
 loadCounts();
