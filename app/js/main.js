@@ -50,6 +50,51 @@ function wastePicks(material) {
     return (material.isFabric && material.wastePicks) ? material.wastePicks : [];
 }
 
+// ---- Lots ----
+//
+// Fabric leaves the shelf from a named lot, because a lot is a TONE. The store
+// person picks; the screen only advises. He can see the rack — no rule we write
+// knows that one lot is nearly finished or that another is behind a pallet.
+//
+// Non-fabric has no lots and none of this runs.
+function lotsFor(material) {
+    return (material.isFabric && material.lots) ? material.lots : [];
+}
+
+function lotInputId(supIdx, matIdx, lotIdx) {
+    return 'lot-input-' + supIdx + '-' + matIdx + '-' + lotIdx;
+}
+
+// What has been typed across this row's lots.
+function lotSum(supIdx, matIdx, material) {
+    var total = 0;
+    lotsFor(material).forEach(function (l, lotIdx) {
+        var el = document.getElementById(lotInputId(supIdx, matIdx, lotIdx));
+        if (el) total += parseFloat(el.value) || 0;
+    });
+    return round2(total);
+}
+
+// THE CEILING THE TYPED TOTAL IS CHECKED AGAINST, and for fabric issued from
+// lots it is availableStock — NOT `remaining`.
+//
+// `remaining` is the metres the pieces would need as ONE continuous piece.
+// Split across lots, each lot is cut on its own and loses its part-row, so a
+// correct split legitimately needs a little more: 100 pieces at 2 per row is
+// 27.50m in one piece but 20 + 7.70 across two lots. Validating against
+// `remaining` would mark that invalid and refuse to issue the last two pieces —
+// the same stranded-piece failure the per-lot budget on the server exists to
+// prevent, re-introduced in the UI.
+//
+// Each lot's own input is still capped at that lot's washed stock, which is the
+// guard that actually matters, and the server trims anything surplus per pass.
+function issueCeiling(material) {
+    if (material.isFabric && lotsFor(material).length > 0) {
+        return round2(Math.max(0, Number(material.availableStock) || 0));
+    }
+    return maxIssuable(material);
+}
+
 // Waste pieces now live in their own section with their own rows, so a fabric
 // metres row is issuable on metres alone again.
 function rowIssuable(material) {
@@ -138,7 +183,7 @@ function validateRow(supIdx, matIdx, material) {
     var input = document.getElementById(rowInputId(supIdx, matIdx));
     if (!input) return;
     var val = parseFloat(input.value) || 0;
-    var maxAllowed = maxIssuable(material);
+    var maxAllowed = issueCeiling(material);
     if (val < 0 || val > maxAllowed + 0.0001) {
         input.classList.add('invalid');
         input.title = 'Max issuable is ' + fmt(maxAllowed) + ' ' + material.unit;
@@ -575,10 +620,117 @@ function shortPill(m) {
 // One waste piece size to fetch off the rack.
 // Length to cut off the roll. Used for fabric and for every other material —
 // they are the same job: hand over this much of this thing.
+// The lot strip under a fabric row: one line per lot with washed stock.
+//
+// THE SCREEN THINKS, IT DOES NOT DECIDE. Nothing is pre-filled — pre-filling
+// would be choosing the tone for him. What it does do is mark the lots that
+// could cover the whole ask on their own, call out a lot this order already has
+// cloth from, and warn (never block) when he splits where one lot would have
+// done. He can override all of it; he just cannot do it by accident.
+function lotStripHtml(m, supIdx, matIdx) {
+    var lots = lotsFor(m);
+    var cols = m.isFabric ? 5 : 4;
+
+    if (lots.length === 0) {
+        return '<tr class="lot-row"><td colspan="' + cols + '">' +
+            '<div class="lot-none">No lot has washed cloth &mdash; book it in on ' +
+            '<b>Stock in</b>, or send a lot for washing. Fabric cannot be issued ' +
+            'without saying which lot it came from.</div></td></tr>';
+    }
+
+    var need = suggestedIssue(m);
+
+    var rows = lots.map(function (l, lotIdx) {
+        var wash = Number(l.wash) || 0;
+        var covers = need > 0 && wash + 0.0001 >= need;
+
+        return '' +
+            '<div class="lot-line">' +
+                '<span class="lot-id">' + escapeHtml(l.lotNumber || '—') +
+                    (l.label ? ' <span class="lot-label">' + escapeHtml(l.label) + '</span>' : '') +
+                '</span>' +
+                '<span class="lot-avail">' + fmt(wash) + '<span class="unit">' +
+                    escapeHtml(m.unit) + ' washed</span></span>' +
+                (covers ? '<span class="status-pill status-sufficient">covers it all</span>' : '') +
+                ((Number(l.unwash) || 0) > 0
+                    ? '<span class="lot-unwash">' + fmt(l.unwash) + ' unwashed</span>' : '') +
+                '<span class="issue-input-group">' +
+                    '<input type="number" step="0.01" min="0" max="' + wash + '" ' +
+                        'class="issue-input lot-input" id="' + lotInputId(supIdx, matIdx, lotIdx) + '" ' +
+                        'placeholder="0" ' +
+                        'oninput="onLotInput(' + supIdx + ',' + matIdx + ')" />' +
+                '</span>' +
+                '<button type="button" class="ghost-btn lot-fill" ' +
+                    'onclick="fillLot(' + supIdx + ',' + matIdx + ',' + lotIdx + ')">Fill</button>' +
+            '</div>';
+    }).join('');
+
+    return '<tr class="lot-row"><td colspan="' + cols + '">' +
+        '<div class="lot-strip-head">Take from which lot?</div>' +
+        rows +
+        '<div class="lot-warn" id="lot-warn-' + supIdx + '-' + matIdx + '"></div>' +
+        '</td></tr>';
+}
+
+// Sets one lot to whatever is still needed, capped at what that lot holds.
+// A convenience, not a decision — he still chose the lot.
+function fillLot(supIdx, matIdx, lotIdx) {
+    var m = window.__reqData[supIdx].materials[matIdx];
+    var lots = lotsFor(m);
+    var el = document.getElementById(lotInputId(supIdx, matIdx, lotIdx));
+    if (!el || !lots[lotIdx]) return;
+
+    var others = 0;
+    lots.forEach(function (l, i) {
+        if (i === lotIdx) return;
+        var o = document.getElementById(lotInputId(supIdx, matIdx, i));
+        if (o) others += parseFloat(o.value) || 0;
+    });
+
+    var stillNeeded = round2(Math.max(0, suggestedIssue(m) - others));
+    var canGive = Number(lots[lotIdx].wash) || 0;
+    el.value = round2(Math.min(stillNeeded, canGive));
+    onLotInput(supIdx, matIdx);
+}
+
+// The lot inputs are what he types; the row's metres box is their sum and is
+// read-only. Feeding the existing handler keeps checkbox state, validation and
+// the card footer working exactly as they did before lots existed.
+function onLotInput(supIdx, matIdx) {
+    var m = window.__reqData[supIdx].materials[matIdx];
+    var input = document.getElementById(rowInputId(supIdx, matIdx));
+    var total = lotSum(supIdx, matIdx, m);
+    if (input) input.value = total;
+
+    var warnBox = document.getElementById('lot-warn-' + supIdx + '-' + matIdx);
+    if (warnBox) {
+        var used = 0;
+        lotsFor(m).forEach(function (l, i) {
+            var el = document.getElementById(lotInputId(supIdx, matIdx, i));
+            if (el && (parseFloat(el.value) || 0) > 0) used++;
+        });
+
+        // Warned, never blocked. Mixing tones inside one order is the mistake
+        // lots exist to prevent, but he may have a reason we cannot see.
+        var avoidable = used > 1 && lotsFor(m).some(function (l) {
+            return (Number(l.wash) || 0) + 0.0001 >= total;
+        });
+        warnBox.innerHTML = avoidable
+            ? '&#9888; Two lots for one order means two tones. One lot on its own could cover this.'
+            : '';
+    }
+
+    onIssueInputChange(supIdx, matIdx);
+}
+
 function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
     var done = isFullyIssued(m);
-    var defaultIssue = suggestedIssue(m);
+    var lots = lotsFor(m);
+    // Fabric is typed into its lots, so the row's own box is a running total.
+    var byLot = m.isFabric && !done;
+    var defaultIssue = byLot ? 0 : suggestedIssue(m);
     var disabled = maxIssuable(m) > 0 ? '' : 'disabled';
+    if (byLot && lots.length === 0) disabled = 'disabled';
 
     var issueCell;
     if (done) {
@@ -592,12 +744,13 @@ function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
         issueCell =
             '<div class="issue-cell">' +
                 '<input type="checkbox" class="issue-checkbox" id="' + rowCheckboxId(supIdx, matIdx) + '" ' +
-                    (rowIssuable(m) ? 'checked' : '') + ' ' + disabled + ' ' +
+                    (rowIssuable(m) && !byLot ? 'checked' : '') + ' ' + disabled + ' ' +
                     'aria-label="Issue ' + escapeHtml(m.material) + '" ' +
                     'onchange="onIssueCheckboxChange(' + supIdx + ',' + matIdx + ')" />' +
                 '<span class="issue-input-group">' +
-                    '<input type="number" step="0.01" min="0" max="' + maxIssuable(m) + '" ' +
+                    '<input type="number" step="0.01" min="0" max="' + issueCeiling(m) + '" ' +
                         'class="issue-input" id="' + rowInputId(supIdx, matIdx) + '" ' + disabled + ' ' +
+                        (byLot ? 'readonly ' : '') +
                         'value="' + defaultIssue + '" oninput="onIssueInputChange(' + supIdx + ',' + matIdx + ')" />' +
                     '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
                 '</span>' +
@@ -634,7 +787,10 @@ function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
             '</td>' +
             stockCells +
             '<td class="col-issue">' + issueCell + '</td>' +
-        '</tr>';
+        '</tr>' +
+        // Fabric only, and only while there is still something to issue. A
+        // fully-issued row is a receipt and has no lot to choose.
+        (byLot ? lotStripHtml(m, supIdx, matIdx) : '');
 }
 
 // A fabric material becomes one row per waste size plus, unless waste covers it
@@ -1317,6 +1473,17 @@ function issueForSupervisor(supIdx) {
             if (pieces > 0) picks.push({ wasteId: p.wasteId, pieces: pieces });
         });
 
+        // Which cloth is coming off which lot. Only lots he actually typed into
+        // travel — a zero line is not a choice, and the server treats it as one
+        // to be skipped rather than an error.
+        var lotLines = [];
+        lotsFor(m).forEach(function (l, lotIdx) {
+            var el = document.getElementById(lotInputId(supIdx, matIdx, lotIdx));
+            if (!el) return;
+            var q = parseFloat(el.value) || 0;
+            if (q > 0) lotLines.push({ lotId: l.lotId, qty: q });
+        });
+
         // A fabric row can be worth issuing at 0 metres when waste covers it
         // entirely, so the metres value alone cannot decide this.
         if (val > 0 || picks.length > 0) {
@@ -1334,6 +1501,17 @@ function issueForSupervisor(supIdx) {
                 line.cutWidth = m.cutWidth;
                 line.cutLength = m.cutLength;
                 line.wastePicks = picks;
+                line.lots = lotLines;
+
+                // Metres with no lot behind them cannot be issued: the server
+                // would have nothing to take the cloth off, and receipt and
+                // disputes would have no lot to settle against. Caught here so
+                // he is told which row, rather than getting a server error
+                // naming a SKU.
+                if (val > 0 && lotLines.length === 0) {
+                    alert('Choose which lot the ' + m.material + ' comes from.');
+                    hasInvalid = true;
+                }
             }
             issues.push(line);
         }
@@ -1461,6 +1639,7 @@ function loadRequirements() {
 // "issue" is deliberately absent. It is the home tab, loaded by
 // loadRequirements() on boot, and Refresh names it directly.
 var TAB_LOADERS = {
+    stockin: loadStockIn,
     history: loadHistory,
     waste: loadWasteReceipt,
     disputes: loadDisputes,
@@ -2962,6 +3141,296 @@ function loadCounts() {
     }).catch(function (err) {
         // A missing badge is not worth an error message — the tabs still work.
         console.error('getStoreCounts error:', err);
+    });
+}
+
+// ---- Stock in tab ----
+//
+// Where arriving cloth gets a tone. A LOT IS A TONE, NOT A DELIVERY: same SKU,
+// same width, every recorded detail identical — the difference is only visible
+// to the eye. The store person holds the new cloth against what is on the rack
+// and either tops up the lot it matches or starts a new one.
+//
+// FABRIC ONLY. Accessories have no lots and getStoreLots does not return them.
+//
+// The lot holds the truth and Raw_Material holds a maintained total; both move
+// in one pass inside saveStockInward, so this screen never computes a balance
+// of its own. Everything shown here comes back from the server.
+
+var stockMats = [];
+var stockFilter = '';
+var stockOpenId = null;
+
+function loadStockIn() {
+    var panel = document.getElementById('panel-stockin');
+    panel.innerHTML = '<div class="panel-loading">Loading…</div>';
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getStoreLots',
+        http_method: 'GET'
+    }).then(function (response) {
+        var parsed;
+        try {
+            parsed = JSON.parse(response.result);
+        } catch (e) {
+            console.error('getStoreLots parse failed:', e, response.result);
+            panel.innerHTML = '<div class="panel-placeholder"><h2>Could not read the stock list</h2><p>Check the browser console.</p></div>';
+            return;
+        }
+        // Deluge returns its real message inside the payload — Creator would
+        // otherwise surface every failure as a bare "code 9430".
+        if (parsed.error) console.error('getStoreLots:', parsed.error);
+        stockMats = parsed.materials || [];
+        renderStockIn();
+    }).catch(function (err) {
+        console.error('getStoreLots error:', err);
+        panel.innerHTML = '<div class="panel-placeholder"><h2>Failed to load</h2><p>Check the browser console.</p></div>';
+    });
+}
+
+// TWO BLOCKS, redrawn separately, and the search box is the reason. Rebuilding
+// the input on every keystroke destroys the element the browser is focused on,
+// so the caret jumps out after the first character. Only the list redraws.
+function renderStockIn() {
+    var panel = document.getElementById('panel-stockin');
+    panel.innerHTML =
+        '<div class="stockin-search">' +
+            '<input type="text" id="stockin-filter" class="note-input" ' +
+                'placeholder="Search SKU or material…" oninput="onStockFilter()" />' +
+        '</div>' +
+        '<div id="stockin-list">' + stockInListHtml() + '</div>';
+}
+
+function renderStockInList() {
+    var box = document.getElementById('stockin-list');
+    if (box) box.innerHTML = stockInListHtml();
+}
+
+function onStockFilter() {
+    var el = document.getElementById('stockin-filter');
+    stockFilter = el ? el.value.trim().toLowerCase() : '';
+    renderStockInList();
+}
+
+function stockInMatches() {
+    if (!stockFilter) return stockMats;
+    return stockMats.filter(function (m) {
+        return (m.sku || '').toLowerCase().indexOf(stockFilter) !== -1 ||
+               (m.material || '').toLowerCase().indexOf(stockFilter) !== -1;
+    });
+}
+
+// Keyed on materialId, NEVER on list index. The index moves the moment the
+// filter changes, so an open card would silently become a different material's.
+function toggleStockCard(matId) {
+    stockOpenId = (stockOpenId === matId) ? null : matId;
+    renderStockInList();
+}
+
+function onStockLotChange(matId) {
+    var sel = document.getElementById('si-lot-' + matId);
+    var numWrap = document.getElementById('si-num-wrap-' + matId);
+    var labWrap = document.getElementById('si-label-wrap-' + matId);
+    if (!sel) return;
+    // Number and label only mean anything on a lot being CREATED. Topping up an
+    // existing lot must not offer to renumber or rename it from a screen that is
+    // about incoming cloth — that is a different action with different rules.
+    var creating = sel.value === '';
+    if (numWrap) numWrap.style.display = creating ? '' : 'none';
+    if (labWrap) labWrap.style.display = creating ? '' : 'none';
+}
+
+function stockInListHtml() {
+    var list = stockInMatches();
+    if (list.length === 0) {
+        return '<div class="waste-none">No fabric matches that search.</div>';
+    }
+
+    return list.map(function (m) {
+        var open = stockOpenId === m.materialId;
+
+        // Only shown once the sync exists — cloth Inventory knows about that has
+        // not been given a tone yet. Until then it is always zero.
+        var unalloc = m.unallocated > 0
+            ? '<span class="status-pill status-warning">' + fmt(m.unallocated) + ' awaiting a lot</span>'
+            : '';
+
+        return '' +
+            '<div class="item-card' + (open ? ' open' : '') + '">' +
+                '<div class="item-header" onclick="toggleStockCard(\'' + m.materialId + '\')">' +
+                    '<div class="item-header-info">' +
+                        '<h2>' + escapeHtml(m.material || m.sku || '—') + '</h2>' +
+                        '<div class="item-meta-line">' +
+                            '<span>' + escapeHtml(m.sku || '') + '</span>' +
+                            '<span>' + m.lotCount + (m.lotCount === 1 ? ' lot' : ' lots') + '</span>' +
+                            '<span>' + fmt(m.wash) + ' washed &middot; ' + fmt(m.unwash) + ' unwashed</span>' +
+                            unalloc +
+                        '</div>' +
+                    '</div>' +
+                '</div>' +
+                (open ? stockCardBodyHtml(m) : '') +
+            '</div>';
+    }).join('');
+}
+
+function stockCardBodyHtml(m) {
+    var lots = m.lots || [];
+
+    var rows = lots.map(function (l) {
+        return '' +
+            '<tr>' +
+                '<td class="material-name-cell">' +
+                    '<div class="mat-name">' + escapeHtml(l.lotNumber) + '</div>' +
+                    (l.label ? '<div class="mat-sku">' + escapeHtml(l.label) + '</div>' : '') +
+                '</td>' +
+                '<td class="col-num">' + fmt(l.wash) + '</td>' +
+                '<td class="col-num">' + fmt(l.unwash) + '</td>' +
+                '<td class="col-num">' + fmt(l.inTransit) + '</td>' +
+                '<td class="col-num">' + fmt(l.disputed) + '</td>' +
+                '<td>' + (l.status === 'Blocked'
+                    ? '<span class="status-pill status-danger">Blocked</span>'
+                    : '<span class="status-pill status-sufficient">Active</span>') + '</td>' +
+            '</tr>';
+    }).join('');
+
+    var lotTable = lots.length === 0
+        ? '<div class="waste-none">No lots yet &mdash; the first booking creates one.</div>'
+        : '<div class="table-wrapper"><table>' +
+              '<thead><tr>' +
+                  '<th>Lot</th>' +
+                  '<th class="col-num">Washed</th>' +
+                  '<th class="col-num">Unwashed</th>' +
+                  '<th class="col-num">In transit</th>' +
+                  '<th class="col-num">Disputed</th>' +
+                  '<th>Status</th>' +
+              '</tr></thead>' +
+              '<tbody>' + rows + '</tbody></table></div>';
+
+    // A blocked lot is quarantined — it must not be offered somewhere it could
+    // quietly grow. saveStockInward refuses one anyway; this keeps the screen
+    // and the server saying the same thing.
+    var opts = '<option value="">+ New lot</option>' +
+        lots.filter(function (l) { return l.status !== 'Blocked'; })
+            .map(function (l) {
+                return '<option value="' + l.lotId + '">' + escapeHtml(l.lotNumber) +
+                    (l.label ? ' &mdash; ' + escapeHtml(l.label) : '') + '</option>';
+            }).join('');
+
+    return '' +
+        '<div class="item-body is-open">' +
+            lotTable +
+            '<div class="stockin-form">' +
+                '<label class="si-field"><span>Lot</span>' +
+                    '<select id="si-lot-' + m.materialId + '" class="note-input" ' +
+                        'onchange="onStockLotChange(\'' + m.materialId + '\')">' + opts + '</select>' +
+                '</label>' +
+                '<label class="si-field" id="si-num-wrap-' + m.materialId + '"><span>Lot number</span>' +
+                    '<input type="text" id="si-num-' + m.materialId + '" class="note-input" ' +
+                        'placeholder="as written on the roll" />' +
+                '</label>' +
+                '<label class="si-field" id="si-label-wrap-' + m.materialId + '"><span>Label</span>' +
+                    '<input type="text" id="si-label-' + m.materialId + '" class="note-input" ' +
+                        'placeholder="e.g. slightly darker" />' +
+                '</label>' +
+                '<label class="si-field"><span>Quantity</span>' +
+                    '<input type="number" step="0.01" min="0" id="si-qty-' + m.materialId + '" class="issue-input" />' +
+                '</label>' +
+                '<label class="si-field"><span>State</span>' +
+                    '<select id="si-state-' + m.materialId + '" class="note-input">' +
+                        '<option value="Unwash">Unwashed</option>' +
+                        '<option value="Wash">Washed</option>' +
+                    '</select>' +
+                '</label>' +
+            '</div>' +
+            '<div class="card-footer">' +
+                '<span class="sel-count">Match it against the rack first &mdash; a new lot cannot be merged back later.</span>' +
+                '<button type="button" class="primary-btn" id="si-btn-' + m.materialId + '" ' +
+                    'onclick="submitStockIn(\'' + m.materialId + '\')">Add to stock</button>' +
+            '</div>' +
+        '</div>';
+}
+
+function submitStockIn(matId) {
+    var lotSel = document.getElementById('si-lot-' + matId);
+    var numEl = document.getElementById('si-num-' + matId);
+    var labelEl = document.getElementById('si-label-' + matId);
+    var qtyEl = document.getElementById('si-qty-' + matId);
+    var stateEl = document.getElementById('si-state-' + matId);
+    var btn = document.getElementById('si-btn-' + matId);
+    if (!qtyEl || !btn) return;
+
+    var creating = !lotSel || lotSel.value === '';
+    var lotNum = numEl ? numEl.value.trim() : '';
+
+    if (creating && lotNum === '') {
+        alert('Give the new lot a number — whatever is written on the roll.');
+        return;
+    }
+
+    // Checked here as well as on the server. The server is the one that counts —
+    // a Custom API is callable from anywhere — but a collision caught before the
+    // round trip tells him while he is still looking at the list of lots it
+    // clashed with. Upper-cased, so "l1" cannot slip in beside "L1".
+    if (creating) {
+        var mat = null;
+        stockMats.forEach(function (x) { if (x.materialId === matId) mat = x; });
+        var taken = (mat && mat.lots || []).some(function (l) {
+            return String(l.lotNumber || '').trim().toUpperCase() === lotNum.toUpperCase();
+        });
+        if (taken) {
+            alert('This material already has a lot ' + lotNum + '.');
+            return;
+        }
+    }
+
+    var qty = parseFloat(qtyEl.value);
+    if (isNaN(qty) || qty <= 0) {
+        alert('Enter how much has arrived.');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'saveStockInward',
+        http_method: 'POST',
+        payload: {
+            inwardJson: JSON.stringify({
+                materialId: matId,
+                lotId: lotSel ? lotSel.value : '',
+                lotNumber: lotNum,
+                lotLabel: labelEl ? labelEl.value : '',
+                qty: qty,
+                state: stateEl ? stateEl.value : 'Unwash',
+                remarks: ''
+            })
+        }
+    }).then(function (response) {
+        var parsed;
+        try {
+            parsed = JSON.parse(response.result);
+        } catch (e) {
+            parsed = null;
+        }
+
+        if (!parsed || !parsed.success) {
+            alert('Could not book the stock: ' + ((parsed && parsed.error) || 'unknown error'));
+            btn.disabled = false;
+            btn.textContent = 'Add to stock';
+            return;
+        }
+
+        // Refetched rather than patched by hand. The lot balance, the parent
+        // total and the unallocated figure all moved, and a card patched from
+        // the response would be a second opinion about stock — which is exactly
+        // what this design exists to avoid having.
+        loadStockIn();
+    }).catch(function (err) {
+        console.error('saveStockInward error:', err);
+        alert('Failed to book the stock. Check the browser console.');
+        btn.disabled = false;
+        btn.textContent = 'Add to stock';
     });
 }
 

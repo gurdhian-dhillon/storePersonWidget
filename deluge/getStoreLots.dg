@@ -1,0 +1,153 @@
+string getStoreLots()
+{
+	// Feeds the store's Stock In tab: every fabric material with the lots
+	// currently under it.
+	//
+	// FABRIC ONLY. Accessories have no lots - their Quantity is their stock
+	// exactly as it always was, and none of the lot code runs on them.
+	//
+	// TWO QUERIES TOTAL, both grouped before use. The obvious shape - loop the
+	// materials and query that material's lots inside the loop - is one query per
+	// SKU, which is precisely what blew the statement-execution limit in
+	// getStoreMaterialRequirements. That limit is NOT catchable: it kills the
+	// script, so the try/catch below never runs and the widget gets a bare 500
+	// with no error card.
+
+	matsJson = "";
+
+	try
+	{
+		// Lots first, grouped by material as JSON fragments. Oldest first, which
+		// is the order the store person sees them in - and sort by has to be its
+		// own assignment, never inline in a for each header.
+		allLots = Raw_Material_Lot[ID != 0] sort by Added_Time;
+
+		lotJsonByMat = Map();
+		lotCountByMat = Map();
+
+		for each  lt in allLots
+		{
+			// A lookup holds a record id, so this is the Raw_Material id as text.
+			ltMat = ifnull(lt.Material,"").toString().trim();
+
+			if(ltMat != "")
+			{
+				// A Creator numeric that was never written is EMPTY, not null.
+				// ifnull() does not catch empty and toDecimal() throws on it, so
+				// normalise to string, test, then convert - four times, because
+				// Deluge has no local functions to put this behind.
+				luS = ifnull(lt.Unwash_Quantity,"0").toString().trim();
+				if(luS == "")
+				{
+					luS = "0";
+				}
+				lwS = ifnull(lt.Wash_Quantity,"0").toString().trim();
+				if(lwS == "")
+				{
+					lwS = "0";
+				}
+				liS = ifnull(lt.In_Transit_Qty,"0").toString().trim();
+				if(liS == "")
+				{
+					liS = "0";
+				}
+				ldS = ifnull(lt.Disputed_Qty,"0").toString().trim();
+				if(ldS == "")
+				{
+					ldS = "0";
+				}
+
+				ltNum = ifnull(lt.Lot_Number,"").toString().replaceAll("\"","'");
+				ltLab = ifnull(lt.Lot_Label,"").toString().replaceAll("\"","'");
+				ltSt = ifnull(lt.Status,"").toString().trim();
+				if(ltSt == "")
+				{
+					ltSt = "Active";
+				}
+
+				// Ids forced to string - an 18-digit id breaks JSON.parse on the
+				// widget side.
+				oneLot = "{\"lotId\":\"" + lt.ID + "\",\"lotNumber\":\"" + ltNum + "\",\"label\":\"" + ltLab + "\",\"status\":\"" + ltSt + "\",\"unwash\":" + luS.toDecimal() + ",\"wash\":" + lwS.toDecimal() + ",\"inTransit\":" + liS.toDecimal() + ",\"disputed\":" + ldS.toDecimal() + "}";
+
+				prevJson = ifnull(lotJsonByMat.get(ltMat),"").toString();
+				if(prevJson != "")
+				{
+					prevJson = prevJson + ",";
+				}
+				lotJsonByMat.put(ltMat,prevJson + oneLot);
+
+				prevCnt = ifnull(lotCountByMat.get(ltMat),"0").toString().trim();
+				if(prevCnt == "")
+				{
+					prevCnt = "0";
+				}
+				lotCountByMat.put(ltMat,prevCnt.toLong() + 1);
+			}
+		}
+
+		// Is_Fabric is tested in code, not filtered in the query. A checkbox that
+		// was never ticked is EMPTY, not false, and a query filtering on == true
+		// drops those rows silently with no way to notice.
+		for each  rm in Raw_Material[ID != 0]
+		{
+			if(ifnull(rm.Is_Fabric,false) == true)
+			{
+				rmKey = rm.ID + "";
+
+				muS = ifnull(rm.Unwash_Quantity,"0").toString().trim();
+				if(muS == "")
+				{
+					muS = "0";
+				}
+				mwS = ifnull(rm.Wash_Quantity,"0").toString().trim();
+				if(mwS == "")
+				{
+					mwS = "0";
+				}
+				maS = ifnull(rm.Unallocated_Qty,"0").toString().trim();
+				if(maS == "")
+				{
+					maS = "0";
+				}
+
+				// Display name where one is set, else the plain name, else the SKU.
+				// Same fallback chain issueMaterials uses when it stamps a handover.
+				mDisp = ifnull(rm.Material_Display_Name,"").toString().trim();
+				if(mDisp == "")
+				{
+					mDisp = ifnull(rm.Name,"").toString().trim();
+				}
+				if(mDisp == "")
+				{
+					mDisp = ifnull(rm.SKU,"").toString().trim();
+				}
+
+				mSku = ifnull(rm.SKU,"").toString().replaceAll("\"","'");
+				mUnit = ifnull(rm.Unit,"").toString().replaceAll("\"","'");
+
+				myLots = ifnull(lotJsonByMat.get(rmKey),"").toString();
+				myCount = ifnull(lotCountByMat.get(rmKey),"0").toString().trim();
+				if(myCount == "")
+				{
+					myCount = "0";
+				}
+
+				if(matsJson != "")
+				{
+					matsJson = matsJson + ",";
+				}
+				matsJson = matsJson + "{\"materialId\":\"" + rmKey + "\",\"sku\":\"" + mSku + "\",\"material\":\"" + mDisp.replaceAll("\"","'") + "\",\"unit\":\"" + mUnit + "\",\"unwash\":" + muS.toDecimal() + ",\"wash\":" + mwS.toDecimal() + ",\"unallocated\":" + maS.toDecimal() + ",\"lotCount\":" + myCount.toLong() + ",\"lots\":[" + myLots + "]}";
+			}
+		}
+	}
+	catch (e)
+	{
+		// Creator reports every runtime failure to a widget as a generic code 9430.
+		// Returning the real message is the only way to debug this from the widget.
+		return "{\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\",\"materials\":[]}";
+	}
+
+	// Built by hand - Map.toString() does not emit valid JSON once the structure
+	// nests, and List.toString() does not wrap in [].
+	return "{\"materials\":[" + matsJson + "]}";
+}

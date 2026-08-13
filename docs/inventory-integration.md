@@ -13,8 +13,11 @@ Agreed 2026-08-13. Creator and Inventory are the same Zoho org, synced over the 
   This is the rule that keeps the two from drifting, and everything below is derived from it.
 - **Creator reads a replica, not the live API.** Screens read Creator's own fields; Inventory is
   called at the moment stock actually moves, and on a schedule to refresh the replica.
-- **Lots live in Creator** (see `lots.md` when written). Inventory syncs at SKU level and its
-  per-SKU total equals the sum of that SKU's Creator lots.
+- **Lots live in Creator** — see `lots.md`. Inventory syncs at SKU level and its per-SKU total
+  equals the sum of that SKU's Creator lots.
+- **Lot management is built first, before any sync.** Lots are meaningless to Inventory, so there
+  is nothing to coordinate; and the sync's job is to move a total that lots must already exist to
+  receive. `lots.md` is therefore the current work and this document is the one that follows.
 
 > **After the deduction, the cloth is still physically in the building** — in the cutting room.
 > "On hand" therefore means *raw material we still hold as raw material*, not *material inside the
@@ -175,8 +178,10 @@ inside every plan, *provided no screen ever reads through*.
 
 ## Build order
 
-Each phase is useful on its own and nothing breaks between them.
+Each phase is useful on its own and nothing breaks between them. **Phase 0 is `lots.md` and is
+not optional** — the sync moves a SKU total that has to have somewhere to land.
 
+0. **Lot management in Creator**, against existing data. See `lots.md`.
 1. **Item mapping.** `Inventory_Item_ID` on `Raw_Material`, matched by SKU, plus a report of
    items that failed to match. Read-only, no posting. This is where we find out how clean the
    SKU data really is.
@@ -196,22 +201,35 @@ per-SKU total against their sum.
 
 These are written into the plan above. Each one changes real work if it is wrong.
 
-- **A1 — Raw material items may not exist in Inventory yet.** The items list currently shows
-  finished goods only (dresses, cushion covers, size variants, account `Sales`). Phase 1 assumes
-  fabric items exist or will be created *in Inventory* by purchase, with Creator matching on SKU.
-  If Creator must create them instead, phase 1 gains a push leg.
+- ~~**A1**~~ — **settled.** Fabric items exist in Inventory (`RM-00050`…), classified by a custom
+  field **`Product Type`** with exactly two values, `Raw Material` and `Finished Goods`. SKU codes
+  match Creator's own convention, so **SKU is the join key**. A second custom field, `Type`
+  (`Fabric` / `Printed fabric`), maps onto Creator's `Is_Fabric`.
+- **A1b — every item reads `0.00` stock. Inventory has the catalogue but no quantities.** So the
+  opening balances are in *Creator*, not Inventory, and there is a **seeding step** before
+  Inventory can own the total: push each SKU's `Unwash + Wash + In_Transit + Disputed` up as an
+  opening stock adjustment, once. **This must happen before the first consumption post**, or the
+  first supervisor receipt deducts from zero. The alternative — a physical count entered in
+  Inventory, with Creator's lots rebuilt to match — is more honest if today's Creator figures are
+  suspect. Not yet chosen.
 - **A2 — one Inventory item per fabric SKU**, with the unwash/wash split staying Creator-only. If
   washed and unwashed are two Inventory items, wash completion becomes a transfer posting and
   every raw-material post has to name which of the two it means.
-- **A3 — fabric vs finished goods is distinguished by item Group/Category or a custom field**, not
-  by `item_type` (which is `inventory`/`sales`/`purchases`) or `product_type` (`goods`/`service`).
-  Neither of those separates a fabric from a dress.
+- ~~**A3**~~ — **settled**, by the `Product Type` custom field above. Note it is *not* Zoho's
+  native `product_type` (`goods`/`service`) despite the near-identical name — both will be present
+  in the same payload, reading `"Finished Goods"` and `"goods"` respectively. **Custom fields come
+  back only inside a `custom_fields` array of `{customfield_id, label, value}`; there are no `cf_`
+  keys, and they are not filterable through the List Items API.** Match on `customfield_id`, never
+  on the label, or renaming the field silently unclassifies every item.
 - **A4 — dispatch happens in Inventory** and is mirrored down, as above.
-- **A5 — sales orders continue to originate in Creator.** If they come from Shopify → Inventory
-  instead, then `Sales_Order` becomes a mirror too and
-  [createProductionPlans.dg](../deluge/createProductionPlans.dg) — which queues every Creator
-  order at `Pending` — is fed by the sync. That is a substantially larger change and is *not*
-  costed in the build order above.
+- ~~**A5**~~ — **settled, in the larger direction: orders come from Inventory.** Creator's
+  `Sales_Order` becomes a mirror, and [createProductionPlans.dg](../deluge/createProductionPlans.dg)
+  — which today plans every Creator order sitting at `Pending` — gets its queue from the sync.
+  This is a substantially larger change than the raw-material sync and is **not** costed in the
+  build order above; it needs its own pass. Two things it turns on: which Inventory sales-order
+  state means *ready to plan*, and how Inventory's commercial statuses coexist with Creator's
+  production lifecycle (`Pending → In Progress → Production Complete → QC Passed → Packed →
+  Dispatched`). One writer per status, as everywhere else.
 - **A6 — batch tracking is not assumed.** Lots are Creator-side and Inventory sees SKU totals. If
   batch tracking is on the plan and wanted, lots can additionally be mirrored as Inventory
   batches, which affects phases 1, 2 and 4.

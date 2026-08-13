@@ -1,20 +1,32 @@
 string issueMaterials(string supervisorId, string issuesJson)
 {
-	// Extended for waste cut pieces. An issue line is now:
+	// Extended for waste cut pieces, then for lots. An issue line is now:
 	//
 	//   { "materialId":"123", "qty":2.2,
 	//     "cutWidth":55, "cutLength":55,
+	//     "lots":[ {"lotId":"901","qty":3.0}, {"lotId":"902","qty":2.0} ],
 	//     "wastePicks":[ {"wasteId":"456","pieces":3} ] }
 	//
-	// cutWidth/cutLength/wastePicks are absent on non-fabric lines and everything
-	// behaves exactly as it did before.
+	// cutWidth/cutLength/wastePicks/lots are absent on non-fabric lines and
+	// everything behaves exactly as it did before.
 	//
-	// Two rules worth stating up front:
+	// Rules worth stating up front:
 	//  - qty may be 0 when wastePicks is non-empty. A requirement fully covered by
 	//    waste needs no fresh fabric at all, and rejecting that was the old
 	//    "quantity must be greater than zero" behaviour.
 	//  - Pieces_From_Raw is recomputed here from the metres actually issued, not
 	//    taken from the payload. The widget's split is advisory; this is the ledger.
+	//  - For FABRIC, qty is IGNORED and the total comes from lots. The store
+	//    person chooses which cloth leaves the shelf; a metres figure that did not
+	//    say which lot it came from could not be received or disputed against one.
+	//
+	// ONE PASS PER LOT, and it is not merely tidiness. Cloth is usable only in
+	// whole marker rows, so pieces have to be counted PER LOT and summed - never
+	// derived from the combined metres. 500m at a 55cm cut is 909 rows in one
+	// piece, but 300 + 200 is 545 + 363 = 908. Counting off the total credits
+	// Pieces_From_Raw with a piece nobody cut, which is the same silent loss
+	// CLAUDE.md already records four of. The per-lot pass makes it impossible
+	// rather than merely guarded against.
 
 	errJson = "";
 	okJson = "";
@@ -103,6 +115,7 @@ string issueMaterials(string supervisorId, string issuesJson)
 		}
 
 		picks = ifnull(im.get("wastePicks"),"[]").toString().toJSONList();
+		lotLines = ifnull(im.get("lots"),"[]").toString().toJSONList();
 
 		matRec = Raw_Material[ID == matId.toLong()];
 
@@ -384,6 +397,138 @@ string issueMaterials(string supervisorId, string issuesJson)
 				piecesFromWaste = outPieces;
 			}
 
+			//--------------------------------------------------------------
+			// Pass 2b - VALIDATE EVERY LOT BEFORE CONSUMING ANY.
+			//
+			// Same rule as the waste picks above: a half-applied issue takes
+			// cloth off a lot with nothing booked against it, and there is no
+			// transaction in Deluge to roll that back with.
+			//
+			// A lot line is checked for: existing, belonging to THIS material,
+			// not Blocked, and holding enough WASHED cloth. Fabric only ever
+			// leaves as washed metres, so Wash_Quantity is the figure - a lot
+			// full of unwashed cloth is not issuable however much it holds.
+			//--------------------------------------------------------------
+			lotOrder = List();
+			lotWant = Map();
+			lotHave = Map();
+			lotName = Map();
+			lotErr = "";
+			lotTotal = 0.0;
+
+			for each  laRaw in lotLines
+			{
+				la = laRaw.toMap();
+				laId = ifnull(la.get("lotId"),"").toString().trim();
+
+				laqS = ifnull(la.get("qty"),"0").toString().trim();
+				if(laqS == "")
+				{
+					laqS = "0";
+				}
+				laQ = laqS.toDecimal();
+
+				// A zero line is not an error - the widget sends a row per lot
+				// on screen and he only fills the ones he is taking from.
+				if(laQ > 0)
+				{
+					if(laId == "")
+					{
+						lotErr = matName + ": a lot line arrived with no lot";
+					}
+					else
+					{
+						// The SAME lot twice in one payload is summed, not
+						// treated as two lines. Two rows against one lot would
+						// each be checked against the full stock separately and
+						// could together take more than it holds.
+						prevWant = ifnull(lotWant.get(laId),"0").toString().trim();
+						if(prevWant == "")
+						{
+							prevWant = "0";
+						}
+
+						if(prevWant.toDecimal() == 0)
+						{
+							lotRecs2 = Raw_Material_Lot[ID == laId.toLong()];
+							if(lotRecs2.count() == 0)
+							{
+								lotErr = matName + ": lot " + laId + " not found";
+							}
+							else
+							{
+								for each  lrec in lotRecs2
+								{
+									if(ifnull(lrec.Material,"").toString().trim() != matId)
+									{
+										lotErr = matName + ": lot " + laId + " belongs to a different material";
+									}
+									else if(ifnull(lrec.Status,"Active").toString().trim() == "Blocked")
+									{
+										lotErr = matName + ": lot " + ifnull(lrec.Lot_Number,laId).toString() + " is blocked";
+									}
+									else
+									{
+										lhS = ifnull(lrec.Wash_Quantity,"0").toString().trim();
+										if(lhS == "")
+										{
+											lhS = "0";
+										}
+										lotHave.put(laId,lhS.toDecimal());
+										lotName.put(laId,ifnull(lrec.Lot_Number,laId).toString());
+										lotOrder.add(laId);
+									}
+								}
+							}
+						}
+
+						lotWant.put(laId,prevWant.toDecimal() + laQ);
+						lotTotal = lotTotal + laQ;
+					}
+				}
+			}
+
+			// Stock check AFTER summing, so a lot named twice is measured once
+			// against what it actually holds.
+			for each  lchkId in lotOrder
+			{
+				wantHere = ifnull(lotWant.get(lchkId),"0").toString().trim();
+				if(wantHere == "")
+				{
+					wantHere = "0";
+				}
+				haveHere = ifnull(lotHave.get(lchkId),"0").toString().trim();
+				if(haveHere == "")
+				{
+					haveHere = "0";
+				}
+				if(wantHere.toDecimal() > haveHere.toDecimal())
+				{
+					lotErr = matName + ": lot " + ifnull(lotName.get(lchkId),lchkId).toString() + " has " + haveHere.toDecimal() + " washed, asked " + wantHere.toDecimal();
+				}
+			}
+
+			//--------------------------------------------------------------
+			// FOR FABRIC THE LOTS ARE THE ASK. The payload's qty is advisory
+			// and is overridden, for the same reason Pieces_From_Raw is
+			// recomputed rather than trusted: this function is the ledger.
+			//
+			// Fabric with no lot at all is REFUSED rather than issued off the
+			// parent total. Letting it through would move Raw_Material without
+			// moving any lot, so the parent and the sum of its lots would
+			// silently disagree - and nothing downstream could say which cloth
+			// the supervisor is holding, which is what receipt and disputes
+			// both need.
+			//--------------------------------------------------------------
+			if(isFab == true)
+			{
+				askQty = lotTotal;
+				if(lotErr == "" && lotTotal <= 0 && picks.size() == 0)
+				{
+					lotErr = matName + ": choose which lot the cloth comes from";
+				}
+			}
+
 			if(askQty < 0)
 			{
 				if(errJson != "")
@@ -407,6 +552,14 @@ string issueMaterials(string supervisorId, string issuesJson)
 					errJson = errJson + ",";
 				}
 				errJson = errJson + "\"" + pickErr.replaceAll("\"","'") + "\"";
+			}
+			else if(lotErr != "")
+			{
+				if(errJson != "")
+				{
+					errJson = errJson + ",";
+				}
+				errJson = errJson + "\"" + lotErr.replaceAll("\"","'") + "\"";
 			}
 			else if(outstanding <= 0 && outPieces <= 0)
 			{
@@ -482,38 +635,159 @@ string issueMaterials(string supervisorId, string issuesJson)
 				}
 
 				//----------------------------------------------------------
-				// How many pieces did the fresh fabric actually cover? Derived
-				// from the metres issued rather than trusted from the payload.
+				// THE PASSES - one per lot the cloth comes off.
+				//
+				// Non-fabric gets a single pass with an empty lot id, so it
+				// walks exactly the same code and behaves exactly as before.
 				//----------------------------------------------------------
-				piecesFromRaw = 0;
-				if(isFab == true && cutW > 0 && cutL > 0 && fabricWidthCm >= cutW)
+				passIds = List();
+				if(isFab == true)
 				{
-					perRow = (fabricWidthCm / cutW).floor();
-					rowsIssued = ((issueQty * 100) / cutL).floor();
-					piecesFromRaw = perRow * rowsIssued;
-					stillNeeded = outPieces - piecesFromWaste;
-					if(piecesFromRaw > stillNeeded)
+					for each  lpId in lotOrder
 					{
-						piecesFromRaw = stillNeeded;
-					}
-					if(piecesFromRaw < 0)
-					{
-						piecesFromRaw = 0;
+						passIds.add(lpId);
 					}
 				}
+				else
+				{
+					passIds.add("");
+				}
 
-				//----------------------------------------------------------
-				// Pass 3 - fan the issued qty across the pending rows
-				//----------------------------------------------------------
-				toFan = issueQty;
+				// Waste credit belongs to the ISSUE, not to any one lot, so it
+				// is carried across the passes and spent by the first rows that
+				// need it. The second pass simply finds it already spent.
 				fanWaste = piecesFromWaste;
-				fanRaw = piecesFromRaw;
 				// A physical remnant cannot be split across two plans, so the
 				// Issued movements are attached to the FIRST plan that takes
 				// waste credit for this material and cut size, and carry that
 				// row's Plan_Item. If an issue happens to span two plans the
-				// handover is recorded against the older one.
+				// handover is recorded against the older one. Set OUTSIDE the
+				// pass loop so a two-lot issue still logs them exactly once.
 				wasteLogged = false;
+				piecesFromRawTotal = 0;
+				issuedTotal = 0.0;
+
+				perRowP = 0;
+				canPiece = false;
+				if(isFab == true && cutW > 0 && cutL > 0 && fabricWidthCm >= cutW)
+				{
+					perRowP = (fabricWidthCm / cutW).floor();
+					if(perRowP > 0)
+					{
+						canPiece = true;
+					}
+				}
+
+				for each  passId in passIds
+				{
+					//------------------------------------------------------
+					// HOW MUCH COMES OFF THIS LOT.
+					//
+					// Recomputed here, per pass, from the pieces still owed at
+					// this moment - NOT carved out of a budget worked out once
+					// for the whole issue.
+					//
+					// That distinction is the whole reason this is a loop.
+					// Cloth is usable only in whole marker rows, and each lot
+					// is cut on its own, so the part-row at the end of one lot
+					// cannot be finished with cloth from the next. A budget
+					// computed once, as if the metres were one continuous
+					// piece, is therefore SHORT by up to a row per extra lot -
+					// and the shortfall is the stranded-piece failure CLAUDE.md
+					// already records: the item never leaves Awaiting_Material,
+					// the plan never reaches Material Ready, and pressing Issue
+					// again does nothing because the "nothing outstanding" test
+					// needs both metres and pieces to be spent.
+					//
+					// 100 pieces at 2 per row is 50 rows = 27.50m in one piece.
+					// Split 20 + 7.50 it yields 36 + 13 = 49 rows, 98 pieces.
+					// Budgeting the second pass from the 28 pieces still owed
+					// asks for 7.70m instead, gets 14 rows, and closes it.
+					//
+					// So a split issue can spend slightly MORE metres than the
+					// plan estimated. That is the documented model, not a leak:
+					// Required_Qty is a pre-waste estimate and rounds up once,
+					// while every separate cut rounds up again.
+					//------------------------------------------------------
+					thisQty = 0.0;
+					if(isFab == true)
+					{
+						lpWantS = ifnull(lotWant.get(passId),"0").toString().trim();
+						if(lpWantS == "")
+						{
+							lpWantS = "0";
+						}
+						thisQty = lpWantS.toDecimal();
+
+						capQty = 0.0;
+						if(canPiece == true)
+						{
+							pcsLeft = outPieces - piecesFromWaste - piecesFromRawTotal;
+							if(pcsLeft > 0)
+							{
+								// * 1.0 first - an integer quotient truncates
+								// before .ceil() sees it, budgeting a row short.
+								rowsCap = ((pcsLeft * 1.0) / perRowP).ceil();
+								capQty = (rowsCap * cutL) / 100;
+							}
+						}
+						else
+						{
+							// No piece data to count with - a row planned before
+							// Required_Pieces existed, or a fabric whose width was
+							// never recorded. Fall back to the metres balance.
+							capQty = outstanding - issuedTotal;
+						}
+
+						if(thisQty > capQty)
+						{
+							thisQty = capQty;
+						}
+					}
+					else
+					{
+						thisQty = issueQty - issuedTotal;
+					}
+
+					if(thisQty < 0)
+					{
+						thisQty = 0.0;
+					}
+
+					// Deluge has no reliable break; the body is guarded instead.
+					// A lot whose share came out at zero - everything already
+					// covered - costs one comparison and moves no stock.
+					if(thisQty > 0)
+					{
+
+					//------------------------------------------------------
+					// How many pieces did THIS LOT'S cloth cover? Off its own
+					// metres, never off the combined total.
+					//------------------------------------------------------
+					piecesFromRaw = 0;
+					if(canPiece == true)
+					{
+						perRow = perRowP;
+						rowsIssued = ((thisQty * 100) / cutL).floor();
+						piecesFromRaw = perRow * rowsIssued;
+						stillNeeded = outPieces - piecesFromWaste - piecesFromRawTotal;
+						if(piecesFromRaw > stillNeeded)
+						{
+							piecesFromRaw = stillNeeded;
+						}
+						if(piecesFromRaw < 0)
+						{
+							piecesFromRaw = 0;
+						}
+					}
+					piecesFromRawTotal = piecesFromRawTotal + piecesFromRaw;
+					issuedTotal = issuedTotal + thisQty;
+
+				//----------------------------------------------------------
+				// Pass 3 - fan this lot's qty across the pending rows
+				//----------------------------------------------------------
+				toFan = thisQty;
+				fanRaw = piecesFromRaw;
 				for each  plan in plans
 				{
 					for each  row in Material_Requirement[Plan == plan.ID]
@@ -614,6 +888,13 @@ string issueMaterials(string supervisorId, string issuesJson)
 											lnMap = Map();
 											lnMap.put("req",row.ID);
 											lnMap.put("planItem",row.Plan_Item);
+											// WHICH CLOTH crossed the counter. The
+											// requirement row records metres and has
+											// never recorded which lot they were, so
+											// this line is the only place that can
+											// answer it - and receipt, disputes and
+											// offcut provenance all have to ask.
+											lnMap.put("lot",passId);
 											lnMap.put("qty",give);
 											lnMap.put("unit",ifnull(row.Unit,"").toString());
 											lnMap.put("cutW",cutW);
@@ -715,6 +996,46 @@ string issueMaterials(string supervisorId, string issuesJson)
 					}
 				}
 
+					//------------------------------------------------------
+					// Move THIS LOT'S stock, in the same pass that booked it.
+					//
+					// The lot holds the truth; Raw_Material below holds the
+					// maintained total. Both move for the same metres, here and
+					// there, so they cannot drift apart.
+					//
+					// Washed only - fabric never leaves the shelf unwashed, and
+					// the validation above already refused a lot that could not
+					// cover this from Wash_Quantity.
+					//------------------------------------------------------
+					if(passId != "")
+					{
+						for each  lotMv in Raw_Material_Lot[ID == passId.toLong()]
+						{
+							lmwS = ifnull(lotMv.Wash_Quantity,"0").toString().trim();
+							if(lmwS == "")
+							{
+								lmwS = "0";
+							}
+							lmtS = ifnull(lotMv.In_Transit_Qty,"0").toString().trim();
+							if(lmtS == "")
+							{
+								lmtS = "0";
+							}
+							lotMv.Wash_Quantity = lmwS.toDecimal() - thisQty;
+							lotMv.In_Transit_Qty = lmtS.toDecimal() + thisQty;
+						}
+					}
+
+					}
+					// end of the thisQty > 0 guard
+				}
+				// end of the per-lot pass loop
+
+				// Every pass has run; this is what actually left the shelf.
+				// issueQty was only ever the pre-pass estimate, and for a split
+				// across lots the passes can legitimately total more.
+				issueQty = issuedTotal;
+
 				//----------------------------------------------------------
 				// Move the stock, do NOT consume it.
 				//
@@ -813,6 +1134,18 @@ string issueMaterials(string supervisorId, string issuesJson)
 					liRow.Unit=lnRaw.get("unit");
 					liRow.Cut_Size_Width=lnRaw.get("cutW");
 					liRow.Cut_Size_Length=lnRaw.get("cutL");
+
+					// Nothing confirmed yet. receiveMaterials settles against
+					// this, oldest line first, to know which lot to take the
+					// in-transit cloth off - so it has to start at a real 0
+					// rather than the EMPTY a Creator numeric otherwise holds.
+					liRow.Settled_Qty=0;
+
+					lotTxt = ifnull(lnRaw.get("lot"),"").toString().trim();
+					if(lotTxt != "")
+					{
+						liRow.Lot=lotTxt.toLong();
+					}
 					if(lnRaw.get("req") != null)
 					{
 						liRow.Requirement=lnRaw.get("req");

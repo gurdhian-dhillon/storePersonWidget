@@ -1,0 +1,326 @@
+string saveStockInward(string inwardJson)
+{
+	// Store person books arriving cloth into a lot.
+	//
+	//   { "materialId":"123",
+	//     "lotId":"901",            // empty => create a new lot
+	//     "lotNumber":"L3",         // new lot only - TYPED, and must be unique
+	//     "lotLabel":"darker roll", // new lot only
+	//     "qty":100,
+	//     "state":"Unwash",         // or "Wash"
+	//     "remarks":"" }
+	//
+	// THE LOT HOLDS THE TRUTH, Raw_Material HOLDS A MAINTAINED TOTAL. Both are
+	// written here, in one pass, so they cannot disagree. The parent is not a
+	// derived roll-up on purpose: recomputing a sum per material on every screen
+	// load is a query per material, and that is the road to the statement limit.
+	//
+	// FABRIC ONLY. An accessory has no lots and must not get one - its Quantity is
+	// its stock exactly as before.
+	//
+	// ONE EXIT, AT THE BOTTOM, and it is not a style choice. Deluge's "all paths
+	// return" check does NOT count a return that lives inside try/catch, so a
+	// function whose every return sat in the try failed to save with
+	// "Missing return statement" reported against line 3 - the first line of the
+	// body, nowhere near anything actually wrong. So nothing returns early:
+	// errTxt is set, every later block is guarded on it being empty, and the one
+	// return is after the catch. Same shape as issueMaterials.
+
+	res = "";
+	errTxt = "";
+
+	try
+	{
+		inp = inwardJson.toMap();
+
+		matId = ifnull(inp.get("materialId"),"").toString().trim();
+		lotId = ifnull(inp.get("lotId"),"").toString().trim();
+		// Escaped here, once, so the uniqueness test below compares like with
+		// like: what is stored and what is checked have been through the same
+		// transformation.
+		lotNumIn = ifnull(inp.get("lotNumber"),"").toString().trim().replaceAll("\"","'");
+		lotLabel = ifnull(inp.get("lotLabel"),"").toString().trim().replaceAll("\"","'");
+		remarks = ifnull(inp.get("remarks"),"").toString().trim().replaceAll("\"","'");
+
+		state = ifnull(inp.get("state"),"").toString().trim();
+		if(state != "Wash")
+		{
+			state = "Unwash";
+		}
+
+		// Never compare a number to "" - Deluge rejects mixed-type comparison. So
+		// normalise to string first, test, then convert.
+		qStr = ifnull(inp.get("qty"),"0").toString().trim();
+		if(qStr == "")
+		{
+			qStr = "0";
+		}
+		qty = qStr.toDecimal();
+
+		if(matId == "")
+		{
+			errTxt = "No material given";
+		}
+		if(errTxt == "" && qty <= 0)
+		{
+			errTxt = "Quantity must be more than zero";
+		}
+
+		// Initialised BEFORE the guarded blocks. A name first assigned inside an
+		// if is not safe to read after it when that branch did not run.
+		matName = "";
+		isFab = false;
+		unallocHave = 0.0;
+
+		if(errTxt == "")
+		{
+			// A query result needs .count() - .size() is a List method.
+			matRecs = Raw_Material[ID == matId.toLong()];
+			if(matRecs.count() == 0)
+			{
+				errTxt = "Material not found";
+			}
+			else
+			{
+				for each  rmChk in matRecs
+				{
+					matName = ifnull(rmChk.SKU,"").toString().replaceAll("\"","'");
+					isFab = ifnull(rmChk.Is_Fabric,false);
+
+					uaS = ifnull(rmChk.Unallocated_Qty,"0").toString().trim();
+					if(uaS == "")
+					{
+						uaS = "0";
+					}
+					unallocHave = uaS.toDecimal();
+				}
+			}
+		}
+
+		if(errTxt == "" && isFab != true)
+		{
+			errTxt = matName + " is not a fabric - lots apply to fabric only";
+		}
+
+		//--------------------------------------------------------------------
+		// Which lot. An existing one has to belong to THIS material and be
+		// Active; a blocked lot is quarantined and must not quietly grow.
+		//--------------------------------------------------------------------
+		targetLot = 0;
+		lotNumOut = "";
+
+		if(errTxt == "")
+		{
+			if(lotId != "")
+			{
+				lotRecs = Raw_Material_Lot[ID == lotId.toLong()];
+				if(lotRecs.count() == 0)
+				{
+					errTxt = "Lot not found";
+				}
+				else
+				{
+					for each  lchk in lotRecs
+					{
+						if(ifnull(lchk.Material,"").toString().trim() != matId)
+						{
+							errTxt = "That lot belongs to a different material";
+						}
+						else if(ifnull(lchk.Status,"Active").toString().trim() == "Blocked")
+						{
+							errTxt = "That lot is blocked and cannot take stock";
+						}
+						else
+						{
+							targetLot = lchk.ID;
+							lotNumOut = ifnull(lchk.Lot_Number,"").toString().replaceAll("\"","'");
+						}
+					}
+				}
+			}
+			else
+			{
+				//------------------------------------------------------------
+				// NEW LOT. The number is TYPED by the store person - it is his
+				// label for a tone he can see, and no rule we invent would match
+				// what he writes on the roll.
+				//
+				// UNIQUE WITHIN THE MATERIAL, not globally. Two different fabrics
+				// may both sensibly have a lot "1"; forbidding that would make him
+				// invent numbers to dodge collisions with cloth he is not even
+				// looking at. Within one material it must be unique or every later
+				// reference is ambiguous - which lot did that offcut come from.
+				//
+				// Compared UPPER-CASED and trimmed, so "l1" cannot slip in beside
+				// "L1" and read as a different lot on screen when it is not.
+				//------------------------------------------------------------
+				if(lotNumIn == "")
+				{
+					errTxt = "Give the new lot a number";
+				}
+				else
+				{
+					wantKey = lotNumIn.toUpperCase();
+					clash = false;
+
+					for each  lseq in Raw_Material_Lot[Material == matId.toLong()]
+					{
+						lnTxt = ifnull(lseq.Lot_Number,"").toString().trim().toUpperCase();
+						if(lnTxt == wantKey)
+						{
+							// No reliable break in Deluge - the loop runs on and
+							// the flag carries the answer out.
+							clash = true;
+						}
+					}
+
+					if(clash == true)
+					{
+						errTxt = "Lot " + lotNumIn + " already exists for " + matName;
+					}
+					else
+					{
+						lotNumOut = lotNumIn;
+
+						newLotId = insert into Raw_Material_Lot
+						[
+							Material=matId.toLong()
+							Lot_Number=lotNumOut
+							Lot_Label=lotLabel
+							Unwash_Quantity=0
+							Wash_Quantity=0
+							In_Transit_Qty=0
+							Disputed_Qty=0
+							Status="Active"
+							Remarks=remarks
+						];
+						targetLot = newLotId.toLong();
+						info "new lot " + lotNumOut + " for " + matName + " id=" + targetLot;
+					}
+				}
+			}
+		}
+
+		if(errTxt == "" && targetLot == 0)
+		{
+			errTxt = "Could not resolve a lot to book against";
+		}
+
+		if(errTxt == "")
+		{
+			//----------------------------------------------------------------
+			// THE INVENTORY SEAM, and it is a no-op today.
+			//
+			// Unallocated_Qty is always 0 until the Zoho Inventory sync exists,
+			// so fromNew below is always the whole quantity and the parent total
+			// rises with the lot - which is what booking new cloth into Creator
+			// means now.
+			//
+			// Once the sync lands, a purchase receipt raises the PARENT total
+			// before anyone has been to the rack, and the difference sits in
+			// Unallocated_Qty waiting to be given a tone. Booking that cloth into
+			// a lot must NOT raise the parent again - it is already counted. So
+			// the split: whatever this quantity can take out of Unallocated_Qty
+			// is a move, and only the remainder is genuinely new stock.
+			//
+			// Handling both at once means the seam needs no second code path
+			// later, and a part-allocated arrival does not need one either.
+			//----------------------------------------------------------------
+			fromUnalloc = qty;
+			if(fromUnalloc > unallocHave)
+			{
+				fromUnalloc = unallocHave;
+			}
+			if(fromUnalloc < 0)
+			{
+				fromUnalloc = 0;
+			}
+			fromNew = qty - fromUnalloc;
+
+			lotUnwashOut = 0.0;
+			lotWashOut = 0.0;
+
+			for each  lotRec in Raw_Material_Lot[ID == targetLot]
+			{
+				lcuS = ifnull(lotRec.Unwash_Quantity,"0").toString().trim();
+				if(lcuS == "")
+				{
+					lcuS = "0";
+				}
+				lcwS = ifnull(lotRec.Wash_Quantity,"0").toString().trim();
+				if(lcwS == "")
+				{
+					lcwS = "0";
+				}
+
+				if(state == "Wash")
+				{
+					lotRec.Wash_Quantity = lcwS.toDecimal() + qty;
+					lotUnwashOut = lcuS.toDecimal();
+					lotWashOut = lcwS.toDecimal() + qty;
+				}
+				else
+				{
+					lotRec.Unwash_Quantity = lcuS.toDecimal() + qty;
+					lotUnwashOut = lcuS.toDecimal() + qty;
+					lotWashOut = lcwS.toDecimal();
+				}
+			}
+
+			matUnwashOut = 0.0;
+			matWashOut = 0.0;
+
+			for each  rmUpd in Raw_Material[ID == matId.toLong()]
+			{
+				mcuS = ifnull(rmUpd.Unwash_Quantity,"0").toString().trim();
+				if(mcuS == "")
+				{
+					mcuS = "0";
+				}
+				mcwS = ifnull(rmUpd.Wash_Quantity,"0").toString().trim();
+				if(mcwS == "")
+				{
+					mcwS = "0";
+				}
+
+				if(state == "Wash")
+				{
+					rmUpd.Wash_Quantity = mcwS.toDecimal() + fromNew;
+					matUnwashOut = mcuS.toDecimal();
+					matWashOut = mcwS.toDecimal() + fromNew;
+				}
+				else
+				{
+					rmUpd.Unwash_Quantity = mcuS.toDecimal() + fromNew;
+					matUnwashOut = mcuS.toDecimal() + fromNew;
+					matWashOut = mcwS.toDecimal();
+				}
+
+				if(fromUnalloc > 0)
+				{
+					rmUpd.Unallocated_Qty = unallocHave - fromUnalloc;
+				}
+			}
+
+			// Ids forced to string - 18-digit ids break JSON.parse on the widget.
+			res = "{\"success\":true,\"lotId\":\"" + targetLot + "\",\"lotNumber\":\"" + lotNumOut + "\",\"material\":\"" + matName + "\",\"state\":\"" + state + "\",\"added\":" + qty + ",\"lotUnwash\":" + lotUnwashOut + ",\"lotWash\":" + lotWashOut + ",\"materialUnwash\":" + matUnwashOut + ",\"materialWash\":" + matWashOut + ",\"fromUnallocated\":" + fromUnalloc + "}";
+		}
+	}
+	catch (e)
+	{
+		// Creator reports every runtime failure to a widget as a generic code 9430,
+		// so the real message has to travel back inside the payload.
+		errTxt = "DELUGE: " + e.toString();
+	}
+
+	if(res == "")
+	{
+		if(errTxt == "")
+		{
+			errTxt = "Nothing was booked";
+		}
+		res = "{\"success\":false,\"error\":\"" + errTxt.replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

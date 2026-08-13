@@ -290,6 +290,79 @@ string getStoreMaterialRequirements()
 
 
 	//------------------------------------------------------------------------
+	// LOTS, fetched ONCE and grouped by material as ready-built JSON fragments.
+	//
+	// Same discipline as the waste grouping above and for the same reason: a
+	// query per material inside the key loop is the shape that blew the
+	// statement-execution limit, and that limit is not catchable.
+	//
+	// NOT decremented across supervisors the way waste is. Waste has to be,
+	// because the widget PRE-SELECTS the pieces and two cards offering the same
+	// remnant would both promise it. Lots are chosen by hand, so every card
+	// showing the true shelf figure is honest - the same convention
+	// availableStock already follows. issueMaterials validates against real stock
+	// at issue time regardless.
+	//
+	// Blocked lots are excluded: quarantined cloth must not be offered. A Status
+	// never written reads EMPTY, not null, so it is defaulted to Active here
+	// rather than filtered in the query, where empty would fall the wrong way.
+	//------------------------------------------------------------------------
+	lotJsonByMat = Map();
+	allLotRows = Raw_Material_Lot[ID != 0] sort by Added_Time;
+
+	for each  lotR in allLotRows
+	{
+		lrMat = ifnull(lotR.Material,"").toString().trim();
+
+		lrSt = ifnull(lotR.Status,"").toString().trim();
+		if(lrSt == "")
+		{
+			lrSt = "Active";
+		}
+
+		if(lrMat != "" && lrSt != "Blocked")
+		{
+			// Creator numerics never written are EMPTY, not null, and toDecimal()
+			// throws on empty - normalise to string first.
+			lrwS = ifnull(lotR.Wash_Quantity,"0").toString().trim();
+			if(lrwS == "")
+			{
+				lrwS = "0";
+			}
+			lruS = ifnull(lotR.Unwash_Quantity,"0").toString().trim();
+			if(lruS == "")
+			{
+				lruS = "0";
+			}
+
+			lrWash = lrwS.toDecimal();
+			lrUnwash = lruS.toDecimal();
+
+			// An empty lot is not a choice. It stays on the form for its history
+			// but must not clutter a screen about what can be issued today.
+			if(lrWash > 0 || lrUnwash > 0)
+			{
+				// Fabric is issued as WASHED metres - issueMaterials reads
+				// Wash_Quantity for fabric - so wash is the issuable figure and
+				// unwash is context, exactly as unwashedStock is at material level.
+				lrNum = ifnull(lotR.Lot_Number,"").toString().replaceAll("\"","'");
+				lrLab = ifnull(lotR.Lot_Label,"").toString().replaceAll("\"","'");
+
+				// Ids as strings - an 18-digit id breaks JSON.parse on the widget.
+				lotFrag = "{\"lotId\":\"" + lotR.ID + "\",\"lotNumber\":\"" + lrNum + "\",\"label\":\"" + lrLab + "\",\"wash\":" + lrWash + ",\"unwash\":" + lrUnwash + "}";
+
+				prevLots = ifnull(lotJsonByMat.get(lrMat),"").toString();
+				if(prevLots != "")
+				{
+					prevLots = prevLots + ",";
+				}
+				lotJsonByMat.put(lrMat,prevLots + lotFrag);
+			}
+		}
+	}
+
+
+	//------------------------------------------------------------------------
 	// Open exception tickets, fetched ONCE and grouped by material.
 	//
 	// This was a query plus a subform walk inside the per-material loop, so a
@@ -433,6 +506,10 @@ string getStoreMaterialRequirements()
 			matEntry.put("issuedPieces",e.get("issPieces"));
 			matEntry.put("wasteIssuedPieces",e.get("wasteIssPieces"));
 			matEntry.put("outstandingPieces",outstandingPieces);
+
+			// Built once per material above and reused here, so the same fabric
+			// appearing on three supervisor cards costs one build, not three.
+			matEntry.put("lotsJson",ifnull(lotJsonByMat.get(matIdTxt),"").toString());
 
 			wastePicks = List();
 
@@ -757,7 +834,7 @@ string getStoreMaterialRequirements()
 					picksJson = picksJson + "{\"wasteId\":\"" + pkE.get("wasteId") + "\",\"width\":" + pkE.get("width") + ",\"length\":" + pkE.get("length") + ",\"pieces\":" + pkE.get("pieces") + "}";
 				}
 
-				matsJson = matsJson + ",\"unwashedStock\":" + mEnt.get("unwashedStock") + ",\"cutWidth\":" + mEnt.get("cutWidth") + ",\"cutLength\":" + mEnt.get("cutLength") + ",\"fabricWidthCm\":" + mEnt.get("fabricWidthCm") + ",\"requiredPieces\":" + mEnt.get("requiredPieces") + ",\"issuedPieces\":" + mEnt.get("issuedPieces") + ",\"wasteIssuedPieces\":" + mEnt.get("wasteIssuedPieces") + ",\"outstandingPieces\":" + mEnt.get("outstandingPieces") + ",\"wastePicks\":[" + picksJson + "],\"freshMeters\":" + mEnt.get("freshMeters") + ",\"piecesCoveredByWaste\":" + mEnt.get("piecesCoveredByWaste") + ",\"freshPieces\":" + mEnt.get("freshPieces") + ",\"requiredTotal\":" + mEnt.get("requiredTotal");
+				matsJson = matsJson + ",\"unwashedStock\":" + mEnt.get("unwashedStock") + ",\"cutWidth\":" + mEnt.get("cutWidth") + ",\"cutLength\":" + mEnt.get("cutLength") + ",\"fabricWidthCm\":" + mEnt.get("fabricWidthCm") + ",\"requiredPieces\":" + mEnt.get("requiredPieces") + ",\"issuedPieces\":" + mEnt.get("issuedPieces") + ",\"wasteIssuedPieces\":" + mEnt.get("wasteIssuedPieces") + ",\"outstandingPieces\":" + mEnt.get("outstandingPieces") + ",\"wastePicks\":[" + picksJson + "],\"freshMeters\":" + mEnt.get("freshMeters") + ",\"piecesCoveredByWaste\":" + mEnt.get("piecesCoveredByWaste") + ",\"freshPieces\":" + mEnt.get("freshPieces") + ",\"requiredTotal\":" + mEnt.get("requiredTotal") + ",\"lots\":[" + ifnull(mEnt.get("lotsJson"),"").toString() + "]";
 			}
 
 			matsJson = matsJson + "}";

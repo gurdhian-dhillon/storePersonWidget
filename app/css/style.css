@@ -1730,3 +1730,105 @@ th.col-num {
     color: var(--primary);
     font-weight: 700;
 }
+
+/* ---- Stock in tab ----
+   The search box sits outside #stockin-list so filtering redraws the list
+   alone. Rebuilding the input on every keystroke would take the focused
+   element with it and drop the caret after one character. */
+.stockin-search {
+    padding: 0 0 0.75rem 0;
+}
+.stockin-search .note-input {
+    width: 100%;
+    max-width: 26rem;
+}
+
+/* One row of fields, wrapping on a narrow screen rather than scrolling — the
+   store person is often on a tablet at the counter. */
+.stockin-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    padding: 1rem 1.25rem 0.25rem;
+    align-items: flex-end;
+}
+.si-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+.si-field .note-input,
+.si-field .issue-input {
+    min-width: 10rem;
+    text-transform: none;
+    letter-spacing: normal;
+}
+.si-field .issue-input {
+    min-width: 7rem;
+}
+
+/* ---- Lot strip on a fabric issue row ----
+   A sub-row under the material, spanning the table. One line per lot, because
+   a lot is a physical thing on a rack and the screen keeps one row per
+   physical thing. */
+.lot-row > td {
+    background: #f8fafc;
+    border-bottom: 1px solid #e2e8f0;
+    padding: 0.6rem 1rem 0.75rem;
+}
+.lot-strip-head {
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-weight: 600;
+    padding-bottom: 0.4rem;
+}
+.lot-line {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.25rem 0;
+    flex-wrap: wrap;
+}
+.lot-id {
+    font-weight: 600;
+    min-width: 6rem;
+}
+.lot-label {
+    font-weight: 400;
+    color: var(--text-muted);
+}
+.lot-avail {
+    min-width: 8rem;
+}
+.lot-unwash {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+/* Pushed right so every lot's input lands in the same column — the eye reads
+   down the numbers rather than hunting across ragged rows. */
+.lot-line .issue-input-group {
+    margin-left: auto;
+}
+.lot-input {
+    width: 6.5rem;
+}
+.lot-fill {
+    padding: 0.25rem 0.6rem;
+    font-size: 0.75rem;
+}
+.lot-warn:not(:empty) {
+    color: #b45309;
+    font-size: 0.8rem;
+    padding-top: 0.4rem;
+}
+.lot-none {
+    color: #b45309;
+    font-size: 0.85rem;
+}

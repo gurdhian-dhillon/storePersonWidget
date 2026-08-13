@@ -1,0 +1,246 @@
+string migrateOpeningLots()
+{
+	// ONE-OFF MIGRATION, run from Creator's Execute. Not a Custom API.
+	//
+	// Gives every FABRIC material an opening lot "L1" carrying the four balances
+	// it already holds on Raw_Material. After this, each fabric's parent total
+	// equals the sum of the single lot underneath it - the invariant the whole
+	// lot design rests on, and what the issue screen needs before it will let
+	// anything be issued.
+	//
+	// "L1" for every material is correct: lot numbers are unique WITHIN a
+	// material, never globally. Two SKUs both having an L1 is not a collision.
+	//
+	// Raw_Material is NOT modified. Its totals are already right - the lot is a
+	// breakdown of them, not a replacement - and Unallocated_Qty stays 0 until
+	// the Inventory sync exists.
+	//
+	// RE-RUNNABLE, and that is load-bearing rather than a nicety. The
+	// statement-execution limit is NOT catchable: it kills the script outright,
+	// so the try/catch never runs and Execute shows nothing useful. A run that
+	// dies halfway has to be resumable, which is why it skips materials that
+	// already have a lot and stops after batchCap creations.
+	//
+	//   KEEP PRESSING EXECUTE UNTIL "pending" IS 0.
+	//
+	// ONE EXIT, AT THE BOTTOM. Deluge's "all paths return" check does not count
+	// a return inside try/catch - a function whose every return sat in the try
+	// fails to save with "Missing return statement" pointed at the first line of
+	// the body, nowhere near the cause.
+
+	created = 0;
+	skipped = 0;
+	pending = 0;
+	nonFabric = 0;
+	noteJson = "";
+	errJson = "";
+	batchCap = 40;
+
+	try
+	{
+		//----------------------------------------------------------------
+		// Which materials already have a lot, and what those lots sum to.
+		//
+		// ONE query, not one per material. A query inside the material loop is
+		// one statement per SKU for something a single pass answers, and that
+		// shape is what blows the statement limit.
+		//----------------------------------------------------------------
+		hasLot = List();
+		lotSum = Map();
+
+		for each  lt in Raw_Material_Lot[ID != 0]
+		{
+			// A lookup holds a record id, so this is the Raw_Material id as text.
+			ltMat = ifnull(lt.Material,"").toString().trim();
+
+			if(ltMat != "")
+			{
+				if(hasLot.contains(ltMat) == false)
+				{
+					hasLot.add(ltMat);
+				}
+
+				// Creator numerics never written are EMPTY, not null, and
+				// toDecimal() throws on empty - normalise to string first.
+				lauS = ifnull(lt.Unwash_Quantity,"0").toString().trim();
+				if(lauS == "")
+				{
+					lauS = "0";
+				}
+				lawS = ifnull(lt.Wash_Quantity,"0").toString().trim();
+				if(lawS == "")
+				{
+					lawS = "0";
+				}
+				laiS = ifnull(lt.In_Transit_Qty,"0").toString().trim();
+				if(laiS == "")
+				{
+					laiS = "0";
+				}
+				ladS = ifnull(lt.Disputed_Qty,"0").toString().trim();
+				if(ladS == "")
+				{
+					ladS = "0";
+				}
+
+				prevSum = ifnull(lotSum.get(ltMat),"0").toString().trim();
+				if(prevSum == "")
+				{
+					prevSum = "0";
+				}
+				lotSum.put(ltMat,prevSum.toDecimal() + lauS.toDecimal() + lawS.toDecimal() + laiS.toDecimal() + ladS.toDecimal());
+			}
+		}
+		info "materials already lotted: " + hasLot.size();
+
+		//----------------------------------------------------------------
+		// Is_Fabric is tested in CODE, not filtered in the query. A checkbox
+		// never ticked is EMPTY, not false, so a query on == true would drop
+		// those rows silently with no way to count them. Here they land in
+		// nonFabric, so a real fabric with an unset flag is visible in the
+		// summary instead of invisible.
+		//----------------------------------------------------------------
+		for each  rm in Raw_Material[ID != 0]
+		{
+			rmKey = rm.ID + "";
+			rmSku = ifnull(rm.SKU,"?").toString().replaceAll("\"","'");
+
+			if(ifnull(rm.Is_Fabric,false) != true)
+			{
+				nonFabric = nonFabric + 1;
+			}
+			else if(hasLot.contains(rmKey) == true)
+			{
+				skipped = skipped + 1;
+
+				//--------------------------------------------------------
+				// Already lotted - but do the lots still ADD UP to the parent?
+				//
+				// Reported, never corrected. A gap here means stock exists on
+				// Raw_Material that no lot accounts for - most likely booked
+				// in before lots, or added straight on the form - and it is
+				// NOT issuable, because the issue screen only offers lots. It
+				// needs a person to decide which tone it is, which is exactly
+				// the judgement this migration cannot make.
+				//--------------------------------------------------------
+				puS = ifnull(rm.Unwash_Quantity,"0").toString().trim();
+				if(puS == "")
+				{
+					puS = "0";
+				}
+				pwS = ifnull(rm.Wash_Quantity,"0").toString().trim();
+				if(pwS == "")
+				{
+					pwS = "0";
+				}
+				piS = ifnull(rm.In_Transit_Qty,"0").toString().trim();
+				if(piS == "")
+				{
+					piS = "0";
+				}
+				pdS = ifnull(rm.Disputed_Qty,"0").toString().trim();
+				if(pdS == "")
+				{
+					pdS = "0";
+				}
+				parentTot = puS.toDecimal() + pwS.toDecimal() + piS.toDecimal() + pdS.toDecimal();
+
+				haveSum = ifnull(lotSum.get(rmKey),"0").toString().trim();
+				if(haveSum == "")
+				{
+					haveSum = "0";
+				}
+				gap = parentTot - haveSum.toDecimal();
+
+				if(gap > 0.001 || gap < -0.001)
+				{
+					if(noteJson != "")
+					{
+						noteJson = noteJson + ",";
+					}
+					noteJson = noteJson + "\"" + rmSku + ": parent " + parentTot + " but lots total " + haveSum.toDecimal() + " - " + gap + " unaccounted\"";
+				}
+			}
+			else if(created >= batchCap)
+			{
+				// Deluge has no reliable break, so the loop runs on with a
+				// guarded body. Counting what is left is what tells you whether
+				// another Execute is needed.
+				pending = pending + 1;
+			}
+			else
+			{
+				// Per-row try/catch: one bad material must not take the whole
+				// run down, and the summary has to name which SKU failed.
+				// Deluge's reported line number points at the statement that
+				// failed, which is rarely the one that is wrong - naming the
+				// record beats reading the line.
+				try
+				{
+					uwS = ifnull(rm.Unwash_Quantity,"0").toString().trim();
+					if(uwS == "")
+					{
+						uwS = "0";
+					}
+					wqS = ifnull(rm.Wash_Quantity,"0").toString().trim();
+					if(wqS == "")
+					{
+						wqS = "0";
+					}
+					itS = ifnull(rm.In_Transit_Qty,"0").toString().trim();
+					if(itS == "")
+					{
+						itS = "0";
+					}
+					dqS = ifnull(rm.Disputed_Qty,"0").toString().trim();
+					if(dqS == "")
+					{
+						dqS = "0";
+					}
+
+					// Material goes IN the insert block. The usual rule in this
+					// repo is to set lookups after the insert, but that exists
+					// because a NULL cannot go in the block - rm.ID never is, and
+					// Material is mandatory on the form, so it has to be there at
+					// insert time.
+					newLotId = insert into Raw_Material_Lot
+					[
+						Material=rm.ID
+						Lot_Number="L1"
+						Lot_Label="Opening stock"
+						Unwash_Quantity=uwS.toDecimal()
+						Wash_Quantity=wqS.toDecimal()
+						In_Transit_Qty=itS.toDecimal()
+						Disputed_Qty=dqS.toDecimal()
+						Status="Active"
+						Remarks="Opening lot created by migrateOpeningLots"
+					];
+
+					created = created + 1;
+					hasLot.add(rmKey);
+
+					info "L1 created for " + rmSku + " lot=" + newLotId;
+				}
+				catch (eRow)
+				{
+					if(errJson != "")
+					{
+						errJson = errJson + ",";
+					}
+					errJson = errJson + "\"" + rmSku + ": " + eRow.toString().replaceAll("\"","'") + "\"";
+				}
+			}
+		}
+	}
+	catch (e)
+	{
+		if(errJson != "")
+		{
+			errJson = errJson + ",";
+		}
+		errJson = errJson + "\"RUN FAILED: " + e.toString().replaceAll("\"","'") + "\"";
+	}
+
+	// Built by hand - Map.toString() does not emit valid JSON once nested.
+	return "{\"created\":" + created + ",\"skipped\":" + skipped + ",\"pending\":" + pending + ",\"nonFabric\":" + nonFabric + ",\"unaccounted\":[" + noteJson + "],\"errors\":[" + errJson + "]}";
+}
