@@ -645,16 +645,6 @@ function renderItemCard(plan, item, index) {
         <div class="tables-container" style="border-bottom: 1px solid var(--border);">
             <div class="section-title section-title-row">
                 <span>Materials for this item</span>
-                <!-- Deliberately NOT tied to a stage ending short. A wash care
-                     label torn while being attached ruins no garment at all —
-                     in 10, out 10, and three labels gone. Hanging this off a
-                     piece loss would miss most of what it is for.
-
-                     Send to third party used to sit here too, which put it in
-                     the middle of a row it had nothing to do with — it is about
-                     STAGES, not material. It now heads the Production Flow
-                     section, where the stages it acts on actually are. -->
-                <button type="button" class="damage-btn">Report damage</button>
             </div>
             <div class="table-wrapper">
                 <table>
@@ -1229,19 +1219,6 @@ function renderItemCard(plan, item, index) {
 		}
 	}
 
-	const btnDamage = body.querySelector(".damage-btn");
-	if (btnDamage) {
-		btnDamage.addEventListener("click", () => {
-			if (typeof openDamageDialog !== "function") {
-				alert(
-					"Damage reporting is not loaded.\n\n" +
-						"js/reissue.js is missing from the widget upload.",
-				);
-				return;
-			}
-			openDamageDialog(plan, item);
-		});
-	}
 
 	// Reveal-only: no server write, so pressing this by accident costs nothing.
 	const btnStartProd = body.querySelector(".btn-start-production");
