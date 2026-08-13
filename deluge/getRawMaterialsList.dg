@@ -31,15 +31,30 @@ string getRawMaterialsList()
 			
 			unitVal = ifnull(rm.Unit, "").toString().trim().replaceAll("\"", "'");
 			
-			availStock = 0.0;
+			washQty = 0.0;
+			unwashQty = 0.0;
+			totalQty = 0.0;
 			if(isFab == true)
 			{
-				availStock = ifnull(rm.Wash_Quantity, 0.0).toDecimal();
+				washQty = ifnull(rm.Wash_Quantity, 0.0).toDecimal();
+				unwashQty = ifnull(rm.Unwash_Quantity, 0.0).toDecimal();
+				totalQty = washQty + unwashQty;
 			}
 			else
 			{
-				availStock = ifnull(rm.Quantity, 0.0).toDecimal();
+				totalQty = ifnull(rm.Quantity, 0.0).toDecimal();
 			}
+			
+			matPrice = ifnull(rm.Item_Price, 0.0).toDecimal();
+			matLastPurchase = "";
+			if(rm.Last_Purchase_Date != null)
+			{
+				matLastPurchase = rm.Last_Purchase_Date.toString("dd-MMM-yyyy");
+			}
+			
+			widthVal = ifnull(rm.Fabric_Width_Inches, "").toString().trim().replaceAll("\"", "'");
+			gsmVal = ifnull(rm.GSM, "").toString().trim().replaceAll("\"", "'");
+			qualityVal = ifnull(rm.Quality, "").toString().trim().replaceAll("\"", "'");
 			
 			rowsJson = rowsJson + "{\"id\":\"" + rm.ID + "\","
 				+ "\"name\":\"" + matName + "\","
@@ -49,7 +64,14 @@ string getRawMaterialsList()
 				+ "\"pattern\":\"" + matPattern + "\","
 				+ "\"color\":\"" + matColor + "\","
 				+ "\"unit\":\"" + unitVal + "\","
-				+ "\"stock\":" + availStock + "}";
+				+ "\"stock\":" + totalQty + ","
+				+ "\"washQty\":" + washQty + ","
+				+ "\"unwashQty\":" + unwashQty + ","
+				+ "\"width\":\"" + widthVal + "\","
+				+ "\"gsm\":\"" + gsmVal + "\","
+				+ "\"quality\":\"" + qualityVal + "\","
+				+ "\"price\":" + matPrice + ","
+				+ "\"lastPurchaseDate\":\"" + matLastPurchase + "\"}";
 		}
 		res = "{\"errors\":[],\"materials\":[" + rowsJson + "]}";
 	}
