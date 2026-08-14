@@ -85,6 +85,17 @@ string raiseMaterialException(string payloadJson)
 	shortQty = shortStr.toDecimal();
 
 	// Nothing complex in a for-each header - hoisted into its own variable.
+	// WHICH LOT'S GREIGE IS GOING TO THE WASH. Wash tickets only.
+	//
+	// The wash converts a lot's unwashed cloth into that same lot's washed
+	// cloth - it does not create or merge a lot - so the ticket has to name
+	// which one, or completeWashRequest has nothing to move and the lots drift
+	// away from the parent total.
+	//
+	// Empty is tolerated: a purchase ticket has no lot, and a wash ticket raised
+	// by an older widget lands on the parent alone, exactly as it did before.
+	lotIdTxt = ifnull(inp.get("lotId"),"").toString().trim();
+
 	lines = ifnull(inp.get("lines"),"[]").toString().toJSONList();
 
 	// Guarded BEFORE the fetch. An empty or non-numeric id makes .toLong() throw
@@ -274,14 +285,31 @@ string raiseMaterialException(string payloadJson)
 		{
 			try
 			{
-				// One open job per material. A second report while the first is
-				// still on the line updates the quantity instead of queueing
-				// the same cloth twice.
+				// One open job per material AND LOT.
+				//
+				// It used to be one per material, which is now too coarse: a
+				// wash running on lot 2 would swallow a request for lot 3,
+				// leaving lot 3's greige on the shelf with nothing queued
+				// against it and the ticket quietly reading as covered.
+				//
+				// Matched in code rather than in the query. A lookup that was
+				// never written is EMPTY, not null, so a query on Lot ==
+				// something would drop every pre-lot request instead of letting
+				// them match a request that also has no lot.
 				openWash = Wash_Request[Material == matId.toLong() && (Status == "Pending" || Status == "In_Progress")];
 
-				if(openWash.count() > 0)
+				sameLotJob = null;
+				for each  wqChk in openWash
 				{
-					for each  wq in openWash
+					if(ifnull(wqChk.Lot,"").toString().trim() == lotIdTxt)
+					{
+						sameLotJob = wqChk.ID;
+					}
+				}
+
+				if(sameLotJob != null)
+				{
+					for each  wq in Wash_Request[ID == sameLotJob]
 					{
 						wq.Requested_Qty = shortQty;
 						if(exRec != null)
@@ -304,11 +332,17 @@ string raiseMaterialException(string payloadJson)
 						Added_User=zoho.loginuser
 					];
 
-					if(exRec != null)
+					// Lookups after the insert - a null cannot go in the block,
+					// and a purchase-era ticket legitimately has no lot.
+					for each  wr in Wash_Request[ID == newWash.toLong()]
 					{
-						for each  wr in Wash_Request[ID == newWash.toLong()]
+						if(exRec != null)
 						{
 							wr.Exception = exRec.ID;
+						}
+						if(lotIdTxt != "")
+						{
+							wr.Lot = lotIdTxt.toLong();
 						}
 					}
 				}

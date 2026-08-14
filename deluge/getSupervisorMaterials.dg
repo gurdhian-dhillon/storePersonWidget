@@ -359,14 +359,148 @@ string getSupervisorMaterials(string supervisorId)
 		}
 	}
 
+	//------------------------------------------------------------------------
+	// WHICH LOT THE CLOTH CAME OFF.
+	//
+	// The requirement row records METRES and has never recorded which cloth they
+	// were. Material_Issue.Issue_Lines is the only place that knows, because the
+	// lot is stamped there at the moment it crosses the counter.
+	//
+	// NEWEST LINES FIRST, taken up to what is still pending. Receipt settles the
+	// oldest handover first, so whatever is still owed is the most recent cloth -
+	// he was issued 10m off L2, then 5m off L3, and has confirmed 10m, so the 5m
+	// he is being asked about is L3's. Walking oldest-first would name L2 and
+	// have him check the wrong roll.
+	//
+	// This needs no Settled_Qty: the cap IS the pending figure, already worked
+	// out above from Issued_Qty - Received_Qty and net of open disputes.
+	//------------------------------------------------------------------------
+	lotNumById = Map();
+	for each  lotRef in Raw_Material_Lot[ID != 0]
+	{
+		lotNumById.put(lotRef.ID + "",ifnull(lotRef.Lot_Number,"").toString());
+	}
+
+	// Issue lines for this supervisor, newest handover first, grouped by
+	// material as a parallel pair of lists - Deluge has no tuple, and a Map of
+	// Lists of Maps is the shape that stops serialising cleanly.
+	lineLotByMat = Map();
+	lineQtyByMat = Map();
+
+	supIssues = Material_Issue[Issued_To == supId] sort by Added_Time desc;
+
+	for each  miRec in supIssues
+	{
+		for each  miLn in miRec.Issue_Lines
+		{
+			lnMat = ifnull(miLn.Material,"").toString().trim();
+
+			// THE CHEAP TEST FIRST. A line for a material with nothing pending
+			// costs one lookup and stops here, rather than being read and parsed
+			// only to be thrown away.
+			if(lnMat != "" && agg.get(lnMat) != null)
+			{
+				lqS = ifnull(miLn.Qty,"0").toString().trim();
+				if(lqS == "")
+				{
+					lqS = "0";
+				}
+
+				if(lqS.toDecimal() > 0)
+				{
+					prevL = ifnull(lineLotByMat.get(lnMat),"").toString();
+					prevQ = ifnull(lineQtyByMat.get(lnMat),"").toString();
+					if(prevL != "")
+					{
+						prevL = prevL + "~";
+						prevQ = prevQ + "~";
+					}
+					lineLotByMat.put(lnMat,prevL + ifnull(miLn.Lot,"").toString().trim());
+					lineQtyByMat.put(lnMat,prevQ + lqS);
+				}
+			}
+		}
+	}
+
+
 	for each  k in orderedKeys
 	{
 		e = agg.get(k);
+
+		//--------------------------------------------------------------------
+		// Take the newest lines until the pending figure is covered, summing
+		// per lot as we go. Two lots can appear on one material - one handover
+		// split across them, or two handovers - and both have to be shown or he
+		// checks one roll and signs for two.
+		//--------------------------------------------------------------------
+		lotsJson = "";
+		leftToName = e.get("pending");
+
+		lotSeen = List();
+		lotQty = Map();
+
+		lotTxt = ifnull(lineLotByMat.get(k),"").toString();
+		qtyTxt = ifnull(lineQtyByMat.get(k),"").toString();
+
+		if(lotTxt != "")
+		{
+			lotParts = lotTxt.toList("~");
+			qtyParts = qtyTxt.toList("~");
+
+			idxN = 0;
+			for each  qPart in qtyParts
+			{
+				if(leftToName > 0)
+				{
+					takeHere = qPart.toDecimal();
+					if(takeHere > leftToName)
+					{
+						takeHere = leftToName;
+					}
+
+					if(takeHere > 0)
+					{
+						thisLot = lotParts.get(idxN).toString();
+						// A line issued before lots existed carries none. Named
+						// rather than dropped - the metres are real and he is
+						// being asked to sign for them.
+						if(thisLot == "")
+						{
+							thisLot = "none";
+						}
+
+						if(lotSeen.contains(thisLot) == false)
+						{
+							lotSeen.add(thisLot);
+							lotQty.put(thisLot,0.0);
+						}
+						lotQty.put(thisLot,lotQty.get(thisLot) + takeHere);
+						leftToName = leftToName - takeHere;
+					}
+				}
+				idxN = idxN + 1;
+			}
+		}
+
+		for each  lotKey in lotSeen
+		{
+			if(lotsJson != "")
+			{
+				lotsJson = lotsJson + ",";
+			}
+			lotLabelTxt = ifnull(lotNumById.get(lotKey),"").toString();
+			if(lotLabelTxt == "")
+			{
+				lotLabelTxt = "Not recorded";
+			}
+			lotsJson = lotsJson + "{\"lot\":\"" + lotLabelTxt.replaceAll("\"","'") + "\",\"qty\":" + lotQty.get(lotKey) + "}";
+		}
+
 		if(matJson != "")
 		{
 			matJson = matJson + ",";
 		}
-		matJson = matJson + "{\"materialId\":\"" + e.get("matId") + "\",\"material\":\"" + e.get("name") + "\",\"unit\":\"" + e.get("unit") + "\",\"isFabric\":" + e.get("isFabric") + ",\"isReissue\":" + ifnull(e.get("hasReissue"),"false") + ",\"pending\":" + e.get("pending") + ",\"orders\":[" + detail.get(k) + "]}";
+		matJson = matJson + "{\"materialId\":\"" + e.get("matId") + "\",\"material\":\"" + e.get("name") + "\",\"unit\":\"" + e.get("unit") + "\",\"isFabric\":" + e.get("isFabric") + ",\"isReissue\":" + ifnull(e.get("hasReissue"),"false") + ",\"pending\":" + e.get("pending") + ",\"lots\":[" + lotsJson + "],\"orders\":[" + detail.get(k) + "]}";
 	}
 
 	// Built by hand - List.toString() does not reliably wrap in [].

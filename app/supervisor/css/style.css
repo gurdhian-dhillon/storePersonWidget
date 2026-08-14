@@ -2996,3 +2996,27 @@ th.col-num {
 .os-stage-row.is-locked:hover {
     background: none;
 }
+
+/* Which lot the cloth came off, on the receive row. One entry per lot, because
+   a split handover is two rolls on his bench — not one quantity. */
+.rcv-lots {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.4rem;
+    padding-top: 0.25rem;
+    font-size: 0.78rem;
+}
+.rcv-lots-label {
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.68rem;
+}
+.rcv-lot {
+    background: #eff6ff;
+    border: 1px solid #dbeafe;
+    border-radius: 4px;
+    padding: 0.05rem 0.4rem;
+    white-space: nowrap;
+}

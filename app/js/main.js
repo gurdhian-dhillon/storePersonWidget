@@ -61,6 +61,119 @@ function lotsFor(material) {
     return (material.isFabric && material.lots) ? material.lots : [];
 }
 
+// Lots you can actually take cloth off today. Fabric only ever leaves the shelf
+// WASHED, so a lot holding nothing but greige is not a choice — it is an
+// explanation for why stock looks short.
+function issuableLots(material) {
+    return lotsFor(material).filter(function (l) { return (Number(l.wash) || 0) > 0; });
+}
+
+// Metres of cloth needed to cut `pieces`, on this fabric, in whole marker rows.
+// Returns null when there is not enough piece data to count with — a row planned
+// before Required_Pieces existed, a cut wider than the cloth, or a fabric whose
+// width was never recorded.
+function metresForPieces(m, pieces) {
+    var w = Number(m.fabricWidthCm) || 0;
+    var cw = Number(m.cutWidth) || 0;
+    var cl = Number(m.cutLength) || 0;
+    if (pieces <= 0) return 0;
+    if (!(w > 0 && cw > 0 && cl > 0 && w >= cw)) return null;
+    var perRow = Math.floor(w / cw);
+    if (perRow <= 0) return null;
+    return round2((Math.ceil(pieces / perRow) * cl) / 100);
+}
+
+// THE RECOMMENDATION. Which lot, and how much off each.
+//
+// ONE LOT IF ONE LOT WILL DO — and the SMALLEST that covers the whole ask, not
+// the largest. Taking from the biggest lot every time leaves a tail on each
+// small one that nothing can ever use; draining the snuggest fit keeps the rack
+// tidy and keeps the big lots whole for the big orders.
+//
+// When no single lot can cover it, it takes the LARGEST first. A split is
+// already a compromise on tone, so the job is to use as few lots as possible.
+//
+// The per-lot arithmetic mirrors issueMaterials exactly: each lot's cloth is cut
+// in whole marker rows of its own, so after taking from one lot the remaining
+// need is recomputed from the PIECES still owed, not the metres. Anything else
+// and the pre-filled numbers would disagree with what the server actually
+// issues — the pre-fill would look short by a row and he would top it up by
+// hand for no reason.
+//
+// It is a suggestion. Every figure it writes stays editable.
+function recommendLots(m) {
+    var lots = issuableLots(m);
+    if (lots.length === 0) return {};
+
+    var out = {};
+    var full = lotsFor(m);
+    var indexOf = function (lot) { return full.indexOf(lot); };
+
+    var pieces = Number(m.freshPieces);
+    if (!(pieces > 0)) pieces = 0;
+
+    // TWO WAYS THIS ROW CANNOT BE COUNTED IN PIECES, and both have to fall back
+    // or the row gets no suggestion at all:
+    //   - no piece figure — a row planned before Required_Pieces existed
+    //   - no width, or a cut wider than the cloth
+    // getStoreMaterialRequirements makes the same distinction and quotes the
+    // metres estimate in exactly these cases, so this matches what it sent.
+    var needAll = (pieces > 0) ? metresForPieces(m, pieces) : null;
+    var byMetres = (needAll === null);
+    if (byMetres) needAll = round2(Math.max(0, Number(m.remaining) || 0));
+    if (needAll <= 0) return {};
+
+    // 1. the smallest single lot that covers the whole thing
+    var best = null;
+    lots.forEach(function (l) {
+        var wash = Number(l.wash) || 0;
+        if (wash + 0.0001 >= needAll) {
+            if (best === null || wash < (Number(best.wash) || 0)) best = l;
+        }
+    });
+    if (best !== null) {
+        out[indexOf(best)] = needAll;
+        return out;
+    }
+
+    // 2. no single lot can — take the largest first, fewest lots wins
+    var ordered = lots.slice().sort(function (a, b) {
+        return (Number(b.wash) || 0) - (Number(a.wash) || 0);
+    });
+
+    var piecesLeft = pieces;
+    var metresLeft = needAll;
+
+    ordered.forEach(function (l) {
+        var wash = Number(l.wash) || 0;
+        if (wash <= 0) return;
+
+        var need = byMetres ? metresLeft : metresForPieces(m, piecesLeft);
+        if (need === null || need <= 0) return;
+
+        var take = Math.min(wash, need);
+        take = round2(take);
+        if (take <= 0) return;
+
+        out[indexOf(l)] = take;
+
+        if (byMetres) {
+            metresLeft = round2(metresLeft - take);
+            if (metresLeft <= 0) metresLeft = 0;
+        } else {
+            // How many pieces this lot's cloth actually yields, counted in whole
+            // marker rows off ITS OWN metres.
+            var perRow = Math.floor((Number(m.fabricWidthCm) || 0) / (Number(m.cutWidth) || 1));
+            var got = perRow * Math.floor((take * 100) / (Number(m.cutLength) || 1));
+            if (got > piecesLeft) got = piecesLeft;
+            piecesLeft -= got;
+            if (piecesLeft < 0) piecesLeft = 0;
+        }
+    });
+
+    return out;
+}
+
 function lotInputId(supIdx, matIdx, lotIdx) {
     return 'lot-input-' + supIdx + '-' + matIdx + '-' + lotIdx;
 }
@@ -438,6 +551,85 @@ function summaryEntry(kind, idx) {
     return (kind === 'wash' ? s.toWash : s.toBuy)[idx];
 }
 
+// WHICH LOT'S GREIGE GOES TO THE WASH.
+//
+// Washing does not change the lot — it converts that lot's unwashed cloth into
+// that lot's washed cloth. So the ticket has to name one, and the choice is
+// worth making well rather than taking whatever comes first.
+//
+// PREFER A LOT THAT ALREADY HAS WASHED CLOTH. Washing its greige adds to a tone
+// that is already on the shelf, so washed stock GATHERS in one lot instead of
+// spreading thin across several — and thin-spread washed stock is precisely what
+// forces an order to be split across two tones later. Washing the wrong lot
+// today is what creates the split next week.
+//
+// Failing that, the lot with the most greige, so the wash is one trip.
+//
+// COVERING THE WHOLE NEED COMES FIRST though. A lot that already has washed
+// cloth but not enough greige leaves the order still short after the wash — one
+// wash that finishes the job beats a tidier tone that does not. So the order is:
+//   1. enough greige AND already has washed cloth
+//   2. enough greige
+//   3. most greige, washed cloth as the tie-break
+function recommendWashLot(e, need) {
+    var lots = (e.lots || []).filter(function (l) { return (Number(l.unwash) || 0) > 0; });
+    if (lots.length === 0) return null;
+
+    var want = Number(need) || 0;
+    var score = function (l) {
+        var covers = (Number(l.unwash) || 0) + 0.0001 >= want;
+        var hasWash = (Number(l.wash) || 0) > 0;
+        if (covers && hasWash) return 3;
+        if (covers) return 2;
+        if (hasWash) return 1;
+        return 0;
+    };
+
+    var best = null;
+    lots.forEach(function (l) {
+        if (best === null) { best = l; return; }
+        var a = score(l), b = score(best);
+        if (a !== b) {
+            if (a > b) best = l;
+            return;
+        }
+        if ((Number(l.unwash) || 0) > (Number(best.unwash) || 0)) best = l;
+    });
+    return best;
+}
+
+function washLotPickerHtml(e, entry) {
+    var lots = (e.lots || []).filter(function (l) { return (Number(l.unwash) || 0) > 0; });
+    if (lots.length === 0) {
+        return '<div class="exc-nolot">No lot has unwashed cloth &mdash; there is ' +
+            'nothing to send. This one needs buying, not washing.</div>';
+    }
+
+    // The same lot the row chose, so the dialog cannot disagree with the table
+    // he pressed the button on.
+    var rec = (entry && entry.lot) ? entry.lot : recommendWashLot(e, entry ? entry.qty : 0);
+    var recId = rec ? String(rec.lotId) : '';
+
+    var opts = lots.map(function (l) {
+        var wash = Number(l.wash) || 0;
+        return '<option value="' + l.lotId + '"' +
+            (String(l.lotId) === recId ? ' selected' : '') + '>' +
+            escapeHtml(l.lotNumber || '—') + ' — ' + fmt(l.unwash) + ' ' +
+            escapeHtml(e.unit) + ' unwashed' +
+            (wash > 0 ? ', ' + fmt(wash) + ' already washed' : '') +
+            '</option>';
+    }).join('');
+
+    return '' +
+        '<label class="exc-label">Which lot goes to the wash</label>' +
+        '<select id="exc-lot" class="note-input">' + opts + '</select>' +
+        (lots.length > 1 && rec && (Number(rec.wash) || 0) > 0
+            ? '<div class="exc-lot-why">Suggested because this lot already has washed ' +
+              'cloth &mdash; washing it keeps the tone together instead of spreading ' +
+              'washed stock across lots.</div>'
+            : '');
+}
+
 function openSummaryException(kind, idx) {
     var entry = summaryEntry(kind, idx);
     if (!entry) return;
@@ -512,6 +704,9 @@ function openSummaryException(kind, idx) {
                     '<th class="col-num">Outstanding</th>' +
                 '</tr></thead><tbody>' + lineRows + '</tbody></table>' +
             '</div>' +
+            // Wash only. A purchase ticket has no lot — the cloth does not
+            // exist yet, so there is nothing to name.
+            (isWash ? washLotPickerHtml(e, entry) : '') +
             '<label class="exc-label">Note</label>' +
             '<textarea id="exc-note" rows="2" placeholder="Anything the next person needs to know"></textarea>' +
             '<div class="exc-foot">' +
@@ -520,6 +715,13 @@ function openSummaryException(kind, idx) {
                     'onclick="submitSummaryException(\'' + kind + '\',' + idx + ')">Raise it</button>' +
             '</div>' +
         '</div>';
+}
+
+// The chosen lot, or '' for a purchase ticket or a material with no greige lot.
+function washLotChoice(kind) {
+    if (kind !== 'wash') return '';
+    var sel = document.getElementById('exc-lot');
+    return sel ? String(sel.value || '') : '';
 }
 
 function submitSummaryException(kind, idx) {
@@ -546,6 +748,10 @@ function submitSummaryException(kind, idx) {
                 shortfall: entry.qty,
                 unit: e.unit,
                 note: document.getElementById('exc-note').value,
+                // Wash only, and only when a lot was offered. completeWashRequest
+                // moves the cloth inside this lot; without it the parent total
+                // moves on its own and the lots underneath drift short of it.
+                lotId: washLotChoice(kind),
                 lines: e.lines || []
             })
         }
@@ -627,47 +833,111 @@ function shortPill(m) {
 // could cover the whole ask on their own, call out a lot this order already has
 // cloth from, and warn (never block) when he splits where one lot would have
 // done. He can override all of it; he just cannot do it by accident.
+// The suggestion totalled up — what the row's metres box starts at.
+function recommendedTotal(m) {
+    var rec = recommendLots(m);
+    var t = 0;
+    Object.keys(rec).forEach(function (k) { t += rec[k]; });
+    return round2(t);
+}
+
 function lotStripHtml(m, supIdx, matIdx) {
     var lots = lotsFor(m);
-    var cols = m.isFabric ? 5 : 4;
-
-    if (lots.length === 0) {
-        return '<tr class="lot-row"><td colspan="' + cols + '">' +
-            '<div class="lot-none">No lot has washed cloth &mdash; book it in on ' +
-            '<b>Stock in</b>, or send a lot for washing. Fabric cannot be issued ' +
-            'without saying which lot it came from.</div></td></tr>';
-    }
-
+    // Fabric rows are Material / To be issued / Issue now since the stock
+    // columns came off. Only fabric ever gets a lot strip.
+    var cols = 3;
     var need = suggestedIssue(m);
 
-    var rows = lots.map(function (l, lotIdx) {
-        var wash = Number(l.wash) || 0;
-        var covers = need > 0 && wash + 0.0001 >= need;
+    // A REAL TABLE, one row per lot. Washed and unwashed are their own columns
+    // so the numbers line up and mean the same thing on every row — a flex line
+    // could not align them, which is what made this read as clutter.
+    //
+    // The label is not shown. The lot NUMBER is what is written on the roll and
+    // what he recognises it by; a second name beside it earned no space.
+    //
+    // A lot holding only greige still gets a row — the cloth is here, it just
+    // has not been washed, and that is the answer to "why is stock short" — but
+    // no input, because a control that can never do anything is worse than none.
+    var rec = recommendLots(m);
+    var recCount = Object.keys(rec).length;
 
-        return '' +
-            '<div class="lot-line">' +
-                '<span class="lot-id">' + escapeHtml(l.lotNumber || '—') +
-                    (l.label ? ' <span class="lot-label">' + escapeHtml(l.label) + '</span>' : '') +
-                '</span>' +
-                '<span class="lot-avail">' + fmt(wash) + '<span class="unit">' +
-                    escapeHtml(m.unit) + ' washed</span></span>' +
-                (covers ? '<span class="status-pill status-sufficient">covers it all</span>' : '') +
-                ((Number(l.unwash) || 0) > 0
-                    ? '<span class="lot-unwash">' + fmt(l.unwash) + ' unwashed</span>' : '') +
-                '<span class="issue-input-group">' +
-                    '<input type="number" step="0.01" min="0" max="' + wash + '" ' +
-                        'class="issue-input lot-input" id="' + lotInputId(supIdx, matIdx, lotIdx) + '" ' +
-                        'placeholder="0" ' +
-                        'oninput="onLotInput(' + supIdx + ',' + matIdx + ')" />' +
-                '</span>' +
-                '<button type="button" class="ghost-btn lot-fill" ' +
-                    'onclick="fillLot(' + supIdx + ',' + matIdx + ',' + lotIdx + ')">Fill</button>' +
-            '</div>';
-    }).join('');
+    // ONLY ISSUABLE LOTS GO IN THE TABLE. A lot holding nothing but greige is
+    // not a choice, so it is not a row in a picker — a row you cannot use still
+    // reads as one you have to consider, and it was the main thing making this
+    // strip hard to scan.
+    //
+    // The greige is not hidden though. It is summed into one muted line under
+    // the table, because it answers the question a short-looking figure
+    // provokes: the cloth IS here, it just has not been washed.
+    var body = '';
+    var greigeQty = 0;
+    var greigeLots = [];
+
+    lots.forEach(function (l, lotIdx) {
+        var wash = Number(l.wash) || 0;
+        var unwash = Number(l.unwash) || 0;
+
+        if (wash <= 0) {
+            greigeQty += unwash;
+            if (unwash > 0) greigeLots.push(l.lotNumber || '—');
+            return;
+        }
+
+        var picked = rec[lotIdx];
+        var isPicked = picked !== undefined && picked > 0;
+
+        body +=
+            '<tr' + (isPicked ? ' class="lot-picked"' : '') + '>' +
+                '<td class="lot-cell-id">' + escapeHtml(l.lotNumber || '—') + '</td>' +
+                '<td class="col-num">' + fmt(wash) + '</td>' +
+                '<td class="col-num">' +
+                    (unwash > 0 ? fmt(unwash) : '<span class="is-zero">&mdash;</span>') + '</td>' +
+                '<td class="col-issue">' +
+                    '<span class="issue-input-group">' +
+                        '<input type="number" step="0.01" min="0" max="' + wash + '" ' +
+                            'class="issue-input lot-input" id="' + lotInputId(supIdx, matIdx, lotIdx) + '" ' +
+                            'placeholder="0" ' +
+                            (isPicked ? 'value="' + picked + '" ' : '') +
+                            'oninput="onLotInput(' + supIdx + ',' + matIdx + ')" />' +
+                    '</span>' +
+                    '<button type="button" class="ghost-btn lot-fill" ' +
+                        'onclick="fillLot(' + supIdx + ',' + matIdx + ',' + lotIdx + ')">Fill</button>' +
+                '</td>' +
+            '</tr>';
+    });
+
+    var greigeLine = greigeQty > 0
+        ? '<div class="lot-greige">' + fmt(greigeQty) + ' ' + escapeHtml(m.unit) +
+              ' unwashed in ' + escapeHtml(greigeLots.join(', ')) +
+              ' &mdash; not issuable until washed</div>'
+        : '';
+
+    if (body === '') {
+        return '<tr class="lot-row"><td colspan="' + cols + '">' +
+            '<div class="lot-none">' +
+                (greigeQty > 0
+                    ? 'Nothing washed yet &mdash; this cloth cannot be issued until a lot comes back from washing.'
+                    : 'No lot at all &mdash; book this fabric in on <b>Stock in</b> before it can be issued.') +
+            '</div>' + greigeLine +
+            '<div class="lot-warn" id="lot-warn-' + supIdx + '-' + matIdx + '"></div>' +
+            '</td></tr>';
+    }
 
     return '<tr class="lot-row"><td colspan="' + cols + '">' +
-        '<div class="lot-strip-head">Take from which lot?</div>' +
-        rows +
+        '<div class="lot-strip-head">Take from which lot?' +
+            // Said once, under the heading, instead of a pill on every chosen row.
+            (recCount > 1
+                ? '<span class="lot-split-note">No single lot could cover this &mdash; split across '
+                    + recCount + '</span>'
+                : '') +
+        '</div>' +
+        '<table class="lot-table"><thead><tr>' +
+            '<th>Lot</th>' +
+            '<th class="col-num">Washed (' + escapeHtml(m.unit) + ')</th>' +
+            '<th class="col-num">Unwashed (' + escapeHtml(m.unit) + ')</th>' +
+            '<th class="col-issue">Issue</th>' +
+        '</tr></thead><tbody>' + body + '</tbody></table>' +
+        greigeLine +
         '<div class="lot-warn" id="lot-warn-' + supIdx + '-' + matIdx + '"></div>' +
         '</td></tr>';
 }
@@ -727,6 +997,12 @@ function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
     var done = isFullyIssued(m);
     var lots = lotsFor(m);
     // Fabric is typed into its lots, so the row's own box is a running total.
+    //
+    // Today every fabric row goes through renderFabricRows and this function is
+    // only ever called with non-fabric, so byLot is always false here. Kept so
+    // the two renderers cannot disagree if fabric is ever routed back through
+    // this one — which is exactly how the lot strip came to be missing from the
+    // issue screen the first time.
     var byLot = m.isFabric && !done;
     var defaultIssue = byLot ? 0 : suggestedIssue(m);
     var disabled = maxIssuable(m) > 0 ? '' : 'disabled';
@@ -811,6 +1087,13 @@ function renderFabricRows(m, supIdx, matIdx) {
     var picks = wastePicks(m);
     var wantsFresh = done || needsFreshFabric(m);
 
+    // Fresh cloth has to come off a named lot. A row covered entirely by waste
+    // needs none, so it gets no lot strip — there is no fresh fabric to source.
+    var byLot = !done && wantsFresh;
+    // What can actually be issued, not merely what exists: a lot holding only
+    // greige is no more issuable than no lot at all.
+    var lots = issuableLots(m);
+
     // ---- "To be issued": fresh metres as the headline, waste beneath it ----
     var toIssue = '';
     if (wantsFresh) {
@@ -839,19 +1122,32 @@ function renderFabricRows(m, supIdx, matIdx) {
         }
     } else {
         var disabled = maxIssuable(m) > 0 ? '' : 'disabled';
+        // Nothing to take it off means nothing to issue, whatever the shelf
+        // total says. The lot strip below explains why.
+        if (byLot && lots.length === 0) disabled = 'disabled';
         issueCell = '<div class="issue-stack">';
 
         if (wantsFresh) {
+            // Pre-filled from the recommendation, so the common case is one
+            // glance and one press. He can still change any of it.
+            var startQty = byLot ? recommendedTotal(m) : suggestedIssue(m);
+
             issueCell +=
                 '<div class="issue-cell">' +
                     '<input type="checkbox" class="issue-checkbox" id="' + rowCheckboxId(supIdx, matIdx) + '" ' +
-                        (rowIssuable(m) ? 'checked' : '') + ' ' + disabled + ' ' +
+                        (rowIssuable(m) && startQty > 0 ? 'checked' : '') + ' ' + disabled + ' ' +
                         'aria-label="Issue ' + escapeHtml(m.material) + '" ' +
                         'onchange="onIssueCheckboxChange(' + supIdx + ',' + matIdx + ')" />' +
                     '<span class="issue-input-group">' +
-                        '<input type="number" step="0.01" min="0" max="' + maxIssuable(m) + '" ' +
+                        // Read-only when it comes off lots: this box is the
+                        // running total of what he typed against each lot, not
+                        // somewhere to type. Keeping it means the checkbox,
+                        // validation and card footer all work unchanged.
+                        '<input type="number" step="0.01" min="0" max="' + issueCeiling(m) + '" ' +
                             'class="issue-input" id="' + rowInputId(supIdx, matIdx) + '" ' + disabled + ' ' +
-                            'value="' + suggestedIssue(m) + '" oninput="onIssueInputChange(' + supIdx + ',' + matIdx + ')" />' +
+                            (byLot ? 'readonly ' : '') +
+                            'value="' + startQty + '" ' +
+                            'oninput="onIssueInputChange(' + supIdx + ',' + matIdx + ')" />' +
                         '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
                     '</span>' +
                 '</div>';
@@ -894,10 +1190,9 @@ function renderFabricRows(m, supIdx, matIdx) {
                 warning +
             '</td>' +
             '<td class="col-num col-strong">' + toIssue + '</td>' +
-            '<td class="col-num">' + qty(m.availableStock, m.unit) + '</td>' +
-            '<td class="col-num">' + qty(Number(m.unwashedStock) || 0, m.unit) + '</td>' +
             '<td class="col-issue">' + issueCell + '</td>' +
-        '</tr>';
+        '</tr>' +
+        (byLot ? lotStripHtml(m, supIdx, matIdx) : '');
 }
 
 function selectAllHeader(supIdx, section, label) {
@@ -983,6 +1278,10 @@ function buildShortfallSummary(data) {
                     // summing it would invent stock that does not exist.
                     stock: Number(m.availableStock) || 0,
                     unwashed: Number(m.unwashedStock) || 0,
+                    // Same reasoning as stock: one live list, taken from the
+                    // first row that mentions the material rather than merged.
+                    // The wash ticket has to name which lot's greige is going.
+                    lots: (m.lots || []).slice(),
                     needed: 0,
                     supervisors: [],
                     // One entry per Material_Requirement row, straight from the
@@ -1028,8 +1327,29 @@ function buildShortfallSummary(data) {
         // Only fabric has an unwashed pile to draw on, and only the part washing
         // cannot cover is a genuine shortage. A material can land in both lists.
         var washQty = e.isFabric ? round2(Math.min(gap, e.unwashed)) : 0;
+
+        // WHICH LOT, decided HERE rather than in the dialog, because it changes
+        // the number on the row.
+        //
+        // The wash converts ONE lot's greige. The material's total unwashed can
+        // easily be more than any single lot holds, so a "to wash" figure taken
+        // from the total would raise a ticket for cloth that lot cannot give —
+        // and completeWashRequest would then silently cap it, leaving the store
+        // waiting on metres that were never coming.
+        var washLot = null;
         if (washQty > 0) {
-            toWash.push({ e: e, qty: washQty, kind: 'wash' });
+            washLot = recommendWashLot(e, washQty);
+            if (washLot) {
+                washQty = round2(Math.min(washQty, Number(washLot.unwash) || 0));
+            } else {
+                // Greige exists on the material but sits in no lot we can name.
+                // Nothing to send.
+                washQty = 0;
+            }
+        }
+
+        if (washQty > 0) {
+            toWash.push({ e: e, qty: washQty, kind: 'wash', lot: washLot });
         }
 
         var buyQty = round2(gap - washQty);
@@ -1097,10 +1417,27 @@ function summaryRow(entry, idx) {
             '</td>' +
             '<td class="col-num">' + qty(e.needed, e.unit, { keepZero: true }) + '</td>' +
             '<td class="col-num">' + qty(e.stock, e.unit) + '</td>' +
+            // Wash rows only — the greige pile and the lot it comes off. A
+            // purchase row has neither: the cloth does not exist yet.
+            (kind === 'wash'
+                ? '<td class="col-num">' + qty(e.unwashed, e.unit) + '</td>'
+                : '') +
             '<td class="col-num col-strong">' +
                 '<span class="qty-big">' + fmt(entry.qty) +
                     '<span class="unit">' + escapeHtml(e.unit) + '</span></span>' +
             '</td>' +
+            (kind === 'wash'
+                ? '<td class="sum-lot">' +
+                      (entry.lot
+                          ? '<span class="lot-id">' + escapeHtml(entry.lot.lotNumber || '—') + '</span>' +
+                            // Only worth saying when the lot cannot finish the
+                            // job — otherwise the To wash figure already says it.
+                            ((Number(entry.lot.unwash) || 0) + 0.0001 < round2(e.needed - e.stock)
+                                ? '<div class="sum-lot-note">all it has</div>'
+                                : '')
+                          : '<span class="is-zero">&mdash;</span>') +
+                  '</td>'
+                : '') +
             '<td class="col-action">' +
                 '<button type="button" class="raise-btn' + (state === 'stale' ? ' is-stale' : '') + '" ' +
                     'id="' + summaryBtnId(kind, idx) + '" ' +
@@ -1119,11 +1456,15 @@ function renderShortfallSummary(data) {
     window.__summary = s;
     if (s.toWash.length === 0 && s.toBuy.length === 0) return '';
 
+    // Reads as the chain it is: you need this much, you have this much washed
+    // and this much greige, so wash this much, off this lot.
     var washHead =
         '<th>Material</th>' +
         '<th class="col-num">Needed</th>' +
-        '<th class="col-num">Washed stock</th>' +
+        '<th class="col-num">Washed</th>' +
+        '<th class="col-num">Unwashed</th>' +
         '<th class="col-num">To wash</th>' +
+        '<th>From lot</th>' +
         '<th class="col-action"></th>';
 
     var buyHead =
@@ -1200,11 +1541,16 @@ function renderSupervisorCard(sup, idx, arr) {
         return (!m.isFabric && isRe(m)) ? renderQtyIssueRow(m, idx, matIdx, '') : '';
     }).join('');
 
+    // NO STOCK COLUMNS ON FABRIC. The store person issues from a LOT, and the
+    // lot strip underneath already shows what each one holds. A shelf total
+    // beside it answers a question he is no longer asking, and 373.1 washed
+    // across three lots is actively misleading when only one of them can fill
+    // the order without mixing tones. The total still exists on Raw_Material and
+    // still drives the shortage pill and the contested warning - it just is not
+    // a column any more.
     var fabricHead =
         '<th>Material</th>' +
-        '<th class="col-num">To be issued</th>' +
-        '<th class="col-num">Wash stock</th>' +
-        '<th class="col-num">Unwash stock</th>';
+        '<th class="col-num">To be issued</th>';
 
     var otherHead =
         '<th>Material</th>' +
@@ -3238,14 +3584,11 @@ function toggleStockCard(matId) {
 function onStockLotChange(matId) {
     var sel = document.getElementById('si-lot-' + matId);
     var numWrap = document.getElementById('si-num-wrap-' + matId);
-    var labWrap = document.getElementById('si-label-wrap-' + matId);
     if (!sel) return;
-    // Number and label only mean anything on a lot being CREATED. Topping up an
-    // existing lot must not offer to renumber or rename it from a screen that is
-    // about incoming cloth — that is a different action with different rules.
-    var creating = sel.value === '';
-    if (numWrap) numWrap.style.display = creating ? '' : 'none';
-    if (labWrap) labWrap.style.display = creating ? '' : 'none';
+    // The number only means anything on a lot being CREATED. Topping up an
+    // existing lot must not offer to renumber it from a screen that is about
+    // incoming cloth — that is a different action with different rules.
+    if (numWrap) numWrap.style.display = (sel.value === '') ? '' : 'none';
 }
 
 function stockInListHtml() {
@@ -3284,12 +3627,14 @@ function stockInListHtml() {
 function stockCardBodyHtml(m) {
     var lots = m.lots || [];
 
+    // The lot NUMBER is what is written on the roll and what he recognises it
+    // by. The label is still on the form and still written by the migration; it
+    // just does not earn a place on screen.
     var rows = lots.map(function (l) {
         return '' +
             '<tr>' +
                 '<td class="material-name-cell">' +
                     '<div class="mat-name">' + escapeHtml(l.lotNumber) + '</div>' +
-                    (l.label ? '<div class="mat-sku">' + escapeHtml(l.label) + '</div>' : '') +
                 '</td>' +
                 '<td class="col-num">' + fmt(l.wash) + '</td>' +
                 '<td class="col-num">' + fmt(l.unwash) + '</td>' +
@@ -3320,8 +3665,7 @@ function stockCardBodyHtml(m) {
     var opts = '<option value="">+ New lot</option>' +
         lots.filter(function (l) { return l.status !== 'Blocked'; })
             .map(function (l) {
-                return '<option value="' + l.lotId + '">' + escapeHtml(l.lotNumber) +
-                    (l.label ? ' &mdash; ' + escapeHtml(l.label) : '') + '</option>';
+                return '<option value="' + l.lotId + '">' + escapeHtml(l.lotNumber) + '</option>';
             }).join('');
 
     return '' +
@@ -3336,22 +3680,15 @@ function stockCardBodyHtml(m) {
                     '<input type="text" id="si-num-' + m.materialId + '" class="note-input" ' +
                         'placeholder="as written on the roll" />' +
                 '</label>' +
-                '<label class="si-field" id="si-label-wrap-' + m.materialId + '"><span>Label</span>' +
-                    '<input type="text" id="si-label-' + m.materialId + '" class="note-input" ' +
-                        'placeholder="e.g. slightly darker" />' +
-                '</label>' +
                 '<label class="si-field"><span>Quantity</span>' +
                     '<input type="number" step="0.01" min="0" id="si-qty-' + m.materialId + '" class="issue-input" />' +
                 '</label>' +
-                '<label class="si-field"><span>State</span>' +
-                    '<select id="si-state-' + m.materialId + '" class="note-input">' +
-                        '<option value="Unwash">Unwashed</option>' +
-                        '<option value="Wash">Washed</option>' +
-                    '</select>' +
-                '</label>' +
+                // No state to choose. Cloth arrives greige and is washed
+                // in-house, so everything booked here lands in unwashed; the
+                // wash flow is the only way into washed stock.
             '</div>' +
             '<div class="card-footer">' +
-                '<span class="sel-count">Match it against the rack first &mdash; a new lot cannot be merged back later.</span>' +
+                '<span class="sel-count">Goes in as <b>unwashed</b>. Match it against the rack first &mdash; a new lot cannot be merged back later.</span>' +
                 '<button type="button" class="primary-btn" id="si-btn-' + m.materialId + '" ' +
                     'onclick="submitStockIn(\'' + m.materialId + '\')">Add to stock</button>' +
             '</div>' +
@@ -3361,9 +3698,7 @@ function stockCardBodyHtml(m) {
 function submitStockIn(matId) {
     var lotSel = document.getElementById('si-lot-' + matId);
     var numEl = document.getElementById('si-num-' + matId);
-    var labelEl = document.getElementById('si-label-' + matId);
     var qtyEl = document.getElementById('si-qty-' + matId);
-    var stateEl = document.getElementById('si-state-' + matId);
     var btn = document.getElementById('si-btn-' + matId);
     if (!qtyEl || !btn) return;
 
@@ -3408,9 +3743,10 @@ function submitStockIn(matId) {
                 materialId: matId,
                 lotId: lotSel ? lotSel.value : '',
                 lotNumber: lotNum,
-                lotLabel: labelEl ? labelEl.value : '',
+                // No label from this screen any more. The field still exists on
+                // the form and the migration still writes it; nothing here does.
+                lotLabel: '',
                 qty: qty,
-                state: stateEl ? stateEl.value : 'Unwash',
                 remarks: ''
             })
         }

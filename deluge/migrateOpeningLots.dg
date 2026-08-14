@@ -2,16 +2,37 @@ string migrateOpeningLots()
 {
 	// ONE-OFF MIGRATION, run from Creator's Execute. Not a Custom API.
 	//
-	// Gives every FABRIC material an opening lot "L1" carrying the four balances
-	// it already holds on Raw_Material. After this, each fabric's parent total
-	// equals the sum of the single lot underneath it - the invariant the whole
-	// lot design rests on, and what the issue screen needs before it will let
-	// anything be issued.
+	// Gives every FABRIC material its opening lots, carrying the balances it
+	// already holds on Raw_Material. After this each fabric's parent total equals
+	// the sum of the lots underneath it - the invariant the whole lot design
+	// rests on, and what the issue screen needs before it will let anything be
+	// issued.
 	//
-	// "L1" for every material is correct: lot numbers are unique WITHIN a
-	// material, never globally. Two SKUs both having an L1 is not a collision.
+	// UP TO TWO LOTS PER MATERIAL, and that is the point of doing it here rather
+	// than splitting afterwards:
 	//
-	// Raw_Material is NOT modified. Its totals are already right - the lot is a
+	//   "Opening unwashed"  the Unwash_Quantity
+	//   "Opening washed"    the Wash_Quantity, plus In_Transit and Disputed
+	//
+	// WASHING IS WHAT SHIFTS THE TONE. The washed cloth on the rack was washed on
+	// some day nobody recorded; the greige beside it has not been through that
+	// yet and will come out its own shade. Calling them one lot is a claim the
+	// data cannot support - and a lot is a tone, nothing else.
+	//
+	// IN TRANSIT AND DISPUTED GO WITH THE WASHED LOT. Fabric only ever leaves the
+	// shelf washed, so anything already issued or disputed came off washed cloth.
+	// On the unwashed lot it would put a receipt against cloth that could not
+	// have been issued.
+	//
+	// Numbered SEQUENTIALLY with no gaps - a material with only washed stock gets
+	// a single "L1 - Opening washed". L1 therefore does not always mean the same
+	// state, which is fine: the LABEL says which, and that is what the store
+	// person reads on screen.
+	//
+	// A material with no stock at all gets NO lot. An empty lot is not a choice
+	// on any screen, and the store person creates what he needs on Stock in.
+	//
+	// Raw_Material is NOT modified. Its totals are already right - the lots are a
 	// breakdown of them, not a replacement - and Unallocated_Qty stays 0 until
 	// the Inventory sync exists.
 	//
@@ -19,22 +40,41 @@ string migrateOpeningLots()
 	// statement-execution limit is NOT catchable: it kills the script outright,
 	// so the try/catch never runs and Execute shows nothing useful. A run that
 	// dies halfway has to be resumable, which is why it skips materials that
-	// already have a lot and stops after batchCap creations.
+	// already have a lot and stops after batchCap materials.
 	//
 	//   KEEP PRESSING EXECUTE UNTIL "pending" IS 0.
 	//
-	// ONE EXIT, AT THE BOTTOM. Deluge's "all paths return" check does not count
-	// a return inside try/catch - a function whose every return sat in the try
+	// ONE EXIT, AT THE BOTTOM. Deluge's "all paths return" check does not count a
+	// return inside try/catch - a function whose every return sat in the try
 	// fails to save with "Missing return statement" pointed at the first line of
 	// the body, nowhere near the cause.
 
 	created = 0;
+	lotsMade = 0;
 	skipped = 0;
 	pending = 0;
 	nonFabric = 0;
+	noStock = 0;
+	outOfScope = 0;
+	scanned = 0;
 	noteJson = "";
 	errJson = "";
-	batchCap = 40;
+	skipJson = "";
+	skipShown = 0;
+	batchCap = 100;
+
+	//--------------------------------------------------------------------------
+	// SCOPE. Only materials whose SKU starts with this are touched.
+	//
+	//   ""     everything - the real run
+	//   "RM-"  one family only, for a trial that can be checked before the rest
+	//          of the catalogue is committed to
+	//
+	// Matched case-insensitively. While a prefix is set a material with no SKU is
+	// out of scope, deliberately: a blank SKU is its own problem and should not
+	// be swept up by accident in a trial.
+	//--------------------------------------------------------------------------
+	skuPrefix = "";
 
 	try
 	{
@@ -94,20 +134,102 @@ string migrateOpeningLots()
 		info "materials already lotted: " + hasLot.size();
 
 		//----------------------------------------------------------------
-		// Is_Fabric is tested in CODE, not filtered in the query. A checkbox
-		// never ticked is EMPTY, not false, so a query on == true would drop
-		// those rows silently with no way to count them. Here they land in
-		// nonFabric, so a real fabric with an unset flag is visible in the
-		// summary instead of invisible.
+		// Is_Fabric is tested in CODE, not filtered in the query, and AS TEXT
+		// rather than against the boolean true.
+		//
+		// A checkbox never ticked is EMPTY, not false, so a query on == true
+		// drops those rows silently. And what a Creator field hands back depends
+		// on how it was built: a Decision box gives a boolean, a yes/no dropdown
+		// gives the STRING "Yes", an untouched field gives EMPTY. Comparing any
+		// of the last two against true is silently false.
+		//
+		// The store screen reads a DIFFERENT field - Material_Requirement
+		// .Is_Fabric, copied at plan time. The two can disagree, and when they do
+		// this is the one that matters: issueMaterials reads Raw_Material
+		// .Is_Fabric too, so a fabric marked false there is issued off Quantity
+		// with no lot and no piece counting at all.
+		//
+		// Whatever is skipped is REPORTED with the raw value it held, so "why was
+		// this one left out" is answered in the output rather than by guessing.
 		//----------------------------------------------------------------
 		for each  rm in Raw_Material[ID != 0]
 		{
-			rmKey = rm.ID + "";
-			rmSku = ifnull(rm.SKU,"?").toString().replaceAll("\"","'");
+			// How many records the fetch actually handed back. Compare against
+			// the Raw Material report's own count: if it is short, the query is
+			// not returning everything and no amount of re-running will help -
+			// a completely different problem that looks identical from outside.
+			scanned = scanned + 1;
 
-			if(ifnull(rm.Is_Fabric,false) != true)
+			rmKey = rm.ID + "";
+
+			// SKU FIRST, THEN THE NAME. A large part of this catalogue has no SKU
+			// at all - a Creator field never written is EMPTY, not null, so both
+			// have to be tested - and a log line reading "? " for a hundred
+			// records tells you nothing about which record it was.
+			//
+			// The material is still migrated correctly either way: everything is
+			// keyed on rm.ID, and the SKU is only ever used for the log and the
+			// summary. This is a readability fix, not a correctness one.
+			rmSku = ifnull(rm.SKU,"").toString().trim().replaceAll("\"","'");
+			if(rmSku == "")
+			{
+				rmSku = ifnull(rm.Material_Display_Name,"").toString().trim().replaceAll("\"","'");
+			}
+			if(rmSku == "")
+			{
+				rmSku = ifnull(rm.Name,"").toString().trim().replaceAll("\"","'");
+			}
+			if(rmSku == "")
+			{
+				rmSku = "id " + rmKey;
+			}
+			else
+			{
+				// The id too, so a name that repeats across records is still
+				// traceable to one of them.
+				rmSku = rmSku + " (id " + rmKey + ")";
+			}
+
+			// In scope? An empty prefix means everything. Upper-cased so
+			// "rm-00001" is not treated as a different family from "RM-00001".
+			inScope = true;
+			if(skuPrefix != "")
+			{
+				if(rmSku.toUpperCase().startsWith(skuPrefix.toUpperCase()) == false)
+				{
+					inScope = false;
+				}
+			}
+
+			fabTxt = ifnull(rm.Is_Fabric,"").toString().trim().toLowerCase();
+			isFabHere = false;
+			if(fabTxt == "true" || fabTxt == "yes" || fabTxt == "1" || fabTxt == "y")
+			{
+				isFabHere = true;
+			}
+
+			if(inScope == false)
+			{
+				// Not this run's business. Counted so the buckets still add up to
+				// scanned, which is what makes a short run tellable from a broken
+				// one.
+				outOfScope = outOfScope + 1;
+			}
+			else if(isFabHere == false)
 			{
 				nonFabric = nonFabric + 1;
+
+				// A sample only - enough to see the pattern without building a
+				// string with one entry per accessory in the building.
+				if(skipShown < 15)
+				{
+					skipShown = skipShown + 1;
+					if(skipJson != "")
+					{
+						skipJson = skipJson + ",";
+					}
+					skipJson = skipJson + "\"" + rmSku + " -> Is_Fabric=[" + fabTxt.replaceAll("\"","'") + "]\"";
+				}
 			}
 			else if(hasLot.contains(rmKey) == true)
 			{
@@ -116,12 +238,11 @@ string migrateOpeningLots()
 				//--------------------------------------------------------
 				// Already lotted - but do the lots still ADD UP to the parent?
 				//
-				// Reported, never corrected. A gap here means stock exists on
-				// Raw_Material that no lot accounts for - most likely booked
-				// in before lots, or added straight on the form - and it is
-				// NOT issuable, because the issue screen only offers lots. It
-				// needs a person to decide which tone it is, which is exactly
-				// the judgement this migration cannot make.
+				// Reported, never corrected. A gap means stock exists on
+				// Raw_Material that no lot accounts for, and it is NOT issuable
+				// because the issue screen only offers lots. Closing it needs a
+				// person to decide which tone it is - exactly the judgement this
+				// migration cannot make.
 				//--------------------------------------------------------
 				puS = ifnull(rm.Unwash_Quantity,"0").toString().trim();
 				if(puS == "")
@@ -170,11 +291,11 @@ string migrateOpeningLots()
 			}
 			else
 			{
-				// Per-row try/catch: one bad material must not take the whole
-				// run down, and the summary has to name which SKU failed.
-				// Deluge's reported line number points at the statement that
-				// failed, which is rarely the one that is wrong - naming the
-				// record beats reading the line.
+				// Per-row try/catch: one bad material must not take the whole run
+				// down, and the summary has to name which SKU failed. Deluge's
+				// reported line points at the statement that failed, which is
+				// rarely the one that is wrong - naming the record beats reading
+				// the line.
 				try
 				{
 					uwS = ifnull(rm.Unwash_Quantity,"0").toString().trim();
@@ -198,28 +319,77 @@ string migrateOpeningLots()
 						dqS = "0";
 					}
 
-					// Material goes IN the insert block. The usual rule in this
-					// repo is to set lookups after the insert, but that exists
-					// because a NULL cannot go in the block - rm.ID never is, and
-					// Material is mandatory on the form, so it has to be there at
-					// insert time.
-					newLotId = insert into Raw_Material_Lot
-					[
-						Material=rm.ID
-						Lot_Number="L1"
-						Lot_Label="Opening stock"
-						Unwash_Quantity=uwS.toDecimal()
-						Wash_Quantity=wqS.toDecimal()
-						In_Transit_Qty=itS.toDecimal()
-						Disputed_Qty=dqS.toDecimal()
-						Status="Active"
-						Remarks="Opening lot created by migrateOpeningLots"
-					];
+					uwQ = uwS.toDecimal();
+					wqQ = wqS.toDecimal();
+					itQ = itS.toDecimal();
+					dqQ = dqS.toDecimal();
 
-					created = created + 1;
-					hasLot.add(rmKey);
+					// The washed side exists if there is washed cloth OR anything
+					// already out against it - in-transit and disputed cloth left
+					// the shelf washed and has to land somewhere real.
+					hasWashSide = false;
+					if(wqQ > 0 || itQ > 0 || dqQ > 0)
+					{
+						hasWashSide = true;
+					}
 
-					info "L1 created for " + rmSku + " lot=" + newLotId;
+					if(uwQ <= 0 && hasWashSide == false)
+					{
+						// Nothing to carry. An empty lot is not offered on any
+						// screen, so creating one would only add noise.
+						noStock = noStock + 1;
+					}
+					else
+					{
+						seqNo = 1;
+
+						if(uwQ > 0)
+						{
+							// Material goes IN the insert block. The usual rule in
+							// this repo is to set lookups after the insert, but
+							// that exists because a NULL cannot go in the block -
+							// rm.ID never is, and Material is mandatory on the
+							// form, so it has to be present at insert time.
+							newUnwashId = insert into Raw_Material_Lot
+							[
+								Material=rm.ID
+								Lot_Number="L" + seqNo
+								Lot_Label="Opening unwashed"
+								Unwash_Quantity=uwQ
+								Wash_Quantity=0
+								In_Transit_Qty=0
+								Disputed_Qty=0
+								Status="Active"
+								Remarks="Opening lot created by migrateOpeningLots - greige, not yet washed"
+							];
+							lotsMade = lotsMade + 1;
+							seqNo = seqNo + 1;
+							info "L" + (seqNo - 1) + " unwashed for " + rmSku + " lot=" + newUnwashId;
+						}
+
+						if(hasWashSide == true)
+						{
+							newWashId = insert into Raw_Material_Lot
+							[
+								Material=rm.ID
+								Lot_Number="L" + seqNo
+								Lot_Label="Opening washed"
+								Unwash_Quantity=0
+								Wash_Quantity=wqQ
+								In_Transit_Qty=itQ
+								Disputed_Qty=dqQ
+								Status="Active"
+								Remarks="Opening lot created by migrateOpeningLots - washing is what shifts the tone, so this is not the same lot as the greige"
+							];
+							lotsMade = lotsMade + 1;
+							info "L" + seqNo + " washed for " + rmSku + " lot=" + newWashId;
+						}
+
+						// Counts MATERIALS, not lots - the batch cap is about how
+						// many materials one Execute gets through.
+						created = created + 1;
+						hasLot.add(rmKey);
+					}
 				}
 				catch (eRow)
 				{
@@ -242,5 +412,5 @@ string migrateOpeningLots()
 	}
 
 	// Built by hand - Map.toString() does not emit valid JSON once nested.
-	return "{\"created\":" + created + ",\"skipped\":" + skipped + ",\"pending\":" + pending + ",\"nonFabric\":" + nonFabric + ",\"unaccounted\":[" + noteJson + "],\"errors\":[" + errJson + "]}";
+	return "{\"scanned\":" + scanned + ",\"skuPrefix\":\"" + skuPrefix + "\",\"outOfScope\":" + outOfScope + ",\"materialsDone\":" + created + ",\"lotsCreated\":" + lotsMade + ",\"skipped\":" + skipped + ",\"pending\":" + pending + ",\"nonFabric\":" + nonFabric + ",\"noStock\":" + noStock + ",\"notFabricSample\":[" + skipJson + "],\"unaccounted\":[" + noteJson + "],\"errors\":[" + errJson + "]}";
 }

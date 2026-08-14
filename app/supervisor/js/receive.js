@@ -40,6 +40,32 @@ function setEditMode(on) {
 
 // ---- Rendering ----
 
+// WHICH LOT THE CLOTH CAME OFF, so he checks the right roll.
+//
+// Fabric only, and only when the store actually recorded it — a handover made
+// before lots existed carries none, and saying "Not recorded" is honest where
+// inventing a lot would not be.
+//
+// Split handovers show every lot with its own metres. One entry each, because
+// they are separate rolls on his bench: he is not signing for "5.5 metres", he
+// is signing for 3 off L2 and 2.5 off L3 — and if only one of them is on the
+// trolley, that is exactly the discrepancy this screen exists to catch.
+function lotLine(m) {
+    var lots = (m.isFabric && m.lots) ? m.lots : [];
+    if (lots.length === 0) return '';
+
+    var parts = lots.map(function (l) {
+        return '<span class="rcv-lot"><b>' + escapeHtml(l.lot) + '</b> ' +
+               fmt(l.qty) + ' ' + escapeHtml(m.unit) + '</span>';
+    }).join('');
+
+    return '<div class="rcv-lots">' +
+               '<span class="rcv-lots-label">' +
+                   (lots.length > 1 ? 'from' : 'from lot') +
+               '</span>' + parts +
+           '</div>';
+}
+
 function renderMaterialRow(m, i) {
     var qtyCell = '<span class="qty-big">' + fmt(m.pending) +
         '<span class="unit">' + escapeHtml(m.unit) + '</span></span>';
@@ -79,6 +105,7 @@ function renderMaterialRow(m, i) {
                             ? '<span class="reissue-tag">incl. reissue</span>'
                             : '') +
                     '</div>' +
+                    lotLine(m) +
                 '</td>' +
                 '<td class="col-num col-strong">' + qtyCell + '</td>' +
                 '<td class="col-issue">' +
@@ -105,6 +132,7 @@ function renderMaterialRow(m, i) {
                         ? '<span class="reissue-tag">incl. reissue</span>'
                         : '') +
                 '</div>' +
+                lotLine(m) +
                 orders +
             '</td>' +
             '<td class="col-num col-strong">' + qtyCell + '</td>' +

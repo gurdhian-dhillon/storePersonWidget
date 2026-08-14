@@ -64,6 +64,37 @@ void completeWashRequest()
 				matRec = rm;
 			}
 
+			//------------------------------------------------------------
+			// WHICH LOT WENT TO THE WASH.
+			//
+			// Washing does NOT change the lot. A lot is decided when the cloth
+			// is bought; the wash converts that lot's greige into that lot's
+			// washed cloth and nothing about its identity moves. So this is a
+			// transfer inside one lot, not a lot being created or merged.
+			//
+			// A request raised before lots existed carries no lot. It still
+			// works - the parent total moves on its own, exactly as it always
+			// did - but the lots underneath will then be short of the parent by
+			// that amount, which migrateOpeningLots reports as unaccounted.
+			//------------------------------------------------------------
+			lotIdTxt = ifnull(wr.Lot,"").toString().trim();
+			lotUnw = 0.0;
+			hasLotHere = false;
+
+			if(lotIdTxt != "")
+			{
+				for each  wLot in Raw_Material_Lot[ID == lotIdTxt.toLong()]
+				{
+					lwStr = ifnull(wLot.Unwash_Quantity,"0").toString().trim();
+					if(lwStr == "")
+					{
+						lwStr = "0";
+					}
+					lotUnw = lwStr.toDecimal();
+					hasLotHere = true;
+				}
+			}
+
 			if(matRec != null && gotQty > 0)
 			{
 				unwStr = ifnull(matRec.Unwash_Quantity,"0").toString().trim();
@@ -90,10 +121,41 @@ void completeWashRequest()
 					info "capped: entered " + gotQty + " but only " + unwQty + " unwashed";
 				}
 
+				// AND capped again at what THIS LOT holds. The parent total is
+				// the sum of every lot, so it can easily cover a figure the one
+				// lot cannot - and moving more than the lot has would drive its
+				// greige negative while the parent still looked right.
+				if(hasLotHere == true && moveQty > lotUnw)
+				{
+					moveQty = lotUnw;
+					info "capped to lot: " + gotQty + " asked but lot holds " + lotUnw + " unwashed";
+				}
+
 				if(moveQty > 0)
 				{
 					matRec.Unwash_Quantity = unwQty - moveQty;
 					matRec.Wash_Quantity = wshQty + moveQty;
+
+					// The same move on the lot, in the same pass, so the lot and
+					// the maintained parent total cannot disagree.
+					if(hasLotHere == true)
+					{
+						for each  wLotUpd in Raw_Material_Lot[ID == lotIdTxt.toLong()]
+						{
+							luStr = ifnull(wLotUpd.Unwash_Quantity,"0").toString().trim();
+							if(luStr == "")
+							{
+								luStr = "0";
+							}
+							lwqStr = ifnull(wLotUpd.Wash_Quantity,"0").toString().trim();
+							if(lwqStr == "")
+							{
+								lwqStr = "0";
+							}
+							wLotUpd.Unwash_Quantity = luStr.toDecimal() - moveQty;
+							wLotUpd.Wash_Quantity = lwqStr.toDecimal() + moveQty;
+						}
+					}
 				}
 
 				wr.Washed_Qty = moveQty;

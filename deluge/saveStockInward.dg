@@ -42,11 +42,14 @@ string saveStockInward(string inwardJson)
 		lotLabel = ifnull(inp.get("lotLabel"),"").toString().trim().replaceAll("\"","'");
 		remarks = ifnull(inp.get("remarks"),"").toString().trim().replaceAll("\"","'");
 
-		state = ifnull(inp.get("state"),"").toString().trim();
-		if(state != "Wash")
-		{
-			state = "Unwash";
-		}
+		// ARRIVING CLOTH IS ALWAYS UNWASHED. There is no choice on the screen and
+		// no choice here: fabric is bought greige and washed in-house, so booking
+		// it in as washed would be claiming a step that never happened - and it
+		// is washing that shifts the tone, which is the whole reason lots exist.
+		//
+		// The only way into Wash_Quantity is the wash flow. A "state" in the
+		// payload from an older widget is ignored rather than honoured.
+		state = "Unwash";
 
 		// Never compare a number to "" - Deluge rejects mixed-type comparison. So
 		// normalise to string first, test, then convert.
@@ -85,7 +88,18 @@ string saveStockInward(string inwardJson)
 				for each  rmChk in matRecs
 				{
 					matName = ifnull(rmChk.SKU,"").toString().replaceAll("\"","'");
-					isFab = ifnull(rmChk.Is_Fabric,false);
+
+					// Tested AS TEXT. A Decision box gives a boolean, a yes/no
+					// dropdown gives the string "Yes", an untouched field gives
+					// EMPTY - and comparing any of the last two against the
+					// boolean true is silently false, which would refuse stock
+					// for a material that really is fabric.
+					fabTxt = ifnull(rmChk.Is_Fabric,"").toString().trim().toLowerCase();
+					isFab = false;
+					if(fabTxt == "true" || fabTxt == "yes" || fabTxt == "1" || fabTxt == "y")
+					{
+						isFab = true;
+					}
 
 					uaS = ifnull(rmChk.Unallocated_Qty,"0").toString().trim();
 					if(uaS == "")

@@ -13,6 +13,13 @@ string getStoreMaterialRequirements()
 	agg = Map();
 	orderedKeys = List();
 
+	// Which materials this screen actually asks about. Collected as the
+	// requirements are aggregated - it costs one contains() per row - and used to
+	// throw away irrelevant lots before any work is done on them. A store with
+	// 270 lots but 15 fabrics on screen would otherwise pay full price for 255 of
+	// them on every single fetch.
+	neededMats = List();
+
 	// Plan_Item name and remake flag, cached by id. Lines are per requirement
 	// ROW, so one order can contribute two of them - and since a QC remake
 	// repeats its original's material and order number, the two were arriving
@@ -139,6 +146,12 @@ string getStoreMaterialRequirements()
 					cur.put("lines",List());
 					orderedKeys.add(key);
 				}
+				matKeyTxt = matId + "";
+				if(neededMats.contains(matKeyTxt) == false)
+				{
+					neededMats.add(matKeyTxt);
+				}
+
 				cur.put("required",cur.get("required") + ifnull(mr.Required_Qty,0));
 				cur.put("issued",cur.get("issued") + ifnull(mr.Issued_Qty,0));
 				cur.put("reqPieces",cur.get("reqPieces") + reqPieces);
@@ -314,13 +327,22 @@ string getStoreMaterialRequirements()
 	{
 		lrMat = ifnull(lotR.Material,"").toString().trim();
 
+		// THE CHEAP TEST FIRST. A lot belonging to a material nobody is asking
+		// for costs two statements and stops here; only the handful this screen
+		// is actually about goes through the reads and the string building
+		// below. Same discipline as grouping the waste by SKU, and for the same
+		// reason - the statement-execution limit is not catchable, so the
+		// function has to stay cheap rather than be made to fail politely.
+		if(lrMat != "" && neededMats.contains(lrMat) == true)
+		{
+
 		lrSt = ifnull(lotR.Status,"").toString().trim();
 		if(lrSt == "")
 		{
 			lrSt = "Active";
 		}
 
-		if(lrMat != "" && lrSt != "Blocked")
+		if(lrSt != "Blocked")
 		{
 			// Creator numerics never written are EMPTY, not null, and toDecimal()
 			// throws on empty - normalise to string first.
@@ -359,6 +381,9 @@ string getStoreMaterialRequirements()
 				lotJsonByMat.put(lrMat,prevLots + lotFrag);
 			}
 		}
+
+		}
+		// end of the "is anyone asking about this material" guard
 	}
 
 

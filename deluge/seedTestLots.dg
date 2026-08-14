@@ -1,0 +1,272 @@
+string seedTestLots()
+{
+	// TEST DATA ONLY. Run from Execute, delete the function afterwards. Never
+	// let this near real stock.
+	//
+	// WHY IT EXISTS. The opening migration gives each material at most ONE
+	// issuable lot, because the data it came from had one washed balance. That
+	// cannot exercise the part of the design most worth testing: choosing between
+	// two lots, splitting across them, and the marker-row arithmetic that runs
+	// per lot. And it cannot be set up by hand either - saveStockInward books
+	// everything as unwashed now, and the wash flow is not lot-aware yet, so
+	// there is currently NO route to a second washed lot.
+	//
+	// WHAT IT DOES. For each fabric that has one lot with washed cloth, it splits
+	// that lot roughly 60/40 into two, and gives each a little unwashed cloth
+	// too, so both look like real lots rather than a washed pile and a greige
+	// pile:
+	//
+	//   before   L2  washed 373.10   unwashed 0
+	//   after    L2  washed 223.86   unwashed 30      (60%)
+	//            L3  washed 149.24   unwashed 20      (40%)
+	//
+	// THE UNWASHED CLOTH IS MOVED, NOT INVENTED. It comes off the material's
+	// existing greige lot, so Raw_Material's totals still equal the sum of its
+	// lots - the invariant everything else depends on. If there is no greige to
+	// take, the new lots simply get none.
+	//
+	// Washed cloth is only ever REDISTRIBUTED between the two new lots, never
+	// created, for the same reason.
+	//
+	// RE-RUNNABLE. A material that already has two or more washed lots is left
+	// alone, so a run killed by the statement limit - which is not catchable -
+	// can just be run again.
+	//
+	// ONE EXIT, AT THE BOTTOM. Deluge's "all paths return" check does not count a
+	// return inside try/catch.
+
+	splitDone = 0;
+	alreadyOk = 0;
+	noWashed = 0;
+	pending = 0;
+	errJson = "";
+	batchCap = 60;
+	greigeMove = 50;
+
+	try
+	{
+		//----------------------------------------------------------------
+		// Group the lots by material in ONE pass. A query per material is the
+		// shape that blows the statement limit.
+		//----------------------------------------------------------------
+		washLotByMat = Map();
+		washCountByMat = Map();
+		greigeLotByMat = Map();
+		matsSeen = List();
+
+		for each  lt in Raw_Material_Lot[ID != 0]
+		{
+			ltMat = ifnull(lt.Material,"").toString().trim();
+
+			if(ltMat != "")
+			{
+				if(matsSeen.contains(ltMat) == false)
+				{
+					matsSeen.add(ltMat);
+				}
+
+				// Creator numerics never written are EMPTY, not null, and
+				// toDecimal() throws on empty - normalise to string first.
+				wS = ifnull(lt.Wash_Quantity,"0").toString().trim();
+				if(wS == "")
+				{
+					wS = "0";
+				}
+				uS = ifnull(lt.Unwash_Quantity,"0").toString().trim();
+				if(uS == "")
+				{
+					uS = "0";
+				}
+
+				if(wS.toDecimal() > 0)
+				{
+					prevC = ifnull(washCountByMat.get(ltMat),"0").toString().trim();
+					if(prevC == "")
+					{
+						prevC = "0";
+					}
+					washCountByMat.put(ltMat,prevC.toLong() + 1);
+
+					// The first washed lot found is the one that gets split.
+					if(washLotByMat.get(ltMat) == null)
+					{
+						washLotByMat.put(ltMat,lt.ID);
+					}
+				}
+				else if(uS.toDecimal() > 0)
+				{
+					if(greigeLotByMat.get(ltMat) == null)
+					{
+						greigeLotByMat.put(ltMat,lt.ID);
+					}
+				}
+			}
+		}
+
+		for each  matTxt in matsSeen
+		{
+			cntS = ifnull(washCountByMat.get(matTxt),"0").toString().trim();
+			if(cntS == "")
+			{
+				cntS = "0";
+			}
+			washCount = cntS.toLong();
+
+			if(washCount == 0)
+			{
+				noWashed = noWashed + 1;
+			}
+			else if(washCount > 1)
+			{
+				// Already has something to choose between.
+				alreadyOk = alreadyOk + 1;
+			}
+			else if(splitDone >= batchCap)
+			{
+				// No reliable break in Deluge; the body is guarded instead.
+				pending = pending + 1;
+			}
+			else
+			{
+				try
+				{
+					srcLotId = washLotByMat.get(matTxt);
+
+					srcWash = 0.0;
+					srcNum = "";
+					for each  srcLot in Raw_Material_Lot[ID == srcLotId]
+					{
+						sW = ifnull(srcLot.Wash_Quantity,"0").toString().trim();
+						if(sW == "")
+						{
+							sW = "0";
+						}
+						srcWash = sW.toDecimal();
+						srcNum = ifnull(srcLot.Lot_Number,"").toString().trim();
+					}
+
+					// A 60/40 split, rounded to 2dp, with the remainder given to
+					// the source lot so the two halves always add back to exactly
+					// what was there. Splitting 0.01 in half and losing a hundredth
+					// is precisely the kind of drift this whole design is trying
+					// to avoid, test data or not.
+					keepWash = (srcWash * 0.6).round(2);
+					moveWash = srcWash - keepWash;
+
+					if(moveWash <= 0)
+					{
+						// Too small to split into something worth testing with.
+						alreadyOk = alreadyOk + 1;
+					}
+					else
+					{
+						// Greige to hand to each new lot, taken from the material's
+						// existing unwashed lot. Moved, never invented.
+						takeGreige = 0.0;
+						greigeId = greigeLotByMat.get(matTxt);
+						if(greigeId != null)
+						{
+							for each  gLot in Raw_Material_Lot[ID == greigeId]
+							{
+								gS = ifnull(gLot.Unwash_Quantity,"0").toString().trim();
+								if(gS == "")
+								{
+									gS = "0";
+								}
+								gHave = gS.toDecimal();
+
+								takeGreige = greigeMove;
+								// Never take more than half of what is there, so the
+								// greige lot stays a real lot in its own right.
+								if(takeGreige * 2 > gHave)
+								{
+									takeGreige = (gHave / 2).round(2);
+								}
+								if(takeGreige < 0)
+								{
+									takeGreige = 0.0;
+								}
+
+								if(takeGreige > 0)
+								{
+									gLot.Unwash_Quantity = gHave - (takeGreige * 2);
+								}
+							}
+						}
+
+						// Next free number for this material.
+						maxSeq = 0;
+						for each  numLot in Raw_Material_Lot[Material == matTxt.toLong()]
+						{
+							nTxt = ifnull(numLot.Lot_Number,"").toString().trim().toUpperCase();
+							if(nTxt.startsWith("L") && nTxt.length() > 1)
+							{
+								try
+								{
+									nSeq = nTxt.substring(1).toLong();
+									if(nSeq > maxSeq)
+									{
+										maxSeq = nSeq;
+									}
+								}
+								catch (eNum)
+								{
+									info "unparsed lot number: " + nTxt;
+								}
+							}
+						}
+
+						newNum = "L" + (maxSeq + 1);
+
+						newLotId = insert into Raw_Material_Lot
+						[
+							Material=matTxt.toLong()
+							Lot_Number=newNum
+							Lot_Label="Test lot"
+							Unwash_Quantity=takeGreige
+							Wash_Quantity=moveWash
+							In_Transit_Qty=0
+							Disputed_Qty=0
+							Status="Active"
+							Remarks="TEST DATA created by seedTestLots - split off " + srcNum + " so multi-lot issuing can be exercised"
+						];
+
+						// The source lot keeps the larger share, plus its own
+						// handful of greige.
+						for each  updLot in Raw_Material_Lot[ID == srcLotId]
+						{
+							uCur = ifnull(updLot.Unwash_Quantity,"0").toString().trim();
+							if(uCur == "")
+							{
+								uCur = "0";
+							}
+							updLot.Wash_Quantity = keepWash;
+							updLot.Unwash_Quantity = uCur.toDecimal() + takeGreige;
+						}
+
+						splitDone = splitDone + 1;
+						info "split " + srcNum + " (" + srcWash + ") -> " + srcNum + "=" + keepWash + " + " + newNum + "=" + moveWash + " lot=" + newLotId;
+					}
+				}
+				catch (eRow)
+				{
+					if(errJson != "")
+					{
+						errJson = errJson + ",";
+					}
+					errJson = errJson + "\"material " + matTxt + ": " + eRow.toString().replaceAll("\"","'") + "\"";
+				}
+			}
+		}
+	}
+	catch (e)
+	{
+		if(errJson != "")
+		{
+			errJson = errJson + ",";
+		}
+		errJson = errJson + "\"RUN FAILED: " + e.toString().replaceAll("\"","'") + "\"";
+	}
+
+	return "{\"split\":" + splitDone + ",\"alreadyHadTwo\":" + alreadyOk + ",\"noWashedLot\":" + noWashed + ",\"pending\":" + pending + ",\"errors\":[" + errJson + "]}";
+}

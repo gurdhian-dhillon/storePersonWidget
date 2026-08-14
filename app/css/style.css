@@ -1832,3 +1832,134 @@ th.col-num {
     color: #b45309;
     font-size: 0.85rem;
 }
+
+/* A lot that cannot be issued today: greige, waiting on the wash. Shown so a
+   short-looking stock figure explains itself, muted so it is clearly not a
+   choice — it carries no input and no Fill button. */
+.lot-note {
+    font-size: 0.78rem;
+    color: #b45309;
+}
+
+/* The lot the screen is suggesting. Marked so the eye lands on it, but it is
+   only a suggestion — every figure stays editable. */
+.lot-picked {
+    background: #eff6ff;
+    border-radius: 6px;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+}
+
+/* ---- The lot table on a fabric issue row ----
+   A real table so washed and unwashed line up as columns. One row per lot,
+   every column meaning the same on every row. */
+.lot-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.4rem;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    overflow: hidden;
+}
+.lot-table th {
+    padding: 0.4rem 0.75rem;
+    background: #f1f5f9;
+    border-bottom: 1px solid #e2e8f0;
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-weight: 600;
+    text-align: left;
+}
+.lot-table td {
+    padding: 0.4rem 0.75rem;
+    border-bottom: 1px solid #eef2f6;
+    font-size: 0.85rem;
+}
+.lot-table tr:last-child td {
+    border-bottom: none;
+}
+.lot-cell-id {
+    font-weight: 600;
+    white-space: nowrap;
+}
+.lot-table .col-issue {
+    text-align: right;
+    white-space: nowrap;
+}
+.lot-table .lot-input {
+    width: 6rem;
+}
+/* Said once under the heading rather than as a pill on every chosen row. */
+.lot-split-note {
+    margin-left: 0.6rem;
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 400;
+    color: #b45309;
+}
+
+/* Greige summed into one line under the table. It is context for a
+   short-looking figure, not a row in a picker — a lot you cannot issue from
+   still reads as one you have to weigh up. */
+.lot-greige {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    padding-top: 0.45rem;
+}
+
+/* The generic .lot-table th rule sets text-align:left for the Lot heading, which
+   also beat .col-num on the numeric headings — so the headers sat left while
+   their figures sat right. Put the alignment back on the columns that need it. */
+.lot-table th.col-num,
+.lot-table td.col-num {
+    text-align: right;
+}
+.lot-table th.col-issue,
+.lot-table td.col-issue {
+    text-align: right;
+}
+
+/* Widths, so the two figures sit next to each other and can be compared at a
+   glance. Left to itself the table spreads four columns across its full width
+   and pushes Washed into the middle of nowhere. The Lot column absorbs the
+   slack because it is the one whose content never grows. */
+.lot-table th:first-child,
+.lot-table td:first-child {
+    width: auto;
+}
+.lot-table th.col-num,
+.lot-table td.col-num {
+    width: 9rem;
+    white-space: nowrap;
+}
+.lot-table th.col-issue,
+.lot-table td.col-issue {
+    width: 12rem;
+}
+
+/* Why the wash dialog suggested this lot. One line, under the picker. */
+.exc-lot-why {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    padding-top: 0.35rem;
+}
+.exc-nolot {
+    font-size: 0.85rem;
+    color: #b45309;
+    padding-top: 0.5rem;
+}
+
+/* Which lot the wash comes off, on the shortfall summary. */
+.sum-lot {
+    white-space: nowrap;
+}
+.sum-lot .lot-id {
+    font-weight: 600;
+}
+.sum-lot-note {
+    font-size: 0.72rem;
+    color: #b45309;
+}

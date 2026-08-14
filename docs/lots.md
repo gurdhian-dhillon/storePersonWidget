@@ -132,8 +132,14 @@ an order is the exact mistake lots exist to prevent.
 New tab on the store widget. Fabric only.
 
 Pick a material → the existing lots are listed with their balances → either **add to an existing
-lot** or **create a new one** (number pre-generated, label optional), then enter the quantity and
-whether it is washed or unwashed.
+lot** or **create a new one** (number typed, label optional), then enter the quantity.
+
+**Everything booked in is UNWASHED, and there is no choice about it.** Cloth is bought greige and
+washed in-house, so booking it in as washed would claim a step that never happened. The only route
+into `Wash_Quantity` is the wash flow.
+
+> Because of that, **washing is the only thing that shifts the tone**, which makes it the moment a
+> lot most often has to split — and the reason *move between lots* exists.
 
 Later this same screen grows an "arrived, not yet lotted" banner fed by `Unallocated_Qty`. The
 screen is built now; only its feeder changes.

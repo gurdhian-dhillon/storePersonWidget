@@ -85,12 +85,20 @@ string getStoreLots()
 			}
 		}
 
-		// Is_Fabric is tested in code, not filtered in the query. A checkbox that
+		// Is_Fabric is tested in code, not filtered in the query - a checkbox that
 		// was never ticked is EMPTY, not false, and a query filtering on == true
 		// drops those rows silently with no way to notice.
+		//
+		// AND AS TEXT, not against the boolean true. What a Creator field hands
+		// back depends on how it was built: a Decision box gives a boolean, a
+		// yes/no dropdown gives the STRING "Yes", an untouched field gives EMPTY.
+		// `ifnull(x,false) == true` only matches the first, and silently drops
+		// real fabric otherwise - which is how a whole SKU range went missing
+		// from this screen while the issue screen still listed it under FABRIC.
 		for each  rm in Raw_Material[ID != 0]
 		{
-			if(ifnull(rm.Is_Fabric,false) == true)
+			fabTxt = ifnull(rm.Is_Fabric,"").toString().trim().toLowerCase();
+			if(fabTxt == "true" || fabTxt == "yes" || fabTxt == "1" || fabTxt == "y")
 			{
 				rmKey = rm.ID + "";
 
