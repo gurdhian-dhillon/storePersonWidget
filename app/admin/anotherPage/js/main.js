@@ -1113,6 +1113,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Render an explicit loading state. Only counts returned by the Creator
     // backend are displayed; zero is shown only when the backend returns zero.
+    activateTab('pipeline');
     renderPipeline();
     loadPipeline();
     loadSalesOrderProgress();
