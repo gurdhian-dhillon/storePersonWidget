@@ -432,7 +432,7 @@ function renderSelectedPlan() {
 	visibleItems.forEach((item, index) => {
 		const card = renderItemCard(plan, item, index);
 		elDynamicContent.appendChild(card);
-		
+
 		const hasFabric = (item.materials || []).some((m) => m.isFabric && !m.isWaste);
 		if (hasFabric) {
 			ZOHO.CREATOR.DATA.invokeCustomApi({
@@ -454,7 +454,7 @@ function renderSelectedPlan() {
 							}
 						}
 					});
-				} catch(e) {
+				} catch (e) {
 					console.error("Waste parse error", e);
 				}
 			});
@@ -677,9 +677,9 @@ function renderItemCard(plan, item, index) {
                         <tr>
                             <th>Material</th>
                             <th>Per piece size <span class="cut-axis">(L &times; W)</span></th>
-                            <th class="col-num">You have</th>
-                            <th class="col-num">Pieces to cut</th>
-                            <th class="col-num">Expected waste</th>
+                            <th>Material You have</th>
+                            <th>Pieces to cut</th>
+                            <th>Expected waste</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -780,9 +780,9 @@ function renderItemCard(plan, item, index) {
 				}>
                     <td class="material-name-cell">${nameCell}</td>
                     <td>${cutCell}</td>
-                    <td class="col-num col-strong">${haveCell}</td>
-                    <td class="col-num">${cutCountCell}</td>
-                    <td class="col-num">${expectedWasteCell}</td>
+                    <td class="col-strong">${haveCell}</td>
+                    <td>${cutCountCell}</td>
+                    <td>${expectedWasteCell}</td>
                 </tr>
             `;
 		});
