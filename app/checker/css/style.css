@@ -1,0 +1,206 @@
+/* Checker screen. Same palette and class names as the store and supervisor
+   widgets — item-card, table-wrapper, mat-name/mat-sku, col-num — so the three
+   read as one system. Only the accordion and the check dialog are new here. */
+
+:root {
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --bg-color: #e9eef4;
+    --surface: #ffffff;
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+    --border: #e2e8f0;
+
+    --status-success: #10b981;
+    --status-success-bg: #d1fae5;
+    --status-warning: #f59e0b;
+    --status-warning-bg: #fef3c7;
+    --status-danger: #ef4444;
+    --status-danger-bg: #fee2e2;
+
+    /* An offcut is green throughout the app because reuse is the good outcome.
+       Alteration is the same idea one level up: the garment is being saved
+       rather than scrapped, so it is not a warning colour. */
+    --alt: #0d9488;
+    --alt-bg: #ccfbf1;
+
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    --radius: 8px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-main);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+.app-container { max-width: 1100px; margin: 0 auto; padding: 1.25rem; }
+.hidden { display: none !important; }
+
+/* Header ----------------------------------------------------------------- */
+
+.app-header {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem;
+}
+.app-header h1 { font-size: 1.4rem; font-weight: 700; }
+.app-date { font-size: 0.85rem; color: var(--text-muted); }
+.app-header-right { display: flex; gap: 0.6rem; align-items: center; }
+
+.sup-select {
+    font-family: inherit; font-size: 0.9rem; padding: 0.5rem 0.7rem;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--surface); color: var(--text-main); min-width: 190px;
+}
+
+.primary-btn {
+    font-family: inherit; font-size: 0.9rem; font-weight: 600;
+    padding: 0.5rem 1rem; border: 0; border-radius: var(--radius);
+    background: var(--primary); color: #fff; cursor: pointer;
+}
+.primary-btn:hover { background: var(--primary-hover); }
+.primary-btn:disabled { opacity: 0.55; cursor: default; }
+
+.ghost-btn {
+    font-family: inherit; font-size: 0.9rem; font-weight: 600;
+    padding: 0.5rem 1rem; border: 1px solid var(--border);
+    border-radius: var(--radius); background: var(--surface);
+    color: var(--text-muted); cursor: pointer;
+}
+.ghost-btn:hover { color: var(--text-main); }
+
+.empty-note { color: var(--text-muted); padding: 2rem 0; text-align: center; }
+.error-note { color: var(--status-danger); }
+
+/* Accordion -------------------------------------------------------------- */
+
+.sup-block {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); margin-bottom: 0.75rem; overflow: hidden;
+    box-shadow: var(--shadow-sm);
+}
+.sup-head {
+    width: 100%; display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.9rem 1rem; background: none; border: 0; cursor: pointer;
+    font-family: inherit; text-align: left;
+}
+.sup-head:hover { background: #f8fafc; }
+.sup-caret { color: var(--text-muted); font-size: 0.9rem; width: 0.9rem; }
+.sup-name { font-weight: 600; font-size: 1rem; flex: 1; }
+.sup-count {
+    font-size: 0.8rem; font-weight: 600; color: var(--primary);
+    background: #eff6ff; padding: 0.15rem 0.6rem; border-radius: 1rem;
+}
+.sup-body { padding: 0 1rem 1rem; }
+
+/* Item card -------------------------------------------------------------- */
+
+.item-card {
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 0.9rem; margin-top: 0.75rem; background: var(--surface);
+}
+.item-header { display: flex; align-items: center; gap: 1rem; }
+.item-header-info { flex: 1; min-width: 0; }
+.item-header h2 { font-size: 1rem; font-weight: 600; display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+
+.mat-name { font-weight: 600; }
+.mat-sku { font-size: 0.78rem; color: var(--text-muted); font-weight: 500; }
+
+.item-meta-line {
+    display: flex; align-items: center; gap: 0.7rem;
+    flex-wrap: wrap; margin-top: 0.3rem;
+}
+.item-qty { font-size: 0.85rem; color: var(--text-muted); }
+.so-ref { font-size: 0.8rem; color: var(--text-muted); }
+
+.batch-tag {
+    font-size: 0.72rem; font-weight: 600; padding: 0.1rem 0.5rem;
+    border-radius: 1rem;
+}
+.batch-tag.is-alt { color: var(--alt); background: var(--alt-bg); }
+.batch-tag.is-remake { color: var(--status-warning); background: var(--status-warning-bg); }
+/* Muted, not amber. A replacement batch is not a quality problem — nothing
+   failed a check — so it must not carry the same colour as one that did. */
+.batch-tag.is-replace { color: var(--text-muted); background: #f1f5f9; }
+
+.round-tag { font-size: 0.72rem; font-weight: 600; color: var(--text-muted); }
+
+.line-pos { font-size: 0.8rem; color: var(--text-muted); }
+.line-pos b { color: var(--status-warning); }
+.line-pos.is-done { color: var(--status-success); }
+
+/* Dialog ----------------------------------------------------------------- */
+
+.modal-back {
+    position: fixed; inset: 0; background: rgb(15 23 42 / 0.45);
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: 2rem 1rem; overflow-y: auto; z-index: 50;
+}
+.modal-panel {
+    background: var(--surface); border-radius: var(--radius);
+    box-shadow: var(--shadow-md); padding: 1.25rem;
+    width: 100%; max-width: 640px;
+}
+.modal-narrow { max-width: 420px; }
+.modal-panel h3 { font-size: 1.1rem; font-weight: 700; }
+.modal-panel h4 { font-size: 0.9rem; font-weight: 600; margin-top: 1.1rem; }
+.modal-sub { font-size: 0.82rem; color: var(--text-muted); margin-top: 0.15rem; }
+.hint { font-size: 0.78rem; color: var(--text-muted); margin: 0.2rem 0 0.5rem; }
+
+/* Wide content scrolls inside its own box rather than pushing the dialog. */
+.table-wrapper { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.chk-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.chk-table th, .chk-table td { padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); text-align: left; }
+.chk-table th { font-weight: 600; color: var(--text-muted); font-size: 0.76rem; background: #f8fafc; }
+.chk-table tr:last-child td { border-bottom: 0; }
+.col-num { text-align: right; }
+.chk-label { font-weight: 500; }
+
+.chk-table input[type="number"] { width: 5rem; text-align: right; }
+.chk-table input[type="text"] { width: 100%; }
+.chk-table input, .disp-row input, .rem-label textarea {
+    font-family: inherit; font-size: 0.85rem; padding: 0.3rem 0.45rem;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+    color: var(--text-main);
+}
+
+.disp-row { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.4rem; }
+.disp-row label {
+    display: flex; flex-direction: column; gap: 0.2rem;
+    font-size: 0.78rem; font-weight: 600; color: var(--text-muted);
+}
+.disp-row input { width: 7rem; text-align: right; }
+
+/* The running total is the one thing on this dialog that must be impossible to
+   miss — the save is refused unless it balances, on the server as well. */
+.disp-total { font-size: 0.85rem; font-weight: 600; margin-top: 0.5rem; padding: 0.35rem 0.6rem; border-radius: 6px; }
+.disp-total.is-ok { color: var(--status-success); background: var(--status-success-bg); }
+.disp-total.is-bad { color: var(--status-danger); background: var(--status-danger-bg); }
+
+.rem-label {
+    display: flex; flex-direction: column; gap: 0.25rem; margin-top: 1rem;
+    font-size: 0.78rem; font-weight: 600; color: var(--text-muted);
+}
+.rem-label textarea { width: 100%; resize: vertical; }
+
+.modal-error {
+    margin-top: 0.8rem; padding: 0.5rem 0.7rem; border-radius: 6px;
+    font-size: 0.85rem; color: var(--status-danger); background: var(--status-danger-bg);
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 1.1rem; }
+
+.outcome-list { margin: 0.6rem 0 0 1.1rem; font-size: 0.9rem; }
+.outcome-list li { margin-bottom: 0.25rem; }
+.outcome-order { margin-top: 0.8rem; font-size: 0.85rem; color: var(--text-muted); }
+.outcome-order.is-ok { color: var(--status-success); font-weight: 600; }
+
+@media (max-width: 640px) {
+    .app-header-right { width: 100%; }
+    .sup-select { flex: 1; min-width: 0; }
+    .item-header { flex-direction: column; align-items: stretch; }
+}

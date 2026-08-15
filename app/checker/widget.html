@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Checking</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="app-container">
+
+        <header class="app-header">
+            <div class="app-header-left">
+                <h1>Checking</h1>
+                <span class="app-date" id="app-date"></span>
+            </div>
+
+            <div class="app-header-right">
+                <!-- Standing in for a login until zoho.loginuser can be resolved
+                     to an Employee record, the same way the store and supervisor
+                     screens do it. Lists every Quality Inspector — a login does
+                     not appear and disappear based on whether you have work. -->
+                <select id="insp-select" class="sup-select" aria-label="Choose inspector">
+                    <option value="">Choose inspector…</option>
+                </select>
+                <button id="refresh-btn" class="primary-btn" type="button">Refresh</button>
+            </div>
+        </header>
+
+        <main class="tab-body">
+            <section class="tab-panel is-active" id="panel-queue">
+                <!-- Grouped by supervisor rather than listed flat. He collects a
+                     trolley from one man at a time, and a flat list of forty
+                     items across six supervisors is not the order he works in. -->
+                <div id="queue-root">
+                    <p class="empty-note">Loading…</p>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Built by js/checker.js on open and emptied on close. Kept out of the
+         page so a half-filled form cannot survive a Refresh. -->
+    <div id="check-modal" class="modal-back hidden"></div>
+
+    <script src="https://js.zohostatic.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <script src="js/checker.js"></script>
+</body>
+</html>

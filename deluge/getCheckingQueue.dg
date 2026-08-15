@@ -1,0 +1,569 @@
+string getCheckingQueue(string inspectorId)
+{
+	// THE CHECKER'S QUEUE. Custom API, POST, one argument.
+	//
+	// Every Plan_Item sitting at Item_Status == "Awaiting_Check", grouped by the
+	// supervisor of its plan. There is no handover record between production and
+	// checking - the transfer is physical, and the status IS the queue - so this
+	// function is the only thing that tells the inspector work is waiting.
+	//
+	// WHAT inspectorId IS FOR, AND WHAT IT IS NOT FOR.
+	//
+	// It is validated and logged, and that is all. An empty or unknown one still
+	// returns the WHOLE queue. Checking is not sliced per inspector: garments are
+	// not assigned to a man, they are on a rack, and whoever is on the floor
+	// checks them. Filtering by it would hide work from the only person who could
+	// do it, and there are no roles or login in this app yet to make such a filter
+	// mean anything - the picker is a stand-in, exactly as it is on the supervisor
+	// screen.
+	//
+	// THE STATEMENT-EXECUTION LIMIT IS THE DESIGN CONSTRAINT HERE. It is NOT
+	// catchable: it kills the script and the widget gets a bare HTTP 500 with no
+	// error card, so it cannot be reported the way an ordinary failure can. The
+	// naive shape - walk Plan_Item, fetch its Plan, fetch that plan's Sales_Order,
+	// fetch its BOM, fetch its root line - pays for all of that once PER ITEM, and
+	// a queue is many items off a handful of plans. So everything that is shared
+	// is fetched once and cached in a Map keyed by id-as-string:
+	//
+	//   plans + their sales orders  - one fetch per PLAN, not per item
+	//   the root line's figures     - one fetch per ROOT, not per batch on it
+	//   BOM stage lists             - one fetch per BOM, and most items share one
+	//   employee names              - one pass, for the supervisor headings
+	//
+	// WHY THE ORDER-LINE POSITION IS IN HERE AT ALL. Without it the inspector
+	// approves 85 pieces with no idea whether that finishes the customer's line or
+	// leaves it fifteen short. It is counted per ORIGINAL line - the root's
+	// Qty_Ordered against the root's Qty_Accepted plus every batch hanging off it -
+	// because Remake_Of always points at the ROOT, never at the previous batch.
+	// That is what keeps it one flat query however many rounds it takes; Deluge has
+	// no recursion.
+	//
+	// THE STAGE LIST IS ALWAYS THE ROOT'S BOM. Never the batch's own
+	// Alteration_Stage rows. Those are what the LAST checker asked for, and
+	// offering them back would narrow the choices every round until by the third
+	// alteration he cannot name the stage that is actually wrong.
+	supsJson = "";
+	inspJson = "";
+
+	try
+	{
+		//------------------------------------------------------------------
+		// 0. THE INSPECTOR PICKER, AND WHO IS ASKING.
+		//
+		// The picker is the LOGIN STAND-IN, the same one the supervisor screen
+		// uses, so it is built on every call - the widget populates it and reads
+		// the queue in one round trip.
+		//
+		// BY ROLE, not by work. A login does not appear and disappear depending
+		// on whether there is anything on the rack; an inspector with an empty
+		// morning still has to sign in and look.
+		//
+		// Matched on the Designation TEXT. It is a plain Dropdown whose choices
+		// are injected at runtime by autoPopulateDesignation from the
+		// Department's Designations subform, so there is no lookup id to
+		// resolve - and it follows the SPACES convention, "Quality Inspector",
+		// not underscores.
+		//
+		// FALLS BACK TO EVERYONE IF THAT FINDS NOBODY, deliberately, and this is
+		// not belt-and-braces - it is the difference between a working screen
+		// and a dead one. Designation and Status are newer than most of the
+		// Employee records, which are blank on both, so the moment this filter
+		// ships it can legitimately match nobody - and an empty picker is a
+		// widget that looks broken with nothing on screen or in the console
+		// saying why. getSupervisorMaterials hit exactly this. The info line
+		// below is how you tell which state you are in; once the Employee
+		// records carry designations the fallback stops firing on its own.
+		//------------------------------------------------------------------
+		inspEmps = Employee[Designation == "Quality Inspector" && Status == "Active"] sort by Employee_Name;
+
+		if(inspEmps.count() == 0)
+		{
+			info "getCheckingQueue: no Active employee has Designation 'Quality Inspector' - falling back to the full employee list. Set Designation and Status on the Employee records.";
+			inspEmps = Employee[ID != 0] sort by Employee_Name;
+		}
+
+		inspTxt = ifnull(inspectorId,"").toString().trim();
+		inspName = "";
+
+		for each  ieRec in inspEmps
+		{
+			// Ids forced to string on BOTH sides. ID is a long and the argument
+			// arrives as text; comparing them as they are is a mixed-type
+			// comparison, which throws.
+			if(ieRec.ID.toString() == inspTxt)
+			{
+				inspName = ifnull(ieRec.Employee_Name,"").toString();
+			}
+
+			if(inspJson != "")
+			{
+				inspJson = inspJson + ",";
+			}
+			// Id as a string - an 18-digit id breaks JSON.parse. Employee_Name
+			// escaped: one name carrying a double quote would otherwise break
+			// the parse for the whole screen, not just its own row.
+			inspJson = inspJson + "{\"id\":\"" + ieRec.ID + "\",\"name\":\"" + ifnull(ieRec.Employee_Name,"").toString().replaceAll("\"","'") + "\"}";
+		}
+
+		// VALIDATED AND LOGGED, NEVER USED AS A FILTER. See the header - an
+		// unknown or empty inspectorId still gets the whole queue.
+		if(inspTxt == "")
+		{
+			info "getCheckingQueue: no inspectorId given - the full queue is returned.";
+		}
+		else if(inspName == "")
+		{
+			info "getCheckingQueue: inspectorId '" + inspTxt + "' matched nobody in the picker list - the full queue is returned anyway, deliberately.";
+		}
+		else
+		{
+			info "getCheckingQueue: inspector " + inspTxt + " (" + inspName + ")";
+		}
+
+		//------------------------------------------------------------------
+		// 1. EVERY EMPLOYEE, ONCE, for the supervisor headings.
+		//
+		// Read as a whole rather than one lookup per plan: two plans on one
+		// supervisor would otherwise fetch the same man twice, and a queue
+		// spanning six plans pays six times for four names.
+		//
+		// NOT narrowed to supervisors. This is the directory used to NAME a man
+		// on work he already has, not a picker - narrowing it would blank the
+		// heading for anyone who has since changed designation.
+		//------------------------------------------------------------------
+		empNameById = Map();
+
+		for each  empRec in Employee[ID != 0]
+		{
+			empNameById.put(empRec.ID + "",ifnull(empRec.Employee_Name,"").toString().replaceAll("\"","'"));
+		}
+
+		//------------------------------------------------------------------
+		// 2. THE QUEUE ITSELF.
+		//
+		// "sort by" on its own assignment, never inline in the for-each header -
+		// inline it does not reliably parse, and a function that will not save
+		// looks exactly like one that saved and did nothing.
+		//
+		// Added_Time rather than Line_No: items of one plan are created together
+		// and in line order, so this reads plan by plan, line by line, with
+		// later batches after the originals they replace. Line_No sorted across
+		// plans would interleave them.
+		//------------------------------------------------------------------
+		awaiting = Plan_Item[Item_Status == "Awaiting_Check"] sort by Added_Time;
+
+		// Caches. Every one is keyed by id AS STRING - a Map keyed on a raw id
+		// and read back with a string finds nothing, silently.
+		planNoById = Map();
+		planSoById = Map();
+		planSupById = Map();
+
+		rootOrdById = Map();
+		rootAccById = Map();
+		rootBomById = Map();
+		rootRoundById = Map();
+
+		bomStagesById = Map();
+		skuById = Map();
+
+		// One JSON blob per supervisor, plus the order they were first seen in.
+		// A Map alone has no order worth relying on.
+		supItemsById = Map();
+		supOrder = List();
+
+		for each  itm in awaiting
+		{
+			//----------------------------------------------------------
+			// THE PLAN, AND THROUGH IT THE ORDER AND THE SUPERVISOR.
+			//
+			// Filled on first sight of each plan. The sales order is fetched
+			// inside this block on purpose: one order produces exactly one
+			// plan in this app, so per-plan already means per-order, and a
+			// second cache would be two maps to keep in step for nothing.
+			//----------------------------------------------------------
+			planKey = ifnull(itm.Plan,"").toString().trim();
+
+			if(planKey != "" && planNoById.get(planKey) == null)
+			{
+				pNoTxt = "";
+				pSoTxt = "";
+				pSupTxt = "";
+
+				if(planKey.isNumber())
+				{
+					planId = planKey.toLong();
+
+					for each  planRec in Production_Planning[ID == planId]
+					{
+						pNoTxt = ifnull(planRec.Plan_No,"").toString().replaceAll("\"","'");
+
+						// Assigned_To is a LOOKUP, so it holds a record id, not
+						// a name. The name comes off the directory above.
+						pSupTxt = ifnull(planRec.Assigned_To,"").toString().trim();
+
+						soKey = ifnull(planRec.Sales_Order,"").toString().trim();
+						if(soKey != "" && soKey.isNumber())
+						{
+							soId = soKey.toLong();
+							for each  soRec in Sales_Order[ID == soId]
+							{
+								pSoTxt = ifnull(soRec.Sales_Order,"").toString().replaceAll("\"","'");
+							}
+						}
+					}
+				}
+
+				// Written even when nothing was found, so a missing plan is
+				// looked up once rather than on every item hanging off it.
+				planNoById.put(planKey,pNoTxt);
+				planSoById.put(planKey,pSoTxt);
+				planSupById.put(planKey,pSupTxt);
+			}
+
+			planNoOut = ifnull(planNoById.get(planKey),"").toString();
+			soNoOut = ifnull(planSoById.get(planKey),"").toString();
+			supIdTxt = ifnull(planSupById.get(planKey),"").toString();
+
+			//----------------------------------------------------------
+			// THE ROOT LINE.
+			//
+			// Remake_Of when it is set, the item's own id otherwise. A Creator
+			// field never written is EMPTY, not null, and ifnull() does not
+			// catch empty - so it is normalised to text and tested for "",
+			// never for null.
+			//
+			// Read WITHOUT consulting Is_Remake, unlike recheckOrderComplete.
+			// It only decides which line's figures to show, so a batch with no
+			// Remake_Of - the orphan state recheckOrderComplete warns about -
+			// falls back to reading its own position rather than showing the
+			// inspector nothing. Nothing is written here, so the worst case is
+			// a number that under-reports, not one that corrupts a line.
+			//----------------------------------------------------------
+			rootKey = itm.ID.toString();
+			rmOfTxt = ifnull(itm.Remake_Of,"").toString().trim();
+			if(rmOfTxt != "")
+			{
+				rootKey = rmOfTxt;
+			}
+
+			if(rootOrdById.get(rootKey) == null)
+			{
+				rOrdTxt = "0";
+				rAccNum = 0.0;
+				rBomTxt = "";
+				rRounds = 0;
+				lineIds = List();
+
+				if(rootKey.isNumber())
+				{
+					rootId = rootKey.toLong();
+					lineIds.add(rootId);
+
+					for each  rootRec in Plan_Item[ID == rootId]
+					{
+						// Every numeric normalised before it is read as one.
+						// toDecimal() THROWS on an empty field, and these are
+						// exactly the fields that stay empty until the first
+						// check writes them.
+						rOrdTxt = ifnull(rootRec.Qty_Ordered,"0").toString().trim();
+						if(rOrdTxt == "")
+						{
+							rOrdTxt = "0";
+						}
+
+						rAccTxt = ifnull(rootRec.Qty_Accepted,"0").toString().trim();
+						if(rAccTxt == "")
+						{
+							rAccTxt = "0";
+						}
+						rAccNum = rAccNum + rAccTxt.toDecimal();
+
+						// BOM is copied onto every batch, but the ROOT's is the
+						// one the alteration picker must offer - see the header.
+						rBomTxt = ifnull(rootRec.BOM,"").toString().trim();
+					}
+
+					// ONE FLAT QUERY for the whole line. Remake_Of points at the
+					// root from every generation of batch, so this catches the
+					// third alteration of a remake without any recursion.
+					for each  kidRec in Plan_Item[Remake_Of == rootId]
+					{
+						kAccTxt = ifnull(kidRec.Qty_Accepted,"0").toString().trim();
+						if(kAccTxt == "")
+						{
+							kAccTxt = "0";
+						}
+						rAccNum = rAccNum + kAccTxt.toDecimal();
+
+						lineIds.add(kidRec.ID);
+					}
+
+					//------------------------------------------------
+					// WHICH ROUND THIS IS: how many checks the line has
+					// already had, plus one.
+					//
+					// Counted per line member rather than by scanning
+					// Item_Check whole. That table only grows - a year in it
+					// is every check the factory has ever done - and reading
+					// all of it to answer a question about one line is the
+					// shape that walks into the statement limit later, when
+					// there is live data and no way to test it.
+					//
+					// The queue is small by construction: it is what is on
+					// the rack right now, and a line carries a handful of
+					// batches at most.
+					//
+					// .count() and not .size() - size() is a List method, a
+					// query result answers to count().
+					//------------------------------------------------
+					for each  lineKey in lineIds
+					{
+						chkRows = Item_Check[Plan_Item == lineKey];
+						rRounds = rRounds + chkRows.count();
+					}
+				}
+
+				rootOrdById.put(rootKey,rOrdTxt);
+				rootAccById.put(rootKey,rAccNum.toString());
+				rootBomById.put(rootKey,rBomTxt);
+				rootRoundById.put(rootKey,(rRounds + 1).toString());
+			}
+
+			//----------------------------------------------------------
+			// THE ROOT'S STAGE LIST, cached per BOM.
+			//
+			// Many items share one BOM - every size of one style does - so
+			// this is fetched once per BOM rather than once per item.
+			//----------------------------------------------------------
+			bomKey = ifnull(rootBomById.get(rootKey),"").toString();
+
+			if(bomKey != "" && bomStagesById.get(bomKey) == null)
+			{
+				stgJson = "";
+
+				if(bomKey.isNumber())
+				{
+					bomId = bomKey.toLong();
+
+					for each  bomRec in BOM[ID == bomId]
+					{
+						for each  bstg in bomRec.Production_Stages
+						{
+							seqTxt = ifnull(bstg.Sequence_No,"0").toString().trim();
+							if(seqTxt == "")
+							{
+								seqTxt = "0";
+							}
+
+							// Stage names are free text on the BOM until the
+							// stage master lands, so they are escaped like any
+							// other free text.
+							opTxt = ifnull(bstg.Operation,"").toString().trim().replaceAll("\"","'");
+
+							if(opTxt != "")
+							{
+								if(stgJson != "")
+								{
+									stgJson = stgJson + ",";
+								}
+								stgJson = stgJson + "{\"sequence\":" + seqTxt.toDecimal().toLong() + ",\"operation\":\"" + opTxt + "\"}";
+							}
+						}
+					}
+				}
+
+				bomStagesById.put(bomKey,stgJson);
+			}
+
+			stagesOut = ifnull(bomStagesById.get(bomKey),"").toString();
+
+			//----------------------------------------------------------
+			// THE SKU.
+			//
+			// Item_Sku is a LOOKUP to Item_Master, so the field holds a record
+			// id. Sending it raw put an 18-digit id on screen where the code
+			// the floor recognises should be, twice before.
+			//----------------------------------------------------------
+			skuKey = ifnull(itm.Item_Sku,"").toString().trim();
+
+			if(skuKey != "" && skuById.get(skuKey) == null)
+			{
+				skuTxt = "";
+
+				if(skuKey.isNumber())
+				{
+					skuId = skuKey.toLong();
+					for each  imRec in Item_Master[ID == skuId]
+					{
+						skuTxt = ifnull(imRec.SKU,"").toString().replaceAll("\"","'");
+					}
+				}
+
+				skuById.put(skuKey,skuTxt);
+			}
+
+			skuOut = ifnull(skuById.get(skuKey),"").toString();
+
+			//----------------------------------------------------------
+			// WHICH KIND OF BATCH THIS IS.
+			//
+			// Is_Remake reads EMPTY, not false, on anything planned before the
+			// field existed - so the ifnull default is what makes those old
+			// records read as originals, which is what they are.
+			//
+			// FOUR KINDS, NOT THREE, and Production_Loss is the one that must
+			// not be folded in with the rest. It replaces pieces spoiled on the
+			// floor - garments that were NEVER inspected and never rejected.
+			// Drawing it as a rejection tells the inspector these failed his own
+			// check when they never reached him, and quietly moves the blame for
+			// a cutting-table accident onto his own last round.
+			//
+			// production.js already draws this distinction on the supervisor's
+			// screen ("Replacement batch" against "QC remake"), so collapsing it
+			// here would also make the two screens disagree about one item.
+			//
+			// Check_Reject is the rejection spelling. Empty reads as a rejection
+			// too - every remake raised before the field existed came from one.
+			//----------------------------------------------------------
+			batchTxt = "Original";
+
+			if(ifnull(itm.Is_Remake,false) == true)
+			{
+				rsnTxt = ifnull(itm.Remake_Reason,"").toString().trim();
+
+				if(rsnTxt == "Alteration")
+				{
+					batchTxt = "Alteration";
+				}
+				else if(rsnTxt == "Production_Loss")
+				{
+					batchTxt = "Replacement";
+				}
+				else
+				{
+					batchTxt = "Remake";
+				}
+			}
+
+			//----------------------------------------------------------
+			// The figures, all normalised through text first.
+			//
+			// Qty_Produced is what production says it made, and it is what the
+			// check has to be split three ways against. An empty field emitted
+			// straight into JSON produces "produced": with nothing after it,
+			// which breaks JSON.parse for the entire screen rather than for
+			// one row.
+			//----------------------------------------------------------
+			prodTxt = ifnull(itm.Qty_Produced,"0").toString().trim();
+			if(prodTxt == "")
+			{
+				prodTxt = "0";
+			}
+			producedOut = prodTxt.toDecimal().toLong();
+
+			ordTxt = ifnull(rootOrdById.get(rootKey),"0").toString().trim();
+			if(ordTxt == "")
+			{
+				ordTxt = "0";
+			}
+			accTxt = ifnull(rootAccById.get(rootKey),"0").toString().trim();
+			if(accTxt == "")
+			{
+				accTxt = "0";
+			}
+
+			ordOut = ordTxt.toDecimal().toLong();
+			accOut = accTxt.toDecimal().toLong();
+
+			// CLAMPED AT 0. Acceptances can legitimately pass the ordered
+			// quantity - a batch is sized to what was rejected, and nothing
+			// stops a checker accepting all of it after some of the original
+			// was already accepted - and a negative "still to come" reads as an
+			// arithmetic bug on screen rather than as a line that is finished.
+			outOut = ordOut - accOut;
+			if(outOut < 0)
+			{
+				outOut = 0;
+			}
+
+			roundTxt = ifnull(rootRoundById.get(rootKey),"1").toString().trim();
+			if(roundTxt == "")
+			{
+				roundTxt = "1";
+			}
+			roundOut = roundTxt.toDecimal().toLong();
+
+			//----------------------------------------------------------
+			// Into its supervisor's bucket.
+			//
+			// An item whose plan has no supervisor still appears, under an
+			// empty id. Dropping it would hide real work on the rack because
+			// of a blank field on a record nobody is looking at.
+			//----------------------------------------------------------
+			if(supItemsById.get(supIdTxt) == null)
+			{
+				supItemsById.put(supIdTxt,"");
+				supOrder.add(supIdTxt);
+			}
+
+			itemsJson = supItemsById.get(supIdTxt).toString();
+			if(itemsJson != "")
+			{
+				itemsJson = itemsJson + ",";
+			}
+
+			// Every id a STRING - an 18-digit id breaks JSON.parse on the
+			// widget side. Every quantity a bare number.
+			itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"name\":\"" + ifnull(itm.Item_Name,"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + skuOut + "\",\"planId\":\"" + planKey + "\",\"planNo\":\"" + planNoOut + "\",\"salesOrder\":\"" + soNoOut + "\",\"produced\":" + producedOut + ",\"round\":" + roundOut + ",\"batch\":\"" + batchTxt + "\",\"lineOrdered\":" + ordOut + ",\"lineAccepted\":" + accOut + ",\"lineOutstanding\":" + outOut + ",\"stages\":[" + stagesOut + "]}";
+
+			supItemsById.put(supIdTxt,itemsJson);
+		}
+
+		//------------------------------------------------------------------
+		// 3. THE ACCORDION.
+		//
+		// Only supervisors who actually have something waiting. Listing every
+		// supervisor here means opening a heading and finding nothing, with
+		// nothing on screen to say why.
+		//------------------------------------------------------------------
+		for each  supKey in supOrder
+		{
+			supName = "Unassigned";
+
+			if(supKey != "")
+			{
+				nameTxt = ifnull(empNameById.get(supKey),"").toString();
+				if(nameTxt != "")
+				{
+					supName = nameTxt;
+				}
+				else
+				{
+					// Named by id rather than left blank. A supervisor whose
+					// Employee record has gone still has garments on the rack,
+					// and a heading reading nothing is unattributable.
+					supName = "Employee " + supKey;
+				}
+			}
+
+			if(supsJson != "")
+			{
+				supsJson = supsJson + ",";
+			}
+			supsJson = supsJson + "{\"id\":\"" + supKey + "\",\"name\":\"" + supName + "\",\"items\":[" + ifnull(supItemsById.get(supKey),"").toString() + "]}";
+		}
+	}
+	catch (e)
+	{
+		// Creator collapses every runtime failure reaching a widget into "code
+		// 9430", which says nothing at all. The real message travels back inside
+		// the payload, in the shape the widget already parses.
+		// The picker goes back too when it was already built - the widget can
+		// then still show who it thinks you are while reporting the failure.
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"inspectors\":[" + inspJson + "],\"supervisors\":[]}";
+	}
+
+	// Built by hand. Map.toString() does not emit valid JSON once the structure
+	// nests, and List.toString() does not wrap in [].
+	return "{\"errors\":[],\"inspectors\":[" + inspJson + "],\"supervisors\":[" + supsJson + "]}";
+}

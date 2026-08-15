@@ -1,0 +1,440 @@
+string closeAlterationBatch(string payloadJson)
+{
+	// API for the Production Supervisor Widget. Custom API, POST, one argument.
+	//
+	// CLOSES AN ALTERATION BATCH by DECLARATION. This is the whole reason the
+	// function exists, so it is worth saying plainly:
+	//
+	// An alteration batch has no continuous quantity flow. One garment can be
+	// worked at two stages - a seam redone AND its embroidery redone - so the
+	// per-stage Qty_Out figures cannot be summed into a batch total without
+	// knowing which garments overlap, and nobody records that. Adding them would
+	// count the same garment twice; taking the maximum would silently drop the
+	// ones that only needed one stage. There is no arithmetic that recovers it.
+	//
+	// So attrition is DECLARED ONCE, here, at the end - not derived from the
+	// stages. The supervisor is asked "how many garments are going back for
+	// checking?", defaulted to the batch size and reducible only, and that number
+	// is Qty_Produced. Qty_Ordered minus it is Qty_Lost.
+	//
+	// ALTERATION STAGE LOGS ARE WORK RECORDS, NOT ATTRITION RECORDS. Their
+	// Qty_Out equals their Qty_In by construction (saveProductionPhase writes it;
+	// the widget never asks for one) and it means "these came back from that
+	// operator", not "these were fixed". A garment the operator could not rescue
+	// still comes back and is rejected at the NEXT check - that is an inspection
+	// outcome, not a production one, and reading it as loss here would book the
+	// same garment as lost twice. The stage row answers who did what work, when.
+	// It deliberately does not answer how many survived.
+	//
+	// The arithmetic is declared at the batch; the explanation is attributed at
+	// the stage. The damage report the widget opens on a shortfall asks which
+	// stage he lost them at, and that answer is allowed to be approximate
+	// precisely because nothing computes from it. The number that must be right
+	// has one owner and one place to be wrong.
+	//
+	// ITS OWN FUNCTION, NOT ANOTHER ARGUMENT ON saveProductionPhase. Closing a
+	// batch is a different act from closing a stage, and folding it in would give
+	// that function's isLastStage a second meaning. Read the comment blocks in
+	// saveProductionPhase for what happened the last time something was
+	// overloaded onto it.
+	//
+	// payload:
+	// {
+	//   "planItemId": "31",
+	//   "supervisorId": "5",
+	//   "qtyReturning": 28,
+	//   "note": ""
+	// }
+	//
+	// returns:
+	// {"success":true,"qtyProduced":28,"qtyLost":2,"status":"Awaiting_Check",
+	//  "orderVerdict":"..."}
+	// or
+	// {"success":false,"error":"...","code":"..."}
+
+	// Deluge requires a return at the function's top level, so the result is
+	// built into a variable rather than returned from inside the try/catch.
+	res = "{\"success\":false,\"error\":\"Nothing was saved\"}";
+
+	// Declared out here so the success line can always reference them, whether
+	// or not this close happened to be the one that finished the order.
+	verdictTxt = "";
+	noteTxt = "";
+	supIdTxt = "";
+
+	try
+	{
+		inp = payloadJson.toMap();
+		itemIdStr = ifnull(inp.get("planItemId"),"").toString().trim();
+		supIdTxt = ifnull(inp.get("supervisorId"),"").toString().trim();
+
+		// Free text going into hand-built JSON has to lose its quotes or the
+		// widget's JSON.parse dies on the response.
+		noteTxt = ifnull(inp.get("note"),"").toString().replaceAll("\"","'");
+
+		// Creator and payload numerics that were never written are EMPTY, not
+		// null, and toDecimal() throws on empty - normalise to string first.
+		qRetStr = ifnull(inp.get("qtyReturning"),"0").toString().trim();
+		if(qRetStr == "") { qRetStr = "0"; }
+
+		if(itemIdStr == "" || itemIdStr.isNumber() == false)
+		{
+			return "{\"success\":false,\"code\":\"BAD_ITEM\",\"error\":\"Missing or non-numeric planItemId\"}";
+		}
+		if(qRetStr.isNumber() == false)
+		{
+			return "{\"success\":false,\"code\":\"BAD_QTY\",\"error\":\"qtyReturning is not a number\"}";
+		}
+
+		itemId = itemIdStr.toLong();
+		qtyReturning = qRetStr.toDecimal().toLong();
+
+		//------------------------------------------------------------------
+		// The batch itself.
+		//
+		// A query returns a COLLECTION, not a record - if(x != null) is true
+		// even when nothing matched, so a for-each is the only reliable way to
+		// take one record out of one.
+		//------------------------------------------------------------------
+		itemFound = false;
+		itemNameTxt = "";
+		statusNow = "";
+		qtyOrdered = 0;
+		planId = 0;
+
+		for each  piChk in Plan_Item[ID == itemId]
+		{
+			itemFound = true;
+			itemNameTxt = ifnull(piChk.Item_Name,"").toString().replaceAll("\"","'");
+			statusNow = ifnull(piChk.Item_Status,"").toString().trim();
+
+			ordS = ifnull(piChk.Qty_Ordered,"0").toString().trim();
+			if(ordS == "") { ordS = "0"; }
+			qtyOrdered = ordS.toDecimal().toLong();
+
+			// A lookup holds a record id. Forced through string to a long so
+			// every comparison below is long-against-long - mixed-type
+			// comparison throws, and the id is 18 digits.
+			if(piChk.Plan != null)
+			{
+				planId = piChk.Plan.toString().toLong();
+			}
+		}
+
+		if(itemFound == false)
+		{
+			return "{\"success\":false,\"code\":\"NO_ITEM\",\"error\":\"Plan item " + itemId + " not found\"}";
+		}
+
+		//------------------------------------------------------------------
+		// THIS MUST BE AN ALTERATION BATCH, and Alteration_Stage rows are what
+		// make it one.
+		//
+		// That form exists only for alteration batches - an ordinary item takes
+		// its stage list from the BOM, and a batch cannot, because it runs two
+		// stages rather than eight. So "has rows" is the test, and there is no
+		// flag to keep in sync with it.
+		//
+		// A plain item coming through here would have its Qty_Produced - the
+		// figure its last BOM stage published, which the checker then splits
+		// three ways - overwritten by a number somebody typed into a dialog
+		// that was never meant for it. This is a Custom API and callable from
+		// anywhere, so the widget hiding the button is not the guard.
+		//
+		// Rows are read in Sequence_No order because the message names them and
+		// he thinks of them in the order the work runs. "sort by" on its own
+		// assignment - inline in a for-each header it does not reliably parse,
+		// and a function that will not save is indistinguishable from one that
+		// saved and did nothing.
+		//------------------------------------------------------------------
+		altRows = Alteration_Stage[Plan_Item == itemId] sort by Sequence_No;
+
+		altCount = 0;
+		openCount = 0;
+		openNames = "";
+
+		for each  asRow in altRows
+		{
+			altCount = altCount + 1;
+
+			// Phase_Name is a SNAPSHOT of what the stage was called on the day,
+			// and so is Alteration_Stage.Stage_Name - both are Single Line, not
+			// a reference. They are matched on exact string, never "contains":
+			// the stage names collide as substrings ("Machine Embroidery" sits
+			// inside "Manual Machine Embroidery") and a contains match would
+			// accept the wrong stage's log as this one's.
+			stgName = ifnull(asRow.Stage_Name,"").toString().trim();
+
+			stgDone = false;
+			if(stgName != "")
+			{
+				for each  slChk in Stage_Log[Plan_Item == itemId && Phase_Name == stgName]
+				{
+					if(ifnull(slChk.Stage_Status,"").toString().trim() == "Done")
+					{
+						stgDone = true;
+					}
+				}
+			}
+
+			// A stage with no Stage_Log row at all has not been started -
+			// Stage_Status has only two values and a row is created at Start,
+			// so "no row" is the third state and it belongs on this side.
+			if(stgDone == false)
+			{
+				openCount = openCount + 1;
+
+				if(openNames != "")
+				{
+					openNames = openNames + ", ";
+				}
+				openNames = openNames + stgName.replaceAll("\"","'");
+			}
+		}
+
+		if(altCount == 0)
+		{
+			return "{\"success\":false,\"code\":\"NOT_ALTERATION\",\"error\":\"" + itemNameTxt + " is not an alteration batch - it has no alteration stages. Ordinary items finish through their last production stage.\"}";
+		}
+
+		//------------------------------------------------------------------
+		// ALREADY CLOSED FOR GOOD.
+		//
+		// Complete is reached either through saveItemCheck, which has already
+		// split Qty_Produced into accepted and rejected, or through the
+		// zero-survivor path below. Rewriting Qty_Produced afterwards would put
+		// it at odds with Qty_Accepted with nothing to say which is right, and
+		// recheckOrderComplete reads both. Same rule the rest of the app
+		// applies: a status that has moved on is not this function's to move
+		// back.
+		//
+		// Awaiting_Check is deliberately NOT refused. The check has not happened
+		// yet, so a supervisor correcting the number he declared five minutes
+		// ago is honest bookkeeping, and refusing it would leave him no way to
+		// fix a typo except a data edit nobody would see.
+		//------------------------------------------------------------------
+		if(statusNow == "Complete")
+		{
+			return "{\"success\":false,\"code\":\"BATCH_CLOSED\",\"error\":\"" + itemNameTxt + " is already Complete. Its quantities cannot be re-declared.\"}";
+		}
+
+		if(openCount > 0)
+		{
+			stageWord = "stages are";
+			if(openCount == 1) { stageWord = "stage is"; }
+			return "{\"success\":false,\"code\":\"STAGES_OPEN\",\"error\":\"" + openCount + " alteration " + stageWord + " still open on " + itemNameTxt + " (" + openNames + "). Finish the work before closing the batch.\"}";
+		}
+
+		//------------------------------------------------------------------
+		// STILL WAITING ON CLOTH HE ASKED FOR.
+		//
+		// An alteration batch is created with NO Material_Requirement rows -
+		// that is what makes material optional for it. But the reissue path is
+		// open to these batches on purpose: "Request material" opens the damage
+		// dialog, raiseReissueRequest turns the draft into real requirements
+		// with Source = "Alteration", and the batch drops back to
+		// Awaiting_Material until the store hands the cloth over.
+		//
+		// So a batch CAN owe material, and without this guard he would send it
+		// to the checker while the store still held a live requirement for it -
+		// the garments arriving unfinished, and the requirement outliving the
+		// batch that asked for it.
+		//
+		// Received, not issued. Stock is consumed at RECEIPT, and cloth sitting
+		// in transit is not on his table.
+		//------------------------------------------------------------------
+		matOpen = 0;
+
+		for each  mrRow in Material_Requirement[Plan_Item == itemId]
+		{
+			reqS = ifnull(mrRow.Required_Qty,"0").toString().trim();
+			if(reqS == "") { reqS = "0"; }
+			recS = ifnull(mrRow.Received_Qty,"0").toString().trim();
+			if(recS == "") { recS = "0"; }
+
+			if(recS.toDecimal() < reqS.toDecimal())
+			{
+				matOpen = matOpen + 1;
+			}
+		}
+
+		if(matOpen > 0)
+		{
+			reqWord = "requests are";
+			if(matOpen == 1) { reqWord = "request is"; }
+			return "{\"success\":false,\"code\":\"MATERIAL_PENDING\",\"error\":\"" + matOpen + " material " + reqWord + " still not fully received on " + itemNameTxt + ". Receive the material before closing the batch.\"}";
+		}
+
+		//------------------------------------------------------------------
+		// The declared figure has to be a subset of the batch.
+		//
+		// More coming back than went out is not a shortfall he can explain - it
+		// is garments that belong to some other batch, and letting it through
+		// would credit this order with pieces the customer never bought.
+		//------------------------------------------------------------------
+		if(qtyReturning < 0)
+		{
+			return "{\"success\":false,\"code\":\"BAD_QTY\",\"error\":\"Cannot return a negative number of garments\"}";
+		}
+		if(qtyReturning > qtyOrdered)
+		{
+			return "{\"success\":false,\"code\":\"BAD_QTY\",\"error\":\"Only " + qtyOrdered + " garments went into this batch, so " + qtyReturning + " cannot come back from it.\"}";
+		}
+
+		qtyLost = qtyOrdered - qtyReturning;
+
+		//------------------------------------------------------------------
+		// THE DECLARATION, and the one place these two numbers are written.
+		//
+		// NOTHING TO INSPECT goes straight to Complete. A batch that lost every
+		// garment has nothing for the checker to look at, and one sitting at
+		// Awaiting_Check with zero in it would sit on his queue for ever with
+		// no action that could clear it - Awaiting_Check is the queue, so a row
+		// on it that cannot be checked is a row nobody can remove.
+		//------------------------------------------------------------------
+		newStatus = "Awaiting_Check";
+		if(qtyReturning == 0)
+		{
+			newStatus = "Complete";
+		}
+
+		for each  piSet in Plan_Item[ID == itemId]
+		{
+			piSet.Qty_Produced = qtyReturning;
+			piSet.Qty_Lost = qtyLost;
+			piSet.Item_Status = newStatus;
+		}
+
+		//------------------------------------------------------------------
+		// Roll the plan up.
+		//
+		// The PLAN's test is "every item at Awaiting_Check or beyond", not
+		// "every item Complete". The plan tracks PRODUCTION, and production on
+		// an item is finished the moment it reaches the checker - waiting for
+		// the plan to move until every garment has been inspected would leave a
+		// finished floor reading as busy for days.
+		//
+		// Production Complete is the LAST status a plan takes. Checking,
+		// packing and dispatch are tracked on Sales_Order.Order_Status from
+		// here, which is a different field with its own chain.
+		//------------------------------------------------------------------
+		if(planId > 0)
+		{
+			// Read once, up here, because both blocks below need it: the mirror
+			// when the plan finishes, and the order recompute when the batch
+			// closed empty. Neither is guaranteed to run, so neither can be the
+			// one that fetches it.
+			orderId = 0;
+
+			for each  plRead in Production_Planning[ID == planId]
+			{
+				if(plRead.Sales_Order != null)
+				{
+					orderId = plRead.Sales_Order.toString().toLong();
+				}
+			}
+
+			allItemsDone = true;
+			itemCount = 0;
+
+			for each  piRoll in Plan_Item[Plan == planId]
+			{
+				itemCount = itemCount + 1;
+
+				rollSt = ifnull(piRoll.Item_Status,"").toString().trim();
+				if(rollSt != "Awaiting_Check" && rollSt != "Complete")
+				{
+					allItemsDone = false;
+				}
+			}
+
+			if(itemCount > 0 && allItemsDone == true)
+			{
+				for each  plSet in Production_Planning[ID == planId]
+				{
+					if(ifnull(plSet.Order_Status,"").toString().trim() != "Production Complete")
+					{
+						plSet.Order_Status = "Production Complete";
+					}
+				}
+
+				//----------------------------------------------------------
+				// The handover from plan to order. A mirror, not a roll-up:
+				// createProductionPlans inserts exactly ONE plan per order
+				// inside its per-order loop, so the plan finishing is the
+				// order's production finishing.
+				//
+				// FORWARD ONLY. Every close of every batch on this plan comes
+				// back through here, and the all-items-done test stays true
+				// once it is true - so an unguarded write would drag an order
+				// back from Checking Passed to Production Complete and put it
+				// in front of the checker a second time. Same rule
+				// saveProductionPhase applies to the order, resolveDispute to
+				// the plan and receiveMaterials to Item_Status.
+				//----------------------------------------------------------
+				if(orderId > 0)
+				{
+					for each  soSet in Sales_Order[ID == orderId]
+					{
+						soStNow = ifnull(soSet.Order_Status,"").toString().trim();
+						if(soStNow == "Pending" || soStNow == "In Progress")
+						{
+							soSet.Order_Status = "Production Complete";
+						}
+					}
+				}
+			}
+
+			//--------------------------------------------------------------
+			// A BATCH THAT CLOSED WITH NOTHING IN IT NEVER REACHES A CHECK, SO
+			// NOTHING ELSE WILL EVER RE-ASSESS THE ORDER.
+			//
+			// Complete is normally arrived at through saveItemCheck, which
+			// calls recheckOrderComplete as its last step. This path skips the
+			// checker entirely, and if this was the last item of the order the
+			// order would hang at Production Complete for ever with nothing on
+			// any screen to press. Four callers, one writer - this is one of
+			// the four.
+			//
+			// Called AFTER the roll-up above, not before: recheckOrderComplete
+			// only moves an order that is already Production Complete or In
+			// Progress, so calling it first would have it look at an order the
+			// two lines above were about to move and decide there was nothing
+			// to do.
+			//
+			// It never throws - it swallows its own errors and returns the
+			// reason as text - so its result is information, not a condition.
+			// The records above are already written and must not be reported
+			// as failed because a later step disagreed.
+			//--------------------------------------------------------------
+			if(qtyReturning == 0)
+			{
+				if(orderId > 0)
+				{
+					verdictTxt = thisapp.recheckOrderComplete(orderId.toString()).toString().replaceAll("\"","'");
+				}
+				else
+				{
+					verdictTxt = "SKIP: plan " + planId + " has no sales order";
+				}
+			}
+		}
+
+		res = "{\"success\":true,\"qtyProduced\":" + qtyReturning + ",\"qtyLost\":" + qtyLost + ",\"status\":\"" + newStatus + "\",\"orderVerdict\":\"" + verdictTxt + "\"}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	// THE NOTE HAS NOWHERE ELSE TO GO. Plan_Item carries no remarks field, and
+	// the reason for a shortfall is meant to land on the damage report the
+	// widget opens next, where it can be attributed to a stage. Logged rather
+	// than dropped so an Execute can show what was actually sent, and so a
+	// supervisor who typed an explanation here is not silently ignored.
+	// supervisorId is logged for the same reason: it is the login stand-in and
+	// there is nothing on Plan_Item to record it against.
+	info "closeAlterationBatch -> supervisor " + supIdTxt + " | note '" + noteTxt + "' | " + res;
+
+	return res;
+}
