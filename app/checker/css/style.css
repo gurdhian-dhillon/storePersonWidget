@@ -204,3 +204,48 @@ body {
     .sup-select { flex: 1; min-width: 0; }
     .item-header { flex-direction: column; align-items: stretch; }
 }
+
+/* Tabs and the queue badge -------------------------------------------------
+   The badge is the only signal an inspector gets that work has arrived, so it
+   is hidden at zero rather than shown as "0" — a row of zeroes is exactly what
+   trains people to stop looking. */
+.tab-strip { display: flex; gap: 0.25rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border); }
+.tab-btn {
+    font-family: inherit; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+    padding: 0.55rem 0.9rem; border: 0; background: none; color: var(--text-muted);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tab-btn:hover { color: var(--text-main); }
+.tab-btn.is-active { color: var(--primary); border-bottom-color: var(--primary); }
+.tab-count {
+    display: inline-block; margin-left: 0.4rem; min-width: 1.2rem; padding: 0 0.35rem;
+    font-size: 0.72rem; line-height: 1.2rem; text-align: center; border-radius: 1rem;
+    background: var(--status-danger); color: #fff;
+}
+.tab-panel { display: none; }
+.tab-panel.is-active { display: block; }
+
+/* History ---------------------------------------------------------------- */
+.hist-bar { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
+.hist-bar label { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); }
+.hist-bar input[type="date"] {
+    font-family: inherit; font-size: 0.88rem; padding: 0.4rem 0.55rem;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+    color: var(--text-main);
+}
+.hist-totals { font-size: 0.82rem; color: var(--text-muted); margin-left: auto; }
+
+.hist-nums { display: flex; flex-direction: column; align-items: flex-end; gap: 0.15rem; font-size: 0.82rem; }
+.hist-num.is-ok { color: var(--status-success); }
+.hist-num.is-rej { color: var(--status-danger); }
+.hist-num.is-alt { color: var(--alt); }
+.hist-num.is-muted { color: var(--text-muted); font-size: 0.76rem; }
+
+.hist-fails { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.6rem; }
+.hist-fail {
+    font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 1rem;
+    color: var(--status-danger); background: var(--status-danger-bg);
+}
+.hist-fail.is-clean { color: var(--text-muted); background: #f1f5f9; }
+.hist-alt { font-size: 0.8rem; color: var(--alt); margin-top: 0.45rem; }
+.hist-remarks { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.45rem; font-style: italic; }

@@ -3044,3 +3044,13 @@ th.col-num {
 .alt-close-hint { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.5rem; }
 .alt-close-error { margin: 0.6rem 1.25rem 0; padding: 0.5rem 0.7rem; border-radius: 6px;
     font-size: 0.85rem; color: var(--status-danger); background: var(--status-danger-bg); }
+
+/* What came back from inspection, on a history card. Teal rather than green or
+   amber: the batch has been looked at, which is neither a success nor a problem
+   in itself — the numbers inside it say which. */
+.status-pill.status-waiting { background: #cffafe; color: #0e7490; }
+.check-outcome { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem 0.9rem;
+    padding: 0.5rem 0.75rem; margin-bottom: 0.6rem; border-radius: 6px;
+    background: #f0fdfa; border: 1px solid #99f6e4; }
+.check-outcome-head { font-size: 0.78rem; font-weight: 600; color: #0e7490; }
+.check-outcome-nums { font-size: 0.82rem; color: var(--text-main); }

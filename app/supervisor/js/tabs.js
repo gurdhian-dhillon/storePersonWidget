@@ -982,6 +982,7 @@ function renderSupHistory(items, stageCount, producedTotal, receipts) {
         }).join('');
 
         var done = it.status === 'Complete';
+        var waiting = it.status === 'Awaiting_Check';
         var nStages = (it.stages || []).length;
 
         // qtyOrdered and qtyProduced belong to the WHOLE item, not to this day —
@@ -989,9 +990,40 @@ function renderSupHistory(items, stageCount, producedTotal, receipts) {
         // day's stitching reads as "I made 80 today" when it was earned over
         // three days. Said explicitly rather than dropped: without knowing how
         // far the item has got, a day's stage rows are hard to act on.
-        var progress = done
-            ? 'Finished · ' + fmt(it.qtyProduced) + ' of ' + fmt(it.qtyOrdered) + ' pcs (whole item)'
-            : 'Still in production · ordered ' + fmt(it.qtyOrdered) + ' pcs';
+        //
+        // THREE STATES NOW, not two. Production finishing is Awaiting_Check;
+        // Complete means the inspector has signed it off. Reading the old
+        // two-way test on the new data called a finished batch "still in
+        // production" on the very day it was finished.
+        var progress;
+        if (done) {
+            progress = 'Finished · ' + fmt(it.qtyProduced) + ' of ' + fmt(it.qtyOrdered) + ' pcs (whole item)';
+        } else if (waiting) {
+            progress = 'With the checker · ' + fmt(it.qtyProduced) + ' of ' + fmt(it.qtyOrdered) + ' pcs made';
+        } else {
+            progress = 'Still in production · ordered ' + fmt(it.qtyOrdered) + ' pcs';
+        }
+
+        // WHAT CAME BACK FROM INSPECTION. Without this his batch vanishes into
+        // "Finished" and the rejected pieces reappear days later as a new batch
+        // with nothing connecting the two. Only present once a check exists.
+        var chk = it.check;
+        var chkHtml = '';
+        if (chk) {
+            var bits = [];
+            if (Number(chk.approved) > 0) bits.push('<b>' + fmt(chk.approved) + '</b> approved');
+            if (Number(chk.rejected) > 0) bits.push('<b>' + fmt(chk.rejected) + '</b> rejected');
+            if (Number(chk.alteration) > 0) bits.push('<b>' + fmt(chk.alteration) + '</b> to alter');
+            chkHtml =
+                '<div class="check-outcome">' +
+                    '<span class="check-outcome-head">Checked' +
+                        (chk.checkedOn ? ' ' + escapeHtml(chk.checkedOn) : '') +
+                        (chk.inspector ? ' by ' + escapeHtml(chk.inspector) : '') +
+                        (Number(chk.round) > 1 ? ' · round ' + fmt(chk.round) : '') +
+                    '</span>' +
+                    '<span class="check-outcome-nums">' + bits.join(' · ') + '</span>' +
+                '</div>';
+        }
 
         return '' +
             '<div class="item-card">' +
@@ -1005,12 +1037,13 @@ function renderSupHistory(items, stageCount, producedTotal, receipts) {
                         '</span></div>' +
                     '</div>' +
                     '<div class="item-header-right">' +
-                        '<span class="status-pill ' + (done ? 'status-sufficient' : 'status-partial') + '">' +
+                        '<span class="status-pill ' + (done ? 'status-sufficient' : waiting ? 'status-waiting' : 'status-partial') + '">' +
                             progress +
                         '</span>' +
                     '</div>' +
                 '</div>' +
                 '<div class="item-body is-open">' +
+                    chkHtml +
                     '<div class="tables-container">' +
                         '<div class="table-wrapper">' +
                             '<table><thead><tr>' +

@@ -28,15 +28,38 @@
             </div>
         </header>
 
+        <!-- The badge is the whole point of the tab strip. The invariant makes an
+             unchecked batch impossible to LOSE; it does not make anyone look. A
+             count on the queue is what turns "nothing is lost" into "somebody
+             knows it is there". -->
+        <nav class="tab-strip" id="tab-strip">
+            <button type="button" class="tab-btn is-active" data-tab="queue">
+                To check<span class="tab-count hidden" id="count-queue"></span>
+            </button>
+            <button type="button" class="tab-btn" data-tab="history">
+                History
+            </button>
+        </nav>
+
         <main class="tab-body">
+
             <section class="tab-panel is-active" id="panel-queue">
-                <!-- Grouped by supervisor rather than listed flat. He collects a
-                     trolley from one man at a time, and a flat list of forty
-                     items across six supervisors is not the order he works in. -->
                 <div id="queue-root">
                     <p class="empty-note">Loading…</p>
                 </div>
             </section>
+
+            <section class="tab-panel" id="panel-history">
+                <div class="hist-bar">
+                    <label for="hist-date">Day</label>
+                    <input type="date" id="hist-date">
+                    <span class="hist-totals" id="hist-totals"></span>
+                </div>
+                <div id="history-root">
+                    <p class="empty-note">Pick a day.</p>
+                </div>
+            </section>
+
         </main>
     </div>
 

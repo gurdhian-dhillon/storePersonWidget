@@ -141,6 +141,14 @@ function renderQueue() {
         return (s.items || []).length > 0;
     });
 
+    // Counted across supervisors, not per accordion — the badge answers "is
+    // there anything for me", which is one number regardless of whose trolley
+    // it came off.
+    var waiting = withWork.reduce(function (n, s) {
+        return n + (s.items || []).length;
+    }, 0);
+    setQueueCount(waiting);
+
     if (!withWork.length) {
         root.innerHTML = '<p class="empty-note">Nothing is waiting to be checked.</p>';
         return;
@@ -534,11 +542,216 @@ function showOutcome(item, approved, rejected, alteration, res) {
 }
 
 // ---------------------------------------------------------------------------
+// Tabs
+//
+// History loads lazily and only once, the same way the supervisor widget's tabs
+// do. The queue loads on open because that is the screen's reason to exist.
+// ---------------------------------------------------------------------------
+
+var histLoaded = false;
+
+function showTab(name) {
+    var btns = document.querySelectorAll('.tab-btn');
+    for (var i = 0; i < btns.length; i++) {
+        btns[i].classList.toggle('is-active', btns[i].getAttribute('data-tab') === name);
+    }
+    var panels = document.querySelectorAll('.tab-panel');
+    for (var j = 0; j < panels.length; j++) {
+        panels[j].classList.toggle('is-active', panels[j].id === 'panel-' + name);
+    }
+
+    if (name === 'history' && !histLoaded) {
+        histLoaded = true;
+        loadHistory();
+    }
+}
+
+function activeTab() {
+    var b = document.querySelector('.tab-btn.is-active');
+    return b ? b.getAttribute('data-tab') : 'queue';
+}
+
+// Hidden at zero rather than shown as "0". A badge should mean "there is
+// something here", and a row of zeroes trains people to ignore them — which is
+// the one thing this badge cannot afford, since it is the only signal an
+// inspector gets that work has arrived.
+function setQueueCount(n) {
+    var e = el('count-queue');
+    if (!e) return;
+    if (!n || n <= 0) {
+        e.textContent = '';
+        e.classList.add('hidden');
+    } else {
+        e.textContent = n;
+        e.classList.remove('hidden');
+    }
+}
+
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+function isoToDdMmmYyyy(iso) {
+    if (!iso) return '';
+    var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    var p = String(iso).split('-');
+    if (p.length !== 3) return '';
+    // Deluge parses "dd-MMM-yyyy" the same way whatever the org's locale is,
+    // while "01-08-2026" is a different day in the US than it is here.
+    return p[2] + '-' + months[Number(p[1]) - 1] + '-' + p[0];
+}
+
+function todayIso() {
+    var d = new Date();
+    var m = String(d.getMonth() + 1);
+    var day = String(d.getDate());
+    if (m.length === 1) m = '0' + m;
+    if (day.length === 1) day = '0' + day;
+    return d.getFullYear() + '-' + m + '-' + day;
+}
+
+function loadHistory() {
+    var dateInput = el('hist-date');
+    if (!dateInput.value) dateInput.value = todayIso();
+
+    var dayTxt = isoToDdMmmYyyy(dateInput.value);
+    if (!dayTxt) {
+        el('history-root').innerHTML = '<p class="empty-note">Pick a day.</p>';
+        return;
+    }
+
+    el('history-root').innerHTML = '<p class="empty-note">Loading…</p>';
+    el('hist-totals').textContent = '';
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getCheckerHistory',
+        http_method: 'POST',
+        // Deliberately NOT narrowed to the picked inspector. "Who checked this"
+        // is exactly the question a disputed rejection turns into, and hiding
+        // everyone else's rounds would answer it wrongly.
+        payload: { inspectorId: '', dateTxt: dayTxt }
+    }).then(function (response) {
+        console.log('getCheckerHistory raw:', response);
+        var parsed;
+        try {
+            parsed = JSON.parse(response.result);
+        } catch (e) {
+            el('history-root').innerHTML =
+                '<p class="empty-note error-note">The server did not answer. ' +
+                'If this keeps happening, run the function with Execute in Creator.</p>';
+            return;
+        }
+
+        if (parsed.errors && parsed.errors.length) {
+            el('history-root').innerHTML =
+                '<p class="empty-note error-note">' + escapeHtml(parsed.errors.join(' · ')) + '</p>';
+            return;
+        }
+
+        renderHistory(parsed);
+    }).catch(function (err) {
+        console.error('getCheckerHistory failed:', err);
+        el('history-root').innerHTML =
+            '<p class="empty-note error-note">Could not reach the server. ' + escapeHtml(String(err)) + '</p>';
+    });
+}
+
+function renderHistory(data) {
+    var checks = data.checks || [];
+    var t = data.totals || {};
+
+    if (!checks.length) {
+        el('hist-totals').textContent = '';
+        el('history-root').innerHTML = '<p class="empty-note">Nothing was checked that day.</p>';
+        return;
+    }
+
+    el('hist-totals').innerHTML =
+        '<b>' + num(t.checks) + '</b> ' + (num(t.checks) === 1 ? 'batch' : 'batches') +
+        ' · <b>' + num(t.inspected) + '</b> inspected · ' +
+        num(t.approved) + ' approved · ' + num(t.rejected) + ' rejected · ' +
+        num(t.alteration) + ' to alter';
+
+    var html = checks.map(function (c) {
+        // The five checks are carried through untouched. They do not reconcile
+        // with the decision and are not meant to — one garment can fail two —
+        // so only the ones that actually found something are worth the row.
+        var failed = (c.lines || []).filter(function (l) { return num(l.failed) > 0; });
+        var failHtml = failed.length
+            ? '<div class="hist-fails">' + failed.map(function (l) {
+                return '<span class="hist-fail">' + escapeHtml(l.type) + ' ' + num(l.failed) +
+                    (l.note ? ' · ' + escapeHtml(l.note) : '') + '</span>';
+            }).join('') + '</div>'
+            : '<div class="hist-fails"><span class="hist-fail is-clean">No check found anything</span></div>';
+
+        var altHtml = (c.alterationLines || []).length
+            ? '<div class="hist-alt">Back to: ' + (c.alterationLines || []).map(function (a) {
+                return escapeHtml(a.stage) + ' (' + num(a.qty) + ')';
+            }).join(', ') + '</div>'
+            : '';
+
+        return '' +
+            '<div class="item-card">' +
+            '<div class="item-header">' +
+            '<div class="item-header-info">' +
+            '<h2><span class="mat-name">' + escapeHtml(c.item) + '</span>' +
+            (c.sku ? '<span class="mat-sku">' + escapeHtml(c.sku) + '</span>' : '') + '</h2>' +
+            '<div class="item-meta-line">' +
+            '<span class="so-ref">' + escapeHtml(c.salesOrder || '—') +
+            (c.planNo ? ' · ' + escapeHtml(c.planNo) : '') + '</span>' +
+            batchTag(c) +
+            '<span class="round-tag">Round ' + num(c.round) + '</span>' +
+            '</div>' +
+            '<div class="item-meta-line">' +
+            '<span class="so-ref">' + escapeHtml(c.inspector || 'Unknown inspector') +
+            ' · ' + escapeHtml(c.checkedOn || '') + '</span>' +
+            '</div>' +
+            '</div>' +
+            '<div class="hist-nums">' +
+            '<span class="hist-num is-ok"><b>' + num(c.approved) + '</b> approved</span>' +
+            (num(c.rejected) > 0 ? '<span class="hist-num is-rej"><b>' + num(c.rejected) + '</b> rejected</span>' : '') +
+            (num(c.alteration) > 0 ? '<span class="hist-num is-alt"><b>' + num(c.alteration) + '</b> to alter</span>' : '') +
+            '<span class="hist-num is-muted">of ' + num(c.inspected) + '</span>' +
+            '</div>' +
+            '</div>' +
+            failHtml + altHtml +
+            (c.remarks ? '<div class="hist-remarks">' + escapeHtml(c.remarks) + '</div>' : '') +
+            '</div>';
+    }).join('');
+
+    el('history-root').innerHTML = html;
+}
+
+// ---------------------------------------------------------------------------
 
 setTodayLabel();
-el('refresh-btn').addEventListener('click', loadQueue);
+
+var tabBtns = document.querySelectorAll('.tab-btn');
+for (var ti = 0; ti < tabBtns.length; ti++) {
+    (function (btn) {
+        btn.addEventListener('click', function () {
+            showTab(btn.getAttribute('data-tab'));
+        });
+    })(tabBtns[ti]);
+}
+
+el('hist-date').value = todayIso();
+el('hist-date').addEventListener('change', loadHistory);
+
+// Refresh reloads whichever tab is actually open, rather than always the queue —
+// pressing it on History and watching nothing change is worse than no button.
+el('refresh-btn').addEventListener('click', function () {
+    if (activeTab() === 'history') {
+        loadHistory();
+    } else {
+        loadQueue();
+    }
+});
+
 el('insp-select').addEventListener('change', function () {
     // The queue is the same whoever is looking — the picker only decides who the
     // check is recorded against — so this does not refetch.
 });
+
 loadQueue();
