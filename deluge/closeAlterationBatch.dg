@@ -240,8 +240,20 @@ string closeAlterationBatch(string payloadJson)
 		// the garments arriving unfinished, and the requirement outliving the
 		// batch that asked for it.
 		//
-		// Received, not issued. Stock is consumed at RECEIPT, and cloth sitting
-		// in transit is not on his table.
+		// THE SAME THREE-PART TEST receiveMaterials USES, and it has to be the
+		// same one or the two disagree about whether a row is settled.
+		//
+		//  1. Received_Qty < Issued_Qty - cloth the store sent that he has not
+		//     confirmed. Stock is consumed at RECEIPT; what is in transit is not
+		//     on his table.
+		//  2. FABRIC IS SATISFIED IN CUT PIECES, NOT METRES. This is the single
+		//     most important rule in the app and the one this guard originally
+		//     got wrong: comparing Received_Qty against Required_Qty on a fabric
+		//     row would have blocked the batch FOR EVER whenever its pieces came
+		//     off offcuts, because Required_Qty is a pre-waste metre estimate
+		//     that such a row never reaches and is never meant to.
+		//  3. Everything else is satisfied in its own unit, on Issued_Qty -
+		//     thread, elastic, labels.
 		//------------------------------------------------------------------
 		matOpen = 0;
 
@@ -249,10 +261,36 @@ string closeAlterationBatch(string payloadJson)
 		{
 			reqS = ifnull(mrRow.Required_Qty,"0").toString().trim();
 			if(reqS == "") { reqS = "0"; }
+			issS = ifnull(mrRow.Issued_Qty,"0").toString().trim();
+			if(issS == "") { issS = "0"; }
 			recS = ifnull(mrRow.Received_Qty,"0").toString().trim();
 			if(recS == "") { recS = "0"; }
 
-			if(recS.toDecimal() < reqS.toDecimal())
+			rowOpen = false;
+
+			if(recS.toDecimal() < issS.toDecimal())
+			{
+				rowOpen = true;
+			}
+
+			if(ifnull(mrRow.Is_Fabric,false) == true)
+			{
+				reqPcsN = ifnull(mrRow.Required_Pieces,0);
+				gotPcsN = ifnull(mrRow.Pieces_From_Waste,0) + ifnull(mrRow.Pieces_From_Raw,0);
+				if(reqPcsN <= 0 || gotPcsN < reqPcsN)
+				{
+					rowOpen = true;
+				}
+			}
+			else
+			{
+				if(issS.toDecimal() < reqS.toDecimal())
+				{
+					rowOpen = true;
+				}
+			}
+
+			if(rowOpen == true)
 			{
 				matOpen = matOpen + 1;
 			}

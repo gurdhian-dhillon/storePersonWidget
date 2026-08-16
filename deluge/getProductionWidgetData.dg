@@ -459,11 +459,42 @@ string getProductionWidgetData(string supervisorId, string planId)
 					// it would let the batch close while the store had an open
 					// line against it.
 					//------------------------------------------------------
+					// THE SAME THREE-PART TEST receiveMaterials and
+					// closeAlterationBatch use. FABRIC IS SATISFIED IN CUT
+					// PIECES, NOT METRES - a fabric row whose pieces came off
+					// offcuts never reaches its Required_Qty in metres and is
+					// never meant to, so comparing metres here would grey out
+					// the close button FOR EVER on exactly the batches that
+					// went best.
 					aReqS = ifnull(mrA.Required_Qty,"0").toString().trim();
 					if(aReqS == "") { aReqS = "0"; }
+					aIssS = ifnull(mrA.Issued_Qty,"0").toString().trim();
+					if(aIssS == "") { aIssS = "0"; }
 					aRcvS = ifnull(mrA.Received_Qty,"0").toString().trim();
 					if(aRcvS == "") { aRcvS = "0"; }
-					if(aRcvS.toDecimal() < aReqS.toDecimal())
+
+					aRowOpen = false;
+					if(aRcvS.toDecimal() < aIssS.toDecimal())
+					{
+						aRowOpen = true;
+					}
+					if(ifnull(mrA.Is_Fabric,false) == true)
+					{
+						aReqPcs = ifnull(mrA.Required_Pieces,0);
+						aGotPcs = ifnull(mrA.Pieces_From_Waste,0) + ifnull(mrA.Pieces_From_Raw,0);
+						if(aReqPcs <= 0 || aGotPcs < aReqPcs)
+						{
+							aRowOpen = true;
+						}
+					}
+					else
+					{
+						if(aIssS.toDecimal() < aReqS.toDecimal())
+						{
+							aRowOpen = true;
+						}
+					}
+					if(aRowOpen == true)
 					{
 						altMatShort = altMatShort + 1;
 					}

@@ -239,10 +239,82 @@ the same rule `Stage_Log.Phase_Name` follows. Renaming a stage later must not re
 ### `Material_Requirement` — changes
 
 - `Source` gains `Alteration` and `Check_Remake` (`QC_Remake` was never written; it can go)
+- **`Issued_Lot` — Lookup → `Raw_Material_Lot`.** Already added and live; listed here because
+  everything below depends on it. See *Lots and tone* at the end of this section.
 - **`Check_Ref` — Lookup → `Item_Check`.** New field. This is the reason record for a
   `Check_Remake` requirement, and it is what the consumption report follows to answer *why was
   this cloth issued*. `Damage_Ref` already plays the same role for a `Reissue` row; without this
   one, remake material has a `Source` but nothing to trace it back to.
+
+### Lots and tone — what the lot work already decided for you
+
+Fabric lots are colour tone, and the store screen now guarantees **one order, one lot**. Three
+consequences land directly on this spec, and none of them needs new work here.
+
+**A `Check_Remake` requirement is automatically pinned to the original lot.** The store screen
+reads the pin from *any* line of the order, settled or not, so a remake batch raised weeks later
+against a finished item is allocated from the same lot the rejected garments were cut from. That
+is exactly what a replacement needs — four new pieces in a different shade to the ninety-six they
+sit beside is a second rejection, not a fix.
+
+> This was a real bug found while testing. The pin was read only from lines that still owed
+> something, and a finished original owes nothing — so the ordinary remake was allocated freshly
+> and landed on whichever lot was smallest. Fixed; `issueflow.test.js` covers it.
+
+**`Alteration` requirements inherit the same pin**, by the same mechanism and for the same reason.
+An alteration batch is a new `Plan_Item` under the same plan, and the pin is keyed on the **order**
+rather than the item, so it carries across without the checking functions doing anything.
+
+**The lot can be exhausted, and the screen now says so rather than failing silently.** If the
+original lot has nothing usable left, the remake row is unissuable and reads *"Already cut from L2,
+which is now empty."* Nothing here needs to handle it — but a remake sitting unissued on the store
+screen is a real outcome to expect on the first order that hits it, and the reason will be tone,
+not stock.
+
+> Worth knowing why that was hard: an emptied lot is **dropped from the store screen's data
+> entirely**, so "the pin is unusable" normally looks like *the lot is absent*, not *the lot is
+> there with zero*. Missing that, the allocator fell through to choosing freely and moved the
+> remake onto another tone silently. A blocked lot behaves the same way, correctly.
+
+**He can override it, and the override is recorded.** When the original lot is unusable the row
+offers *"Use a different lot…"*, which requires him to pick a replacement and give a reason. The
+handover then carries `Lot_Override_From` and `Lot_Override_Note` while `Issued_Lot` keeps the
+original — the disagreement between them is the evidence a person chose it.
+
+So a check remake has three possible endings, and the checking flow should expect all three:
+
+| | what the store screen does |
+|---|---|
+| original lot has stock | allocated from it, no interaction |
+| original lot has only greige | allocated what it can, wash ticket **aimed at that lot** |
+| original lot unusable | nothing allocated, override offered, reason required |
+
+**What this spec must NOT do:** do not set `Issued_Lot` when creating remake or alteration
+requirements. It is stamped by `issueMaterials` on first issue and never overwritten — writing it
+at creation would pin the row to a lot before anyone has looked at the rack, and the store screen
+would obey it.
+
+**What it must carry:** a remake or alteration `Material_Requirement` needs `Plan_Item` set and
+must sit under the **same plan** as the item it replaces. The pin is keyed on the ORDER, so a batch
+under a different plan would be treated as a new order and allocated freely. `createRemakeItems`
+already does this; a new function has to do the same.
+
+Also: `Required_Pieces` matters as much as `Required_Qty` on these rows. The store allocator sizes
+everything from pieces — metres are a pre-waste estimate — so a remake requirement with pieces
+unset gets no lot allocation at all and the row sits unissuable with no explanation.
+
+### Fields this work already added
+
+Listed so the checking build does not re-add them or assume they are missing:
+
+| Form | Field | Purpose |
+|---|---|---|
+| `Material_Requirement` | `Issued_Lot` | the pin |
+| `Material_Issue.Issue_Lines` | `Lot`, `Settled_Qty` | which lot crossed the counter, and how much is confirmed |
+| `Material_Issue.Issue_Lines` | `Lot_Override_From`, `Lot_Override_Note` | a deliberate tone override |
+| `Waste_Master` | `Lot`, `Carton_Number` | an offcut's tone, and which box it is in |
+
+Full detail in `lots.md` — *The pin*, *When the pinned lot runs out*, and *The override*.
 
 ### `Sales_Order` — changes
 
@@ -361,6 +433,10 @@ What is needed is *which bucket, and why*. That is `Source` plus a reason record
 | `Alteration` | supervisor declares | `Material_Damage` | spent on rework |
 
 Every row has a source, and every non-`Plan` source points at a record that explains itself.
+
+> **All four sources are allocated from the order's own lot.** `Source` decides which requirement
+> a handover credits; it does not decide the tone. A `Check_Remake` row and the `Plan` row it
+> replaces belong to one order and therefore one lot — see *Lots and tone* above.
 
 ### A rejection does NOT create a `Material_Damage` record
 
