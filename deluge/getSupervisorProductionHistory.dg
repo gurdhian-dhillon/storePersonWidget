@@ -26,6 +26,30 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 	// Stages are grouped under the item they belong to, because a supervisor
 	// thinks in items - "the napkins" - not in isolated stage rows.
 	//
+	// CHECKING SITS BETWEEN PRODUCTION AND COMPLETION, so two things in here
+	// changed meaning rather than just gaining a value:
+	//
+	//  - Production finishing is now Awaiting_Check, NOT Complete. Complete means
+	//    "inspected and signed off" and is written only by saveItemCheck. The
+	//    produced total therefore counts BOTH states - counting Complete alone
+	//    would read 0 pcs finished on the very day the work was finished, which is
+	//    the day this screen is almost always looking at.
+	//  - An item at Awaiting_Check has left his hands. statusLabel says so in
+	//    words, so the widget does not have to re-derive it and cannot fall back
+	//    to "still in production" for a batch that is on the inspector's rack.
+	//
+	// The check OUTCOME travels with the item when there is one - approved,
+	// rejected, sent to alteration, who inspected it and when. That is the honest
+	// answer to "where did that order go"; without it a supervisor sees his batch
+	// vanish into Complete with no idea how much of it survived.
+	//
+	// Item_Check is read ONE QUERY PER ITEM, which is safe only because the item
+	// set is already bounded twice over: itemOrder holds the items touched by a
+	// Done stage log on ONE day, and only those on plans assigned to THIS
+	// supervisor. It is a shift's worth of cards, not a table scan. It is
+	// narrowed once more to items at Complete - an item can only carry a check
+	// once one has been done, and a check is what writes Complete.
+	//
 	// EVERY LOOKUP IN HERE IS CACHED. This function used to run a
 	// Production_Planning query per stage log just to test whose plan it was -
 	// including for logs that turned out not to be his - plus an Employee query
@@ -249,11 +273,75 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 			soNo = ifnull(planSoMap.get(iPlanKey),"").toString();
 		}
 
-		// Counted only for finished items - an item still mid-flow has a
-		// Qty_Produced of 0 and would drag the total down for no reason.
-		if(itemStatus == "Complete")
+		// Counted for finished items - and finished now means Awaiting_Check as
+		// well as Complete. Production ends at the last stage; Complete is what
+		// the INSPECTOR writes afterwards. Counting Complete alone would report
+		// 0 pcs finished on the very day the work was done, which is the day
+		// this screen is almost always looking at.
+		if(itemStatus == "Complete" || itemStatus == "Awaiting_Check")
 		{
 			totalOut = totalOut + qtyProduced;
+		}
+
+		//------------------------------------------------------------
+		// WHERE THE BATCH ACTUALLY IS, in words.
+		//
+		// Said here rather than left to the widget, because the widget would have
+		// to re-derive it and its existing fallback is "still in production" -
+		// which is exactly wrong for a batch sitting on the inspector's rack.
+		//------------------------------------------------------------
+		statusTxt = itemStatus;
+		if(itemStatus == "Awaiting_Check")
+		{
+			statusTxt = "Waiting for checking";
+		}
+		else if(itemStatus == "Complete")
+		{
+			statusTxt = "Checked and signed off";
+		}
+		else if(itemStatus == "In_Production")
+		{
+			statusTxt = "In production";
+		}
+
+		//------------------------------------------------------------
+		// THE CHECK OUTCOME, when there is one.
+		//
+		// Without it a supervisor watches his batch vanish into Complete with no
+		// idea how much of it survived - and the rejected pieces come back to him
+		// as a new batch with no visible connection to the one he finished.
+		//
+		// ONE QUERY PER ITEM, safe only because the item set is bounded twice
+		// over: items touched by a Done stage log on the days asked for, on plans
+		// belonging to THIS supervisor. A shift's worth of cards, not a scan. It
+		// is narrowed once more to Complete - a check is what writes that status,
+		// so nothing else can carry one.
+		//------------------------------------------------------------
+		chkJson = "null";
+		if(itemStatus == "Complete")
+		{
+			for each  icRec in Item_Check[Plan_Item == k.toLong()]
+			{
+				icInsp = "";
+				if(icRec.Inspector != null)
+				{
+					// A lookup holds a record id - toString() gives the id, not
+					// the name. This exact mistake shipped 18-digit ids to the UI
+					// twice, so the master record is fetched.
+					for each  icEmp in Employee[ID == icRec.Inspector]
+					{
+						icInsp = ifnull(icEmp.Employee_Name,"").toString().replaceAll("\"","'");
+					}
+				}
+
+				icDate = "";
+				if(icRec.Check_Date != null)
+				{
+					icDate = icRec.Check_Date.toString("dd-MMM-yyyy");
+				}
+
+				chkJson = "{\"round\":" + ifnull(icRec.Round,0) + ",\"inspected\":" + ifnull(icRec.Qty_Inspected,0) + ",\"approved\":" + ifnull(icRec.Qty_Approved,0) + ",\"rejected\":" + ifnull(icRec.Qty_Rejected,0) + ",\"alteration\":" + ifnull(icRec.Qty_Alteration,0) + ",\"inspector\":\"" + icInsp + "\",\"checkedOn\":\"" + icDate + "\"}";
+			}
 		}
 
 		if(itemsJson != "")
@@ -261,7 +349,7 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 			itemsJson = itemsJson + ",";
 		}
 		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-		itemsJson = itemsJson + "{\"id\":\"" + k + "\",\"item\":\"" + itemName + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"qtyOrdered\":" + qtyOrdered + ",\"qtyProduced\":" + qtyProduced + ",\"status\":\"" + itemStatus + "\",\"stages\":[" + stagesByItem.get(k) + "]}";
+		itemsJson = itemsJson + "{\"id\":\"" + k + "\",\"item\":\"" + itemName + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"qtyOrdered\":" + qtyOrdered + ",\"qtyProduced\":" + qtyProduced + ",\"status\":\"" + itemStatus + "\",\"statusLabel\":\"" + statusTxt + "\",\"check\":" + chkJson + ",\"stages\":[" + stagesByItem.get(k) + "]}";
 	}
 
 	//--------------------------------------------------------------------

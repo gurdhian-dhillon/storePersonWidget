@@ -29,19 +29,17 @@
 // order has passed QC. One rule, two readers: packing can never disagree with
 // the status that let it be packed.
 //
-// FORM REQUIREMENT: QC_No must hold MORE THAN ONE record. A remade order is
-// inspected more than once, and a plain lookup holds one. Either give the lookup
-// Display Type = Multi Select, or make it a text field - the block that fills it
-// carries both lines. Nothing in this app READS Packing.QC_No, so it can also be
-// dropped entirely: Packing.Sales_Order plus Quality_Check[Sales_Order == x]
-// derives every round without storing anything.
+// FORM CHANGE: Packing.QC_No must be DELETED. It is a lookup pointing at the
+// Quality_Check form, which Checking replaces - so Creator will either refuse to
+// delete that form or leave this field dangling at one. Nothing reads it, and
+// nothing writes it any more either: see the block further down for why the
+// grain change made it unfillable rather than merely unused.
 //
 // DELUGE TRAPS GUARDED HERE:
-//  - There is no reliable `break` in a for-each. The old version relied on one
-//    to take a single QC record and stop; the loop ran on regardless, so QC_No
-//    ended up on the last round and the subform got every round's rows appended.
-//    The idiom here is "keep assigning, last write wins" - which is what the
-//    break was trying to express anyway.
+//  - There is no reliable `break` in a for-each. An old version relied on one to
+//    take a single record and stop; the loop ran on regardless and the subform
+//    got every round's rows appended. The idiom here is "keep assigning, last
+//    write wins" - which is what the break was trying to express anyway.
 //  - Query results need .count(); .size() is a List method.
 //  - A numeric field never written is an EMPTY STRING, not null and not 0.
 //    ifnull() does not catch it and toDecimal() throws on it.
@@ -51,68 +49,33 @@
 
 salesId = input.Sales_Order;
 
-input.QC_No = null;
 input.Assigned_To = null;
 input.Packing_Items.clear();
 
 if(salesId != null)
 {
 	//----------------------------------------------------------------------
-	// EVERY QC round on this order, not just one.
+	// THE QC ROUND BLOCK THAT STOOD HERE IS GONE, along with the form it read.
 	//
-	// QC_No is a MULTI SELECT lookup. A plain lookup holds one record, and a
-	// remade order is inspected more than once - round 1 passes what it can and
-	// rejects the rest, round 2 checks the remakes. Naming a single round left
-	// the packed quantities traceable to an inspection that never saw most of
-	// them. A multi select takes a LIST of record ids, assigned in one go.
+	// It gathered every Quality_Check on the order into Packing.QC_No - a multi
+	// select lookup - so a packing slip named the inspections behind it.
 	//
-	// Oldest first, so the rounds read in the order they happened.
+	// Checking replaced that at a different GRAIN. Quality_Check was one record
+	// per order per round; Item_Check is one per BATCH. A twenty-line order that
+	// went round twice produced two records before and can produce forty now, so
+	// the same field would hold a list nobody can read, naming every batch
+	// instead of summarising an inspection.
+	//
+	// Nothing is lost that this script was actually relying on. The packed
+	// quantities come from Plan_Item.Qty_Accepted below, which saveItemCheck now
+	// writes - so the figures still trace to an inspection, one line at a time
+	// and through the item rather than through a header. Which checks covered a
+	// given item is one query from the item itself: Item_Check[Plan_Item == id].
+	//
+	// Packing.QC_No must be DELETED in Creator. It is a lookup pointing at the
+	// Quality_Check form, so - exactly like Plan_Item.QC_Ref - Creator will
+	// either refuse to delete that form or leave this field dangling at one.
 	//----------------------------------------------------------------------
-	qcRecs = Quality_Check[Sales_Order == salesId] sort by Added_Time;
-
-	qcIds = List();
-	qcTxt = "";
-	roundNo = 0;
-	for each  qcRec in qcRecs
-	{
-		qcIds.add(qcRec.ID);
-
-		// Round is numbered from position, not read off the record. A QC record
-		// deleted and re-raised would leave a gap in Quality_Check.Round, and a
-		// packing slip citing "round 1, round 3" invites a hunt for a round that
-		// no longer exists.
-		roundNo = roundNo + 1;
-		if(qcTxt != "")
-		{
-			qcTxt = qcTxt + " | ";
-		}
-		// QC_Number, not QC_No - QC_No is the field on PACKING that points back
-		// here. Both forms carry a field with a similar name and they are not
-		// the same one.
-		qcTxt = qcTxt + "Round " + roundNo + ": " + ifnull(qcRec.QC_Number,"").toString();
-	}
-
-	// size() is right here - qcIds is a List, not a query result. An empty list
-	// assigned to a lookup is not the same as leaving it null, so guard it.
-	if(qcIds.size() > 0)
-	{
-		//------------------------------------------------------------------
-		// PICK ONE, depending on what QC_No ended up being on the form.
-		//
-		// A) Lookup with Display Type = Multi Select (or Checkbox). Takes a
-		//    LIST of record ids. This is the line below.
-		// B) Single line text. Swap to the commented line - and note it is a
-		//    DIFFERENT field, so the header assignment of null further up has
-		//    to move with it.
-		//
-		// What will NOT work is Creator's plain Multi Select choice field: its
-		// options are fixed at design time and QC numbers are created at
-		// runtime, so a value outside the defined list does not hold. It would
-		// work until the next QC record was raised, then quietly stop.
-		//------------------------------------------------------------------
-		input.QC_No = qcIds;
-		// input.QC_No = qcTxt;
-	}
 
 	//----------------------------------------------------------------------
 	// Every plan on the order. One order produces exactly one plan today -
@@ -159,7 +122,7 @@ if(salesId != null)
 	if(packSup != null)
 	{
 		//------------------------------------------------------------------
-		// PICK ONE, the same way QC_No above does.
+		// PICK ONE, depending on how Assigned_To was defined on the form.
 		//
 		// A) Assigned_To is a LOOKUP to Employee. It takes the record id -
 		//    this is the line below.

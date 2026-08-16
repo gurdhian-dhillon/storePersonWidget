@@ -16,6 +16,44 @@ function isCuttingPhase(name) {
 	return String(name || "").trim() === "Cutting";
 }
 
+// A batch of garments the checker sent back to be fixed rather than remade.
+//
+// Everything that differs about it hangs off this ONE server flag and never off
+// the shape of the phase list: a batch the checker sent to a single stage looks
+// exactly like a one-stage BOM, and guessing from the list would give an
+// ordinary item the alteration rules the first time somebody wrote a short BOM.
+function isAlterationItem(item) {
+	return !!item && item.isAlteration === true;
+}
+
+// What a stage is working on.
+//
+// An ordinary stage receives what the stage before it produced. An alteration
+// stage receives what the CHECKER asked to be fixed there — the whole batch is
+// physically present at every stage, because a garment that gets restitched is
+// not consumed by it. Chaining off the previous log would do two wrong things at
+// once: carry one stage's "7 to alter" into every stage after it, and read a
+// Qty_Out that the server writes equal to Qty_In by definition.
+function stageQtyIn(item, phases, idx) {
+	if (isAlterationItem(item)) return Number(phases[idx].plannedQty) || 0;
+	return qtyInFor(item, phases, idx);
+}
+
+// Four kinds of batch and they must never collapse into one another: a
+// replacement is cloth he spoiled on the floor, a failed check came back from
+// the inspector days later, and an alteration is the garment being SAVED rather
+// than made again. One helper because the item card and the order-finished
+// summary both print this — two copies of the branch is how two screens end up
+// describing the same item differently.
+function remakeTagText(reason) {
+	if (reason === "Production_Loss") return "Replacement batch";
+	if (reason === "Alteration") return "Alteration batch";
+	// An empty reason reads as a rejection on purpose. A batch of unknown cause
+	// is more honestly a failed check than an alteration, which would promise
+	// alteration stages that do not exist.
+	return "Failed checking";
+}
+
 // Waste rows being edited in the End dialog. Kept flat with a rowKey so add and
 // delete do not have to reason about array indices shifting under them.
 let wasteDraft = [];
@@ -579,6 +617,13 @@ function renderItemCard(plan, item, index) {
 	} else if (item.status === "Ready_For_Production") {
 		statusText = "Ready to start";
 		statusColor = "#2563eb"; // Blue
+	} else if (item.status === "Awaiting_Check") {
+		// Production is finished and the inspector has not been yet. Without its
+		// own branch this falls into the catch-all below, which sees every stage
+		// closed and prints "Finishing" — neither a stage any more nor what is
+		// actually happening to the garments.
+		statusText = "Waiting for checking";
+		statusColor = "#0891b2"; // Teal — done, not an error, not finished either
 	} else if (item.status === "Complete") {
 		statusText = "Completed";
 		statusColor = "#16a34a"; // Green
@@ -618,17 +663,15 @@ function renderItemCard(plan, item, index) {
                     <span class="item-qty">${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"} to produce</span>
                     <span class="item-status-badge" style="color:${statusColor}; font-weight:600; font-size:0.8rem; background: ${statusColor}15; padding: 0.1rem 0.5rem; border-radius: 1rem;">${statusText}</span>
                     ${
-		// Two kinds now, and they mean different things to
-		// him. A QC remake replaces a piece that failed
-		// inspection days later; a replacement batch
-		// replaces one he lost on the floor and asked for
-		// cloth for. One label for both left him guessing
+		// Three kinds now, and they mean different things to
+		// him. A failed check replaces a piece the inspector
+		// rejected days later; a replacement batch replaces
+		// one he lost on the floor and asked for cloth for;
+		// an alteration is the same garments coming back to
+		// be fixed. One label for all three left him guessing
 		// which — and only one of them is his to explain.
 		item.isRemake
-			? `<span class="remake-tag">${item.remakeReason === "Production_Loss"
-				? "Replacement batch"
-				: "QC remake"
-			}</span>`
+			? `<span class="remake-tag${isAlterationItem(item) ? " is-alteration" : ""}">${remakeTagText(item.remakeReason)}</span>`
 			: ""
 		}
                 </div>
@@ -821,9 +864,41 @@ function renderItemCard(plan, item, index) {
 
 	const hasPhases = item.phases && item.phases.length > 0;
 	const started = (item.logs || []).length > 0 || revealedItems.has(item.id);
+	const isAlt = isAlterationItem(item);
+
+	// Only an alteration batch may ask for material out of the blue. Everywhere
+	// else the question is asked for him, when a stage closes with fewer pieces
+	// out than went in — and an alteration stage never does, so without this
+	// button he cannot ask for so much as a reel of thread while fixing a batch.
+	const reqMatBtn = isAlt
+		? `<button type="button" class="damage-btn btn-request-material">Request material</button>`
+		: "";
+
+	// THE ONLY WAY AN ALTERATION BATCH REACHES THE CHECKER.
+	//
+	// Its stages cannot answer how many garments survived — one garment can be
+	// worked at two of them, so the figures cannot be added up without knowing
+	// which overlap, and nobody records that. So the count is declared once,
+	// here, and Awaiting_Check is reachable through nothing else. If the batch
+	// could slip past this, the shortfall would surface weeks later as an order
+	// that will not close.
+	//
+	// canCloseAlteration is the server's own answer to "every stage done and no
+	// material outstanding". closeAlterationBatch re-tests both and refuses with
+	// STAGES_OPEN / MATERIAL_PENDING regardless — this only avoids offering a
+	// button that would be turned down.
+	const closeAltBtn =
+		isAlt && item.canCloseAlteration === true
+			? `<button type="button" class="primary-btn btn-close-alteration">Alteration finished</button>`
+			: "";
 
 	if (!hasPhases) {
-		phHtml += `<div style="text-align:center; color:var(--text-muted); padding:2rem;">No phases found in BOM.</div>`;
+		// An alteration batch has no BOM to be missing — its stages are the ones
+		// the checker named, so an empty list means the check wrote none and
+		// saying "BOM" would send him looking in the wrong place.
+		phHtml += isAlt
+			? `<div style="text-align:center; color:var(--text-muted); padding:2rem;">No alteration stages were recorded for this batch.</div>`
+			: `<div style="text-align:center; color:var(--text-muted); padding:2rem;">No phases found in BOM.</div>`;
 	} else if (!started) {
 		// Nothing to log until he actually begins, so the flow stays out of the
 		// way and the card is just "here is your material, ready when you are".
@@ -832,6 +907,7 @@ function renderItemCard(plan, item, index) {
                 <div class="start-prod-row" style="background:#f8fafc; border-color:#e2e8f0; opacity: 0.8;">
                     <button type="button" class="primary-btn" disabled style="background:var(--text-muted); cursor:not-allowed;">Cannot start yet</button>
                     <span class="start-prod-note">Nothing to cut until the store issues the material · ${item.phases.length} stages · ${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"}</span>
+                    ${reqMatBtn}
                 </div>
             `;
 		} else {
@@ -842,7 +918,8 @@ function renderItemCard(plan, item, index) {
 			phHtml += `
                 <div class="start-prod-row">
                     <button type="button" class="primary-btn btn-start-production">Start production</button>
-                    <span class="start-prod-note">${item.phases.length} stages · ${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"}</span>
+                    <span class="start-prod-note">${item.phases.length} ${isAlt ? "stages to alter" : "stages"} · ${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"}</span>
+                    ${reqMatBtn}
                     <button type="button" class="outsource-btn"></button>
                 </div>
             `;
@@ -858,7 +935,9 @@ function renderItemCard(plan, item, index) {
 
 		phHtml += `
             <div class="section-title section-title-row" style="margin-bottom:0.5rem;">
-                <span>Production Flow</span>
+                <span>${isAlt ? "Alteration stages" : "Production Flow"}</span>
+                ${reqMatBtn}
+                ${closeAltBtn}
                 <button type="button" class="outsource-btn"></button>
             </div>`;
 		phHtml += `<div class="flow-trail"><div class="flow-trail-track">`;
@@ -884,7 +963,7 @@ function renderItemCard(plan, item, index) {
 
 			const log = (item.logs || []).find((l) => l.phase === phase.operation);
 			const state = phaseState(log);
-			const qtyIn = qtyInFor(item, item.phases, idx);
+			const qtyIn = stageQtyIn(item, item.phases, idx);
 
 			// Sequence_No is 10/20/30 for insertion room — showing "10." reads
 			// as a step number when this is step 1 of 5.
@@ -903,12 +982,21 @@ function renderItemCard(plan, item, index) {
 					? `<span class="stage-who">${doneShares
 						.map(
 							(a) =>
-								`<span class="stage-who-one">${operatorName(a.operator) || "Not recorded"} <b>${Number(a.qtyOut) || 0}</b> <span class="unit">pcs</span></span>`,
+								`<span class="stage-who-one">${operatorName(a.operator) || "Not recorded"} <b>${Number(isAlt ? a.assigned : a.qtyOut) || 0}</b> <span class="unit">pcs</span></span>`,
 						)
 						.join("")}</span>`
 					: operatorName(log.operator)
 						? `<span>by <b>${operatorName(log.operator)}</b></span>`
 						: "";
+
+				// "in 7 → out 7" on an alteration stage is a sum that answers
+				// nothing: the server writes Qty_Out equal to Qty_In because the
+				// row records WORK, not attrition. What the stage is actually
+				// about is how many of the batch had to be fixed here, so that is
+				// what it says.
+				const doneQtyHtml = isAlt
+					? `<span><b>${qtyIn}</b> altered of <b>${item.qty}</b> in the batch</span>`
+					: `<span>in <b>${log.qtyIn}</b> &rarr; out <b>${log.qtyOut}</b></span>`;
 
 				phHtml += `
                     <div class="stage-card is-done" data-phase="${phase.operation}">
@@ -917,7 +1005,7 @@ function renderItemCard(plan, item, index) {
                             <span class="stage-status">Completed</span>
                         </div>
                         <div class="stage-summary">
-                            <span>in <b>${log.qtyIn}</b> &rarr; out <b>${log.qtyOut}</b></span>
+                            ${doneQtyHtml}
                             <span>${hhmm(log.start)} &ndash; ${hhmm(log.end)}</span>
                             ${whoHtml}
                             ${log.remarks ? `<span class="stage-remark">${log.remarks}</span>` : ""}
@@ -1245,6 +1333,32 @@ function renderItemCard(plan, item, index) {
 			btnOs.textContent = "Send to third party";
 			btnOs.addEventListener("click", () => openSendDialog(plan, item));
 		}
+	}
+
+	// Alteration batches only. Opens the damage dialog in its MANUAL mode — no
+	// third argument — where the spoiled-piece count starts at 0 and he types
+	// what he needs. Everywhere else the dialog is opened for him when a stage
+	// closes short, and an alteration stage never closes short by construction.
+	//
+	// Checked at CLICK time, not render time, for the same reason the outsource
+	// button above is: removing it when reissue.js is missing turns "you forgot
+	// to upload a file" into "the feature does not exist".
+	const btnReqMat = body.querySelector(".btn-request-material");
+	if (btnReqMat) {
+		btnReqMat.addEventListener("click", () => {
+			if (typeof openDamageDialog !== "function") {
+				alert("Cannot open the material request — js/reissue.js is not loaded.");
+				return;
+			}
+			openDamageDialog(plan, item);
+		});
+	}
+
+	const btnCloseAlt = body.querySelector(".btn-close-alteration");
+	if (btnCloseAlt) {
+		btnCloseAlt.addEventListener("click", () =>
+			openCloseAlterationDialog(plan, item),
+		);
 	}
 
 
@@ -1685,6 +1799,151 @@ function closeOrderDone() {
 	if (typeof next === "function") next();
 }
 
+// ---------------------------------------------------------------------------
+// Closing an alteration batch
+//
+// THE ONE NUMBER THAT CANNOT BE DERIVED. Everywhere else in production a
+// stage's Qty_Out says how many came through. An alteration batch has no such
+// figure: the garments travel as one pile through the stages the checker named,
+// one garment can be worked at two of them, and adding the stages up would
+// count those twice. So how many are going back is DECLARED, once, by the man
+// holding the pile.
+//
+// He may only reduce it. A batch cannot return more garments than went into it,
+// and the server refuses that too — this just avoids letting him type it.
+// ---------------------------------------------------------------------------
+
+function altCloseEl() {
+	let el = document.getElementById("alt-close-modal");
+	if (!el) {
+		el = document.createElement("div");
+		el.id = "alt-close-modal";
+		el.className = "waste-modal hidden";
+		document.body.appendChild(el);
+	}
+	return el;
+}
+
+function closeAltDialog() {
+	altCloseEl().classList.add("hidden");
+}
+
+function openCloseAlterationDialog(plan, item) {
+	const el = altCloseEl();
+	const size = Number(item.qty) || 0;
+
+	// The last stage by sequence, so a shortfall can be attributed somewhere on
+	// the damage report. Approximate on purpose: nothing computes from it, which
+	// is exactly why it is safe to ask for and safe to guess at.
+	const phases = (item.phases || []).slice().sort((a, b) => a.sequence - b.sequence);
+	const lastPhase = phases.length ? phases[phases.length - 1].operation : "";
+
+	el.classList.remove("hidden");
+	el.innerHTML = `
+        <div class="waste-panel">
+            <div class="waste-head">
+                <div>
+                    <h3>Alteration finished</h3>
+                    <p>${item.name} &middot; ${size} ${size === 1 ? "garment" : "garments"} went out for alteration.</p>
+                </div>
+            </div>
+
+            <div class="alt-close-body">
+                <label for="alt-return-qty">How many are going back for checking?</label>
+                <input type="number" id="alt-return-qty" min="0" max="${size}" step="1" value="${size}">
+                <p class="alt-close-hint">Anything short of ${size} is treated as garments lost during the
+                alteration, and you will be asked what happened to them.</p>
+            </div>
+
+            <p class="alt-close-error hidden" id="alt-close-error"></p>
+
+            <div class="waste-actions">
+                <button type="button" class="ghost-btn" id="alt-close-cancel">Cancel</button>
+                <button type="button" class="primary-btn" id="alt-close-save">Send for checking</button>
+            </div>
+        </div>`;
+
+	document.getElementById("alt-close-cancel").addEventListener("click", closeAltDialog);
+	document.getElementById("alt-close-save").addEventListener("click", () => {
+		const errEl = document.getElementById("alt-close-error");
+		const qty = Number(document.getElementById("alt-return-qty").value);
+		const btn = document.getElementById("alt-close-save");
+
+		if (!isFinite(qty) || qty < 0 || qty > size) {
+			errEl.textContent = `Enter a number between 0 and ${size}.`;
+			errEl.classList.remove("hidden");
+			return;
+		}
+
+		errEl.classList.add("hidden");
+		btn.disabled = true;
+		btn.textContent = "Saving…";
+
+		ZOHO.CREATOR.DATA.invokeCustomApi({
+			api_name: "closeAlterationBatch",
+			http_method: "POST",
+			payload: {
+				payloadJson: JSON.stringify({
+					planItemId: String(item.id),
+					supervisorId: String(currentSupervisorId() || ""),
+					qtyReturning: qty,
+					note: "",
+				}),
+			},
+		})
+			.then((response) => {
+				console.log("closeAlterationBatch raw:", response);
+				let parsed;
+				try {
+					parsed = JSON.parse(response.result);
+				} catch (e) {
+					parsed = null;
+				}
+
+				if (!parsed || !parsed.success) {
+					btn.disabled = false;
+					btn.textContent = "Send for checking";
+					// Shown verbatim: STAGES_OPEN and MATERIAL_PENDING come back
+					// worded for the man reading them, and rewording them here
+					// would only make the two disagree.
+					errEl.textContent = parsed && parsed.error
+						? parsed.error
+						: "The server did not accept it.";
+					errEl.classList.remove("hidden");
+					return;
+				}
+
+				closeAltDialog();
+
+				const lost = Number(parsed.qtyLost) || 0;
+				// Asked AFTER the save, so the batch is already recorded and a
+				// cancelled damage report cannot undo it. The garments are gone
+				// either way; the material question is a separate one he may not
+				// be able to answer standing there.
+				const askDamage =
+					lost > 0 && typeof openDamageDialog === "function"
+						? () =>
+							openDamageDialog(plan, item, {
+								pieces: lost,
+								phaseName: lastPhase,
+								stageLogId: "",
+							})
+						: null;
+
+				fetchAllData(function () {
+					if (askDamage) askDamage();
+				});
+			})
+			.catch((err) => {
+				console.error("closeAlterationBatch failed:", err);
+				btn.disabled = false;
+				btn.textContent = "Send for checking";
+				errEl.textContent = "Could not reach the server. " + String(err);
+				errEl.classList.remove("hidden");
+			});
+	});
+}
+
 function showOrderCompleteDialog(data) {
 	const el = orderDoneEl();
 	const rows = data.summary || [];
@@ -1798,6 +2057,17 @@ function wasteDialogEl() {
 	return el;
 }
 
+// Lots the item's cloth came off, per material, from the prediction.
+let wasteLotsByMat = {};
+
+// Only pre-select when there is nothing to choose. Two lots means the cloth was
+// split, and nothing on the bench says which roll a given remnant came off —
+// picking the bigger one would put a tone on the piece that might be a lie.
+function defaultLotFor(materialId) {
+	const lots = wasteLotsByMat[String(materialId)] || [];
+	return lots.length === 1 ? String(lots[0].lotId) : "";
+}
+
 function openWasteDialog(plan, item, qtyOut) {
 	const el = wasteDialogEl();
 	el.classList.remove("hidden");
@@ -1821,18 +2091,71 @@ function openWasteDialog(plan, item, qtyOut) {
 				};
 			}
 			wasteFabricOptions = data.fabricOptions || [];
+			// WHICH LOT EACH FABRIC CAME OFF, keyed by material. An offcut goes
+			// back to the lot it was cut from, so the row has to name one — and
+			// when the cloth came off two lots only he can say which.
+			wasteLotsByMat = {};
+			(data.fabrics || []).forEach((f) => {
+				wasteLotsByMat[String(f.materialId)] = f.lots || [];
+			});
+			// ONE ROW PER PHYSICAL THING, counted — not one row per source.
+			//
+			// The prediction emits a row per ORIGIN: the side strip off this
+			// lot, the part-filled row off that one, the tail. Several of those
+			// are routinely the same offcut described twice, so the dialog was
+			// showing six identical lines each reading "1" where the rack will
+			// hold six identical pieces. That is a worse description of the same
+			// fact, and he has to check every line of it before saving.
+			//
+			// Merged on fabric + lot + size. LOT IS IN THE KEY deliberately:
+			// same size, different tone is not the same piece, and merging those
+			// would send an offcut back to the wrong lot.
+			//
+			// `origin` is dropped, as it always was here — nothing in this dialog
+			// reads it. The prediction keeps its per-origin breakdown for the
+			// admin audit screen, which is where that working belongs.
 			wasteDraft = [];
+			const wasteMerge = {};
 			(data.fabrics || []).forEach((f) => {
 				(f.waste || []).forEach((w) => {
-					wasteDraft.push({
+					const matId = String(w.materialId);
+					const count = Number(w.count) || 0;
+					if (count <= 0) return;
+
+					const lotId = w.lotId ? String(w.lotId) : defaultLotFor(matId);
+					const length = Number(w.length) || 0;
+					const width = Number(w.width) || 0;
+
+					// An unplaced piece on a material with SEVERAL lots stays its
+					// own row. He may know which lot it came off even though the
+					// prediction could not, and merging would take that choice
+					// away — he could only get it back by splitting the row again
+					// by hand.
+					const unplaced =
+						!lotId && (wasteLotsByMat[matId] || []).length > 1;
+					const key = `${matId}|${lotId}|${length.toFixed(2)}|${width.toFixed(2)}`;
+
+					if (!unplaced && wasteMerge[key]) {
+						wasteMerge[key].count += count;
+						return;
+					}
+
+					const row = {
 						key: ++wasteRowSeq,
-						materialId: String(w.materialId),
-						width: w.width,
-						length: w.length,
-						count: w.count,
+						materialId: matId,
+						width: width,
+						length: length,
+						count: count,
 						keep: true,
 						predicted: true,
-					});
+						// The prediction knows which lot this remnant was cut
+						// from — each lot's cloth is cut separately, so the row
+						// carries its own answer rather than a per-material
+						// guess. Blank only where the cloth could not be placed.
+						lotId: lotId,
+					};
+					if (!unplaced) wasteMerge[key] = row;
+					wasteDraft.push(row);
 				});
 			});
 			renderWasteDialog(data.errors || []);
@@ -1845,6 +2168,42 @@ function openWasteDialog(plan, item, qtyOut) {
 				"Could not reach the server — you can still enter the waste by hand.",
 			]);
 		});
+}
+
+// One lot: shown, not asked about. Two: he picks, and it starts blank so an
+// unanswered row is visibly unanswered rather than silently wrong. None: the
+// handover predates lots, and saying so beats an empty box.
+function lotCellHtml(r) {
+	const lots = wasteLotsByMat[String(r.materialId)] || [];
+
+	// The prediction already placed this piece — show what it decided rather
+	// than asking again. He can still change it by editing the row's fabric.
+	if (r.lotId) {
+		const named = lots.find((l) => String(l.lotId) === String(r.lotId));
+		if (named && lots.length === 1) {
+			return `<span class="w-lot-fixed">${escapeHtml(named.lotNumber || "—")}</span>`;
+		}
+		if (named) {
+			const opts = lots
+				.map(
+					(l) =>
+						`<option value="${l.lotId}" ${String(l.lotId) === String(r.lotId) ? "selected" : ""}>${escapeHtml(l.lotNumber || "—")}</option>`,
+				)
+				.join("");
+			return `<select class="w-lot" ${r.keep ? "" : "disabled"}>${opts}</select>`;
+		}
+	}
+
+	if (lots.length === 0) return `<span class="w-lot-none">not recorded</span>`;
+	if (lots.length === 1) return `<span class="w-lot-fixed">${escapeHtml(lots[0].lotNumber || "—")}</span>`;
+
+	const opts = lots
+		.map(
+			(l) =>
+				`<option value="${l.lotId}" ${String(l.lotId) === String(r.lotId) ? "selected" : ""}>${escapeHtml(l.lotNumber || "—")}</option>`,
+		)
+		.join("");
+	return `<select class="w-lot" ${r.keep ? "" : "disabled"}><option value="">Which lot?</option>${opts}</select>`;
 }
 
 function renderWasteDialog(errors) {
@@ -1865,6 +2224,7 @@ function renderWasteDialog(errors) {
 			return `
             <tr data-key="${r.key}" class="${r.keep ? "" : "w-discarded"}">
                 <td><select class="w-mat" ${r.keep ? "" : "disabled"}>${sel}</select></td>
+                <td>${lotCellHtml(r)}</td>
                 <td><input type="number" class="w-length" min="0" step="0.01" value="${r.length}" ${r.keep ? "" : "disabled"}></td>
                 <td><input type="number" class="w-width" min="0" step="0.01" value="${r.width}" ${r.keep ? "" : "disabled"}></td>
                 <td><input type="number" class="w-count" min="1" step="1" value="${r.count}" ${r.keep ? "" : "disabled"}></td>
@@ -1889,13 +2249,20 @@ function renderWasteDialog(errors) {
                 <table>
                     <thead><tr>
                         <th>Fabric</th>
+                        <th>Back to lot</th>
                         <th class="col-num">Length (cm)</th>
                         <th class="col-num">Width (cm)</th>
-                        <th class="col-num">Pieces to cut</th>
+                        <!-- NOT "Pieces to cut" — that is the materials table's
+                             heading and means garment pieces still to be cut.
+                             Here the row already IS one offcut of a given size,
+                             so the number is simply how many of them there are.
+                             The two tables sit two clicks apart and the shared
+                             wording made this column read as work outstanding. -->
+                        <th class="col-num">How many</th>
                         <th></th>
                     </tr></thead>
                     <tbody id="waste-rows">
-                        ${rows || `<tr><td colspan="5" class="waste-empty">No waste — nothing will be sent back to the store.</td></tr>`}
+                        ${rows || `<tr><td colspan="6" class="waste-empty">No waste — nothing will be sent back to the store.</td></tr>`}
                     </tbody>
                 </table>
             </div>
@@ -1934,6 +2301,7 @@ function renderWasteDialog(errors) {
 		wasteDraft.push({
 			key: ++wasteRowSeq,
 			materialId: opts[0].materialId,
+			lotId: defaultLotFor(opts[0].materialId),
 			width: 0,
 			length: 0,
 			count: 1,
@@ -1958,7 +2326,13 @@ function syncWasteDraft() {
 		const key = Number(tr.getAttribute("data-key"));
 		const row = wasteDraft.find((r) => r.key === key);
 		if (!row || !row.keep) return;
+		const prevMat = row.materialId;
 		row.materialId = tr.querySelector(".w-mat").value;
+
+		const lotSel = tr.querySelector(".w-lot");
+		if (lotSel) row.lotId = lotSel.value;
+		// Changing the fabric invalidates the lot — it belonged to the old one.
+		if (row.materialId !== prevMat) row.lotId = defaultLotFor(row.materialId);
 		row.width = Number(tr.querySelector(".w-width").value) || 0;
 		row.length = Number(tr.querySelector(".w-length").value) || 0;
 		row.count = Number(tr.querySelector(".w-count").value) || 0;
@@ -1989,6 +2363,21 @@ function confirmWaste() {
 		return;
 	}
 
+	// Only when there was a choice to make. One lot is filled in already, and a
+	// pre-lot handover has none to give.
+	const noLot = wasteDraft.find(
+		(r) =>
+			r.keep &&
+			(wasteLotsByMat[String(r.materialId)] || []).length > 1 &&
+			!r.lotId,
+	);
+	if (noLot) {
+		alert(
+			"This fabric was issued to you off two lots. Say which one each piece came off, so it goes back to the right one.",
+		);
+		return;
+	}
+
 	const pieces = wasteDraft
 		.filter((r) => r.width > 0 && r.length > 0 && r.count > 0)
 		.map((r) => ({
@@ -1996,6 +2385,7 @@ function confirmWaste() {
 			width: r.width,
 			length: r.length,
 			count: r.count,
+			lotId: r.lotId || "",
 			// false lands as Scrapped rather than Pending_Receipt, so thrown-away
 			// cloth stays reportable instead of vanishing.
 			keep: r.keep,

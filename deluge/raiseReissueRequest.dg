@@ -27,7 +27,8 @@ string raiseReissueRequest(string payloadJson)
 	// into that whole class of bug for no gain.
 	//
 	// FIELDS THIS NEEDS ADDING to Material_Requirement:
-	//   Source        Dropdown - Plan / Reissue / QC_Remake   (default Plan)
+	//   Source        Dropdown - Plan / Reissue / Check_Remake / Alteration
+	//                                                          (default Plan)
 	//   Damage_Ref    Lookup   -> Material_Damage
 	//   Reason        Multi Line
 	//   Reported_On   Date
@@ -140,6 +141,29 @@ string raiseReissueRequest(string payloadJson)
 				targetItem = dmg.Remake_Item;
 			}
 
+			//----------------------------------------------------------
+			// WHICH BUCKET THE CLOTH FALLS IN.
+			//
+			// Rework material and production spoilage are the two things the
+			// consumption report most needs told apart. Folded into one Source,
+			// cloth spent fixing garments becomes indistinguishable from cloth
+			// ruined at the cutting table, and "why was there extra?" stops
+			// being answerable at all.
+			//
+			// Derived from the RESOLVED target - the batch the material is
+			// actually for - not from the payload and not from the item the
+			// damage was reported against. Those differ whenever a damage report
+			// spawned a remake batch.
+			//
+			// Resolved once per damage record. The line loop below runs per
+			// Damage_Lines row and every row of one record shares this answer.
+			//----------------------------------------------------------
+			srcTxt = "Reissue";
+			if(Alteration_Stage[Plan_Item == targetItem].count() > 0)
+			{
+				srcTxt = "Alteration";
+			}
+
 			dmgNote = ifnull(dmg.Note,"").toString().trim();
 			if(dmgNote == "")
 			{
@@ -211,7 +235,7 @@ string raiseReissueRequest(string payloadJson)
 						Required_Pieces=pS.toDecimal().toLong()
 						Pieces_From_Waste=0
 						Pieces_From_Raw=0
-						Source="Reissue"
+						Source=srcTxt
 						Reason=whyTxt
 						Added_User=zoho.loginuser
 					];

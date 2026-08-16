@@ -622,15 +622,84 @@ Nothing here is reversible once items start landing at `Awaiting_Check`, so the 
    lookup pointing at that form, and Creator will either refuse the deletion or leave the field
    dangling. `Check_Ref` replaces it and existing records simply have none.
 
-**Do the flip when nothing is sitting between `Production Complete` and `QC Passed`.** Items
-already `Complete` when step 4 lands will never be checked — they are finished under the old
-rules and that is fine — but an order mid-QC when step 5 deletes the form has no way forward.
-Clear those first.
-
 **The data wipe removes the migration risk, not the ordering.** With no live records there is
 nothing to strand, so the old picklist values can simply go. The build order above still holds:
 `saveProductionPhase` must not start writing `Awaiting_Check` before there is a checker widget to
 drain the queue.
+
+---
+
+## Deployment runbook
+
+Nothing in this repo runs until it is pasted into Creator. Nine files, and the order between them
+is not arbitrary — each group is safe to stop at.
+
+### A — inert. Nothing behaves differently yet.
+
+| Paste | Into |
+|---|---|
+| `recheckOrderComplete.dg` | a plain function — **no Custom API** |
+| `getCheckingQueue.dg` | new Custom API, POST, arg `inspectorId` |
+| `saveItemCheck.dg` | new Custom API, POST, arg `payloadJson` |
+| `closeAlterationBatch.dg` | new Custom API, POST, arg `payloadJson` |
+
+Upload `app/checker/`. Nothing writes `Awaiting_Check` yet, so **the queue is correctly empty** —
+that is the expected first result, not a failure. Use Creator's **Execute** on each function here:
+this is the last moment a mistake costs nothing, and the widget only ever sees "code 9430".
+
+`getCheckingQueue` is the **first reader of `Item_Check` in the repo**, so its field names came
+from this document rather than from a function that writes them. If a link name is wrong, this is
+where it surfaces.
+
+### B — still inert, but now the supervisor's screen can drive it.
+
+`getProductionWidgetData.dg`, `raiseReissueRequest.dg`, `production.js`, `app/supervisor/css/`.
+
+Alteration batches cannot exist yet — only `saveItemCheck` creates them, and nothing reaches it —
+so this changes nothing visible. It has to be in place first, because the moment group C lands the
+first check can produce a batch, and a batch with no screen to work it is stuck.
+
+### C — THE FLIP. One file, and it is one-way.
+
+`saveProductionPhase.dg`. From this paste every finished item goes to `Awaiting_Check` instead of
+`Complete`, and the checker is on the critical path for every order.
+
+Before pasting: **no order sitting between `Production Complete` and `QC Passed`.** Anything
+mid-QC has to be finished through the old form first — group D deletes it.
+
+Items already `Complete` when this lands were finished under the old rules and will never be
+checked. That is correct and needs no repair.
+
+### D — retire QC. Only once C is proven on a real order.
+
+1. Add the `Short_Closed` workflow on `Sales_Order` calling `recheckOrderComplete`. **Do this
+   first** — until it exists, ticking `Short_Closed` does nothing at all, and that is the only way
+   to close an order short of pieces nobody will remake.
+2. Paste `packingAutoPopulate.dg` and `getSupervisorProductionHistory.dg`.
+3. **Drop BOTH lookups at `Quality_Check` before deleting the form**, not after — Creator will
+   either refuse the deletion or leave them dangling:
+   - `Plan_Item.QC_Ref`
+   - **`Packing.QC_No`** — easy to miss. `packingAutoPopulate` filled it with every QC round on
+     the order. Checking works at a different grain (one `Item_Check` per *batch*, not one per
+     order per round), so a twenty-line order that went round twice would put forty entries in a
+     field meant to name an inspection. The block that filled it is gone; the packed quantities
+     still trace to an inspection through `Plan_Item.Qty_Accepted`, one line at a time.
+4. Delete the `Quality_Check` form, both its workflows and its subform. Delete
+   `Sales_Order.Ready_For_QC`.
+5. Delete `qcAutoPopulate.dg` and `createRemakeItems.dg` from this repo.
+6. Remove `Finishing` from the `BOM.Production_Stages.Operation` picklist and from every BOM
+   listing it.
+
+### What to watch on the first real order
+
+- The inspector picker falls back to **every employee** until someone has `Designation = Quality
+  Inspector` with `Status = Active`. The function logs which state it is in — that is the fallback
+  firing, not a bug.
+- A **bare HTTP 500 with no error card** is almost always Creator's statement-execution limit,
+  which is not catchable and so cannot report itself. `getCheckingQueue` and
+  `getProductionWidgetData` are the two most exposed.
+- First alteration batch: check the stages appear in **BOM order**, not the order the inspector
+  typed them.
 
 ---
 
