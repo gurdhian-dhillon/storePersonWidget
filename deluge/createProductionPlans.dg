@@ -13,7 +13,7 @@ string createProductionPlans()
 	// ever looks at it again.
 	//
 	// Sales_Order.Order_Status: Pending -> In Progress -> Production Complete ->
-	// QC Passed -> Packed -> Dispatched. Only the first hop belongs to this
+	// Checking Passed -> Packed -> Dispatched. Only the first hop belongs to this
 	// function; saveProductionPhase makes the second when the plan finishes.
 	//
 	// Note it is a DIFFERENT field from Production_Planning.Order_Status, and the

@@ -428,7 +428,7 @@ string saveProductionPhase(string payloadJson)
 						// FORWARD ONLY. This block re-runs on every stage save,
 						// and allItemsDone stays true once it is true - so a
 						// re-saved last stage would come back through here after
-						// QC had passed the order and drag it from QC Passed back
+						// QC had passed the order and drag it from Checking Passed back
 						// to Production Complete, silently, putting it in front of
 						// QC a second time. Same rule resolveDispute uses on the
 						// plan and receiveMaterials uses on Item_Status: a status

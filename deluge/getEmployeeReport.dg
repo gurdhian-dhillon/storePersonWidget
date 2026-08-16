@@ -74,7 +74,7 @@ string getEmployeeReport(string dateTxt)
 		pendingCount = Sales_Order[Order_Status == "Pending"].count();
 		inProgressCount = Sales_Order[Order_Status == "In Progress"].count();
 		completedCount = Sales_Order[Order_Status == "Production Complete"].count();
-		qcCount = Sales_Order[Order_Status == "QC Passed"].count();
+		qcCount = Sales_Order[Order_Status == "Checking Passed"].count();
 		packedCount = Sales_Order[Order_Status == "Packed"].count();
 		dispatchedCount = Sales_Order[Order_Status == "Dispatched"].count();
 	}
