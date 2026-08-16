@@ -640,8 +640,19 @@ function renderItemCard(plan, item, index) {
 			});
 			if (pIdx < sortedPhases.length) {
 				currentPhase = "At " + sortedPhases[pIdx].operation;
+			} else if (isAlterationItem(item)) {
+				// The ONLY way to be In_Production with every stage closed. An
+				// ordinary item's last stage sets Awaiting_Check and is caught
+				// above; an alteration batch is deliberately left here until the
+				// supervisor declares how many garments are going back, because
+				// no stage figure can answer that.
+				//
+				// "Finishing" was the old fallback and is now doubly wrong: it
+				// is not a stage any more, and it reads as work still happening
+				// when what is actually needed is one number from him.
+				currentPhase = "Alteration done — declare returns";
 			} else {
-				currentPhase = "Finishing";
+				currentPhase = "Production finished";
 			}
 		}
 		statusText = currentPhase;
