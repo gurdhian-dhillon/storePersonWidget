@@ -339,7 +339,6 @@ string getProductionWidgetData(string supervisorId, string planId)
 				altHasRows = false;
 				altOpen = 0;
 				altMatShort = 0;
-				altMatOpen = 0;
 
 				phasesJson = "";
 
