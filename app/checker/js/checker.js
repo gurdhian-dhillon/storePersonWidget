@@ -127,14 +127,14 @@ function fillSupervisors(serverChoice) {
     var keep = sel.value;
     sel.innerHTML = '<option value="">Choose supervisor…</option>';
 
-    // Spelled out rather than a bare "(1)". The count is here so he can see who
-    // has work without picking each name in turn — but a number in brackets
-    // after a person's name reads as an employee id, or as the way two people
-    // with one name are told apart. Neither is what it means.
+    // Just the name. The count belongs on the "To check" tab badge, which
+    // already carries it for whoever is selected — repeating it here said the
+    // same thing twice, and a number beside a person's name reads as an
+    // employee id anyway. The server still sends `count`; nothing renders it.
     QUEUE.supervisors.forEach(function (s) {
         var o = document.createElement('option');
         o.value = s.id;
-        o.textContent = s.name + ' — ' + num(s.count) + ' waiting';
+        o.textContent = s.name;
         sel.appendChild(o);
     });
 
