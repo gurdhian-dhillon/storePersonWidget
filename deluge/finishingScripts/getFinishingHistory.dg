@@ -16,7 +16,12 @@ string getFinishingHistory()
 			
 			for each pi in planItemRec
 			{
-				itemName = ifnull(pi.Item_Name, "").toString().replaceAll("\"", "'");
+				itemNameClean = ifnull(pi.Item_Name, "").toString();
+				itemNameClean = itemNameClean.replaceAll("(Alteration Batch)", "");
+				itemNameClean = itemNameClean.replaceAll("(alteration batch)", "");
+				itemNameClean = itemNameClean.replaceAll("Alteration Batch", "");
+				itemNameClean = itemNameClean.replaceAll("alteration batch", "");
+				itemName = itemNameClean.replaceAll("\"", "'").trim();
 				planRec = Production_Planning[ID == pi.Plan];
 				for each p in planRec
 				{

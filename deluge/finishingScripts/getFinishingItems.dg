@@ -42,7 +42,12 @@ string getFinishingItems(string planNo)
 				// Resolve details from Plan_Item and Production_Planning
 				for each pi in Plan_Item[ID == itemId]
 				{
-					itemName = ifnull(pi.Item_Name, "").toString().replaceAll("\"", "'");
+					itemNameClean = ifnull(pi.Item_Name, "").toString();
+					itemNameClean = itemNameClean.replaceAll("(Alteration Batch)", "");
+					itemNameClean = itemNameClean.replaceAll("(alteration batch)", "");
+					itemNameClean = itemNameClean.replaceAll("Alteration Batch", "");
+					itemNameClean = itemNameClean.replaceAll("alteration batch", "");
+					itemName = itemNameClean.replaceAll("\"", "'").trim();
 					for each imRec in Item_Master[ID == pi.Item_Sku]
 					{
 						skuTxt = ifnull(imRec.SKU, "").toString().replaceAll("\"", "'");
