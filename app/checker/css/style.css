@@ -249,3 +249,14 @@ body {
 .hist-fail.is-clean { color: var(--text-muted); background: #f1f5f9; }
 .hist-alt { font-size: 0.8rem; color: var(--alt); margin-top: 0.45rem; }
 .hist-remarks { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.45rem; font-style: italic; }
+
+/* Who judged this batch. Sits at the top of the dialog, before any number is
+   typed, because it is the first thing anyone asks when a rejection is
+   disputed — and the save is refused without it. */
+.insp-row { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.9rem; }
+.insp-row label { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); }
+.insp-row select {
+    font-family: inherit; font-size: 0.88rem; padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface); color: var(--text-main); min-width: 12rem;
+}

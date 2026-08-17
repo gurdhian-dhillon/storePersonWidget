@@ -1,4 +1,4 @@
-string getCheckerHistory(string inspectorId, string dateTxt)
+string getCheckerHistory(string supervisorId, string dateTxt)
 {
 	// What was inspected on a given day. Custom API, POST, two arguments.
 	//
@@ -11,11 +11,16 @@ string getCheckerHistory(string inspectorId, string dateTxt)
 	// same way whatever the org's locale is, while "01-08-2026" is a different
 	// day in the US than it is here.
 	//
-	// EVERY INSPECTOR'S WORK, not just the one passed in. inspectorId NARROWS it
-	// when given and is ignored when empty. There is one inspector on this floor
-	// today, so a screen that hid everyone else's rounds would look broken the
-	// first time a second man was hired - and "who checked this" is exactly the
-	// question a disputed rejection turns into.
+	// SCOPED TO THE SUPERVISOR, not to the inspector. Quality inspectors have no
+	// login; supervisors do, and the man reading this is the one whose garments
+	// were judged. He sees every round on HIS batches whoever performed it -
+	// "which inspector judged this" is a column here, never a filter, because it
+	// is exactly the question a disputed rejection turns into and hiding other
+	// people's rounds would answer it wrongly.
+	//
+	// An empty supervisorId returns the whole day, unfiltered. That is the honest
+	// reading of "no supervisor chosen" and it keeps the function usable from a
+	// report or an Execute without inventing an id.
 	//
 	// WHAT IT ANSWERS THAT THE QUEUE CANNOT. The queue is what is in front of
 	// him; this is what he decided, and it is the only place a decision can be
@@ -54,13 +59,13 @@ string getCheckerHistory(string inspectorId, string dateTxt)
 		return "{\"errors\":[\"Cannot look at a future date\"],\"checks\":[],\"totals\":{\"checks\":0,\"inspected\":0,\"approved\":0,\"rejected\":0,\"alteration\":0}}";
 	}
 
-	// Optional narrowing. An empty or non-numeric id means "everybody", which is
-	// the default the screen opens on.
-	wantInsp = 0;
-	iTxt = ifnull(inspectorId,"").toString().trim();
-	if(iTxt != "" && iTxt.isNumber())
+	// Optional narrowing. Held as TEXT and compared as text on both sides -
+	// Assigned_To is a lookup read with toString(), and comparing that to a long
+	// is a mixed-type comparison, which throws.
+	wantSup = ifnull(supervisorId,"").toString().trim();
+	if(wantSup.isNumber() == false)
 	{
-		wantInsp = iTxt.toLong();
+		wantSup = "";
 	}
 
 	//----------------------------------------------------------------------
@@ -77,6 +82,7 @@ string getCheckerHistory(string inspectorId, string dateTxt)
 	itemNameCache = Map();
 	itemSkuCache = Map();
 	itemKindCache = Map();
+	planSupCache = Map();
 	planNoCache = Map();
 	soNoCache = Map();
 
@@ -88,10 +94,36 @@ string getCheckerHistory(string inspectorId, string dateTxt)
 
 	for each  icRow in checks
 	{
-		takeIt = true;
 		inspKey = ifnull(icRow.Inspector,"").toString();
 
-		if(wantInsp != 0 && inspKey != wantInsp.toString())
+		//--------------------------------------------------------------
+		// WHOSE BATCH WAS THIS? Resolved from the check's own Plan lookup and
+		// cached, because a day's checks cluster on a handful of plans.
+		//
+		// The supervisor is read here rather than filtered in the query because
+		// Item_Check has no supervisor of its own - it belongs to an item, which
+		// belongs to a plan, which is assigned to a man. One hop, cached.
+		//--------------------------------------------------------------
+		planKey = ifnull(icRow.Plan,"").toString();
+		planSupTxt = ifnull(planSupCache.get(planKey),"").toString();
+
+		if(planSupTxt == "" && planKey != "" && planKey.isNumber())
+		{
+			for each  icSup in Production_Planning[ID == planKey.toLong()]
+			{
+				planSupTxt = ifnull(icSup.Assigned_To,"").toString().trim();
+			}
+			// "-" is the remembered miss, never a real id - without it a plan
+			// with no supervisor is re-queried on every check hanging off it.
+			if(planSupTxt == "")
+			{
+				planSupTxt = "-";
+			}
+			planSupCache.put(planKey,planSupTxt);
+		}
+
+		takeIt = true;
+		if(wantSup != "" && planSupTxt != wantSup)
 		{
 			takeIt = false;
 		}

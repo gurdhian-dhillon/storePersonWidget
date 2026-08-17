@@ -1,21 +1,26 @@
-// Quality Inspector's screen. One job: take a batch that has finished
-// production and split it three ways — approved, rejected, alteration.
+// The checking screen. One job: take a batch that has finished production and
+// split it three ways — approved, rejected, alteration.
 //
 // Creator JS API v2 (ZOHO.CREATOR.DATA.invokeCustomApi, no init()), ES5-flavoured
 // var/function to match main.js and the other widgets.
 //
-// WHY AN ACCORDION BY SUPERVISOR rather than one flat list. He collects a
-// trolley from one man at a time. Forty items across six supervisors in one flat
-// list is not the order he works in, and the supervisor is also who he goes back
-// to when the count on the trolley disagrees with the screen.
+// DRIVEN BY THE SUPERVISOR, NOT THE INSPECTOR. Quality inspectors have no login;
+// supervisors do. So the picker at the top is a supervisor, the cards below are
+// his own batches waiting to be checked — the same shape as the production
+// screen he already knows — and WHICH INSPECTOR judged each batch is chosen
+// inside the check dialog.
+//
+// That is not just where the control sits. Who inspected a batch is a fact about
+// that inspection, not about who happens to be looking at the screen, so it
+// belongs on the record per check. Two batches on one trolley can honestly have
+// been judged by two different people.
 //
 // THE THREE NUMBERS MUST TOTAL WHAT PRODUCTION MADE, and that is enforced here
 // as well as on the server. A garment in none of the three has silently vanished
 // between the supervisor and this screen, and the server refuses it — but being
 // told so after typing five check rows is a bad way to find out.
 
-var QUEUE = { inspectors: [], supervisors: [] };
-var openSupId = null;
+var QUEUE = { inspectors: [], supervisors: [], items: [] };
 var saving = false;
 
 // EXACTLY the five values on Item_Check.Check_Lines.Check_Type. These are
@@ -57,7 +62,7 @@ function loadQueue() {
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getCheckingQueue',
         http_method: 'POST',
-        payload: { inspectorId: currentInspectorId() || '' }
+        payload: { supervisorId: currentSupervisorId() || '' }
     }).then(function (response) {
         console.log('getCheckingQueue raw:', response);
         if (btn) btn.disabled = false;
@@ -87,9 +92,14 @@ function loadQueue() {
 
         QUEUE = {
             inspectors: parsed.inspectors || [],
-            supervisors: parsed.supervisors || []
+            supervisors: parsed.supervisors || [],
+            items: parsed.items || []
         };
-        fillInspectors();
+        // The server decides the default when nothing was chosen — the oldest
+        // waiting item's supervisor. Adopting its answer rather than picking our
+        // own is what stops the dropdown and the list disagreeing about whose
+        // work is on screen.
+        fillSupervisors(parsed.selectedSupervisor || '');
         renderQueue();
     }).catch(function (err) {
         console.error('getCheckingQueue failed:', err);
@@ -99,33 +109,39 @@ function loadQueue() {
     });
 }
 
-function currentInspectorId() {
-    var sel = el('insp-select');
+function currentSupervisorId() {
+    var sel = el('sup-select');
     return sel ? sel.value : '';
 }
 
+// Only supervisors who actually have something waiting, each with its count.
+// Listing every supervisor means picking a name and landing on an empty screen
+// with nothing to say why — the same rule the production filter follows.
+//
 // Rebuilt on every load, keeping whoever was already chosen. Losing the
 // selection on Refresh would send him back to the picker every time.
-function fillInspectors() {
-    var sel = el('insp-select');
+function fillSupervisors(serverChoice) {
+    var sel = el('sup-select');
     if (!sel) return;
 
     var keep = sel.value;
-    sel.innerHTML = '<option value="">Choose inspector…</option>';
+    sel.innerHTML = '<option value="">Choose supervisor…</option>';
 
-    QUEUE.inspectors.forEach(function (i) {
+    QUEUE.supervisors.forEach(function (s) {
         var o = document.createElement('option');
-        o.value = i.id;
-        o.textContent = i.name;
+        o.value = s.id;
+        o.textContent = s.name + ' (' + num(s.count) + ')';
         sel.appendChild(o);
     });
 
-    if (keep && QUEUE.inspectors.some(function (i) { return i.id === keep; })) {
+    var have = function (v) {
+        return v && QUEUE.supervisors.some(function (s) { return String(s.id) === String(v); });
+    };
+
+    if (have(keep)) {
         sel.value = keep;
-    } else if (QUEUE.inspectors.length === 1) {
-        // One inspector is the common case on this floor. Making him pick his
-        // own name out of a list of one is friction for nothing.
-        sel.value = QUEUE.inspectors[0].id;
+    } else if (have(serverChoice)) {
+        sel.value = String(serverChoice);
     }
 }
 
@@ -137,67 +153,31 @@ function renderQueue() {
     var root = el('queue-root');
     root.innerHTML = '';
 
-    var withWork = QUEUE.supervisors.filter(function (s) {
-        return (s.items || []).length > 0;
-    });
+    var items = QUEUE.items || [];
 
-    // Counted across supervisors, not per accordion — the badge answers "is
-    // there anything for me", which is one number regardless of whose trolley
-    // it came off.
-    var waiting = withWork.reduce(function (n, s) {
-        return n + (s.items || []).length;
-    }, 0);
-    setQueueCount(waiting);
+    // The badge counts THIS supervisor's waiting batches, because that is whose
+    // screen it is. The dropdown carries every other supervisor's count beside
+    // his name, so nothing is hidden — it is just not summed into one number
+    // that would belong to nobody.
+    setQueueCount(items.length);
 
-    if (!withWork.length) {
-        root.innerHTML = '<p class="empty-note">Nothing is waiting to be checked.</p>';
+    if (!currentSupervisorId()) {
+        root.innerHTML = QUEUE.supervisors.length
+            ? '<p class="empty-note">Choose a supervisor to see what is waiting.</p>'
+            : '<p class="empty-note">Nothing is waiting to be checked.</p>';
         return;
     }
 
-    // Auto-open when there is only one supervisor with work — an accordion of
-    // one closed row is a click that answers no question.
-    if (openSupId === null && withWork.length === 1) {
-        openSupId = withWork[0].id;
+    if (!items.length) {
+        root.innerHTML = '<p class="empty-note">Nothing from this supervisor is waiting to be checked.</p>';
+        return;
     }
 
-    withWork.forEach(function (sup) {
-        var isOpen = String(sup.id) === String(openSupId);
-        var items = sup.items || [];
-
-        var block = document.createElement('div');
-        block.className = 'sup-block' + (isOpen ? ' is-open' : '');
-
-        var head = document.createElement('button');
-        head.type = 'button';
-        head.className = 'sup-head';
-        head.innerHTML =
-            '<span class="sup-caret">' + (isOpen ? '▾' : '▸') + '</span>' +
-            '<span class="sup-name">' + escapeHtml(sup.name) + '</span>' +
-            '<span class="sup-count">' + items.length +
-            (items.length === 1 ? ' batch' : ' batches') + '</span>';
-        head.addEventListener('click', function () {
-            openSupId = isOpen ? null : sup.id;
-            renderQueue();
-        });
-        block.appendChild(head);
-
-        if (isOpen) {
-            var body = document.createElement('div');
-            body.className = 'sup-body';
-            items.forEach(function (item) {
-                body.appendChild(renderItemCard(item, sup));
-            });
-            block.appendChild(body);
-        }
-
-        root.appendChild(block);
+    items.forEach(function (item) {
+        root.appendChild(renderItemCard(item));
     });
 }
 
-// FOUR KINDS, and the last two must not be drawn the same. A Remake replaces a
-// garment that failed HIS check; a Replacement replaces one spoiled on the floor
-// that he never saw. Labelling the second as a rejection tells him it came back
-// from his own last round, which is both wrong and an accusation.
 function batchTag(item) {
     if (item.batch === 'Alteration') {
         return '<span class="batch-tag is-alt">Alteration batch</span>';
@@ -228,7 +208,7 @@ function linePosition(item) {
         ' accepted · <b>' + out + ' still to come</b></span>';
 }
 
-function renderItemCard(item, sup) {
+function renderItemCard(item) {
     var card = document.createElement('div');
     card.className = 'item-card';
 
@@ -252,7 +232,7 @@ function renderItemCard(item, sup) {
         '</div>';
 
     card.querySelector('.check-btn').addEventListener('click', function () {
-        openCheckDialog(item, sup);
+        openCheckDialog(item);
     });
 
     return card;
@@ -262,13 +242,21 @@ function renderItemCard(item, sup) {
 // The check dialog
 // ---------------------------------------------------------------------------
 
+// Rebuilt per dialog rather than held in the DOM, so a Refresh that changes the
+// roster cannot leave a stale name selectable.
+function inspectorOptions() {
+    return (QUEUE.inspectors || []).map(function (i) {
+        return '<option value="' + escapeHtml(i.id) + '">' + escapeHtml(i.name) + '</option>';
+    }).join('');
+}
+
 function closeModal() {
     var m = el('check-modal');
     m.classList.add('hidden');
     m.innerHTML = '';
 }
 
-function openCheckDialog(item, sup) {
+function openCheckDialog(item) {
     var produced = num(item.produced);
     var stages = (item.stages || []).slice().sort(function (a, b) {
         return num(a.sequence) - num(b.sequence);
@@ -302,8 +290,23 @@ function openCheckDialog(item, sup) {
 
         '<h3>' + escapeHtml(item.name) +
         (item.sku ? ' <span class="mat-sku">' + escapeHtml(item.sku) + '</span>' : '') + '</h3>' +
-        '<p class="modal-sub">' + escapeHtml(sup.name) + ' · ' +
-        escapeHtml(item.salesOrder || '') + ' · ' + produced + ' pcs from production</p>' +
+        '<p class="modal-sub">' +
+        escapeHtml(item.salesOrder || '') +
+        (item.planNo ? ' · ' + escapeHtml(item.planNo) : '') +
+        ' · ' + produced + ' pcs from production</p>' +
+
+        // WHO JUDGED THIS, chosen per check rather than once at the top of the
+        // screen. It is a fact about the inspection, not about who is looking —
+        // two batches on one trolley can honestly have been judged by two
+        // different people. And it is the first thing anyone asks when a
+        // rejection is disputed, so the save is refused without it.
+        '<div class="insp-row">' +
+        '<label for="chk-inspector">Checked by</label>' +
+        '<select id="chk-inspector">' +
+        '<option value="">Choose inspector…</option>' +
+        inspectorOptions() +
+        '</select>' +
+        '</div>' +
 
         // Recorded, not calculated. A garment can fail two checks, so these do
         // not add up to the disposition below and nothing derives from them —
@@ -403,6 +406,12 @@ function saveCheck(item, produced) {
     var m = el('check-modal');
     el('chk-error').classList.add('hidden');
 
+    var inspectorId = el('chk-inspector') ? el('chk-inspector').value : '';
+    if (!inspectorId) {
+        showDialogError('Say who checked these. A rejection opens a remake batch, and the first question anyone asks is who judged it.');
+        return;
+    }
+
     var approved = num(el('disp-approved').value);
     var rejected = num(el('disp-rejected').value);
     var alteration = num(el('disp-alteration').value);
@@ -455,7 +464,7 @@ function saveCheck(item, produced) {
 
     var payload = {
         planItemId: String(item.id),
-        inspectorId: String(currentInspectorId() || ''),
+        inspectorId: String(inspectorId),
         checks: checks,
         approved: approved,
         rejected: rejected,
@@ -627,10 +636,10 @@ function loadHistory() {
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getCheckerHistory',
         http_method: 'POST',
-        // Deliberately NOT narrowed to the picked inspector. "Who checked this"
-        // is exactly the question a disputed rejection turns into, and hiding
-        // everyone else's rounds would answer it wrongly.
-        payload: { inspectorId: '', dateTxt: dayTxt }
+        // Scoped to the SUPERVISOR whose screen this is — his batches, whoever
+        // inspected them. The inspector is a column here, never a filter: "who
+        // checked this" is exactly the question a disputed rejection turns into.
+        payload: { supervisorId: currentSupervisorId() || '', dateTxt: dayTxt }
     }).then(function (response) {
         console.log('getCheckerHistory raw:', response);
         var parsed;
@@ -749,9 +758,15 @@ el('refresh-btn').addEventListener('click', function () {
     }
 });
 
-el('insp-select').addEventListener('change', function () {
-    // The queue is the same whoever is looking — the picker only decides who the
-    // check is recorded against — so this does not refetch.
+// Changing supervisor changes WHAT IS ON SCREEN, so it refetches — unlike the
+// old inspector picker, which only decided whose name went on the record.
+el('sup-select').addEventListener('change', function () {
+    histLoaded = false;
+    loadQueue();
+    if (activeTab() === 'history') {
+        histLoaded = true;
+        loadHistory();
+    }
 });
 
 loadQueue();
