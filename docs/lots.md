@@ -164,6 +164,16 @@ counter, and re-labelling them would leave the receipt unable to find what it is
 
 ## Issue — allocated automatically
 
+> **SUPERSEDED from here to the end of *Receipt*.** See
+> [lots-issue-redesign.md](lots-issue-redesign.md), agreed 2026-08-17. The rule changed at the
+> root: **the order is the atom** and is served whole off one lot or not served at all, so the
+> partial-issue machinery below — the per-lot metres budget, the ranking that counts greige as
+> available today, the "drain the largest and close from the smallest" spread — no longer applies.
+> What survives unchanged: one lot per order, the pin and how it is read back, offcuts belonging to
+> their lot's capacity, the recorded override, and the reason capacity is simulated rather than
+> compared in metres. Read the redesign first; the sections below are kept for the arguments they
+> record, several of which are still the reason the new rule is shaped as it is.
+
 The store person does not type metres. He presses Issue and the screen has already worked out
 which lot the cloth comes off, because every figure it produces is a whole number of marker rows
 and a hand-typed one is not: 5.00 m against a 55 cm cut is 9 rows and a 5 cm full-width strip that

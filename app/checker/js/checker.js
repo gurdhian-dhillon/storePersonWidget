@@ -353,8 +353,7 @@ function checkFormHtml(item, produced) {
         // not add up to the decision below and nothing derives from them — they
         // exist so "what is actually going wrong" is answerable later.
         '<div class="section-title">Checks</div>' +
-        '<p class="hint">A record of what was found. A piece can fail more than one check, ' +
-        'so these do not have to add up to the decision below.</p>' +
+        '<p class="hint">A record of what was found. A piece can fail more than one check, so these need not add up to the decision.</p>' +
         '<div class="table-wrapper">' +
         '<table class="chk-table"><thead><tr>' +
         '<th>Check</th><th class="col-num">Failed</th><th class="col-num">Passed</th><th>Note</th>' +
@@ -371,10 +370,9 @@ function checkFormHtml(item, produced) {
 
         '<div id="alt-block" class="hidden">' +
         '<div class="section-title">Which stages need the work?</div>' +
-        '<p class="hint">One garment can need two stages fixed, so these may add up to more ' +
-        'than the alteration count. They may not add up to less.</p>' +
+        '<p class="hint">A garment can need two stages fixed, so these may total more than the alteration count &mdash; never less.</p>' +
         '<div class="table-wrapper">' +
-        '<table class="chk-table"><thead><tr>' +
+        '<table class="chk-table alt-table"><thead><tr>' +
         '<th>Stage</th><th class="col-num">Pieces</th>' +
         '</tr></thead><tbody>' + stageRows + '</tbody></table>' +
         '</div>' +
@@ -745,61 +743,103 @@ function renderHistory(data) {
     var t = data.totals || {};
 
     if (!checks.length) {
-        el('hist-totals').textContent = '';
+        el('hist-totals').innerHTML = '';
         el('history-root').innerHTML = '<p class="empty-note">Nothing was checked that day.</p>';
         return;
     }
 
+    // The day in one line. Inspected is the anchor everything else is a share of,
+    // so it leads; a zero outcome is left out rather than printed as "0 rejected",
+    // which reads as a finding.
     el('hist-totals').innerHTML =
-        '<b>' + num(t.checks) + '</b> ' + (num(t.checks) === 1 ? 'batch' : 'batches') +
-        ' · <b>' + num(t.inspected) + '</b> inspected · ' +
-        num(t.approved) + ' approved · ' + num(t.rejected) + ' rejected · ' +
-        num(t.alteration) + ' to alter';
+        '<span class="day-stat"><b>' + num(t.checks) + '</b> ' +
+        (num(t.checks) === 1 ? 'batch' : 'batches') + '</span>' +
+        '<span class="day-stat"><b>' + num(t.inspected) + '</b> inspected</span>' +
+        (num(t.approved) > 0
+            ? '<span class="day-stat is-ok"><b>' + num(t.approved) + '</b> approved</span>' : '') +
+        (num(t.rejected) > 0
+            ? '<span class="day-stat is-rej"><b>' + num(t.rejected) + '</b> rejected</span>' : '') +
+        (num(t.alteration) > 0
+            ? '<span class="day-stat is-alt"><b>' + num(t.alteration) + '</b> to alter</span>' : '');
 
     var html = checks.map(function (c) {
-        // The five checks are carried through untouched. They do not reconcile
-        // with the decision and are not meant to — one garment can fail two —
-        // so only the ones that actually found something are worth the row.
+        var inspected = num(c.inspected);
+
+        // ONE TILE PER OUTCOME, and a zero outcome is omitted. Printing "0
+        // rejected" beside "3 approved" gives a clean batch the same shape as a
+        // bad one and makes the row something to read rather than something to
+        // scan.
+        var tiles = '';
+        if (num(c.approved) > 0) {
+            tiles += '<span class="out-tile is-ok"><b>' + num(c.approved) + '</b>approved</span>';
+        }
+        if (num(c.rejected) > 0) {
+            tiles += '<span class="out-tile is-rej"><b>' + num(c.rejected) + '</b>rejected</span>';
+        }
+        if (num(c.alteration) > 0) {
+            tiles += '<span class="out-tile is-alt"><b>' + num(c.alteration) + '</b>to alter</span>';
+        }
+        tiles += '<span class="out-tile is-tot"><b>' + inspected + '</b>inspected</span>';
+
+        // Only checks that actually found something. The five never reconcile
+        // with the decision — one garment can fail two — so listing all five
+        // every time would bury the one that matters among four zeroes.
         var failed = (c.lines || []).filter(function (l) { return num(l.failed) > 0; });
         var failHtml = failed.length
-            ? '<div class="hist-fails">' + failed.map(function (l) {
-                return '<span class="hist-fail">' + escapeHtml(l.type) + ' ' + num(l.failed) +
-                    (l.note ? ' · ' + escapeHtml(l.note) : '') + '</span>';
-            }).join('') + '</div>'
-            : '<div class="hist-fails"><span class="hist-fail is-clean">No check found anything</span></div>';
-
-        var altHtml = (c.alterationLines || []).length
-            ? '<div class="hist-alt">Back to: ' + (c.alterationLines || []).map(function (a) {
-                return escapeHtml(a.stage) + ' (' + num(a.qty) + ')';
-            }).join(', ') + '</div>'
+            ? '<div class="hist-row">' +
+                '<span class="hist-row-label">Found</span>' +
+                '<span class="hist-row-body">' + failed.map(function (l) {
+                    return '<span class="fail-pill">' + escapeHtml(l.type) +
+                        ' <b>' + num(l.failed) + '</b>' +
+                        (l.note ? '<i>' + escapeHtml(l.note) + '</i>' : '') + '</span>';
+                }).join('') + '</span>' +
+              '</div>'
             : '';
 
+        var alt = (c.alterationLines || []);
+        var altHtml = alt.length
+            ? '<div class="hist-row">' +
+                '<span class="hist-row-label">Back to</span>' +
+                '<span class="hist-row-body">' + alt.map(function (a) {
+                    return '<span class="stage-pill">' + escapeHtml(a.stage) +
+                        ' <b>' + num(a.qty) + '</b></span>';
+                }).join('') + '</span>' +
+              '</div>'
+            : '';
+
+        var remHtml = c.remarks
+            ? '<div class="hist-row">' +
+                '<span class="hist-row-label">Note</span>' +
+                '<span class="hist-row-body hist-remark">' + escapeHtml(c.remarks) + '</span>' +
+              '</div>'
+            : '';
+
+        // A batch where nothing failed and nothing was sent back says so once,
+        // quietly. Left blank it reads as a card that failed to load.
+        var detail = failHtml + altHtml + remHtml;
+        if (!detail) {
+            detail = '<div class="hist-row"><span class="hist-row-label"></span>' +
+                '<span class="hist-row-body hist-clean">Every check clean</span></div>';
+        }
+
         return '' +
-            '<div class="item-card">' +
-            '<div class="item-header">' +
-            '<div class="item-header-info">' +
-            '<h2><span class="mat-name">' + escapeHtml(c.item) + '</span>' +
-            (c.sku ? '<span class="mat-sku">' + escapeHtml(c.sku) + '</span>' : '') + '</h2>' +
-            '<div class="item-meta-line">' +
+            '<div class="hist-card">' +
+            '<div class="hist-head">' +
+            '<div class="hist-title">' +
+            '<h3>' + escapeHtml(c.item) +
+            (c.sku ? '<span class="mat-sku">' + escapeHtml(c.sku) + '</span>' : '') + '</h3>' +
+            '<div class="hist-meta">' +
             '<span class="so-ref">' + escapeHtml(c.salesOrder || '—') +
             (c.planNo ? ' · ' + escapeHtml(c.planNo) : '') + '</span>' +
             batchTag(c) +
             '<span class="round-tag">Round ' + num(c.round) + '</span>' +
             '</div>' +
-            '<div class="item-meta-line">' +
-            '<span class="so-ref">' + escapeHtml(c.inspector || 'Unknown inspector') +
-            ' · ' + escapeHtml(c.checkedOn || '') + '</span>' +
+            '<div class="hist-who">' + escapeHtml(c.inspector || 'Unknown inspector') +
+            (c.checkedOn ? ' · ' + escapeHtml(c.checkedOn) : '') + '</div>' +
             '</div>' +
+            '<div class="out-tiles">' + tiles + '</div>' +
             '</div>' +
-            '<div class="hist-nums">' +
-            '<span class="hist-num is-ok"><b>' + num(c.approved) + '</b> approved</span>' +
-            (num(c.rejected) > 0 ? '<span class="hist-num is-rej"><b>' + num(c.rejected) + '</b> rejected</span>' : '') +
-            (num(c.alteration) > 0 ? '<span class="hist-num is-alt"><b>' + num(c.alteration) + '</b> to alter</span>' : '') +
-            '<span class="hist-num is-muted">of ' + num(c.inspected) + '</span>' +
-            '</div>' +
-            '</div>' +
-            failHtml + altHtml +
-            (c.remarks ? '<div class="hist-remarks">' + escapeHtml(c.remarks) + '</div>' : '') +
+            '<div class="hist-detail">' + detail + '</div>' +
             '</div>';
     }).join('');
 
