@@ -409,6 +409,12 @@ Deluge cannot be run here, so:
   > one that matters.
 - **No finished-goods stock.** Production says how many were made; nothing receives them.
 - **QC / Packing / Dispatch** have Creator nav but no widgets.
+- **Scaling debt is found, listed and deliberately unfixed** — see `docs/scaling.md`. Ten
+  queries fetch a whole transactional form and get slowly worse as records accumulate; the
+  worst is `createProductionPlans` fetching every plan ever to read one integer. None is broken
+  today. That doc also records what is already *correct* and must not be "fixed": nothing ever
+  scans `Material_Requirement`, the hot path is bounded by WIP rather than history, master-data
+  fetch-alls are fine, and the paged history functions are the shape to copy.
 - **`resolveStockDispute.dg`** is a legacy form workflow duplicating `resolveDispute`. It has
   none of the current logic. **Delete it in Creator.**
 - **Old `Production_Planning` subforms** (`Item_Table`, `Production_Tracking`,

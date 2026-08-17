@@ -122,13 +122,22 @@ string migrateOpeningLots()
 				{
 					ladS = "0";
 				}
+				// Cloth at the wash house counts too. Leaving it out of BOTH
+				// sides happens to net to zero, but then the check can never
+				// see an in-wash drift - and this report is the only thing
+				// watching the parent = sum of lots invariant.
+				lahS = ifnull(lt.In_Wash_Qty,"0").toString().trim();
+				if(lahS == "")
+				{
+					lahS = "0";
+				}
 
 				prevSum = ifnull(lotSum.get(ltMat),"0").toString().trim();
 				if(prevSum == "")
 				{
 					prevSum = "0";
 				}
-				lotSum.put(ltMat,prevSum.toDecimal() + lauS.toDecimal() + lawS.toDecimal() + laiS.toDecimal() + ladS.toDecimal());
+				lotSum.put(ltMat,prevSum.toDecimal() + lauS.toDecimal() + lawS.toDecimal() + laiS.toDecimal() + ladS.toDecimal() + lahS.toDecimal());
 			}
 		}
 		info "materials already lotted: " + hasLot.size();
@@ -264,7 +273,12 @@ string migrateOpeningLots()
 				{
 					pdS = "0";
 				}
-				parentTot = puS.toDecimal() + pwS.toDecimal() + piS.toDecimal() + pdS.toDecimal();
+				phS = ifnull(rm.In_Wash_Qty,"0").toString().trim();
+				if(phS == "")
+				{
+					phS = "0";
+				}
+				parentTot = puS.toDecimal() + pwS.toDecimal() + piS.toDecimal() + pdS.toDecimal() + phS.toDecimal();
 
 				haveSum = ifnull(lotSum.get(rmKey),"0").toString().trim();
 				if(haveSum == "")

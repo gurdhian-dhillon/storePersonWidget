@@ -79,6 +79,7 @@ void completeWashRequest()
 			//------------------------------------------------------------
 			lotIdTxt = ifnull(wr.Lot,"").toString().trim();
 			lotUnw = 0.0;
+			lotInWash = 0.0;
 			hasLotHere = false;
 
 			if(lotIdTxt != "")
@@ -90,7 +91,13 @@ void completeWashRequest()
 					{
 						lwStr = "0";
 					}
+					liwStr = ifnull(wLot.In_Wash_Qty,"0").toString().trim();
+					if(liwStr == "")
+					{
+						liwStr = "0";
+					}
 					lotUnw = lwStr.toDecimal();
+					lotInWash = liwStr.toDecimal();
 					hasLotHere = true;
 				}
 			}
@@ -110,36 +117,74 @@ void completeWashRequest()
 				unwQty = unwStr.toDecimal();
 				wshQty = wshStr.toDecimal();
 
-				// Cannot wash cloth that is not there. Capped rather than
-				// refused - the cloth has physically been washed either way,
-				// and letting unwashed go negative leaves the ledger further
-				// from the truth than a capped figure does.
-				moveQty = gotQty;
-				if(moveQty > unwQty)
+				inwStr = ifnull(matRec.In_Wash_Qty,"0").toString().trim();
+				if(inwStr == "")
 				{
-					moveQty = unwQty;
-					info "capped: entered " + gotQty + " but only " + unwQty + " unwashed";
+					inwStr = "0";
+				}
+				inwQty = inwStr.toDecimal();
+
+				//----------------------------------------------------------
+				// WHAT THE CLOTH COMES OFF.
+				//
+				// Cloth sent to the wash left the rack when the ticket was
+				// raised - Unwash_Quantity went down, In_Wash_Qty went up - so
+				// this is In_Wash -> Wash, not Unwash -> Wash.
+				//
+				// FALLING BACK TO GREIGE IS DELIBERATE. Any ticket raised before
+				// In_Wash_Qty existed never moved anything, so its cloth is
+				// still sitting in Unwash_Quantity. Taking from In_Wash first
+				// and the remainder from Unwash settles both without needing to
+				// know which kind of ticket this is.
+				//
+				// Capped rather than refused: the cloth has physically been
+				// washed either way, and driving a counter negative leaves the
+				// ledger further from the truth than a capped figure does.
+				//----------------------------------------------------------
+				capHere = inwQty + unwQty;
+				if(hasLotHere == true)
+				{
+					// AND capped at what THIS LOT holds. The parent is the sum of
+					// every lot, so it can cover a figure one lot cannot.
+					lotCap = lotInWash + lotUnw;
+					if(lotCap < capHere)
+					{
+						capHere = lotCap;
+					}
 				}
 
-				// AND capped again at what THIS LOT holds. The parent total is
-				// the sum of every lot, so it can easily cover a figure the one
-				// lot cannot - and moving more than the lot has would drive its
-				// greige negative while the parent still looked right.
-				if(hasLotHere == true && moveQty > lotUnw)
+				moveQty = gotQty;
+				if(moveQty > capHere)
 				{
-					moveQty = lotUnw;
-					info "capped to lot: " + gotQty + " asked but lot holds " + lotUnw + " unwashed";
+					moveQty = capHere;
+					info "capped: entered " + gotQty + " but only " + capHere + " available to wash";
 				}
 
 				if(moveQty > 0)
 				{
-					matRec.Unwash_Quantity = unwQty - moveQty;
+					// In-wash first, greige for whatever is left over.
+					fromInWash = moveQty;
+					if(fromInWash > inwQty)
+					{
+						fromInWash = inwQty;
+					}
+					fromGreige = moveQty - fromInWash;
+
+					matRec.In_Wash_Qty = inwQty - fromInWash;
+					matRec.Unwash_Quantity = unwQty - fromGreige;
 					matRec.Wash_Quantity = wshQty + moveQty;
 
 					// The same move on the lot, in the same pass, so the lot and
 					// the maintained parent total cannot disagree.
 					if(hasLotHere == true)
 					{
+						lotFromWash = moveQty;
+						if(lotFromWash > lotInWash)
+						{
+							lotFromWash = lotInWash;
+						}
+						lotFromGreige = moveQty - lotFromWash;
+
 						for each  wLotUpd in Raw_Material_Lot[ID == lotIdTxt.toLong()]
 						{
 							luStr = ifnull(wLotUpd.Unwash_Quantity,"0").toString().trim();
@@ -147,12 +192,18 @@ void completeWashRequest()
 							{
 								luStr = "0";
 							}
+							liwUpd = ifnull(wLotUpd.In_Wash_Qty,"0").toString().trim();
+							if(liwUpd == "")
+							{
+								liwUpd = "0";
+							}
 							lwqStr = ifnull(wLotUpd.Wash_Quantity,"0").toString().trim();
 							if(lwqStr == "")
 							{
 								lwqStr = "0";
 							}
-							wLotUpd.Unwash_Quantity = luStr.toDecimal() - moveQty;
+							wLotUpd.In_Wash_Qty = liwUpd.toDecimal() - lotFromWash;
+							wLotUpd.Unwash_Quantity = luStr.toDecimal() - lotFromGreige;
 							wLotUpd.Wash_Quantity = lwqStr.toDecimal() + moveQty;
 						}
 					}

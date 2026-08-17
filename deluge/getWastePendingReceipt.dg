@@ -54,6 +54,18 @@ string getWastePendingReceipt()
 			matName = matName.replaceAll("\"","'");
 		}
 
+		// Which lot it was cut from. A lookup holds a record id, so the readable
+		// number has to come off the lot record.
+		lotNo = "";
+		lotRefTxt = ifnull(wp.Lot,"").toString().trim();
+		if(lotRefTxt != "")
+		{
+			for each  lrec in Raw_Material_Lot[ID == lotRefTxt.toLong()]
+			{
+				lotNo = ifnull(lrec.Lot_Number,"").toString().trim().replaceAll("\"","'");
+			}
+		}
+
 		// The declaration says which order and which stage produced it. Read
 		// from the movement, not the piece - the piece does not know.
 		soNo = "";
@@ -86,7 +98,7 @@ string getWastePendingReceipt()
 			rowsJson = rowsJson + ",";
 		}
 		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-		rowsJson = rowsJson + "{\"id\":\"" + wp.ID + "\",\"material\":\"" + matName + "\",\"width\":" + pwStr.toDecimal() + ",\"length\":" + plStr.toDecimal() + ",\"count\":" + pcStr.toDecimal().toLong() + ",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"supervisor\":\"" + supName + "\",\"declaredOn\":\"" + declaredOn + "\"}";
+		rowsJson = rowsJson + "{\"id\":\"" + wp.ID + "\",\"material\":\"" + matName + "\",\"width\":" + pwStr.toDecimal() + ",\"length\":" + plStr.toDecimal() + ",\"count\":" + pcStr.toDecimal().toLong() + ",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"supervisor\":\"" + supName + "\",\"declaredOn\":\"" + declaredOn + "\",\"lot\":\"" + lotNo + "\"}";
 	}
 	}
 	catch (e)

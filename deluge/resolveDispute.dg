@@ -395,6 +395,11 @@ string resolveDispute(string payloadJson)
 				rsW = 0;
 				rsL = 0;
 				rsSku = null;
+				// The lot the original piece was cut from. Carried onto the
+				// re-sent row so provenance survives the round trip - the cloth
+				// is the same cloth, and a new row that lost its lot would be
+				// indistinguishable from an offcut nobody could place.
+				rsLot = null;
 
 				//------------------------------------------------------
 				// 1. The stock side
@@ -455,6 +460,7 @@ string resolveDispute(string payloadJson)
 								resendNew = true;
 								rsCount = takeD;
 								rsSku = wm.SKU;
+								rsLot = wm.Lot;
 
 								wSt = ifnull(wm.Piece_Width,"0").toString().trim();
 								if(wSt == "")
@@ -526,6 +532,10 @@ string resolveDispute(string payloadJson)
 								{
 									wmN.SKU = rsSku;
 								}
+								if(rsLot != null)
+								{
+									wmN.Lot = rsLot;
+								}
 							}
 
 							// The store's check-in list reads the plan, order and
@@ -568,6 +578,11 @@ string resolveDispute(string payloadJson)
 				}
 				else if(dsp.Material != null)
 				{
+					// Initialised BEFORE the loop because the lot block below
+					// reads it. A name first assigned inside a for-each is not
+					// safe to read after one that matched nothing.
+					takeD = 0.0;
+
 					for each  rm in Raw_Material[ID == dsp.Material]
 					{
 						rdStr = ifnull(rm.Disputed_Qty,"0").toString().trim();
@@ -604,6 +619,59 @@ string resolveDispute(string payloadJson)
 									onStr = "0";
 								}
 								rm.Quantity = onStr.toDecimal() + takeD;
+							}
+						}
+					}
+
+					//----------------------------------------------------
+					// THE SAME MOVE ON THE LOT IT CAME OFF.
+					//
+					// receiveMaterials stamped the dispute with the lot the
+					// cloth left on, so a Store_Correction puts it back where it
+					// came from rather than on the material at large. Putting it
+					// back on the wrong lot would be worse than not tracking lots
+					// at all: the metres would be right and the TONE would be a
+					// lie, and nothing downstream could tell.
+					//
+					// Washed only. Fabric never leaves the shelf unwashed, so
+					// cloth coming back from a supervisor is washed by
+					// definition - and lots exist for fabric alone, which is why
+					// there is no Quantity branch here.
+					//
+					// A pre-lot dispute carries no lot and only the parent moves,
+					// exactly as it always did.
+					//----------------------------------------------------
+					dspLotTxt = ifnull(dsp.Lot,"").toString().trim();
+					if(dspLotTxt != "")
+					{
+						for each  dLot in Raw_Material_Lot[ID == dspLotTxt.toLong()]
+						{
+							ldStr = ifnull(dLot.Disputed_Qty,"0").toString().trim();
+							if(ldStr == "")
+							{
+								ldStr = "0";
+							}
+							ldQty = ldStr.toDecimal();
+
+							// Capped at what this lot actually holds as disputed.
+							// The parent is the sum of every lot, so it can cover
+							// a figure one lot cannot - and the same guard the
+							// parent has above applies here for the same reason.
+							takeL = takeD;
+							if(takeL > ldQty)
+							{
+								takeL = ldQty;
+							}
+							dLot.Disputed_Qty = ldQty - takeL;
+
+							if(restore == true && takeL > 0)
+							{
+								lwStr = ifnull(dLot.Wash_Quantity,"0").toString().trim();
+								if(lwStr == "")
+								{
+									lwStr = "0";
+								}
+								dLot.Wash_Quantity = lwStr.toDecimal() + takeL;
 							}
 						}
 					}

@@ -40,6 +40,20 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	plans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress")] sort by Added_Time;
 
 	//------------------------------------------------------------------------
+	// THE HANDOVER LINES, oldest first, fetched ONCE for the whole receipt.
+	//
+	// The requirement rows say how much is owed; they have never said WHICH
+	// cloth it was. Material_Issue.Issue_Lines is the only record of that,
+	// because the lot is stamped there as it crosses the counter - so settling a
+	// lot's In_Transit_Qty has to be driven from here.
+	//
+	// Hoisted out of the materials loop deliberately. Re-querying per material
+	// would be one query per line on the receipt, which is the shape that blows
+	// the statement-execution limit - and that limit is not catchable.
+	//------------------------------------------------------------------------
+	supIssues = Material_Issue[Issued_To == supId] sort by Added_Time;
+
+	//------------------------------------------------------------------------
 	// Fungible materials - metres, cones, labels. Fan across the plan rows.
 	//------------------------------------------------------------------------
 	for each  mRaw in mats
@@ -149,6 +163,10 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 			// The whole pending amount leaves In_Transit either way - the
 			// handover is settled now, one way or the other.
 			//--------------------------------------------------------------
+			settleQty = 0.0;
+			dispLotId = "";
+			dispLotShare = 0.0;
+
 			if(pendingTotal > 0)
 			{
 				for each  rmStock in Raw_Material[ID == matId.toLong()]
@@ -178,6 +196,131 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 					if(shortBy > 0)
 					{
 						rmStock.Disputed_Qty = dispQty + shortBy;
+					}
+				}
+
+				//------------------------------------------------------------
+				// THE SAME SETTLEMENT, LOT BY LOT.
+				//
+				// A second pass over the handover lines, OLDEST FIRST - the same
+				// order the requirement fan above uses, so the two agree by
+				// construction rather than by a mapping anybody has to maintain.
+				//
+				// Settled_Qty on the line is what makes this resumable across
+				// receipts. It cannot be derived from Received_Qty instead:
+				// a short receipt settles the whole pending amount off in-transit
+				// but only credits the confirmed part to Received_Qty, so the two
+				// diverge by exactly the disputed amount and every later receipt
+				// would settle the wrong lines.
+				//
+				// Within each line the CONFIRMED metres are taken first and the
+				// shortfall falls on what is left. So a receipt that is short
+				// puts the gap on the newest cloth, which is the cloth that did
+				// not turn up.
+				//------------------------------------------------------------
+				settleLeft = settleQty;
+				gotLeft = gotQty;
+
+				for each  miRec in supIssues
+				{
+					for each  miLn in miRec.Issue_Lines
+					{
+						lnMatTxt = ifnull(miLn.Material,"").toString().trim();
+
+						// The cheap test first: a line for another material stops
+						// here rather than being parsed and thrown away.
+						if(settleLeft > 0 && lnMatTxt == matId)
+						{
+							lnQtyS = ifnull(miLn.Qty,"0").toString().trim();
+							if(lnQtyS == "")
+							{
+								lnQtyS = "0";
+							}
+							lnSetS = ifnull(miLn.Settled_Qty,"0").toString().trim();
+							if(lnSetS == "")
+							{
+								lnSetS = "0";
+							}
+
+							lnRemain = lnQtyS.toDecimal() - lnSetS.toDecimal();
+
+							if(lnRemain > 0)
+							{
+								takeT = lnRemain;
+								if(takeT > settleLeft)
+								{
+									takeT = settleLeft;
+								}
+
+								// Confirmed first, shortfall on the remainder.
+								confT = takeT;
+								if(confT > gotLeft)
+								{
+									confT = gotLeft;
+								}
+								shortT = takeT - confT;
+
+								miLn.Settled_Qty = lnSetS.toDecimal() + takeT;
+								settleLeft = settleLeft - takeT;
+								gotLeft = gotLeft - confT;
+
+								lnLotTxt = ifnull(miLn.Lot,"").toString().trim();
+								if(lnLotTxt != "")
+								{
+									for each  lotSet in Raw_Material_Lot[ID == lnLotTxt.toLong()]
+									{
+										ltiS = ifnull(lotSet.In_Transit_Qty,"0").toString().trim();
+										if(ltiS == "")
+										{
+											ltiS = "0";
+										}
+										ltdS = ifnull(lotSet.Disputed_Qty,"0").toString().trim();
+										if(ltdS == "")
+										{
+											ltdS = "0";
+										}
+
+										ltIn = ltiS.toDecimal();
+										offIt = takeT;
+										if(offIt > ltIn)
+										{
+											// Same guard as the parent: never
+											// drive a lot's in-transit negative.
+											offIt = ltIn;
+										}
+										lotSet.In_Transit_Qty = ltIn - offIt;
+
+										if(shortT > 0)
+										{
+											lotSet.Disputed_Qty = ltdS.toDecimal() + shortT;
+										}
+									}
+
+									// WHICH LOT THE DISPUTE NAMES.
+									//
+									// A Stock_Dispute is one record for the whole
+									// shortfall, so it can hold one lot - but a
+									// short receipt CAN straddle two lines and so
+									// two lots. The lot carrying the LARGEST share
+									// is stamped, because resolveDispute restores
+									// to it and the biggest share is the best
+									// single guess.
+									//
+									// The lots themselves are already correct
+									// above - each carries its own share of
+									// Disputed_Qty - so only the resolution is
+									// approximate, and only when a shortfall
+									// straddles two handovers. If that ever turns
+									// out to happen in practice, the real fix is a
+									// dispute per lot rather than a better guess.
+									if(shortT > dispLotShare)
+									{
+										dispLotShare = shortT;
+										dispLotId = lnLotTxt;
+									}
+								}
+							}
+						}
 					}
 				}
 			}
@@ -218,6 +361,14 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 					{
 						dsp.Material = matId.toLong();
 						dsp.Supervisor = supId;
+						// Where the cloth came off, so a Store_Correction can put
+						// it back on the same lot rather than on the material at
+						// large. Empty on a pre-lot handover, which resolveDispute
+						// treats as "parent only" exactly as it always did.
+						if(dispLotId != "")
+						{
+							dsp.Lot = dispLotId.toLong();
+						}
 						if(shortPlanId != null)
 						{
 							dsp.Plan = shortPlanId;

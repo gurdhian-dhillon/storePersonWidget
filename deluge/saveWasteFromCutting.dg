@@ -22,6 +22,7 @@ string saveWasteFromCutting(string planId, string planItemId, string phaseName, 
 	errJson = "";
 	keptCount = 0;
 	scrapCount = 0;
+	unlottedCount = 0;
 	wasDuplicate = false;
 
 	// Same debug wrapper as issueMaterials - Creator collapses every runtime
@@ -37,6 +38,68 @@ string saveWasteFromCutting(string planId, string planItemId, string phaseName, 
 	//----------------------------------------------------------------------
 	itemIdStr = ifnull(planItemId,"").toString().trim();
 	phName = ifnull(phaseName,"").toString().trim();
+
+	//----------------------------------------------------------------------
+	// WHICH LOT THIS ITEM'S CLOTH CAME OFF.
+	//
+	// An offcut is cut from a specific lot, and that is the only provenance a
+	// remnant will ever have - Waste_Master records what the piece IS, never
+	// where it came from. The handover lines are the only place that knows,
+	// because the lot is stamped there as the cloth crosses the counter.
+	//
+	// Read via the SUPERVISOR rather than the plan. Material_Issue.Plan holds
+	// the first plan a handover touched, so an issue spanning two plans is
+	// stamped with one of them and filtering on it would miss the other's lines
+	// entirely. The line itself carries Plan_Item, which is exact.
+	//
+	// TWO LOTS FOR ONE ITEM MEANS NO LOT IS WRITTEN. That only happens when the
+	// store split the issue across lots, and there is then no way to tell which
+	// of them a given remnant was cut from. Stamping the bigger one would put a
+	// tone on the piece that might be a lie, and a remnant offered later as the
+	// wrong shade is exactly what lots exist to prevent. Left empty and counted,
+	// so the gap is visible rather than invented.
+	//----------------------------------------------------------------------
+	lotForMat = Map();
+	ambigMat = List();
+
+	planIdTxt = ifnull(planId,"").toString().trim();
+	wSupId = 0;
+	if(planIdTxt != "" && planIdTxt.isNumber() == true)
+	{
+		for each  wPlan in Production_Planning[ID == planIdTxt.toLong()]
+		{
+			wSupId = ifnull(wPlan.Assigned_To,0);
+		}
+	}
+
+	if(wSupId != 0 && itemIdStr != "")
+	{
+		for each  wIss in Material_Issue[Issued_To == wSupId]
+		{
+			for each  wLn in wIss.Issue_Lines
+			{
+				if(ifnull(wLn.Plan_Item,"").toString().trim() == itemIdStr)
+				{
+					lnMatW = ifnull(wLn.Material,"").toString().trim();
+					lnLotW = ifnull(wLn.Lot,"").toString().trim();
+
+					if(lnMatW != "" && lnLotW != "")
+					{
+						prevLotW = ifnull(lotForMat.get(lnMatW),"").toString();
+						if(prevLotW == "")
+						{
+							lotForMat.put(lnMatW,lnLotW);
+						}
+						else if(prevLotW != lnLotW && ambigMat.contains(lnMatW) == false)
+						{
+							ambigMat.add(lnMatW);
+							info "two lots issued for item " + itemIdStr + " material " + lnMatW + " - offcut provenance left blank";
+						}
+					}
+				}
+			}
+		}
+	}
 
 	stageId = 0;
 	stageOperator = null;
@@ -93,6 +156,15 @@ string saveWasteFromCutting(string planId, string planItemId, string phaseName, 
 		keepFlag = ifnull(pm.get("keep"),"false").toString().trim().toLowerCase();
 		remarks = ifnull(pm.get("remarks"),"").toString();
 
+		// An explicit lot in the payload wins - that is the supervisor telling
+		// us which roll this came off when only he can know. Otherwise it is
+		// derived, and only when the answer is unambiguous.
+		pieceLot = ifnull(pm.get("lotId"),"").toString().trim();
+		if(pieceLot == "" && ambigMat.contains(skuId) == false)
+		{
+			pieceLot = ifnull(lotForMat.get(skuId),"").toString().trim();
+		}
+
 		matRecs = Raw_Material[ID == skuId.toLong()];
 
 		if(skuId == "" || matRecs.count() == 0)
@@ -140,6 +212,18 @@ string saveWasteFromCutting(string planId, string planItemId, string phaseName, 
 			for each  wchk in Waste_Master[ID == newWasteId.toLong()]
 			{
 				wpId = wchk.ID;
+
+				// Lookup set after the insert - a null cannot go in the block,
+				// and an unresolvable lot is a legitimate outcome here.
+				if(pieceLot != "")
+				{
+					wchk.Lot = pieceLot.toLong();
+				}
+			}
+
+			if(pieceLot == "")
+			{
+				unlottedCount = unlottedCount + 1;
 			}
 
 			newMoveId = insert into Waste_Movement
@@ -207,5 +291,7 @@ string saveWasteFromCutting(string planId, string planItemId, string phaseName, 
 	}
 
 	// Built by hand - List.toString() does not reliably wrap in [].
-	return "{\"errors\":[" + errJson + "],\"kept\":" + keptCount + ",\"scrapped\":" + scrapCount + ",\"duplicate\":" + dupStr + "}";
+	// unlotted: pieces saved without a lot, because the item's cloth came off
+	// two of them and nothing can say which. Reported rather than guessed.
+	return "{\"errors\":[" + errJson + "],\"kept\":" + keptCount + ",\"scrapped\":" + scrapCount + ",\"unlotted\":" + unlottedCount + ",\"duplicate\":" + dupStr + "}";
 }
