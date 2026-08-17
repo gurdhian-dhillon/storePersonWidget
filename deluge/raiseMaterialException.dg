@@ -135,13 +135,34 @@ string raiseMaterialException(string payloadJson)
 	else
 	{
 		// Append to an existing open ticket rather than raising another.
+		//
+		// KEYED ON THE LOT AS WELL, for wash tickets. The wash converts ONE lot's
+		// greige, so a fabric with jobs waiting on two shades needs two tickets -
+		// and keyed on the material alone the second raise landed on the first
+		// ticket, overwrote its quantities, and left the second shade with nothing
+		// queued for it and nothing anywhere saying why.
+		//
+		// A purchase ticket has no lot: the cloth does not exist yet, so there is
+		// nothing to name and one per material is right. Same for a wash ticket
+		// raised before the field existed - lotIdTxt is empty and the match falls
+		// back to the material, which is exactly the old behaviour.
+		//
+		// Filtered in code rather than in the query. A lookup never written reads
+		// EMPTY, not null, so `Lot == null` would not match the pre-lot tickets it
+		// is meant to, and the failure would be silent - a second ticket raised
+		// beside one already open.
 		existing = Material_Exception[SKU == matId.toLong() && Type == exType && Status == "Open"];
 		wasAppended = false;
 		exRec = null;
 
-		if(existing.count() > 0)
+		for each  ex in existing
 		{
-			for each  ex in existing
+			exLotTxt = ifnull(ex.Lot,"").toString().trim();
+			// One match is enough, and there is no reliable break in a for each -
+			// so the body is guarded instead. A second open ticket on the same lot
+			// should not exist; if one does, the later one wins and both are left
+			// on the form rather than one being silently closed.
+			if(exLotTxt == lotIdTxt)
 			{
 				oldNote = ifnull(ex.Note,"").toString();
 				addNote = zoho.currentdate.toString("dd-MMM HH:mm") + " - reported again, now short " + shortQty;
@@ -160,10 +181,11 @@ string raiseMaterialException(string payloadJson)
 				ex.Shortfall_Qty = shortQty;
 				ex.Last_Reported_On = zoho.currentdate;
 				exRec = ex;
+				wasAppended = true;
 			}
-			wasAppended = true;
 		}
-		else
+
+		if(wasAppended == false)
 		{
 			newEx = insert into Material_Exception
 			[
@@ -183,6 +205,18 @@ string raiseMaterialException(string payloadJson)
 
 			for each  ex2 in Material_Exception[ID == newEx.toLong()]
 			{
+				// WHICH SHADE THIS TICKET IS FOR. Set after the insert, not inside
+				// the block - a null cannot go into an insert block, and a purchase
+				// ticket legitimately has no lot. Same pattern as Wash_Request
+				// below.
+				//
+				// Without it the dedup above cannot tell two shades apart, and the
+				// store screen cannot tell which of its two wash rows is already
+				// raised.
+				if(lotIdTxt != "")
+				{
+					ex2.Lot = lotIdTxt.toLong();
+				}
 				exRec = ex2;
 			}
 		}

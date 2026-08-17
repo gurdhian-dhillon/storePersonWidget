@@ -1,0 +1,57 @@
+string getFinishingQueue()
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		rowsJson = "";
+		// Query all plan items that have been accepted in QC (checked)
+		planItems = Plan_Item[Qty_Accepted > 0] sort by Added_Time desc;
+		
+		// If no items have Qty_Accepted > 0 yet, fall back to any active Plan_Item so the user sees their filled record immediately!
+		if(planItems.count() == 0)
+		{
+			planItems = Plan_Item[ID != 0] sort by Added_Time desc;
+		}
+		
+		for each item in planItems
+		{
+			planRec = Production_Planning[ID == item.Plan];
+			planNo = "";
+			soNo = "";
+			for each p in planRec
+			{
+				planNo = ifnull(p.Plan_No, "").toString().replaceAll("\"", "'");
+				for each so in Sales_Order[ID == p.Sales_Order]
+				{
+					soNo = ifnull(so.Sales_Order, "").toString().replaceAll("\"", "'");
+				}
+			}
+			
+			qtyVal = ifnull(item.Qty_Accepted, 0).toLong();
+			if(qtyVal == 0)
+			{
+				qtyVal = ifnull(item.Qty_Ordered, 0).toLong();
+			}
+			
+			if(rowsJson != "")
+			{
+				rowsJson = rowsJson + ",";
+			}
+			
+			rowsJson = rowsJson + "{\"id\":\"" + item.ID + "\","
+				+ "\"salesOrder\":\"" + soNo + "\","
+				+ "\"planNo\":\"" + planNo + "\","
+				+ "\"itemName\":\"" + ifnull(item.Item_Name, "").toString().replaceAll("\"", "'") + "\","
+				+ "\"qty\":" + qtyVal + ","
+				+ "\"status\":\"Pending\","
+				+ "\"stages\":{\"folding\":{\"start\":null,\"end\":null,\"duration\":null},\"pressing\":{\"start\":null,\"end\":null,\"duration\":null},\"branding\":{\"start\":null,\"end\":null,\"duration\":null}}}";
+		}
+		
+		res = "{\"errors\":[],\"queue\":[" + rowsJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

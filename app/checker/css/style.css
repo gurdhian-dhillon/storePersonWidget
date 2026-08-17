@@ -39,7 +39,9 @@ body {
     -webkit-font-smoothing: antialiased;
 }
 
-.app-container { max-width: 1100px; margin: 0 auto; padding: 1.25rem; }
+/* Full width with tight padding, exactly as the production screen — a centred
+   1100px column left a wide empty gutter on either side of one card. */
+.app-container { max-width: 100%; margin: 0 auto; padding: 1rem; }
 .hidden { display: none !important; }
 
 /* Header ----------------------------------------------------------------- */
@@ -100,11 +102,26 @@ body {
 
 /* Item card -------------------------------------------------------------- */
 
+/* Card metrics copied from the production screen so the two read as one system:
+   square-ish corners, a grey header strip, and padding on the HEADER rather than
+   the card, which is what let the body sit flush. */
 .item-card {
-    border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 0.9rem; margin-top: 0.75rem; background: var(--surface);
+    background: var(--surface);
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
+    overflow: hidden;
+    margin-bottom: 0.6rem;
+    /* Clears the sticky app header when a card is scrolled to. */
+    scroll-margin-top: 5rem;
 }
-.item-header { display: flex; align-items: center; gap: 1rem; }
+.item-header {
+    display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+    padding: 0.625rem 0.875rem;
+    background-color: #f8fafc;
+    cursor: pointer;
+    user-select: none;
+}
 .item-header-info { flex: 1; min-width: 0; }
 .item-header h2 { font-size: 1rem; font-weight: 600; display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
 
@@ -225,27 +242,190 @@ body {
 .tab-panel { display: none; }
 .tab-panel.is-active { display: block; }
 
-/* History ---------------------------------------------------------------- */
-.hist-bar { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
+/* Expanding card ---------------------------------------------------------
+   The check form lives inside the card rather than in an overlay, matching the
+   production screen. A modal hid the card it belonged to, so the counts he was
+   checking against — produced, and how much the order still owes — vanished at
+   the moment he needed them most. */
+.item-card.is-open { border-color: var(--primary); }
+.item-card.is-open .item-header { border-bottom: 1px solid var(--border); }
+
+.item-body { padding: 0.875rem; cursor: default; }
+.section-title {
+    font-size: 0.82rem; font-weight: 600; color: var(--text-main);
+    margin-top: 1rem; margin-bottom: 0.15rem;
+}
+.item-body .table-wrapper { background: var(--surface); }
+
+.chk-error {
+    margin-top: 0.8rem; padding: 0.5rem 0.7rem; border-radius: 6px;
+    font-size: 0.85rem; color: var(--status-danger); background: var(--status-danger-bg);
+}
+.chk-actions {
+    display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 1.1rem;
+    padding-top: 0.9rem; border-top: 1px solid var(--border);
+}
+
+/* The accordion chevron, lifted from the production screen so the two cards
+   behave and read the same way. Rotates on open. */
+.item-header-right { display: flex; align-items: center; gap: 0.6rem; flex: 0 0 auto; }
+.chevron {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.75rem; height: 1.75rem; flex: 0 0 auto;
+    border-radius: 50%; color: var(--primary);
+    background: rgba(255, 255, 255, 0.75);
+    box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.25);
+    transition: transform 0.2s ease, background-color 0.15s ease;
+}
+.item-header:hover .chevron { background: #ffffff; box-shadow: inset 0 0 0 1px var(--primary); }
+.chevron svg { width: 0.95rem; height: 0.95rem; display: block; }
+.item-card.is-open .chevron { transform: rotate(90deg); }
+
+/* History -----------------------------------------------------------------
+   One card per check. The shape is: who and what on the left, the outcome as
+   tiles on the right, and anything the check actually FOUND in a labelled row
+   underneath. A batch where nothing failed has almost nothing to read, which is
+   the point — the eye should land on the batches that went wrong. */
+
+.hist-bar {
+    display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+    margin-bottom: 0.75rem;
+}
 .hist-bar label { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); }
 .hist-bar input[type="date"] {
-    font-family: inherit; font-size: 0.88rem; padding: 0.4rem 0.55rem;
-    border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+    font-family: inherit; font-size: 0.88rem; padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
     color: var(--text-main);
 }
-.hist-totals { font-size: 0.82rem; color: var(--text-muted); margin-left: auto; }
 
-.hist-nums { display: flex; flex-direction: column; align-items: flex-end; gap: 0.15rem; font-size: 0.82rem; }
-.hist-num.is-ok { color: var(--status-success); }
-.hist-num.is-rej { color: var(--status-danger); }
-.hist-num.is-alt { color: var(--alt); }
-.hist-num.is-muted { color: var(--text-muted); font-size: 0.76rem; }
-
-.hist-fails { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.6rem; }
-.hist-fail {
-    font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 1rem;
-    color: var(--status-danger); background: var(--status-danger-bg);
+/* The day in one line, right-aligned against the date picker. */
+.hist-totals { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-left: auto; }
+.day-stat {
+    font-size: 0.76rem; color: var(--text-muted);
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 0.15rem 0.55rem; border-radius: 1rem;
 }
-.hist-fail.is-clean { color: var(--text-muted); background: #f1f5f9; }
-.hist-alt { font-size: 0.8rem; color: var(--alt); margin-top: 0.45rem; }
-.hist-remarks { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.45rem; font-style: italic; }
+.day-stat b { color: var(--text-main); font-weight: 600; }
+.day-stat.is-ok  { color: #047857; border-color: #a7f3d0; background: #ecfdf5; }
+.day-stat.is-ok b { color: #047857; }
+.day-stat.is-rej { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+.day-stat.is-rej b { color: #b91c1c; }
+.day-stat.is-alt { color: #0f766e; border-color: #99f6e4; background: #f0fdfa; }
+.day-stat.is-alt b { color: #0f766e; }
+
+.hist-card {
+    background: var(--surface);
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
+    overflow: hidden;
+    margin-bottom: 0.6rem;
+}
+
+.hist-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 1rem; padding: 0.7rem 0.875rem; background: #f8fafc;
+}
+.hist-title { min-width: 0; }
+.hist-title h3 {
+    font-size: 0.95rem; font-weight: 600; line-height: 1.35;
+    display: flex; align-items: baseline; gap: 0.45rem; flex-wrap: wrap;
+}
+.hist-meta { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.2rem; }
+.hist-who { font-size: 0.76rem; color: var(--text-muted); margin-top: 0.2rem; }
+
+/* Outcome tiles. Number over label so the numbers line up as a row and can be
+   read across cards without hunting for them in a sentence. */
+.out-tiles { display: flex; gap: 0.35rem; flex: 0 0 auto; }
+.out-tile {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-width: 3.9rem; padding: 0.3rem 0.45rem; border-radius: 6px;
+    font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.03em;
+    line-height: 1.15; border: 1px solid transparent;
+}
+.out-tile b { font-size: 1.05rem; font-weight: 700; letter-spacing: 0; }
+.out-tile.is-ok  { color: #047857; background: #ecfdf5; border-color: #a7f3d0; }
+.out-tile.is-rej { color: #b91c1c; background: #fef2f2; border-color: #fecaca; }
+.out-tile.is-alt { color: #0f766e; background: #f0fdfa; border-color: #99f6e4; }
+/* Inspected is the denominator, not an outcome — it must not compete. */
+.out-tile.is-tot { color: var(--text-muted); background: #f1f5f9; border-color: var(--border); }
+
+/* Labelled rows. The label column is what stops "Stain 2" and "Stitching 1"
+   reading as the same kind of thing as "Back to Stitching". */
+.hist-detail { padding: 0.55rem 0.875rem 0.7rem; }
+.hist-row { display: flex; gap: 0.6rem; align-items: baseline; margin-top: 0.35rem; }
+.hist-row:first-child { margin-top: 0; }
+.hist-row-label {
+    flex: 0 0 3.4rem; font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--text-muted); padding-top: 0.15rem;
+}
+.hist-row-body { display: flex; gap: 0.3rem; flex-wrap: wrap; min-width: 0; }
+
+.fail-pill, .stage-pill {
+    display: inline-flex; align-items: baseline; gap: 0.3rem;
+    font-size: 0.76rem; padding: 0.12rem 0.5rem; border-radius: 1rem;
+}
+.fail-pill { color: #b91c1c; background: #fef2f2; box-shadow: inset 0 0 0 1px #fecaca; }
+.fail-pill b { font-weight: 700; }
+.fail-pill i { font-style: normal; color: var(--text-muted); }
+.stage-pill { color: #0f766e; background: #f0fdfa; box-shadow: inset 0 0 0 1px #99f6e4; }
+.stage-pill b { font-weight: 700; }
+
+.hist-remark { font-size: 0.8rem; color: var(--text-main); display: block; }
+.hist-clean { font-size: 0.78rem; color: var(--status-success); }
+
+/* The check form -----------------------------------------------------------
+   Restores .insp-row, which was collateral damage when the old history block
+   was removed — it had been appended between two blocks and went with the wrong
+   one, leaving the inspector select unstyled. */
+
+/* Who judged this. First thing in the form, before any number is typed, because
+   the save is refused without it. */
+.insp-row {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.55rem 0.7rem; margin-bottom: 0.9rem;
+    background: #f8fafc; border: 1px solid var(--border); border-radius: 6px;
+}
+.insp-row label { font-size: 0.78rem; font-weight: 600; color: var(--text-muted); }
+.insp-row select {
+    font-family: inherit; font-size: 0.88rem; padding: 0.35rem 0.55rem;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface); color: var(--text-main); min-width: 13rem;
+}
+
+.item-body .section-title:first-child { margin-top: 0; }
+.item-body .hint { max-width: 62ch; }
+
+/* Column widths, so a 2-character number does not sit in a 400px cell and the
+   note field stops stretching to the far edge of a wide screen. */
+.chk-table th:first-child, .chk-table td:first-child { width: 30%; }
+.chk-table th.col-num, .chk-table td.col-num { width: 7.5rem; }
+.chk-table input[type="number"] { width: 4.5rem; }
+.chk-table input[type="text"] { width: 100%; max-width: 34rem; }
+
+/* The stage table has two columns, so without this the Pieces box lands against
+   the right edge miles from the stage it belongs to. */
+.alt-table th:last-child, .alt-table td:last-child { width: 8rem; }
+
+/* Decision. The three that must total what production made, grouped tightly so
+   they read as one control rather than three unrelated boxes. */
+.disp-row {
+    display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.35rem;
+    padding: 0.6rem 0.7rem; background: #f8fafc;
+    border: 1px solid var(--border); border-radius: 6px;
+}
+.disp-row label {
+    display: flex; flex-direction: column; gap: 0.25rem;
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--text-muted);
+}
+.disp-row input { width: 6rem; text-align: right; font-size: 0.95rem; font-weight: 600; }
+
+/* The running total. Sized to its own text — full width made a one-line
+   confirmation look like an error banner even when it was green. */
+.disp-total {
+    display: inline-block; margin-top: 0.5rem;
+    font-size: 0.82rem; font-weight: 600;
+    padding: 0.3rem 0.6rem; border-radius: 6px;
+}
+.chk-actions { margin-top: 1.2rem; }

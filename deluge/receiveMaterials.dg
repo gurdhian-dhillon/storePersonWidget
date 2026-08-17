@@ -37,7 +37,28 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	info "supId=" + supId + " matLines=" + mats.size() + " wasteLines=" + wastes.size();
 
 	// Partially Received is still open - the rest of the plan is yet to arrive.
-	plans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress")] sort by Added_Time;
+	//
+	// SORTED BY Priority_Key, THE SAME KEY issueMaterials USES - and that is not a
+	// preference, it is what makes this function correct. It stores no mapping of
+	// handover to plan and reconstructs which order a receipt belongs to by
+	// re-running the fan in the same order; the whole argument is "the same rule in
+	// the same order gives the same answer".
+	//
+	// It sorted by Added_Time until now, while issueMaterials sorted by
+	// Priority_Key. The two fans were therefore walking different sequences, so a
+	// partial receipt could credit Received_Qty to a different order's row than the
+	// one that was charged Issued_Qty - silently, and only visible as an order that
+	// would not close. Priority_Key came in later and this call was left behind.
+	//
+	// THE REAL FIX IS TO STOP RECONSTRUCTING. Material_Issue.Issue_Lines already
+	// records the Plan_Item, the Lot and the quantity of what actually crossed the
+	// counter, and the lot pass below is already driven from it. Driving the
+	// requirement fan from the same lines would remove the ordering dependency
+	// altogether, so a loose priority rule could never corrupt a ledger. Deferred
+	// deliberately: it restructures the stock and dispute writes in this function
+	// and none of it can be executed outside Creator, where matching the key is one
+	// line and closes today's divergence.
+	plans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress")] sort by Priority_Key;
 
 	//------------------------------------------------------------------------
 	// THE HANDOVER LINES, oldest first, fetched ONCE for the whole receipt.

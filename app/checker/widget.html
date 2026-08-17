@@ -17,12 +17,16 @@
             </div>
 
             <div class="app-header-right">
-                <!-- Standing in for a login until zoho.loginuser can be resolved
-                     to an Employee record, the same way the store and supervisor
-                     screens do it. Lists every Quality Inspector — a login does
-                     not appear and disappear based on whether you have work. -->
-                <select id="insp-select" class="sup-select" aria-label="Choose inspector">
-                    <option value="">Choose inspector…</option>
+                <!-- SUPERVISOR, not inspector. Inspectors have no login; the man
+                     at this screen is the supervisor who made the garments,
+                     working through his own batches. Which inspector judged each
+                     one is chosen per check, inside the dialog, because that is
+                     a fact about the check rather than about who is looking.
+
+                     Standing in for a login until zoho.loginuser can be resolved
+                     to an Employee record, exactly as the production screen does. -->
+                <select id="sup-select" class="sup-select" aria-label="Choose supervisor">
+                    <option value="">Choose supervisor…</option>
                 </select>
                 <button id="refresh-btn" class="primary-btn" type="button">Refresh</button>
             </div>

@@ -92,11 +92,15 @@ function lotsFor(material) {
     return (material.isFabric && material.lots) ? material.lots : [];
 }
 
-// Lots you can actually take cloth off today. Fabric only ever leaves the shelf
-// WASHED, so a lot holding nothing but greige is not a choice — it is an
-// explanation for why stock looks short.
-function issuableLots(material) {
-    return lotsFor(material).filter(function (l) { return (Number(l.wash) || 0) > 0; });
+// Lots that could take an order, for the override dialog: something in them, and
+// not quarantined. Greige counts — a lot with cloth at the wash house is a real
+// candidate, it simply cannot go out today.
+function usableLots(material) {
+    return lotsFor(material).filter(function (l) {
+        return !l.blocked &&
+               ((Number(l.wash) || 0) + (Number(l.unwash) || 0) +
+                (Number(l.inWash) || 0)) > 0;
+    });
 }
 
 // ---- Lot allocation: waste and fresh cloth together ----
@@ -231,50 +235,68 @@ function lotFill(lot, demands, fab, greige) {
     };
 }
 
-// WHICH LOT AN ORDER SHOULD COME OFF.
+// WHICH LOT AN UNPINNED ORDER SHOULD COME OFF.
 //
-// `pin` wins outright when set — an order with cloth already issued has no
-// choice left, because the ninety-seven pieces already cut decide the tone for
-// the three that follow.
+// THE ORDER IS THE ATOM: only a lot that covers it WHOLE is a candidate. A lot
+// that could take half of it is not a weaker version of a good answer, it is the
+// wrong answer — cloth burned on an order that then cannot be finished in that
+// shade, while the next order, which that lot could have completed, goes
+// without. An order nothing covers is skipped, not split and not part-served.
 //
-// Otherwise: the smallest lot that can FINISH the order, greige counted. Small
-// first for the same reason the fresh allocator picks small first — nibbling the
-// biggest lot leaves a medium one where a large one stood, and the next order is
-// likelier to need a split too. Ranked on what each lot can finish rather than
-// on metres, so a lot carrying plenty of usable remnants beats a bigger one that
-// carries none.
+// TWO TIERS, and greige never counts as available today:
 //
-// ONE LOT, ALWAYS — even when no lot can finish the order.
+//   1. lots that cover it off the rack NOW — washed cloth plus that lot's own
+//      offcuts. Ranking these below a smaller greige-only lot is what had the
+//      screen asking for a wash while ready cloth sat beside it.
+//   2. failing that, lots that cover it once their OWN greige is washed. Nothing
+//      goes out today; the wash line says what to send.
 //
-// It used to return null in that case and the caller spread the order over
-// several lots to get the pieces out. That is the one outcome lots exist to
-// prevent, and it bought nothing: the order goes out in two tones TODAY, where
-// staying on one lot leaves it short and fixable — wash that lot's greige, or
-// buy more of it. Short is recoverable; mixed tone is not.
+// Smallest within each tier, so big lots stay whole for the big orders that will
+// need them — nibbling the largest leaves a medium lot where a large one stood
+// and makes the next order likelier to be short.
 //
-// So the choice is a single ranking, and "can finish it" is just the top of it:
-// fewest pieces left owing, and among equals the SMALLEST lot. Nibbling the
-// biggest lot leaves a medium one where a large one stood and makes the next
-// order likelier to be short too.
+// A blocked lot is quarantined cloth and is never a candidate, though it is
+// still named on the row so "nothing on the rack" cannot be said over cloth he
+// is looking at.
 //
-// Returns null only when there are no lots at all.
-function chooseLotForOrder(lots, demands, fab, pin) {
-    if (pin) {
-        var pinned = lots.filter(function (l) { return String(l.lotId) === String(pin); });
-        if (pinned.length > 0) return pinned[0];
-    }
-    var best = null, bestShort = 0, bestSize = 0;
+// Returns null when no lot covers the order, `{lot, ready}` otherwise.
+function chooseLotForOrder(lots, demands, fab) {
+    var today = [], afterWash = [];
     lots.forEach(function (l) {
-        // Greige counted: a lot that finishes the order once washed is a lot
-        // that can finish the order.
-        var shortBy = lotFill(l, demands, fab, true).shortBy;
-        var size = round2((Number(l.wash) || 0) + (Number(l.unwash) || 0));
-        if (best === null || shortBy < bestShort ||
-            (shortBy === bestShort && size < bestSize)) {
-            best = l; bestShort = shortBy; bestSize = size;
-        }
+        if (l.blocked) return;
+        if (lotFill(l, demands, fab, false).covers) { today.push(l); return; }
+        if (lotFill(l, demands, fab, true).covers) afterWash.push(l);
     });
-    return best;
+
+    var smallest = function (list) {
+        var best = null, bestSize = 0;
+        list.forEach(function (l) {
+            var size = round2((Number(l.wash) || 0) + (Number(l.unwash) || 0));
+            if (best === null || size < bestSize) { best = l; bestSize = size; }
+        });
+        return best;
+    };
+
+    if (today.length > 0) return { lot: smallest(today), ready: true };
+    if (afterWash.length > 0) return { lot: smallest(afterWash), ready: false };
+    return null;
+}
+
+// WHAT ONE ORDER ASKS FOR IN METRES, ignoring what is on the rack.
+//
+// Used only to say "the smallest job here needs 22" on a row where nothing
+// fits. Offcut-blind and lot-blind on purpose: it is the size of the job, not an
+// allocation, and quoting a figure that moved with the rack would not answer the
+// question he is asking.
+function orderMetres(demands, fab) {
+    var t = 0;
+    demands.forEach(function (d) {
+        var pr = perRowFor(fab, d.cutW);
+        var cl = Number(d.cutL) || 0;
+        if (pr <= 0 || cl <= 0) return;
+        t += (Math.ceil(d.pieces / pr) * cl) / 100;
+    });
+    return round2(t);
 }
 
 // DELIBERATE TONE OVERRIDES.
@@ -330,11 +352,11 @@ function openLotOverride(supIdx, matIdx) {
     var m = sup.materials[matIdx];
     if (!m || !m.pinnedDry) return;
 
-    // Anything with cloth on it or greige behind it. The dry lot itself is not
-    // on the list — that is the whole reason he is here.
-    var opts = lotsFor(m).filter(function (l) {
-        return ((Number(l.wash) || 0) + (Number(l.unwash) || 0)) > 0 &&
-               String(l.lotNumber) !== String(m.pinnedDry);
+    // Anything with cloth on it, greige behind it or cloth at the washer, and not
+    // quarantined. The dry lot itself is not on the list — that is the whole
+    // reason he is here.
+    var opts = usableLots(m).filter(function (l) {
+        return String(l.lotNumber) !== String(m.pinnedDry);
     });
 
     var el = exceptionModalEl();
@@ -521,6 +543,11 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
         return {
             lotId: String(l.lotId),
             lotNumber: l.lotNumber,
+            // QUARANTINED CLOTH IS NOT A CANDIDATE, BUT IT IS STILL CLOTH.
+            // Dropping blocked lots entirely is what had a row saying "nothing on
+            // the rack" while he stood in front of eighteen metres of it. Carried
+            // through so the row can name it, never allocated from.
+            blocked: !!l.blocked,
             wash: lotLeft[lk] !== undefined ? lotLeft[lk] : round2(Number(l.wash) || 0),
             unwash: greigeLeft[lk] !== undefined ? greigeLeft[lk] : round2(Number(l.unwash) || 0),
             // Carried but never allocatable. Cloth at the wash house cannot be
@@ -591,6 +618,11 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
             }
             byOrder[oid].demands.push({
                 rowIdx: rw.idx,
+                // THE ORDER, carried through to the payload. The server can then
+                // check one-lot-per-order itself instead of trusting that this
+                // side got it right — a Custom API is callable from anywhere, and
+                // the guarantee is worth exactly as much as its weakest caller.
+                planId: oid,
                 planItemId: String(ln.planItemId || ''),
                 cutW: rw.m.cutWidth,
                 cutL: rw.m.cutLength,
@@ -628,17 +660,41 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
                         // quoting it would offer cloth that can never be used.
                         lotsUsed: [],
                         pinnedDryLots: [], pinnedDryOrders: [],
+                        // NOTHING ON THE RACK COVERS A WHOLE JOB. Kept as the
+                        // size of the smallest job that was turned away, because
+                        // that is the number that ends the argument: he is
+                        // looking at cloth, and "no lot holds enough" does not
+                        // tell him how much short it is.
+                        noFitSmallest: 0,
                         overrideFrom: '', overrideNote: '', noPieceData: false };
     });
 
     // `greigeUsed` is the cloth this order has COMMITTED a lot's greige to but
     // cannot take yet — it still has to be washed. Spent down like everything
     // else, or a second order would be told the same greige can finish it too.
-    var spend = function (lot, demands, fill, greigeUsed, noteOn, fromOn) {
+    //
+    // `emit` false is a COMMITMENT WITHOUT A HANDOVER: the order has taken this
+    // lot's cloth off the table — nothing else may be promised it — but none of
+    // it goes out today, because the order is not covered until the wash lands
+    // and an unpinned order is served whole or not at all. The ledgers move; the
+    // issue lines and the offcut picks do not.
+    //
+    // Skipping the ledger here instead would tell the card's next order that the
+    // same pile can finish it too, which is the double-promise this whole design
+    // exists to prevent.
+    //
+    // `washUsed` is passed rather than taken from `fill.freshMetres`, because on
+    // a commitment the fill was simulated against wash PLUS greige and its metres
+    // therefore span both piles. Deriving the washed share from the fill would
+    // drive `lot.wash` negative and then charge the same metres to the greige as
+    // well — the lot would read as having given twice what it holds.
+    var spend = function (lot, demands, fill, washUsed, greigeUsed, noteOn, fromOn, emit) {
+        washUsed = Number(washUsed) || 0;
         greigeUsed = Number(greigeUsed) || 0;
         noteOn = noteOn || '';
         fromOn = fromOn || '';
-        demands.forEach(function (d, i) {
+        emit = emit !== false;
+        if (emit) demands.forEach(function (d, i) {
             var r = res[d.rowIdx];
             r.fromWaste += fill.fromWaste[i];
             r.fromFresh += fill.fromFresh[i];
@@ -646,6 +702,7 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
             if (fill.metresPer[i] > 0) {
                 r.lotLines.push({ lotId: lot.lotId, lotNumber: lot.lotNumber,
                                   qty: fill.metresPer[i], planItemId: d.planItemId,
+                                  planId: d.planId,
                                   note: noteOn, overrideFrom: fromOn });
             }
             // KEYED BY REMNANT **AND** ITEM.
@@ -676,9 +733,9 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
         // only the first let two orders each take 5.50m from a 6.00m lot — both
         // were tested against the figure the lot had before either was served,
         // which is the double-promise this whole design exists to prevent.
-        lotLeft[materialId + '|' + lot.lotId] = round2(
-            (lotLeft[materialId + '|' + lot.lotId] || 0) - fill.freshMetres);
-        lot.wash = round2((Number(lot.wash) || 0) - fill.freshMetres);
+        lotLeft[materialId + '|' + lot.lotId] = round2(Math.max(0,
+            (lotLeft[materialId + '|' + lot.lotId] || 0) - washUsed));
+        lot.wash = round2(Math.max(0, (Number(lot.wash) || 0) - washUsed));
         lot.unwash = round2(Math.max(0, (Number(lot.unwash) || 0) - greigeUsed));
         greigeLeft[materialId + '|' + lot.lotId] = round2(Math.max(0,
             (greigeLeft[materialId + '|' + lot.lotId] || 0) - greigeUsed));
@@ -714,9 +771,20 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
         // A blocked lot lands here too, and should: quarantined cloth is not a
         // thing to finish an order with just because the order started on it.
         var pinnedLot = null;
+        var pinBlocked = false;
         if (ord.pin) {
             lots.forEach(function (l) {
-                if (String(l.lotId) === String(ord.pin)) pinnedLot = l;
+                if (String(l.lotId) !== String(ord.pin)) return;
+                // A BLOCKED PIN IS AN UNUSABLE PIN, however much cloth it holds.
+                // Quarantined cloth is not a thing to finish an order with just
+                // because the order started on it.
+                //
+                // This used to be handled for us: the server dropped blocked lots
+                // entirely, so the pin simply found nothing. Now they are sent so
+                // the row can name them, which means the block has to be honoured
+                // here or a pinned order would quietly issue quarantined cloth.
+                if (l.blocked) { pinBlocked = true; return; }
+                pinnedLot = l;
             });
         }
         // "FINISHED" MEANS FINISHED — no washed cloth, no greige, no offcut and
@@ -742,6 +810,10 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
                 var name = ord.pinNo || ord.pin;
                 if (rr.pinnedDryLots.indexOf(name) === -1) rr.pinnedDryLots.push(name);
                 if (rr.pinnedDryOrders.indexOf(ord.oid) === -1) rr.pinnedDryOrders.push(ord.oid);
+                // "L2 is empty" over a full but quarantined lot sends him to the
+                // rack to check, and he finds cloth. Different sentence, same
+                // override.
+                if (pinBlocked) rr.pinnedBlocked = true;
             });
 
             // AN OVERRIDE APPLIES ONLY HERE. Checked against the live rack every
@@ -759,15 +831,80 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
             }
         }
 
-        var lot = chooseLotForOrder(lots, ord.demands, fab, ord.pin);
-        if (lot) {
+        // WHICH LOT, AND WHETHER ANYTHING GOES OUT TODAY.
+        //
+        // A PINNED order has no choice: the shade is already decided by cloth
+        // that has been cut, so it takes whatever that lot can give, however
+        // little. All-or-nothing protects the shade DECISION, and that decision
+        // is behind it — refusing a top-up here would protect nothing and leave
+        // the order unfinishable for good. It is also the state every order
+        // part-issued under the old rules is already in.
+        //
+        // An UNPINNED order is served whole or skipped, and "whole" may be after
+        // a wash — in which case it commits the lot and issues nothing today.
+        var lot = null;
+        var ready = true;
+        if (ord.pin) {
+            lots.forEach(function (l) {
+                if (String(l.lotId) === String(ord.pin)) lot = l;
+            });
+        } else {
+            var choice = chooseLotForOrder(lots, ord.demands, fab);
+            if (choice) { lot = choice.lot; ready = choice.ready; }
+        }
+
+        if (!lot) {
+            // NOTHING COVERS THIS JOB. Skip it and carry on down the queue —
+            // blocking here would let one order bigger than any lot on the rack
+            // freeze the fabric for everybody behind it, permanently.
+            //
+            // The size of the job is kept so the row can say how far short it is.
+            // Smallest, because that is the one nearest to being servable and the
+            // only figure that makes "20 on the rack" mean anything.
+            var want = orderMetres(ord.demands, fab);
+            ord.demands.forEach(function (d) {
+                var rr = res[d.rowIdx];
+                if (rr.noFitSmallest === 0 || want < rr.noFitSmallest) {
+                    rr.noFitSmallest = want;
+                }
+            });
+            return;
+        }
+
+        {
             var fill = lotFill(lot, ord.demands, fab, false);
             // What the same lot would give with its greige washed. The gap is
             // what this order has reserved at the wash house.
             var withWash = lotFill(lot, ord.demands, fab, true);
             var greige = round2(Math.max(0, withWash.freshMetres - fill.freshMetres));
-            spend(lot, ord.demands, fill, greige,
-                  ord.note, (ord.note && ord.origPin !== ord.pin) ? ord.origPin : '');
+
+            // COMMITTED BUT NOT HANDED OVER. An unpinned order that only its
+            // lot's greige can complete takes nothing today: issuing the washed
+            // part would pin it to a lot that cannot yet finish it, which is the
+            // one thing the atom rule exists to prevent. The lot's cloth, greige
+            // and offcuts are still spent — this order has claimed them.
+            //
+            // The washed/greige split differs between the two cases. Handed over,
+            // the washed share is what actually went out and the greige is the
+            // rest. Committed, the whole requirement is planned against the lot
+            // at once, so the washed share is as much of it as the lot has washed
+            // today and the greige covers what is left.
+            var useFill = ready ? fill : withWash;
+            var washUse = ready
+                ? fill.freshMetres
+                : round2(Math.min(Number(lot.wash) || 0, withWash.freshMetres));
+            var greigeUse = ready
+                ? greige
+                : round2(Math.max(0, withWash.freshMetres - washUse));
+
+            spend(lot, ord.demands, useFill, washUse, greigeUse,
+                  ord.note, (ord.note && ord.origPin !== ord.pin) ? ord.origPin : '',
+                  ready);
+
+            // What the row has to ask the wash for. Handed-over rows want the
+            // gap; a committed row wants everything its lot cannot give washed
+            // today, which is the same figure by a different route.
+            greige = greigeUse;
 
             var usedSeen = [];
             ord.demands.forEach(function (d) {
@@ -916,7 +1053,108 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
                      rowQty: round2(r.washNeed[w.lotId] || 0) };
         });
         m.committedLots = r.lotsUsed;
+        m.shortReason = shortReasonFor(m, r, lots);
     });
+}
+
+// ONE ROW, ONE PROBLEM, ONE LINE.
+//
+// A row getting everything it asked for says only which lot to walk to. A row
+// that is short says exactly one more thing, and it is the next action — not the
+// reasoning, not the other lots, not the material's totals. Everything this
+// screen used to print alongside was true and none of it was his, and a screen
+// that explains itself constantly teaches people to skim the line that mattered.
+//
+// Ranked by what he has to DO about it, hardest stop first. Where two are true
+// the actionable one wins.
+//
+// Returns null on a row that is fully served — the caller prints nothing at all.
+function shortReasonFor(m, r, lots) {
+    var want = round2(Math.max(0, Number(m.remaining) || 0));
+    if (want <= 0) return null;
+
+    var got = 0;
+    (r.lotLines || []).forEach(function (ln) { got += Number(ln.qty) || 0; });
+    if (round2(got) + 0.0001 >= want) return null;
+
+    // Nothing can be worked out at all: no cut size, or a cut wider than the
+    // cloth. A data fault, and it outranks everything because every figure below
+    // it would be invented.
+    if (r.noPieceData) return { kind: 'nodata' };
+
+    // An order already cut in a shade that has run out. He has to decide, and
+    // until he does the order cannot move at all.
+    if (r.pinnedDryLots.length > 0) {
+        return { kind: r.pinnedBlocked ? 'pinnedBlocked' : 'pinnedDry',
+                 lot: r.pinnedDryLots.join(' and ') };
+    }
+
+    var byId = {};
+    lots.forEach(function (l) { byId[String(l.lotId)] = l; });
+
+    // Greige on the committed lot. The one case with a button on it, so it beats
+    // everything below.
+    var wash = (m.washLots || []).filter(function (w) {
+        return byId[String(w.lotId)] && round2(Number(w.rowQty) || 0) > 0;
+    });
+    if (wash.length > 0) {
+        return { kind: 'wash',
+                 lots: wash.map(function (w) {
+                     return { lotNumber: w.lotNumber, qty: round2(Number(w.rowQty) || 0) };
+                 }) };
+    }
+
+    // Committed, nothing left to wash, but cloth already at the washer. Not a
+    // finished lot — it comes back in this shade, so the answer is wait.
+    var atWash = null;
+    (r.lotsUsed || []).forEach(function (u) {
+        var l = byId[String(u.lotId)];
+        if (!atWash && l && (Number(l.inWash) || 0) > 0) {
+            atWash = { kind: 'atWash', lot: l.lotNumber,
+                       qty: round2(Number(l.inWash) || 0) };
+        }
+    });
+    if (atWash) return atWash;
+
+    // Cloth on the rack that no single job fits inside. SAY THE NUMBERS: he is
+    // looking at a rack with cloth on it, and "no lot holds enough" is true and
+    // unusable. The biggest lot and the smallest job end the argument in a
+    // glance, and neither of them is a marker row.
+    if (r.noFitSmallest > 0) {
+        var big = null;
+        lots.forEach(function (l) {
+            if (l.blocked) return;
+            var have = round2(Number(l.wash) || 0);
+            if (have > 0 && (big === null || have > big.qty)) {
+                big = { lotNumber: l.lotNumber, qty: have };
+            }
+        });
+        if (big) {
+            return { kind: 'nofit', lot: big.lotNumber, have: big.qty,
+                     need: round2(r.noFitSmallest) };
+        }
+    }
+
+    // Stock exists and is quarantined. Only reached when nothing usable was
+    // found, which is exactly when a silent row would send him to the rack to
+    // check for himself.
+    var blocked = null;
+    lots.forEach(function (l) {
+        if (!l.blocked) return;
+        var have = round2((Number(l.wash) || 0) + (Number(l.unwash) || 0));
+        if (have > 0 && (blocked === null || have > blocked.qty)) {
+            blocked = { kind: 'blocked', lot: l.lotNumber, qty: have };
+        }
+    });
+    if (blocked) return blocked;
+
+    if (lots.length === 0) return { kind: 'nolots' };
+
+    // Lots exist, none of them can help, and none of the named cases fit — the
+    // rack is simply empty of this shade. Never leave it blank: a row asking for
+    // metres with nothing in its lot column reads as a rendering fault, and he
+    // presses Issue and gets nothing.
+    return { kind: 'empty' };
 }
 
 
@@ -1379,7 +1617,12 @@ function summaryEntry(kind, idx) {
 //   2. enough greige
 //   3. most greige, washed cloth as the tie-break
 function recommendWashLot(e, need) {
-    var lots = (e.lots || []).filter(function (l) { return (Number(l.unwash) || 0) > 0; });
+    // Blocked lots excluded: washing quarantined greige converts it into
+    // quarantined washed cloth, which still cannot be issued. The wash team would
+    // do the work for nothing.
+    var lots = (e.lots || []).filter(function (l) {
+        return !l.blocked && (Number(l.unwash) || 0) > 0;
+    });
     if (lots.length === 0) return null;
 
     var want = Number(need) || 0;
@@ -1406,7 +1649,12 @@ function recommendWashLot(e, need) {
 }
 
 function washLotPickerHtml(e, entry) {
-    var lots = (e.lots || []).filter(function (l) { return (Number(l.unwash) || 0) > 0; });
+    // Blocked lots excluded: washing quarantined greige converts it into
+    // quarantined washed cloth, which still cannot be issued. The wash team would
+    // do the work for nothing.
+    var lots = (e.lots || []).filter(function (l) {
+        return !l.blocked && (Number(l.unwash) || 0) > 0;
+    });
     if (lots.length === 0) {
         return '<div class="exc-nolot">No lot has unwashed cloth &mdash; there is ' +
             'nothing to send. This one needs buying, not washing.</div>';
@@ -1646,13 +1894,17 @@ function submitSummaryException(kind, idx) {
             // Record what the ticket now covers, not just that one exists — the
             // plan list is what decides whether tomorrow's order re-arms this.
             var exType = exTypeFor(kind);
+            var lotNow = washLotChoice(kind);
             var coveredNow = (e.lines || []).map(function (l) { return String(l.planId); });
-            var existing = openRequestFor(e, exType);
+            var existing = openRequestFor(e, exType, lotNow);
             if (existing) {
                 existing.planIds = coveredNow;
             } else {
+                // The lot goes on the local record too, or the sibling wash row
+                // for the other lot would read as already requested until the
+                // next refresh.
                 e.openExceptions = (e.openExceptions || []).concat([
-                    { type: exType, planIds: coveredNow }
+                    { type: exType, lot: lotNow, planIds: coveredNow }
                 ]);
             }
 
@@ -1730,83 +1982,39 @@ function lotLinesHtml(m, supIdx, matIdx) {
         hidden += '<input type="hidden" class="lot-input" ' +
             'id="' + lotInputId(supIdx, matIdx, k) + '" value="' + rec[k] + '" />';
     });
-    if (used.length === 0) {
-        // Pinned to a lot with nothing left. The row is unissuable and saying so
-        // is the whole point — an empty Lot column reads as a rendering fault,
-        // and he presses Issue and gets nothing.
-        if (m.pinnedDry) {
-            return '<div class="lot-dry">&#9888; Already cut from <b>' +
-                escapeHtml(m.pinnedDry) + '</b>, which is now empty. This order ' +
-                'cannot be finished in that tone &mdash; it needs more of that ' +
-                'shade, or it goes out in two.</div>' +
-                '<button type="button" class="lot-override-btn" ' +
-                    'onclick="openLotOverride(' + supIdx + ',' + matIdx + ')">' +
-                    'Use a different lot&hellip;</button>' + hidden;
-        }
-        // Nothing allocated because nothing is wanted — a row already covered,
-        // or one whose offcuts cover it entirely. Warning here would put a
-        // problem on a row that has none, and the warnings below only mean
-        // something because they are rare.
-        if (round2(Number(m.remaining) || 0) <= 0) return hidden;
-
-        // NOTHING ALLOCATED, AND NONE OF THE NAMED REASONS APPLY.
-        //
-        // Every path that reaches here leaves a row asking for metres with an
-        // empty Lot column and an Issue button that does nothing — the silent
-        // dead end this screen keeps having to be defended against. Two ways in,
-        // and they need different answers.
-        if (m.noPieceData) {
-            return '<div class="lot-dry">&#9888; No cut size or fabric width on ' +
-                'record, so this cannot be worked out in marker rows and no lot ' +
-                'can be chosen. Fix the material before issuing it.</div>' + hidden;
-        }
-        // SAY THE NUMBER. "No lot holds enough" is true and useless: he is
-        // looking at a rack with cloth on it and a row asking for metres, and
-        // nothing on screen tells him how little is actually there. 1.37 Mtr
-        // ends the argument in one glance; a paragraph about marker rows does
-        // not, and he does not deal in rows anyway.
-        var live = issuableLots(m);
-        if (live.length > 0) {
-            var onRack = 0;
-            live.forEach(function (l) { onRack += Number(l.wash) || 0; });
-            return '<div class="lot-dry">&#9888; Only ' + fmt(round2(onRack)) + ' ' +
-                escapeHtml(m.unit) + ' washed' +
-                (live.length > 1
-                    ? ', across ' + live.length + ' lots &mdash; no single lot has enough'
-                    : ' &mdash; not enough') +
-                ' to cut a piece this size.</div>' + hidden;
-        }
-        return hidden;
-    }
+    if (used.length === 0) return hidden;
 
     var lotName = function (k) {
         var l = lots[Number(k)];
         return escapeHtml((l && l.lotNumber) || '—');
     };
 
-    // No "from" — the column heading already says Lot, and the word only
-    // pushed the number away from the edge it should be read down.
-    if (used.length === 1) {
-        return '<div class="lot-from"><b>' + lotName(used[0]) + '</b></div>' + hidden;
-    }
-
-    // Metres per lot only when there is more than one. Against a single lot it
-    // would only restate the box beside it.
+    // THE METRES GO ON EVERY LINE, INCLUDING A SINGLE ONE.
     //
-    // NO ROW COUNT. Marker rows are how the allocation is worked out, not
-    // something the store person deals in — he measures and cuts metres, and
-    // "6 rows" is a unit he has to translate before it means anything.
-    var lines = used.map(function (k) {
+    // They used to be printed only when a row took cloth off two lots, on the
+    // argument that against one lot they merely restate the box beside them. That
+    // argument died with the typed box: the box is computed and read-only now, it
+    // sits at the far right of the row, and this column is where he reads what to
+    // fetch off which roll. A bare "L1" made him pair the name with a figure three
+    // columns away — and when a row went from one lot to two, a number appeared
+    // out of nowhere and read as the wash having changed something it had not.
+    //
+    // One line, one instruction: which roll, how much.
+    //
+    // TWO LOTS IS TWO JOBS, and it is not labelled as anything. It used to say
+    // "More than one order on this row", which named something he cannot see and
+    // cannot act on — he does not deal in orders, and the allocator splitting
+    // them is it working, not a condition to report.
+    //
+    // NO ROW COUNT either. Marker rows are how the allocation is worked out; he
+    // measures and cuts metres.
+    //
+    // No "from" — the column heading already says Lot, and the word only pushed
+    // the number away from the edge it should be read down.
+    return used.map(function (k) {
         return '<div class="lot-from"><b>' + lotName(k) + '</b> &middot; ' +
             fmt(rec[k]) + ' ' + escapeHtml(m.unit) + '</div>';
-    }).join('');
-
-    // SEVERAL LOTS HERE MEANS SEVERAL ORDERS, never a split order. Each order
-    // takes one lot and only one, so two lines are two orders in two tones —
-    // which is the allocator working, not a warning. There is no longer a
-    // multi-tone case to tell it apart from: an order that no lot can finish
-    // stays on its lot and stays short.
-    return '<div class="lot-split">More than one order on this row</div>' + lines + hidden;
+    }).join('') + hidden;
 }
 
 // WHY THE FIGURE IS SHORT, and only when it is.
@@ -1816,84 +2024,57 @@ function lotLinesHtml(m, supIdx, matIdx) {
 // that is fully covered it is pure noise — which is what it was on every fabric
 // row while the strip printed it unconditionally.
 function lotShortHtml(m, supIdx, matIdx) {
-    var want = round2(Math.max(0, Number(m.remaining) || 0));
-    if (want <= 0) return '';
-    if (recommendedTotal(m, supIdx, matIdx) + 0.0001 >= want) return '';
+    var why = m.shortReason;
+    if (!why) return '';
+    var u = escapeHtml(m.unit);
 
-    // NAME THE LOT THE ROW IS WAITING ON, and quote THAT lot's greige.
-    //
-    // This used to total the greige across every lot of the material: "706.09
-    // Mtr unwashed" on a row committed to L2, when L2 held fifty of it. The
-    // figure he was shown was not the figure that decides anything — the wash
-    // targets the committed lot and buildShortfallSummary caps the ticket at
-    // what that lot holds, so the row promised metres that were never coming,
-    // and no answer to "which lot is that?" existed anywhere on the screen.
-    //
-    // NOT a per-lot list, which is the opposite mistake and is why the breakdown
-    // came out in the first place: "L1, L2, L3 — not issuable yet" told him L2
-    // and L3 were unusable on the very row that was issuing 8.22 and 10.96
-    // metres off them. One lot — the one this row is committed to — is the only
-    // honest answer, and it is the one he would act on.
-    // ONE LINE PER COMMITTED LOT, saying WHAT THIS ROW NEEDS OFF IT.
-    //
-    // A row carries several orders and each picks its own lot, so two of them
-    // can be waiting on two different piles. The number on each line is this
-    // row's share, never the lot's holding: most of L2's 15.69 belongs to
-    // another supervisor's order, and quoting it on a row that is 35.62 short
-    // offers him cloth that is neither his nor enough.
-    var byId = {};
-    lotsFor(m).forEach(function (l) { byId[String(l.lotId)] = l; });
-    var committed = (m.washLots || []).filter(function (w) {
-        return byId[String(w.lotId)] && round2(Number(w.rowQty) || 0) > 0;
-    });
-
-    if (committed.length > 0) {
-        return committed.map(function (w) {
-            var l = byId[String(w.lotId)];
-            var need = round2(Number(w.rowQty) || 0);
-            var have = round2(Number(l.unwash) || 0);
-            var atWash = round2(Number(l.inWash) || 0);
-            var s = '<div class="lot-short"><b>' + escapeHtml(l.lotNumber || '') + '</b> &middot; ' +
-                    fmt(need) + ' ' + escapeHtml(m.unit) + ' to wash';
-            // Only when the lot cannot even cover this row — otherwise the
-            // figure above already is the answer.
-            if (have + 0.0001 < need) {
-                s += ' &mdash; only ' + fmt(have) + ' ' + escapeHtml(m.unit) + ' there';
-            }
-            if (atWash > 0) {
-                s += ' &middot; <b>' + fmt(atWash) + ' ' + escapeHtml(m.unit) +
-                     ' already at the wash house</b>';
-            }
-            return s + '</div>';
+    // ONE LINE, AND IT IS THE NEXT THING TO DO. No reasoning, no other lots, no
+    // material totals — every figure quoted here is one he can act on, and the
+    // kinds are already ranked in shortReasonFor so only one arrives.
+    if (why.kind === 'wash') {
+        // One line per committed lot, quoting WHAT THIS ROW NEEDS OFF IT — never
+        // the lot's own pile, most of which is spoken for by another
+        // supervisor's job, and never the material's greige, which is other
+        // shades and can never serve this job at all.
+        return why.lots.map(function (w) {
+            return '<div class="lot-short"><b>' + escapeHtml(w.lotNumber || '') +
+                   '</b> &middot; ' + fmt(w.qty) + ' ' + u + ' to wash</div>';
         }).join('');
     }
-
-    // COMMITTED, BUT THE LOT HAS NOTHING LEFT TO WASH.
-    //
-    // The greige sitting on the other lots is ANOTHER TONE and can never serve
-    // this order, so the material total is not merely unhelpful here — it offers
-    // cloth that is unusable by definition. The only true answer is that this
-    // lot cannot cover the rest.
-    var usedLots = (m.committedLots || []).map(function (u) { return byId[String(u.lotId)]; })
-                                          .filter(function (l) { return !!l; });
-    if (usedLots.length > 0) {
-        return usedLots.map(function (l) {
-            var atWash = round2(Number(l.inWash) || 0);
-            // Nothing to wash, but something already washING. Not the same as a
-            // finished lot: it comes back in this tone, so the answer is wait.
-            if (atWash > 0) {
-                return '<div class="lot-short"><b>' + escapeHtml(l.lotNumber || '') +
-                       '</b> &middot; <b>' + fmt(atWash) + ' ' + escapeHtml(m.unit) +
-                       ' already at the wash house</b> &mdash; it comes back in this tone.</div>';
-            }
-            return '<div class="lot-short"><b>' + escapeHtml(l.lotNumber || '') +
-                   '</b> cannot cover the rest &mdash; it needs more cloth in this tone.</div>';
-        }).join('');
+    if (why.kind === 'atWash') {
+        return '<div class="lot-short"><b>' + escapeHtml(why.lot || '') + '</b> &middot; ' +
+               fmt(why.qty) + ' ' + u + ' at the wash house</div>';
     }
-
-    // No lot was chosen at all, so there is none on the rack to choose.
-    return '<div class="lot-short">No lot on the rack &mdash; book this fabric in on <b>Stock in</b>.</div>';
+    if (why.kind === 'pinnedDry' || why.kind === 'pinnedBlocked') {
+        return '<div class="lot-dry">' +
+               (why.kind === 'pinnedBlocked'
+                   ? 'Cut from <b>' + escapeHtml(why.lot) + '</b>, which is blocked'
+                   : '<b>' + escapeHtml(why.lot) + '</b> is empty &mdash; this was cut from ' +
+                     escapeHtml(why.lot)) +
+               '</div>' +
+               '<button type="button" class="lot-override-btn" ' +
+                   'onclick="openLotOverride(' + supIdx + ',' + matIdx + ')">' +
+                   'Use another lot&hellip;</button>';
+    }
+    if (why.kind === 'nofit') {
+        return '<div class="lot-dry">' + fmt(why.have) + ' ' + u + ' on <b>' +
+               escapeHtml(why.lot) + '</b>, smallest job needs ' + fmt(why.need) +
+               '</div>';
+    }
+    if (why.kind === 'blocked') {
+        return '<div class="lot-dry">' + fmt(why.qty) + ' ' + u + ' on <b>' +
+               escapeHtml(why.lot) + '</b> is blocked</div>';
+    }
+    if (why.kind === 'nodata') {
+        return '<div class="lot-dry">No cut size on the material</div>';
+    }
+    if (why.kind === 'nolots') {
+        return '<div class="lot-short">Not booked in</div>';
+    }
+    return '<div class="lot-short">None of this shade left</div>';
 }
+
+
 
 
 function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
@@ -1992,12 +2173,18 @@ function renderFabricRows(m, supIdx, matIdx) {
     var byLot = !done && wantsFresh;
 
     // ---- "To be issued": fresh metres as the headline, waste beneath it ----
+    // NO STATUS PILL ON A FABRIC ROW.
+    //
+    // The lot column beside it now says the one thing he can act on, and the pill
+    // could only categorise it — badly. A row waiting on a wash got "Cannot cut",
+    // which is false: the cloth is there, it is greige, and the line next to it
+    // already says how much to send. Two labels for one condition, and the shorter
+    // one was the wrong one.
     var toIssue = '';
     if (wantsFresh) {
         toIssue =
             '<span class="qty-big">' + fmt(m.remaining) +
-                '<span class="unit">' + escapeHtml(m.unit) + '</span></span>' +
-            (done ? '' : shortPill(m));
+                '<span class="unit">' + escapeHtml(m.unit) + '</span></span>';
     }
     picks.forEach(function (p) {
         toIssue +=
@@ -2078,12 +2265,16 @@ function renderFabricRows(m, supIdx, matIdx) {
         issueCell += '</div>';
     }
 
-    var warning = '';
-    if (!done && isContested(m)) {
-        var names = m.contestedBy.map(function (c) { return escapeHtml(c.name); }).join(', ');
-        warning = '<div class="contested-warn">&#9888; Also needed by ' + names + '</div>';
-    }
-
+    // NO "ALSO NEEDED BY" ON A FABRIC ROW.
+    //
+    // It named something he cannot act on. Under the old screen he could favour
+    // one supervisor by typing a smaller number; the allocation is computed now,
+    // there is no per-order control, and the row he would type into is read-only.
+    // Contention is settled where it can actually be settled — issueMaterials
+    // re-checks every lot, and whoever presses second gets what is really left.
+    //
+    // It stays on ACCESSORY rows, where he still types the quantity and the
+    // warning is therefore something he can do something about.
     return '' +
         '<tr id="' + rowId(supIdx, matIdx) + '" class="' + (done ? 'row-issued' : 'row-selected') + '">' +
             '<td class="material-name-cell">' +
@@ -2092,7 +2283,6 @@ function renderFabricRows(m, supIdx, matIdx) {
                 '</div>' +
                 '<div class="mat-sku">' + escapeHtml(m.sku) + '</div>' +
                 reissueWhy(m) +
-                warning +
             '</td>' +
             '<td class="col-num col-strong">' + toIssue + '</td>' +
             // The hidden inputs live in here now. They are keyed by id, not by
@@ -2269,98 +2459,63 @@ function buildShortfallSummary(data) {
     var toWash = [];
     var toBuy = [];
 
+    // TWO INDEPENDENT QUESTIONS, and gating one on the other is what broke this.
+    //
+    //   WASH — which lot's greige has jobs waiting on it. Read off the rows'
+    //          commitments and nothing else.
+    //   BUY  — is there enough cloth of this fabric AT ALL, in any state.
+    //
+    // It used to ask "is the material short?" first and skip everything if not.
+    // A material with thirty metres washed in the wrong shade is not short by
+    // that test, so a row reading "L2 · 13.2 Mtr to wash" got no wash row here
+    // and no buy row either: he could neither issue nor raise the wash, and
+    // nothing on the screen said why.
     Object.keys(byMat).forEach(function (k) {
         var e = byMat[k];
-        var gap = round2(e.needed - e.stock);
-        if (gap <= 0) return;
 
-        // HOW MUCH TO WASH, and the two answers pull against each other.
+        // ---- WASH: one ticket per lot a job is actually waiting on ----
         //
-        // The SHORTFALL (needed − washed stock) is the least cloth that clears
-        // the block, and it was what this asked for. But issuing afterwards then
-        // means taking the washed part off whichever lots already hold it and
-        // the rest off the newly-washed one. Real case: 116.45 needed, 20.55
-        // washed across L2 and L3, 95.9 washed from L1 — THREE TONES on one
-        // order, and no amount of later washing repairs it, because L1 ends up
-        // holding 95.9 against a demand of 116.45 and still cannot cover it.
+        // Straight off `washByLot`, which the rows built from their own
+        // commitments — no re-derivation, so the row and this list cannot
+        // disagree. Capped at what the lot holds, because the wash converts ONE
+        // lot's greige and raiseMaterialException trims a larger ask silently,
+        // which leaves the store waiting on metres that were never coming.
         //
-        // So when ONE lot's greige can cover the WHOLE outstanding requirement,
-        // wash that instead. It costs a little extra washing and buys a single
-        // tone, which is the entire reason lots exist. The already-washed metres
-        // on the other lots are not wasted; they serve a later order.
-        //
-        // The asymmetry is what settles it: OVER-washing only parks cloth in the
-        // right lot, while UNDER-washing leaves the store waiting on metres that
-        // were never coming. So the fallback below stays deliberately generous.
-        //
-        // Safe against a partial issue in the meantime. Washing moves greige to
-        // washed WITHIN one lot, so if he issues off L2/L3 before the wash lands
-        // the outstanding figure simply drops and the surplus stays as washed
-        // stock in that lot. Nothing is lost and nothing needs unwinding.
-        var washLot = null;
-        var washQty = 0;
+        // No material-level test in front of it. A material can hold plenty of
+        // washed cloth and still have a job stuck, because that cloth is another
+        // shade — which is the whole reason lots exist.
+        var byLotId = {};
+        (e.lots || []).forEach(function (l) { byLotId[String(l.lotId)] = l; });
 
-        if (e.isFabric && e.unwashed > 0) {
-            // ALREADY COMMITTED? Then the lot is not a choice. An order that has
-            // taken cloth from L3 can only be finished with L3's greige, so
-            // washing the biggest pile produces metres it cannot use.
-            // ONE TICKET PER COMMITTED LOT, because a tone commitment is per lot
-            // and a material can be waiting on two of them at once. Washing only
-            // the first one leaves the other order's cloth uncalled for, and the
-            // row on the card that named it goes on saying "not issuable yet"
-            // with nothing on the shortfall list to explain it.
-            var byLotId = {};
-            (e.lots || []).forEach(function (l) { byLotId[String(l.lotId)] = l; });
-            var committed = Object.keys(e.washByLot || {})
+        if (e.isFabric) {
+            Object.keys(e.washByLot || {})
                 .map(function (id) { return e.washByLot[id]; })
-                .filter(function (w) {
+                .filter(function (w) { return w.qty > 0; })
+                .sort(function (a, b) { return b.qty - a.qty; })
+                .forEach(function (w) {
                     var l = byLotId[String(w.lotId)];
-                    return w.qty > 0 && l && (Number(l.unwash) || 0) > 0;
-                })
-                .sort(function (a, b) { return b.qty - a.qty; });
-
-            if (committed.length > 0) {
-                var washedOff = 0;
-                committed.forEach(function (w) {
-                    var l = byLotId[String(w.lotId)];
-                    // The wash converts ONE lot's greige, so a ticket can never
-                    // ask for more than that lot holds — raiseMaterialException
-                    // trims it silently, which would leave the store waiting on
-                    // metres that were never coming.
+                    if (!l) return;
                     var q = round2(Math.min(w.qty, Number(l.unwash) || 0));
                     if (q <= 0) return;
                     toWash.push({ e: e, qty: q, kind: 'wash', lot: l });
-                    washedOff = round2(washedOff + q);
                 });
-                var buyPinned = round2(gap - washedOff);
-                if (buyPinned > 0) toBuy.push({ e: e, qty: buyPinned, kind: 'buy' });
-                return;
-            }
-
-            // Can one lot put the whole requirement on a single tone?
-            var whole = recommendWashLot(e, e.needed);
-            if (whole && (Number(whole.unwash) || 0) + 0.0001 >= e.needed) {
-                washLot = whole;
-                washQty = round2(e.needed);
-            } else {
-                // Nothing covers it outright, so fall back to clearing the block.
-                washQty = round2(Math.min(gap, e.unwashed));
-                washLot = washQty > 0 ? recommendWashLot(e, washQty) : null;
-                // The wash converts ONE lot's greige, so the ticket cannot ask
-                // for more than that lot holds. Capped here because
-                // raiseMaterialException trims it silently, which would leave
-                // the store waiting on metres that were never coming.
-                washQty = washLot
-                    ? round2(Math.min(washQty, Number(washLot.unwash) || 0))
-                    : 0;
-            }
         }
 
-        if (washQty > 0) {
-            toWash.push({ e: e, qty: washQty, kind: 'wash', lot: washLot });
-        }
-
-        var buyQty = round2(gap - washQty);
+        // ---- BUY: cloth that does not exist in ANY state ----
+        //
+        // Washed, greige and at-the-wash-house all count as owned. Leaving the
+        // last one out is what had the screen asking him to purchase cloth that
+        // was sitting at the washer — raised the day after he sent it, because
+        // sending moves the metres off the greige pile.
+        //
+        // Deliberately NOT "the wash could not cover it". A shade that cannot be
+        // made up by washing is a purchase question only if the fabric is short
+        // overall; otherwise it is the tone override's business, and that lives
+        // on the row where the decision is.
+        var owned = round2((Number(e.stock) || 0) +
+                           (Number(e.unwashed) || 0) +
+                           (Number(e.inWash) || 0));
+        var buyQty = round2(e.needed - owned);
         if (buyQty > 0) {
             toBuy.push({ e: e, qty: buyQty, kind: 'buy' });
         }
@@ -2382,9 +2537,24 @@ function exTypeFor(kind) {
     return kind === 'wash' ? 'Wash_Needed' : 'Shortage';
 }
 
-function openRequestFor(e, exType) {
+// A WASH TICKET BELONGS TO A LOT, NOT TO A MATERIAL.
+//
+// A material can be waiting on two lots at once, and each needs its own ticket —
+// washing L3 produces cloth the L2 job cannot use. Matched material-level, the
+// first raise greyed out the second lot's button and that shade was never queued
+// at all, with nothing anywhere saying why.
+//
+// A purchase ticket has no lot: the cloth does not exist yet, so there is nothing
+// to name and one per material is right.
+function openRequestFor(e, exType, lotId) {
+    var want = String(lotId || '');
     var found = (e.openExceptions || []).filter(function (x) {
-        return x && x.type === exType;
+        if (!x || x.type !== exType) return false;
+        if (exType !== 'Wash_Needed') return true;
+        // A ticket raised before the field existed carries no lot. Treated as
+        // covering the lot in hand rather than none, so an older open ticket
+        // still reads as open instead of inviting a duplicate.
+        return String(x.lot || '') === '' || String(x.lot || '') === want;
     });
     return found.length > 0 ? found[0] : null;
 }
@@ -2393,8 +2563,8 @@ function openRequestFor(e, exType) {
 // A plan that has appeared since is demand nobody has been told about, so the
 // button has to come back to life — otherwise today's order silently inherits
 // yesterday's request and nobody orders enough.
-function requestState(e, kind) {
-    var open = openRequestFor(e, exTypeFor(kind));
+function requestState(e, kind, lotId) {
+    var open = openRequestFor(e, exTypeFor(kind), lotId);
     if (!open) return 'none';
 
     var covered = (open.planIds || []).map(String);
@@ -2407,7 +2577,7 @@ function requestState(e, kind) {
 function summaryRow(entry, idx) {
     var e = entry.e;
     var kind = entry.kind;
-    var state = requestState(e, kind);
+    var state = requestState(e, kind, entry.lot ? entry.lot.lotId : '');
 
     var btnLabel = kind === 'wash' ? 'Send to wash' : 'Raise request';
     if (state === 'open') {
@@ -2639,9 +2809,12 @@ function renderSupervisorCard(sup, idx, arr) {
         }
     }
 
-    // No contested count here. The row that is actually contested says so on
-    // itself ("Also needed by …"), which is where the store person can act on
-    // it; a number in the header only says "something below is a problem".
+    // No contested count here. A number in the header only says "something below
+    // is a problem", and on fabric there is nothing he could do with it anyway —
+    // the allocation is computed and the metres box is read-only, so contention is
+    // settled at issue time by issueMaterials rather than announced here. Accessory
+    // rows still carry "Also needed by …" on themselves, because there he types the
+    // quantity and can act on it.
 
     var headerPill;
     if (pending.length === 0) {
@@ -2875,7 +3048,11 @@ function issueForSupervisor(supIdx) {
         var lotLines = (m.lotLines || []).filter(function (ln) {
             return (Number(ln.qty) || 0) > 0;
         }).map(function (ln) {
-            var out = { lotId: ln.lotId, qty: round2(ln.qty), planItemId: ln.planItemId || '' };
+            var out = { lotId: ln.lotId, qty: round2(ln.qty),
+                        planItemId: ln.planItemId || '',
+                        // The order, so issueMaterials can enforce one lot per
+                        // order rather than infer it from the item.
+                        planId: ln.planId || '' };
             // Only on a deliberate override. The handover records the lot that
             // actually left the shelf while Issued_Lot keeps the original, and
             // this says a person decided that rather than a rule slipping.

@@ -1,21 +1,27 @@
-string getCheckingQueue(string inspectorId)
+string getCheckingQueue(string supervisorId)
 {
-	// THE CHECKER'S QUEUE. Custom API, POST, one argument.
+	// THE CHECKING QUEUE, SCOPED TO ONE SUPERVISOR. Custom API, POST, one
+	// argument.
 	//
-	// Every Plan_Item sitting at Item_Status == "Awaiting_Check", grouped by the
-	// supervisor of its plan. There is no handover record between production and
-	// checking - the transfer is physical, and the status IS the queue - so this
-	// function is the only thing that tells the inspector work is waiting.
+	// Every Plan_Item sitting at Item_Status == "Awaiting_Check". There is no
+	// handover record between production and checking - the transfer is physical
+	// and the status IS the queue - so this function is the only thing that says
+	// work is waiting.
 	//
-	// WHAT inspectorId IS FOR, AND WHAT IT IS NOT FOR.
+	// SCOPED TO THE SUPERVISOR, NOT THE INSPECTOR, and that is a deliberate
+	// reversal. Quality inspectors have no login; supervisors do. The man at the
+	// screen is the supervisor who made the garments, working through his own
+	// batches and naming which inspector judged each one. So the argument that
+	// used to be inspectorId is now supervisorId, and it FILTERS rather than
+	// merely being logged.
 	//
-	// It is validated and logged, and that is all. An empty or unknown one still
-	// returns the WHOLE queue. Checking is not sliced per inspector: garments are
-	// not assigned to a man, they are on a rack, and whoever is on the floor
-	// checks them. Filtering by it would hide work from the only person who could
-	// do it, and there are no roles or login in this app yet to make such a filter
-	// mean anything - the picker is a stand-in, exactly as it is on the supervisor
-	// screen.
+	// The inspector list still travels back, because the check dialog has to
+	// offer it - the difference is that the choice is made per check, on the
+	// record, instead of once at the top of the screen.
+	//
+	// EMPTY supervisorId defaults to the first supervisor with work, which is
+	// what the widget auto-selects anyway - so a first load needs one call and
+	// never renders an empty screen while a dropdown sits unchosen.
 	//
 	// THE STATEMENT-EXECUTION LIMIT IS THE DESIGN CONSTRAINT HERE. It is NOT
 	// catchable: it kills the script and the widget gets a bare HTTP 500 with no
@@ -82,19 +88,8 @@ string getCheckingQueue(string inspectorId)
 			inspEmps = Employee[ID != 0] sort by Employee_Name;
 		}
 
-		inspTxt = ifnull(inspectorId,"").toString().trim();
-		inspName = "";
-
 		for each  ieRec in inspEmps
 		{
-			// Ids forced to string on BOTH sides. ID is a long and the argument
-			// arrives as text; comparing them as they are is a mixed-type
-			// comparison, which throws.
-			if(ieRec.ID.toString() == inspTxt)
-			{
-				inspName = ifnull(ieRec.Employee_Name,"").toString();
-			}
-
 			if(inspJson != "")
 			{
 				inspJson = inspJson + ",";
@@ -105,20 +100,20 @@ string getCheckingQueue(string inspectorId)
 			inspJson = inspJson + "{\"id\":\"" + ieRec.ID + "\",\"name\":\"" + ifnull(ieRec.Employee_Name,"").toString().replaceAll("\"","'") + "\"}";
 		}
 
-		// VALIDATED AND LOGGED, NEVER USED AS A FILTER. See the header - an
-		// unknown or empty inspectorId still gets the whole queue.
-		if(inspTxt == "")
+		// WHICH SUPERVISOR'S RACK. Held as TEXT and compared as text on both
+		// sides - Assigned_To is a lookup read with toString(), and comparing
+		// that to a long is a mixed-type comparison, which throws.
+		//
+		// Left empty here when nothing was passed. The first item's supervisor
+		// becomes the default inside the pass below, because the roster is not
+		// known until the items have been walked - and the widget auto-selects
+		// exactly that supervisor, so the two agree without a second call.
+		wantSup = ifnull(supervisorId,"").toString().trim();
+		if(wantSup.isNumber() == false)
 		{
-			info "getCheckingQueue: no inspectorId given - the full queue is returned.";
+			wantSup = "";
 		}
-		else if(inspName == "")
-		{
-			info "getCheckingQueue: inspectorId '" + inspTxt + "' matched nobody in the picker list - the full queue is returned anyway, deliberately.";
-		}
-		else
-		{
-			info "getCheckingQueue: inspector " + inspTxt + " (" + inspName + ")";
-		}
+		info "getCheckingQueue: supervisor '" + wantSup + "'";
 
 		//------------------------------------------------------------------
 		// 1. EVERY EMPLOYEE, ONCE, for the supervisor headings.
@@ -168,8 +163,9 @@ string getCheckingQueue(string inspectorId)
 
 		// One JSON blob per supervisor, plus the order they were first seen in.
 		// A Map alone has no order worth relying on.
-		supItemsById = Map();
+		supSeen = Map();
 		supOrder = List();
+		itemsJson = "";
 
 		for each  itm in awaiting
 		{
@@ -223,6 +219,55 @@ string getCheckingQueue(string inspectorId)
 			planNoOut = ifnull(planNoById.get(planKey),"").toString();
 			soNoOut = ifnull(planSoById.get(planKey),"").toString();
 			supIdTxt = ifnull(planSupById.get(planKey),"").toString();
+
+			//----------------------------------------------------------
+			// THE SUPERVISOR ROSTER, AND THE GATE.
+			//
+			// Every item awaiting a check contributes its supervisor to the
+			// dropdown and to that supervisor's count. Only the SELECTED
+			// supervisor's items go on to be described in full.
+			//
+			// This is the shape getProductionWidgetData already uses for plans:
+			// every one comes back as a light row, exactly one comes back with
+			// detail. It matters more here than there, because everything below
+			// this line - the root line, its acceptances, the BOM stage list,
+			// the round count - is several queries per item, and the queue spans
+			// the whole factory. Describing every supervisor's work to draw one
+			// man's screen is how this function would reach the statement limit,
+			// and that limit is not catchable: it kills the script and the
+			// widget gets a bare 500 with no error card.
+			//
+			// An item on a plan with no supervisor still counts, under the empty
+			// key. It is real work that somebody has to inspect, and dropping it
+			// because a lookup was never filled would hide it completely.
+			//----------------------------------------------------------
+			if(supSeen.get(supIdTxt) == null)
+			{
+				supSeen.put(supIdTxt,"0");
+				supOrder.add(supIdTxt);
+
+				// The default, decided by the OLDEST waiting item because the
+				// query is sorted that way. Whoever has been waiting longest is
+				// the right screen to open on, and it is the one the widget
+				// auto-selects - so the two cannot disagree about what is being
+				// shown.
+				if(wantSup == "")
+				{
+					wantSup = supIdTxt;
+				}
+			}
+			supSeen.put(supIdTxt,(ifnull(supSeen.get(supIdTxt),"0").toString().toLong() + 1).toString());
+
+			// Ids compared as text on both sides - a mixed-type comparison
+			// throws rather than returning false.
+			mineTxt = false;
+			if(supIdTxt == wantSup)
+			{
+				mineTxt = true;
+			}
+
+			if(mineTxt == true)
+			{
 
 			//----------------------------------------------------------
 			// THE ROOT LINE.
@@ -493,38 +538,25 @@ string getCheckingQueue(string inspectorId)
 			}
 			roundOut = roundTxt.toDecimal().toLong();
 
-			//----------------------------------------------------------
-			// Into its supervisor's bucket.
-			//
-			// An item whose plan has no supervisor still appears, under an
-			// empty id. Dropping it would hide real work on the rack because
-			// of a blank field on a record nobody is looking at.
-			//----------------------------------------------------------
-			if(supItemsById.get(supIdTxt) == null)
-			{
-				supItemsById.put(supIdTxt,"");
-				supOrder.add(supIdTxt);
+				if(itemsJson != "")
+				{
+					itemsJson = itemsJson + ",";
+				}
+
+				// Every id a STRING - an 18-digit id breaks JSON.parse on the
+				// widget side. Every quantity a bare number.
+				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"name\":\"" + ifnull(itm.Item_Name,"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + skuOut + "\",\"planId\":\"" + planKey + "\",\"planNo\":\"" + planNoOut + "\",\"salesOrder\":\"" + soNoOut + "\",\"produced\":" + producedOut + ",\"round\":" + roundOut + ",\"batch\":\"" + batchTxt + "\",\"lineOrdered\":" + ordOut + ",\"lineAccepted\":" + accOut + ",\"lineOutstanding\":" + outOut + ",\"stages\":[" + stagesOut + "]}";
 			}
-
-			itemsJson = supItemsById.get(supIdTxt).toString();
-			if(itemsJson != "")
-			{
-				itemsJson = itemsJson + ",";
-			}
-
-			// Every id a STRING - an 18-digit id breaks JSON.parse on the
-			// widget side. Every quantity a bare number.
-			itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"name\":\"" + ifnull(itm.Item_Name,"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + skuOut + "\",\"planId\":\"" + planKey + "\",\"planNo\":\"" + planNoOut + "\",\"salesOrder\":\"" + soNoOut + "\",\"produced\":" + producedOut + ",\"round\":" + roundOut + ",\"batch\":\"" + batchTxt + "\",\"lineOrdered\":" + ordOut + ",\"lineAccepted\":" + accOut + ",\"lineOutstanding\":" + outOut + ",\"stages\":[" + stagesOut + "]}";
-
-			supItemsById.put(supIdTxt,itemsJson);
 		}
 
 		//------------------------------------------------------------------
-		// 3. THE ACCORDION.
+		// 3. THE SUPERVISOR DROPDOWN.
 		//
-		// Only supervisors who actually have something waiting. Listing every
-		// supervisor here means opening a heading and finding nothing, with
-		// nothing on screen to say why.
+		// Only supervisors who actually have something waiting, each with its
+		// count. Listing every supervisor means picking a name and landing on an
+		// empty screen with nothing to say why - the same reason
+		// getProductionWidgetData builds its filter from the plans it found
+		// rather than from the Employee table.
 		//------------------------------------------------------------------
 		for each  supKey in supOrder
 		{
@@ -550,7 +582,7 @@ string getCheckingQueue(string inspectorId)
 			{
 				supsJson = supsJson + ",";
 			}
-			supsJson = supsJson + "{\"id\":\"" + supKey + "\",\"name\":\"" + supName + "\",\"items\":[" + ifnull(supItemsById.get(supKey),"").toString() + "]}";
+			supsJson = supsJson + "{\"id\":\"" + supKey + "\",\"name\":\"" + supName + "\",\"count\":" + ifnull(supSeen.get(supKey),"0").toString().toLong() + "}";
 		}
 	}
 	catch (e)
@@ -560,10 +592,10 @@ string getCheckingQueue(string inspectorId)
 		// the payload, in the shape the widget already parses.
 		// The picker goes back too when it was already built - the widget can
 		// then still show who it thinks you are while reporting the failure.
-		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"inspectors\":[" + inspJson + "],\"supervisors\":[]}";
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"inspectors\":[" + inspJson + "],\"supervisors\":[],\"selectedSupervisor\":\"\",\"items\":[]}";
 	}
 
 	// Built by hand. Map.toString() does not emit valid JSON once the structure
 	// nests, and List.toString() does not wrap in [].
-	return "{\"errors\":[],\"inspectors\":[" + inspJson + "],\"supervisors\":[" + supsJson + "]}";
+	return "{\"errors\":[],\"inspectors\":[" + inspJson + "],\"supervisors\":[" + supsJson + "],\"selectedSupervisor\":\"" + wantSup + "\",\"items\":[" + itemsJson + "]}";
 }

@@ -475,6 +475,17 @@ string issueMaterials(string supervisorId, string issuesJson)
 			fromOf = Map();
 			lotHave = Map();
 			lotName = Map();
+			// ONE ORDER, ONE LOT - checked here rather than trusted.
+			//
+			// The widget allocates per order and cannot produce a straddling
+			// order, but a Custom API is callable from anywhere and the guarantee
+			// is worth exactly as much as its weakest caller. Two shades in one
+			// order is the defect lots exist to prevent, and unlike a stock
+			// shortfall it cannot be undone once the cloth is cut.
+			//
+			// planId -> the lot that order is taking from. Empty on an older
+			// widget, which then behaves exactly as it did before.
+			orderLot = Map();
 			lotErr = "";
 			lotTotal = 0.0;
 
@@ -483,6 +494,7 @@ string issueMaterials(string supervisorId, string issuesJson)
 				la = laRaw.toMap();
 				laId = ifnull(la.get("lotId"),"").toString().trim();
 				laPin = ifnull(la.get("planItemId"),"").toString().trim();
+				laOrd = ifnull(la.get("planId"),"").toString().trim();
 
 				laqS = ifnull(la.get("qty"),"0").toString().trim();
 				if(laqS == "")
@@ -549,6 +561,24 @@ string issueMaterials(string supervisorId, string issuesJson)
 						}
 
 						lotSum.put(laId,prevWant.toDecimal() + laQ);
+
+						// THE ORDER MAY NAME ONLY ONE LOT. Two lines of the same
+						// order against two lots is rejected outright - the whole
+						// material line is refused rather than one of the two
+						// silently winning, because there is no way to tell from
+						// here which shade the finished pieces should be.
+						if(laOrd != "")
+						{
+							prevOrdLot = ifnull(orderLot.get(laOrd),"").toString().trim();
+							if(prevOrdLot == "")
+							{
+								orderLot.put(laOrd,laId);
+							}
+							else if(prevOrdLot != laId)
+							{
+								lotErr = matName + ": one order cannot be cut from two lots";
+							}
+						}
 
 						// The pass this line belongs to. Registered once, in
 						// payload order, so a lot split across two items still

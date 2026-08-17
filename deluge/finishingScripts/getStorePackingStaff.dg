@@ -1,0 +1,58 @@
+string getStorePackingStaff(string payloadJson)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		// 1. Try to find the Store department ID
+		storeDeptId = 0;
+		for each dept in Department[Department_Name.contains("Store") || Department_Name.contains("store")]
+		{
+			storeDeptId = dept.ID;
+		}
+		
+		rowsJson = "";
+		hasRecords = false;
+		
+		if(storeDeptId != 0)
+		{
+			// Query active employees in Store department, then filter by designation in Deluge if block (avoiding query parser limitations)
+			for each emp in Employee[Department == storeDeptId && Status == "Active"]
+			{
+				if(emp.Designation == "Packing Staff" || emp.Designation == "Packing Person" || emp.Designation == "Packaging Person")
+				{
+					hasRecords = true;
+					if(rowsJson != "")
+					{
+						rowsJson = rowsJson + ",";
+					}
+					empName = ifnull(emp.Employee_Name, "").toString().trim().replaceAll("\"", "'");
+					rowsJson = rowsJson + "{\"id\":\"" + emp.ID + "\",\"name\":\"" + empName + "\"}";
+				}
+			}
+		}
+		
+		// Fallback: If no employees were found, query all active employees and check designation
+		if(hasRecords == false)
+		{
+			for each emp in Employee[Status == "Active"]
+			{
+				if(emp.Designation == "Packing Staff" || emp.Designation == "Packing Person" || emp.Designation == "Packaging Person")
+				{
+					if(rowsJson != "")
+					{
+						rowsJson = rowsJson + ",";
+					}
+					empName = ifnull(emp.Employee_Name, "").toString().trim().replaceAll("\"", "'");
+					rowsJson = rowsJson + "{\"id\":\"" + emp.ID + "\",\"name\":\"" + empName + "\"}";
+				}
+			}
+		}
+		
+		res = "{\"errors\":[],\"staff\":[" + rowsJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}
