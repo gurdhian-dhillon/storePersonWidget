@@ -1,0 +1,259 @@
+string getCheckerHistory(string inspectorId, string dateTxt)
+{
+	// What was inspected on a given day. Custom API, POST, two arguments.
+	//
+	// ONE DAY, not a range - the same choice getSupervisorProductionHistory
+	// makes, and for the same two reasons. An inspector's history is a shift log
+	// ("what did I get through today"), and a single day bounds the query
+	// naturally. Check_Date is indexed the same way Log_Date is.
+	//
+	// Dates arrive pre-formatted as "dd-MMM-yyyy" because Deluge parses that the
+	// same way whatever the org's locale is, while "01-08-2026" is a different
+	// day in the US than it is here.
+	//
+	// EVERY INSPECTOR'S WORK, not just the one passed in. inspectorId NARROWS it
+	// when given and is ignored when empty. There is one inspector on this floor
+	// today, so a screen that hid everyone else's rounds would look broken the
+	// first time a second man was hired - and "who checked this" is exactly the
+	// question a disputed rejection turns into.
+	//
+	// WHAT IT ANSWERS THAT THE QUEUE CANNOT. The queue is what is in front of
+	// him; this is what he decided, and it is the only place a decision can be
+	// reviewed after the fact. A rejection opens a remake batch and an alteration
+	// opens another - both cost real cloth and real hours - so the record of who
+	// judged what, and how the batch was split, has to outlive the queue row that
+	// produced it.
+	//
+	// THE BATCH KIND IS DERIVED EXACTLY AS getCheckingQueue DERIVES IT. Four
+	// kinds, and Production_Loss must never fold into Check_Reject: it replaces
+	// garments spoiled on the floor that were never inspected, and drawing it as
+	// a rejection blames the inspector for a cutting-table accident. Two screens
+	// disagreeing about one batch is worse than either being wrong alone.
+
+	rowsJson = "";
+	totChecks = 0;
+	totInspected = 0;
+	totApproved = 0;
+	totRejected = 0;
+	totAlteration = 0;
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+	dTxt = ifnull(dateTxt,"").toString().trim();
+	if(dTxt == "")
+	{
+		return "{\"errors\":[\"No date given\"],\"checks\":[],\"totals\":{\"checks\":0,\"inspected\":0,\"approved\":0,\"rejected\":0,\"alteration\":0}}";
+	}
+
+	dDay = dTxt.toDate();
+
+	if(dDay > zoho.currentdate)
+	{
+		return "{\"errors\":[\"Cannot look at a future date\"],\"checks\":[],\"totals\":{\"checks\":0,\"inspected\":0,\"approved\":0,\"rejected\":0,\"alteration\":0}}";
+	}
+
+	// Optional narrowing. An empty or non-numeric id means "everybody", which is
+	// the default the screen opens on.
+	wantInsp = 0;
+	iTxt = ifnull(inspectorId,"").toString().trim();
+	if(iTxt != "" && iTxt.isNumber())
+	{
+		wantInsp = iTxt.toLong();
+	}
+
+	//----------------------------------------------------------------------
+	// Caches, filled on first sight and read for free after that.
+	//
+	// A day's checks cluster hard on a handful of plans and a handful of items,
+	// so the naive shape - resolve the plan, the order and the employee per row
+	// - is several queries per row for the same few records. That is the shape
+	// that trips the statement-execution limit, and the limit is NOT catchable:
+	// it kills the script, the try/catch never runs, and the widget gets a bare
+	// 500 with no error card to explain it.
+	//----------------------------------------------------------------------
+	empCache = Map();
+	itemNameCache = Map();
+	itemSkuCache = Map();
+	itemKindCache = Map();
+	planNoCache = Map();
+	soNoCache = Map();
+
+	// Newest first. Check_Date is the same for every row on a one-day view, so
+	// it can order nothing here - Added_Time is stamped at insert and gives the
+	// real sequence of the shift.
+	checks = Item_Check[Check_Date == dDay] sort by Added_Time desc;
+	info "checks on day: " + checks.count();
+
+	for each  icRow in checks
+	{
+		takeIt = true;
+		inspKey = ifnull(icRow.Inspector,"").toString();
+
+		if(wantInsp != 0 && inspKey != wantInsp.toString())
+		{
+			takeIt = false;
+		}
+
+		if(takeIt == true)
+		{
+			//----------------------------------------------------------
+			// The inspector's NAME. A lookup holds a record id, so
+			// toString() gives the id rather than the label - the exact
+			// mistake that shipped 18-digit ids to the UI twice.
+			//----------------------------------------------------------
+			inspName = ifnull(empCache.get(inspKey),"").toString();
+			if(inspName == "" && inspKey != "")
+			{
+				for each  icEmp in Employee[ID == icRow.Inspector]
+				{
+					inspName = ifnull(icEmp.Employee_Name,"").toString().replaceAll("\"","'");
+				}
+				empCache.put(inspKey,inspName);
+			}
+
+			//----------------------------------------------------------
+			// The item, its SKU and which kind of batch it was. Cached
+			// together because a re-check of the same batch reads all three
+			// again, and a rejected line produces several rounds on one item.
+			//----------------------------------------------------------
+			itemKey = ifnull(icRow.Plan_Item,"").toString();
+			itemNm = ifnull(itemNameCache.get(itemKey),"").toString();
+			itemSku = ifnull(itemSkuCache.get(itemKey),"").toString();
+			itemKind = ifnull(itemKindCache.get(itemKey),"").toString();
+
+			if(itemKind == "" && itemKey != "")
+			{
+				itemKind = "Original";
+
+				for each  icItm in Plan_Item[ID == icRow.Plan_Item]
+				{
+					itemNm = ifnull(icItm.Item_Name,"").toString().replaceAll("\"","'");
+
+					for each  icMas in Item_Master[ID == icItm.Item_Sku]
+					{
+						itemSku = ifnull(icMas.SKU,"").toString().replaceAll("\"","'");
+					}
+
+					// FOUR KINDS. Production_Loss is a garment spoiled on the
+					// floor and never inspected - it is not a rejection and must
+					// not be drawn as one.
+					if(ifnull(icItm.Is_Remake,false) == true)
+					{
+						kindRsn = ifnull(icItm.Remake_Reason,"").toString().trim();
+
+						if(kindRsn == "Alteration")
+						{
+							itemKind = "Alteration";
+						}
+						else if(kindRsn == "Production_Loss")
+						{
+							itemKind = "Replacement";
+						}
+						else
+						{
+							itemKind = "Remake";
+						}
+					}
+				}
+
+				itemNameCache.put(itemKey,itemNm);
+				itemSkuCache.put(itemKey,itemSku);
+				itemKindCache.put(itemKey,itemKind);
+			}
+
+			// Plan number and sales order, cached per plan.
+			planKey = ifnull(icRow.Plan,"").toString();
+			planNoTxt = ifnull(planNoCache.get(planKey),"").toString();
+			soNoTxt = ifnull(soNoCache.get(planKey),"").toString();
+
+			if(planNoTxt == "" && planKey != "")
+			{
+				for each  icPl in Production_Planning[ID == icRow.Plan]
+				{
+					planNoTxt = ifnull(icPl.Plan_No,"").toString().replaceAll("\"","'");
+
+					for each  icSo in Sales_Order[ID == icPl.Sales_Order]
+					{
+						soNoTxt = ifnull(icSo.Sales_Order,"").toString().replaceAll("\"","'");
+					}
+				}
+				planNoCache.put(planKey,planNoTxt);
+				soNoCache.put(planKey,soNoTxt);
+			}
+
+			//----------------------------------------------------------
+			// The five check rows, as recorded. They do NOT reconcile with
+			// the disposition and are not meant to - one garment can fail
+			// two checks - so they are carried through untouched rather
+			// than summarised into a figure that would look like a total.
+			//----------------------------------------------------------
+			lineJson = "";
+			for each  clRow in icRow.Check_Lines
+			{
+				pS = ifnull(clRow.Passed_Qty,"0").toString().trim();
+				if(pS == "") { pS = "0"; }
+				fS = ifnull(clRow.Failed_Qty,"0").toString().trim();
+				if(fS == "") { fS = "0"; }
+
+				if(lineJson != "") { lineJson = lineJson + ","; }
+				lineJson = lineJson + "{\"type\":\"" + ifnull(clRow.Check_Type,"").toString().replaceAll("\"","'") + "\",\"passed\":" + pS.toDecimal().toLong() + ",\"failed\":" + fS.toDecimal().toLong() + ",\"note\":\"" + ifnull(clRow.Note,"").toString().replaceAll("\"","'") + "\"}";
+			}
+
+			// Which stages the altered garments went back to. Empty on a check
+			// that sent none.
+			altJson = "";
+			for each  alRow in icRow.Alteration_Lines
+			{
+				aS = ifnull(alRow.Planned_Qty,"0").toString().trim();
+				if(aS == "") { aS = "0"; }
+
+				if(altJson != "") { altJson = altJson + ","; }
+				altJson = altJson + "{\"stage\":\"" + ifnull(alRow.Stage_Name,"").toString().replaceAll("\"","'") + "\",\"qty\":" + aS.toDecimal().toLong() + "}";
+			}
+
+			// A Creator numeric never written is an EMPTY STRING, not null, and
+			// toDecimal() throws on it.
+			insS = ifnull(icRow.Qty_Inspected,"0").toString().trim();
+			if(insS == "") { insS = "0"; }
+			appS = ifnull(icRow.Qty_Approved,"0").toString().trim();
+			if(appS == "") { appS = "0"; }
+			rejS = ifnull(icRow.Qty_Rejected,"0").toString().trim();
+			if(rejS == "") { rejS = "0"; }
+			altS = ifnull(icRow.Qty_Alteration,"0").toString().trim();
+			if(altS == "") { altS = "0"; }
+			rndS = ifnull(icRow.Round,"0").toString().trim();
+			if(rndS == "") { rndS = "0"; }
+
+			insN = insS.toDecimal().toLong();
+			appN = appS.toDecimal().toLong();
+			rejN = rejS.toDecimal().toLong();
+			altN = altS.toDecimal().toLong();
+
+			totChecks = totChecks + 1;
+			totInspected = totInspected + insN;
+			totApproved = totApproved + appN;
+			totRejected = totRejected + rejN;
+			totAlteration = totAlteration + altN;
+
+			chkDateTxt = "";
+			if(icRow.Check_Date != null)
+			{
+				chkDateTxt = icRow.Check_Date.toString("dd-MMM-yyyy");
+			}
+
+			if(rowsJson != "") { rowsJson = rowsJson + ","; }
+			// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+			rowsJson = rowsJson + "{\"id\":\"" + icRow.ID + "\",\"itemId\":\"" + itemKey + "\",\"item\":\"" + itemNm + "\",\"sku\":\"" + itemSku + "\",\"batch\":\"" + itemKind + "\",\"salesOrder\":\"" + soNoTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"inspector\":\"" + inspName + "\",\"checkedOn\":\"" + chkDateTxt + "\",\"round\":" + rndS.toDecimal().toLong() + ",\"inspected\":" + insN + ",\"approved\":" + appN + ",\"rejected\":" + rejN + ",\"alteration\":" + altN + ",\"remarks\":\"" + ifnull(icRow.Remarks,"").toString().replaceAll("\"","'") + "\",\"lines\":[" + lineJson + "],\"alterationLines\":[" + altJson + "]}";
+		}
+	}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"checks\":[],\"totals\":{\"checks\":0,\"inspected\":0,\"approved\":0,\"rejected\":0,\"alteration\":0}}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[],\"checks\":[" + rowsJson + "],\"totals\":{\"checks\":" + totChecks + ",\"inspected\":" + totInspected + ",\"approved\":" + totApproved + ",\"rejected\":" + totRejected + ",\"alteration\":" + totAlteration + "}}";
+}

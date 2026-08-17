@@ -34,10 +34,10 @@ string getStoreMaterialRequirements()
 	// TWO jobs and they are easy to mistake for one:
 	//   - it is the order the supervisor cards render in, so the shopify
 	//     supervisor is at the top of the store person's screen;
-	//   - it is the order the waste allocation claims offcuts in, so when two
+	//   - it is the order the widget claims offcuts and lots in, so when two
 	//     supervisors want the same remnant the shopify one gets it.
-	// Both fall out of this single sort, because supOrder is built as the keys
-	// are walked and wsLeft is decremented in the same pass.
+	// Both fall out of this single sort: supOrder is built as the keys are
+	// walked, and applyLotAllocation spends the rack down card by card.
 	//
 	// Priority_Key = rank * 1000000 + plan sequence, stamped by
 	// createProductionPlans. It is one field because Deluge `sort by` accepts
@@ -201,6 +201,28 @@ string getStoreMaterialRequirements()
 				lnMap.put("supervisorId",supId + "");
 				lnMap.put("required",ifnull(mr.Required_Qty,0));
 				lnMap.put("issued",ifnull(mr.Issued_Qty,0));
+				// PIECES PER LINE. Lots are allocated per plan item - one item is
+				// one tone - and fulfilment is counted in cut pieces, not metres.
+				// The aggregate above cannot answer "how many does THIS item still
+				// owe", which is the only question the allocator asks.
+				lnMap.put("reqPieces",reqPieces);
+				lnMap.put("issPieces",issPieces);
+				// THE PIN. Which lot this row's cloth already came off, stamped
+				// by issueMaterials on the first issue.
+				//
+				// The READABLE NUMBER travels with it (issuedLotNo, added at
+				// serialisation). An emptied lot is dropped from the lots array
+				// above - it is no longer a choice - so when the pinned lot has
+				// run out the widget has an id it cannot name, and "already cut
+				// from 3819000000141003" is not something to put on a screen.
+				//
+				// One order is one tone, so once ANY row of an order has taken
+				// cloth the rest of that order is committed to the same lot - a
+				// remake replacing three ruined panels has to match the
+				// ninety-seven already cut, and a second issue against a growing
+				// order has to as well. Empty means nothing has been issued yet
+				// and the lot is still free to choose.
+				lnMap.put("issuedLot",ifnull(mr.Issued_Lot,"").toString().trim());
 				// Why the store is being asked for this material a second time.
 				// One row per damage line, never summed, so this reason belongs
 				// to exactly one incident - which is the whole point of not
@@ -221,9 +243,10 @@ string getStoreMaterialRequirements()
 	// consumed in the order given. Added_Time is Creator's own field, which is
 	// why Waste_Master needs no Generated_On of its own.
 	//
-	// wsLeft tracks what is still unclaimed as we walk the keys in priority
-	// order, so the first supervisor sees the real pieces and every later one
-	// sees what is genuinely left.
+	// Nothing is claimed here any more. The candidates go out whole and the
+	// widget spends them down across the cards in this same priority order, so
+	// the first supervisor still sees the real pieces and every later one sees
+	// what is genuinely left.
 	//------------------------------------------------------------------------
 	// Grouped BY SKU, not one flat list.
 	//
@@ -236,9 +259,20 @@ string getStoreMaterialRequirements()
 	//
 	// Grouping first means a material only ever looks at its own cloth, and a
 	// material with no matching remnant does no allocation work at all.
-	wsLeft = Map();
 	wasteBySku = Map();
-	counterBySku = Map();
+
+	// WHERE THE OFFCUT IS, keyed by waste id and resolved only at emit time.
+	//
+	// Kept out of the scoring loop deliberately. That loop runs once per
+	// candidate per pass and is the hottest thing in this function; the answer is
+	// the same however many times it is scored, so it is looked up once at the
+	// end for the handful of pieces actually picked.
+	//
+	// Lot is a LOOKUP and holds a record id - the readable number comes from the
+	// lot pass further down, which is why this stores the id and not a name.
+	wasteLotById = Map();
+	wasteCartonById = Map();
+
 	availableWaste = Waste_Master[Status == "Available"] sort by Added_Time;
 
 
@@ -277,7 +311,18 @@ string getStoreMaterialRequirements()
 			wRow.put("sku",skuId);
 			wRow.put("width",pw);
 			wRow.put("length",pl);
-			wsLeft.put(wp.ID + "",pc);
+			// The count as it stands on the rack. Nothing here spends it down any
+			// more - the widget needs the whole figure to do its own, lot-aware
+			// allocation, because a remnant carries the tone of the lot it was
+			// cut from and which pieces are usable therefore depends on which lot
+			// the fresh cloth comes off.
+			wRow.put("count",pc);
+
+			// Which lot it was cut from and which carton it is sitting in. Both
+			// are what the store person needs to WALK TO IT - the allocator names
+			// a remnant, and without these he is hunting a rack for it.
+			wasteLotById.put(wp.ID + "",ifnull(wp.Lot,"").toString().trim());
+			wasteCartonById.put(wp.ID + "",ifnull(wp.Carton_Number,"").toString().trim().replaceAll("\"","'"));
 
 			skuList = wasteBySku.get(skuId);
 			if(skuList == null)
@@ -287,17 +332,6 @@ string getStoreMaterialRequirements()
 			skuList.add(wRow);
 			wasteBySku.put(skuId,skuList);
 
-			// A SEPARATE list of the same length, used only to count allocation
-			// passes. The pass loop cannot iterate the row list while the
-			// selection loop inside it is also iterating that list - one list,
-			// two live iterators, and Deluge does not keep them apart.
-			cList = counterBySku.get(skuId);
-			if(cList == null)
-			{
-				cList = List();
-			}
-			cList.add(wp.ID + "");
-			counterBySku.put(skuId,cList);
 		}
 	}
 
@@ -321,6 +355,13 @@ string getStoreMaterialRequirements()
 	// rather than filtered in the query, where empty would fall the wrong way.
 	//------------------------------------------------------------------------
 	lotJsonByMat = Map();
+
+	// Lot id -> the number written on the roll. Filled for every lot of a needed
+	// material, INCLUDING blocked and empty ones, which the lot picker below
+	// deliberately drops: an offcut cut from a lot that has since been blocked or
+	// run dry still has to be able to say which lot it came from.
+	lotNameById = Map();
+
 	allLotRows = Raw_Material_Lot[ID != 0] sort by Added_Time;
 
 	for each  lotR in allLotRows
@@ -335,6 +376,10 @@ string getStoreMaterialRequirements()
 		// function has to stay cheap rather than be made to fail politely.
 		if(lrMat != "" && neededMats.contains(lrMat) == true)
 		{
+
+		// Before the Blocked and empty-lot filters, so an offcut can still name
+		// its lot after that lot itself has dropped off the picker.
+		lotNameById.put(lotR.ID + "",ifnull(lotR.Lot_Number,"").toString().trim().replaceAll("\"","'"));
 
 		lrSt = ifnull(lotR.Status,"").toString().trim();
 		if(lrSt == "")
@@ -356,13 +401,22 @@ string getStoreMaterialRequirements()
 			{
 				lruS = "0";
 			}
+			// At the wash house: not issuable, not on the rack either. Shown so
+			// a lot that looks empty explains itself.
+			lriS = ifnull(lotR.In_Wash_Qty,"0").toString().trim();
+			if(lriS == "")
+			{
+				lriS = "0";
+			}
 
 			lrWash = lrwS.toDecimal();
 			lrUnwash = lruS.toDecimal();
 
 			// An empty lot is not a choice. It stays on the form for its history
-			// but must not clutter a screen about what can be issued today.
-			if(lrWash > 0 || lrUnwash > 0)
+			// but must not clutter a screen about what can be issued today -
+			// unless its cloth is at the wash, which is exactly why it looks
+			// empty and exactly what the store person needs told.
+			if(lrWash > 0 || lrUnwash > 0 || lriS.toDecimal() > 0)
 			{
 				// Fabric is issued as WASHED metres - issueMaterials reads
 				// Wash_Quantity for fabric - so wash is the issuable figure and
@@ -371,7 +425,7 @@ string getStoreMaterialRequirements()
 				lrLab = ifnull(lotR.Lot_Label,"").toString().replaceAll("\"","'");
 
 				// Ids as strings - an 18-digit id breaks JSON.parse on the widget.
-				lotFrag = "{\"lotId\":\"" + lotR.ID + "\",\"lotNumber\":\"" + lrNum + "\",\"label\":\"" + lrLab + "\",\"wash\":" + lrWash + ",\"unwash\":" + lrUnwash + "}";
+				lotFrag = "{\"lotId\":\"" + lotR.ID + "\",\"lotNumber\":\"" + lrNum + "\",\"label\":\"" + lrLab + "\",\"wash\":" + lrWash + ",\"unwash\":" + lrUnwash + ",\"inWash\":" + lriS.toDecimal() + "}";
 
 				prevLots = ifnull(lotJsonByMat.get(lrMat),"").toString();
 				if(prevLots != "")
@@ -442,6 +496,7 @@ string getStoreMaterialRequirements()
 		isFab = e.get("isFabric");
 		availableStock = 0.0;
 		unwashedStock = 0.0;
+		inWashStock = 0.0;
 		fabricWidthCm = 0.0;
 		skuText = "";
 		// Read live from Raw_Material rather than the Material_Name snapshot on
@@ -455,6 +510,7 @@ string getStoreMaterialRequirements()
 			{
 				availableStock = ifnull(rm.Wash_Quantity,0);
 				unwashedStock = ifnull(rm.Unwash_Quantity,0);
+				inWashStock = ifnull(rm.In_Wash_Qty,0);
 				// Stored as TEXT, in inches. Converted here and nowhere else.
 				val = rm.Fabric_Width_Inches;
 				if(val != null && val.trim() != "")
@@ -524,6 +580,7 @@ string getStoreMaterialRequirements()
 			}
 
 			matEntry.put("unwashedStock",unwashedStock);
+			matEntry.put("inWashStock",inWashStock);
 			matEntry.put("cutWidth",cutW);
 			matEntry.put("cutLength",cutL);
 			matEntry.put("fabricWidthCm",fabricWidthCm);
@@ -542,11 +599,11 @@ string getStoreMaterialRequirements()
 			// PIECES STILL TO COVER. Set here, BEFORE the waste
 			// allocation, and decremented by it.
 			//
-			// This used to live inside the hasWaste guard below, together
-			// with the fresh-metres sum that reads it - so a material with
-			// no remnants on the rack skipped both, and shipped a stale
-			// "Required_Qty - Issued_Qty" instead. That went wrong in two
-			// directions at once:
+			// This used to live inside a "has this material any offcuts"
+			// guard, together with the fresh-metres sum that reads it - so a
+			// material with no remnants on the rack skipped both, and shipped
+			// a stale "Required_Qty - Issued_Qty" instead. That went wrong in
+			// two directions at once:
 			//
 			//  UNDER-ASKS after any part-issue. Cloth is only usable in
 			//  whole marker rows, so issuing 10m of a 55cm cut yields 18
@@ -573,132 +630,30 @@ string getStoreMaterialRequirements()
 			coveredPcsTotal = 0;
 
 
-			// Only this material's remnants, and only if it has any. A material
-			// with nothing matching skips the allocation entirely instead of
-			// scanning the whole waste store to conclude the same thing.
-			myWaste = wasteBySku.get(matIdTxt);
-			myCounter = counterBySku.get(matIdTxt);
-			hasWaste = false;
-			if(myWaste != null && myCounter != null)
-			{
-				hasWaste = true;
-			}
-
-			if(hasWaste == true && outstandingPieces > 0 && cutW > 0 && cutL > 0 && fabricWidthCm > 0)
-			{
-				// Least-waste-area selection, not first-fit.
-				//
-				// Each pass scores every candidate piece by the area thrown away
-				// per cut obtained, and takes from the best one. This prefers a
-				// snug remnant over a large one and so protects big stock: a
-				// 300x400 cut into 187x137 wastes 68,762 cm2 for 2 pieces, while
-				// a 200x300 wastes only 8,762 cm2 for the same 2.
-				//
-				// The outer loop is a BOUNDED REPEAT, not an iteration over the
-				// rows - each pass either finishes the requirement or exhausts
-				// one waste row, so there can never be more passes than rows.
-				// myCounter is used purely as the counter, and must NOT be
-				// myWaste itself - see where it is built.
-				for each  passRow in myCounter
-				{
-					// Deluge has no reliable break out of a for-each, so the body
-					// is guarded instead. Once the requirement is covered, every
-					// remaining pass costs one comparison rather than another full
-					// scan of the candidates.
-					if(remainPcs > 0)
-					{
-
-					bestId = "";
-					bestScore = 0.0;
-					bestCap = 0;
-					bestW = 0.0;
-					bestL = 0.0;
-					bestAvail = 0;
-
-					// myWaste, not every remnant in the building - and no SKU test
-					// inside, because the grouping already did it.
-					for each  sRow in myWaste
-					{
-						sId = sRow.get("wasteId");
-						pieceW = sRow.get("width");
-						pieceL = sRow.get("length");
-						avail = wsLeft.get(sId);
-
-						// Grain is fixed - a piece narrower than the cut width
-						// can never be turned sideways to fit.
-						if(avail > 0 && pieceW >= cutW && pieceL >= cutL)
-						{
-							perRow = (pieceW / cutW).floor();
-							maxRows = (pieceL / cutL).floor();
-							capacity = perRow * maxRows;
-
-
-							// Cuts one physical piece yields here, and the area
-							// sacrificed to get them. Lower is better.
-							cutsFrom = capacity;
-							if(cutsFrom > remainPcs)
-							{
-								cutsFrom = remainPcs;
-							}
-							score = ((pieceW * pieceL) - (cutsFrom * cutW * cutL)) / cutsFrom;
-
-
-							// Strictly-better only, so equal scores keep the
-							// oldest piece - the group is already oldest-first, so
-							// FIFO survives as the tie-break.
-							if(bestId == "" || score < bestScore)
-							{
-								bestId = sId;
-								bestScore = score;
-								bestCap = capacity;
-								bestW = pieceW;
-								bestL = pieceL;
-								bestAvail = avail;
-							}
-						}
-					}
-
-					if(bestId != "")
-					{
-
-						// Take just enough of this piece, capped at what is left
-						// of it. Whichever runs out first ends this pass.
-						//
-						// * 1.0 FORCES DECIMAL DIVISION. Two integers divided in
-						// Deluge can truncate, and a truncated quotient is already
-						// rounded DOWN before .ceil() ever sees it - so 5 cuts at 2
-						// per piece asks for 2 pieces, not 3, and quietly leaves a
-						// cut uncovered. The .ceil() looks like it guards this and
-						// does not.
-						takePcs = ((remainPcs * 1.0) / bestCap).ceil();
-						if(takePcs > bestAvail)
-						{
-							takePcs = bestAvail;
-						}
-						coveredPcs = takePcs * bestCap;
-						if(coveredPcs > remainPcs)
-						{
-							coveredPcs = remainPcs;
-						}
-
-
-						pickEntry = Map();
-						pickEntry.put("wasteId",bestId);
-						pickEntry.put("width",bestW);
-						pickEntry.put("length",bestL);
-						pickEntry.put("pieces",takePcs);
-						wastePicks.add(pickEntry);
-
-						// Claim them so the next supervisor cannot be offered
-						// the same physical pieces.
-						wsLeft.put(bestId,bestAvail - takePcs);
-						remainPcs = remainPcs - coveredPcs;
-						coveredPcsTotal = coveredPcsTotal + coveredPcs;
-						}
-					}
-				}
-
-			}
+			// THE WASTE ALLOCATION USED TO LIVE HERE, and it has moved to the
+			// widget. It was a least-waste-area scan, once per candidate remnant per
+			// pass per requirement key - and it was lot-BLIND, because at this point
+			// no lot has been chosen yet.
+			//
+			// That blindness is what made it wrong rather than merely expensive. A
+			// remnant carries the tone of the lot it was cut from, so which remnants
+			// are usable depends on which lot the fresh cloth comes off - and that is
+			// decided in the widget. Choosing the lot and choosing the offcuts is ONE
+			// decision, so it happens in one place.
+			//
+			// The candidates now travel raw in wasteStock, with their lot and carton,
+			// and the widget allocates them alongside the fresh metres.
+			//
+			// Removing it takes keys x rows x rows statements out of the function
+			// closest to Creator's statement-execution limit - the limit that is NOT
+			// catchable, kills the script, and hands the widget a bare 500 with no
+			// error card. That is a real win, not a side effect.
+			//
+			// remainPcs is therefore left at the full outstanding count and the fresh
+			// metres below are the pre-waste figure. The widget overwrites both in
+			// applyLotAllocation before anything renders; leaving them honest rather
+			// than zero means a stale widget over-asks instead of under-asking, which
+			// is the safe direction to be wrong in.
 
 			//----------------------------------------------------------
 			// Whatever the waste could not cover comes off fresh fabric.
@@ -819,7 +774,7 @@ string getStoreMaterialRequirements()
 				{
 					linesJson = linesJson + ",";
 				}
-				linesJson = linesJson + "{\"planId\":\"" + lnE.get("planId") + "\",\"salesOrder\":\"" + lnE.get("salesOrder").toString().replaceAll("\"","'") + "\",\"planItemId\":\"" + lnE.get("planItemId") + "\",\"item\":\"" + lnE.get("item") + "\",\"isRemake\":" + lnE.get("isRemake") + ",\"supervisorId\":\"" + lnE.get("supervisorId") + "\",\"required\":" + lnE.get("required") + ",\"issued\":" + lnE.get("issued") + ",\"reason\":\"" + lnE.get("reason") + "\"}";
+				linesJson = linesJson + "{\"planId\":\"" + lnE.get("planId") + "\",\"salesOrder\":\"" + lnE.get("salesOrder").toString().replaceAll("\"","'") + "\",\"planItemId\":\"" + lnE.get("planItemId") + "\",\"item\":\"" + lnE.get("item") + "\",\"isRemake\":" + lnE.get("isRemake") + ",\"supervisorId\":\"" + lnE.get("supervisorId") + "\",\"required\":" + lnE.get("required") + ",\"issued\":" + lnE.get("issued") + ",\"reqPieces\":" + lnE.get("reqPieces") + ",\"issPieces\":" + lnE.get("issPieces") + ",\"issuedLot\":\"" + ifnull(lnE.get("issuedLot"),"").toString() + "\",\"issuedLotNo\":\"" + ifnull(lotNameById.get(ifnull(lnE.get("issuedLot"),"").toString().trim()),"").toString() + "\",\"reason\":\"" + lnE.get("reason") + "\"}";
 			}
 
 			exsJson = "";
@@ -854,12 +809,58 @@ string getStoreMaterialRequirements()
 					{
 						picksJson = picksJson + ",";
 					}
+					// WHERE TO WALK TO. Resolved here, once per piece actually
+					// picked, rather than carried through the scoring loop.
+					pkWid = pkE.get("wasteId").toString();
+					pkLotId = ifnull(wasteLotById.get(pkWid),"").toString().trim();
+					pkLotNo = "";
+					if(pkLotId != "")
+					{
+						pkLotNo = ifnull(lotNameById.get(pkLotId),"").toString().trim();
+					}
+					pkCarton = ifnull(wasteCartonById.get(pkWid),"").toString().trim();
+
 					// The level that broke it. Ids as strings, everything else
 					// numeric - the widget round-trips wasteId untouched.
-					picksJson = picksJson + "{\"wasteId\":\"" + pkE.get("wasteId") + "\",\"width\":" + pkE.get("width") + ",\"length\":" + pkE.get("length") + ",\"pieces\":" + pkE.get("pieces") + "}";
+					picksJson = picksJson + "{\"wasteId\":\"" + pkWid + "\",\"width\":" + pkE.get("width") + ",\"length\":" + pkE.get("length") + ",\"pieces\":" + pkE.get("pieces") + ",\"lot\":\"" + pkLotNo + "\",\"carton\":\"" + pkCarton + "\"}";
 				}
 
-				matsJson = matsJson + ",\"unwashedStock\":" + mEnt.get("unwashedStock") + ",\"cutWidth\":" + mEnt.get("cutWidth") + ",\"cutLength\":" + mEnt.get("cutLength") + ",\"fabricWidthCm\":" + mEnt.get("fabricWidthCm") + ",\"requiredPieces\":" + mEnt.get("requiredPieces") + ",\"issuedPieces\":" + mEnt.get("issuedPieces") + ",\"wasteIssuedPieces\":" + mEnt.get("wasteIssuedPieces") + ",\"outstandingPieces\":" + mEnt.get("outstandingPieces") + ",\"wastePicks\":[" + picksJson + "],\"freshMeters\":" + mEnt.get("freshMeters") + ",\"piecesCoveredByWaste\":" + mEnt.get("piecesCoveredByWaste") + ",\"freshPieces\":" + mEnt.get("freshPieces") + ",\"requiredTotal\":" + mEnt.get("requiredTotal") + ",\"lots\":[" + ifnull(mEnt.get("lotsJson"),"").toString() + "]";
+				//----------------------------------------------------------
+				// EVERY REMNANT OF THIS MATERIAL, UNALLOCATED, WITH ITS LOT.
+				//
+				// The picks above are this function's own allocation, made
+				// before any lot is chosen and therefore lot-blind. A remnant
+				// carries the tone of the lot it was cut from, so which pieces
+				// are usable depends on which lot the fresh cloth comes off -
+				// and that is decided in the widget, because the lot allocator
+				// lives there and the two are one decision, not two.
+				//
+				// So the candidates travel raw and the widget allocates them
+				// alongside the fresh metres. Counts are the full rack figure,
+				// not what this function's own pass left behind.
+				//----------------------------------------------------------
+				stockJson = "";
+				myRack = wasteBySku.get(mEnt.get("materialId").toString());
+				if(myRack != null)
+				{
+					for each  wsE in myRack
+					{
+						if(stockJson != "")
+						{
+							stockJson = stockJson + ",";
+						}
+						wsWid = wsE.get("wasteId").toString();
+						wsLotId = ifnull(wasteLotById.get(wsWid),"").toString().trim();
+						wsLotNo = "";
+						if(wsLotId != "")
+						{
+							wsLotNo = ifnull(lotNameById.get(wsLotId),"").toString().trim();
+						}
+						stockJson = stockJson + "{\"wasteId\":\"" + wsWid + "\",\"width\":" + wsE.get("width") + ",\"length\":" + wsE.get("length") + ",\"pieces\":" + wsE.get("count") + ",\"lotId\":\"" + wsLotId + "\",\"lot\":\"" + wsLotNo + "\",\"carton\":\"" + ifnull(wasteCartonById.get(wsWid),"").toString() + "\"}";
+					}
+				}
+
+				matsJson = matsJson + ",\"unwashedStock\":" + mEnt.get("unwashedStock") + ",\"inWashStock\":" + ifnull(mEnt.get("inWashStock"),0) + ",\"cutWidth\":" + mEnt.get("cutWidth") + ",\"cutLength\":" + mEnt.get("cutLength") + ",\"fabricWidthCm\":" + mEnt.get("fabricWidthCm") + ",\"requiredPieces\":" + mEnt.get("requiredPieces") + ",\"issuedPieces\":" + mEnt.get("issuedPieces") + ",\"wasteIssuedPieces\":" + mEnt.get("wasteIssuedPieces") + ",\"outstandingPieces\":" + mEnt.get("outstandingPieces") + ",\"wastePicks\":[" + picksJson + "],\"wasteStock\":[" + stockJson + "],\"freshMeters\":" + mEnt.get("freshMeters") + ",\"piecesCoveredByWaste\":" + mEnt.get("piecesCoveredByWaste") + ",\"freshPieces\":" + mEnt.get("freshPieces") + ",\"requiredTotal\":" + mEnt.get("requiredTotal") + ",\"lots\":[" + ifnull(mEnt.get("lotsJson"),"").toString() + "]";
 			}
 
 			matsJson = matsJson + "}";

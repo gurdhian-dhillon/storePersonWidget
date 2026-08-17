@@ -291,11 +291,119 @@ string getProductionWidgetData(string supervisorId, string planId)
 					sku = ifnull(imR.SKU,"").toString().replaceAll("\"","'");
 				}
 
+				// Read once here rather than inline in the JSON line, because the
+				// alteration gate below reads it too. An EMPTY Remake_Reason means
+				// a rejection, never an alteration - a batch of unknown cause must
+				// not be sent down a path expecting Alteration_Stage rows that do
+				// not exist.
+				rmkTxt = ifnull(itm.Remake_Reason,"").toString().trim();
+
+				//------------------------------------------------------------
+				// AN ALTERATION BATCH TAKES ITS PHASES FROM Alteration_Stage.
+				//
+				// An ordinary item's stage list is its BOM's. A batch cannot use
+				// that - it runs the two stages the checker named, not the whole
+				// eight - so when Alteration_Stage has rows they ARE the phase
+				// list and the BOM is not read at all.
+				//
+				// THE GATE EXISTS FOR THE STATEMENT LIMIT, which is NOT
+				// catchable: it kills the script and the widget gets a bare HTTP
+				// 500 with no error card. Only ONE plan gets its items, but every
+				// item on it costs a handful of queries already, and this adds up
+				// to three more.
+				//
+				// "Has Alteration_Stage rows" cannot be answered without a query,
+				// so the gate is the cheapest thing that CANNOT be true without
+				// it: every alteration batch is created as a remake
+				// (Is_Remake = true, Remake_Reason = "Alteration"), so an ordinary
+				// item skips the query entirely and costs exactly what it costs
+				// today. A remake pays one query to find out it is not one. Both
+				// fields are read because either alone would be a single point of
+				// failure, and both are already being read for the JSON.
+				//
+				// The AUTHORITY is still "has rows", exactly as it is in
+				// closeAlterationBatch - the gate only decides whether to ask.
+				//------------------------------------------------------------
+				altRmkTxt = ifnull(itm.Is_Remake,false).toString().trim();
+
+				altGate = false;
+				if(altRmkTxt == "true")
+				{
+					altGate = true;
+				}
+				if(rmkTxt == "Alteration")
+				{
+					altGate = true;
+				}
+
+				altHasRows = false;
+				altOpen = 0;
+				altMatShort = 0;
+
+				phasesJson = "";
+
+				if(altGate == true)
+				{
+					// "sort by" on its own assignment - inline in a for-each
+					// header it does not reliably parse, and a function that will
+					// not save is indistinguishable from one that saved and did
+					// nothing. Same read closeAlterationBatch makes of the same
+					// rows, deliberately.
+					altRows = Alteration_Stage[Plan_Item == itm.ID] sort by Sequence_No;
+
+					for each  altR in altRows
+					{
+						altHasRows = true;
+
+						altStgTxt = ifnull(altR.Stage_Name,"").toString().trim();
+
+						// A Number field that was never written is EMPTY, not
+						// null - ifnull does not catch it and toDecimal() throws.
+						altSeqS = ifnull(altR.Sequence_No,"0").toString().trim();
+						if(altSeqS == "") { altSeqS = "0"; }
+						altPlanS = ifnull(altR.Planned_Qty,"0").toString().trim();
+						if(altPlanS == "") { altPlanS = "0"; }
+
+						// Matched on EXACT string, never "contains": the stage
+						// names collide as substrings - "Machine Embroidery" sits
+						// inside "Manual Machine Embroidery" - and a contains
+						// match would accept the wrong stage's log as this one's.
+						//
+						// A stage with no Stage_Log row at all has not been
+						// started. Stage_Status has only two values and the row is
+						// created at Start, so "no row" is the third state and it
+						// belongs on the open side.
+						altDone = false;
+						if(altStgTxt != "")
+						{
+							for each  altLog in Stage_Log[Plan_Item == itm.ID && Phase_Name == altStgTxt]
+							{
+								if(ifnull(altLog.Stage_Status,"").toString().trim() == "Done")
+								{
+									altDone = true;
+								}
+							}
+						}
+						if(altDone == false)
+						{
+							altOpen = altOpen + 1;
+						}
+
+						if(phasesJson != "") { phasesJson = phasesJson + ","; }
+						// plannedQty is what makes this an alteration phase to the
+						// widget. ORDINARY BOM PHASES MUST NOT CARRY IT - its
+						// presence is the only thing telling the two shapes apart,
+						// and putting it on every stage would draw all production
+						// as rework.
+						phasesJson = phasesJson + "{\"sequence\":" + altSeqS.toDecimal().toLong() + ",\"operation\":\"" + altStgTxt.replaceAll("\"","'") + "\",\"plannedQty\":" + altPlanS.toDecimal().toLong() + "}";
+					}
+				}
+
 				bomId = itm.BOM;
 
-				// Fetch BOM Phases
-				phasesJson = "";
-				if (bomId != null)
+				// Fetch BOM Phases. Not read at all for a batch that named its own
+				// stages above - the two lists are alternatives, never merged.
+				if (bomId != null && altHasRows == false)
 				{
 					for each bomRec in BOM[ID == bomId]
 					{
@@ -336,6 +444,61 @@ string getProductionWidgetData(string supervisorId, string planId)
 
 				for each mrA in Material_Requirement[Plan_Item == itm.ID]
 				{
+					//------------------------------------------------------
+					// STILL WAITING ON CLOTH? Counted in THIS pass rather than
+					// in a query of its own.
+					//
+					// closeAlterationBatch refuses while any requirement is
+					// short, so the widget must not offer the button - but this
+					// function is already the most expensive in the app and the
+					// statement limit is not catchable. The rows are in hand
+					// here, so the test is free.
+					//
+					// Outside the Material != null guard on purpose: a row with
+					// no material still represents something owed, and skipping
+					// it would let the batch close while the store had an open
+					// line against it.
+					//------------------------------------------------------
+					// THE SAME THREE-PART TEST receiveMaterials and
+					// closeAlterationBatch use. FABRIC IS SATISFIED IN CUT
+					// PIECES, NOT METRES - a fabric row whose pieces came off
+					// offcuts never reaches its Required_Qty in metres and is
+					// never meant to, so comparing metres here would grey out
+					// the close button FOR EVER on exactly the batches that
+					// went best.
+					aReqS = ifnull(mrA.Required_Qty,"0").toString().trim();
+					if(aReqS == "") { aReqS = "0"; }
+					aIssS = ifnull(mrA.Issued_Qty,"0").toString().trim();
+					if(aIssS == "") { aIssS = "0"; }
+					aRcvS = ifnull(mrA.Received_Qty,"0").toString().trim();
+					if(aRcvS == "") { aRcvS = "0"; }
+
+					aRowOpen = false;
+					if(aRcvS.toDecimal() < aIssS.toDecimal())
+					{
+						aRowOpen = true;
+					}
+					if(ifnull(mrA.Is_Fabric,false) == true)
+					{
+						aReqPcs = ifnull(mrA.Required_Pieces,0);
+						aGotPcs = ifnull(mrA.Pieces_From_Waste,0) + ifnull(mrA.Pieces_From_Raw,0);
+						if(aReqPcs <= 0 || aGotPcs < aReqPcs)
+						{
+							aRowOpen = true;
+						}
+					}
+					else
+					{
+						if(aIssS.toDecimal() < aReqS.toDecimal())
+						{
+							aRowOpen = true;
+						}
+					}
+					if(aRowOpen == true)
+					{
+						altMatShort = altMatShort + 1;
+					}
+
 					if(mrA.Material != null)
 					{
 						// A Creator field never written is EMPTY, not null, so
@@ -504,7 +667,31 @@ string getProductionWidgetData(string supervisorId, string planId)
 				// isRemake carried so the card can say so. A supervisor handed
 				// cloth for something he already finished deserves to be told it
 				// is a QC remake rather than left to wonder.
-				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"name\":\"" + itm.Item_Name + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "]}";
+				//------------------------------------------------------------
+				// THE TWO FLAGS THE ALTERATION CARD IS DRAWN FROM.
+				//
+				// isAlteration decides whether the card renders as a batch at
+				// all - only its named stages, a "Request material" action, and
+				// no Qty_Out box on any stage.
+				//
+				// canCloseAlteration decides only whether the CLOSE button is
+				// enabled. closeAlterationBatch re-tests both conditions itself
+				// and returns STAGES_OPEN or MATERIAL_PENDING, because it is a
+				// Custom API and callable from anywhere - this flag is the
+				// courtesy of not offering a button that would be refused.
+				//------------------------------------------------------------
+				isAltTxt = "false";
+				canCloseTxt = "false";
+				if(altHasRows == true)
+				{
+					isAltTxt = "true";
+					if(altOpen == 0 && altMatShort == 0)
+					{
+						canCloseTxt = "true";
+					}
+				}
+
+				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"name\":\"" + itm.Item_Name + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"isAlteration\":" + isAltTxt + ",\"canCloseAlteration\":" + canCloseTxt + ",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "]}";
 			}
 
 			// Formatted here rather than in the widget - a raw Creator date

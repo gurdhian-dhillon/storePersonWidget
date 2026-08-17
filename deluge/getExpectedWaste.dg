@@ -42,6 +42,96 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 
 	seenOpt = Map();
 
+	// Trimmed once. planItemId is compared raw further down; this is the same
+	// value, normalised, for the lot lookup below.
+	itemIdTxt = ifnull(planItemId,"").toString().trim();
+
+	//----------------------------------------------------------------------
+	// WHICH LOT THIS ITEM'S CLOTH CAME OFF, so the offcut can go back to it.
+	//
+	// The SAME derivation saveWasteFromCutting does, and it has to stay the same
+	// or the dialog would show one answer and the save would write another. Read
+	// via the supervisor rather than the plan: Material_Issue.Plan holds the
+	// first plan a handover touched, so an issue spanning two plans would lose
+	// the other plan's lines entirely. The line's own Plan_Item is exact.
+	//
+	// A material issued off TWO lots gets both, and the supervisor picks - only
+	// he can know which roll a given remnant came off, and guessing would put a
+	// tone on the piece that might be a lie.
+	//----------------------------------------------------------------------
+	lotsByMat = Map();
+	lotSeqByMat = Map();
+	lotQtyByKey = Map();
+	lotNumById = Map();
+
+	wSupId = 0;
+	for each  wPlan in Production_Planning[ID == pid]
+	{
+		wSupId = ifnull(wPlan.Assigned_To,0);
+	}
+
+	if(wSupId != 0 && itemIdTxt != "")
+	{
+		for each  lotRefW in Raw_Material_Lot[ID != 0]
+		{
+			lotNumById.put(lotRefW.ID + "",ifnull(lotRefW.Lot_Number,"").toString().replaceAll("\"","'"));
+		}
+
+		// OLDEST HANDOVER FIRST - the same order issueMaterials spent them in, so
+		// the metres are attributed to the same lots it charged them to.
+		supIssuesW = Material_Issue[Issued_To == wSupId] sort by Added_Time;
+
+		for each  wIssW in supIssuesW
+		{
+			for each  wLnW in wIssW.Issue_Lines
+			{
+				if(ifnull(wLnW.Plan_Item,"").toString().trim() == itemIdTxt)
+				{
+					lnMatW = ifnull(wLnW.Material,"").toString().trim();
+					lnLotW = ifnull(wLnW.Lot,"").toString().trim();
+
+					lnqW = ifnull(wLnW.Qty,"0").toString().trim();
+					if(lnqW == "")
+					{
+						lnqW = "0";
+					}
+
+					if(lnMatW != "" && lnLotW != "" && lnqW.toDecimal() > 0)
+					{
+						qKeyW = lnMatW + "|" + lnLotW;
+
+						// Two handovers off the SAME roll are one lot with more
+						// metres, not two choices. Summed rather than listed twice.
+						prevQW = ifnull(lotQtyByKey.get(qKeyW),"0").toString().trim();
+						if(prevQW == "")
+						{
+							prevQW = "0";
+						}
+
+						if(prevQW.toDecimal() == 0)
+						{
+							seqW = ifnull(lotSeqByMat.get(lnMatW),"").toString();
+							if(seqW != "")
+							{
+								seqW = seqW + "~";
+							}
+							lotSeqByMat.put(lnMatW,seqW + lnLotW);
+
+							haveW = ifnull(lotsByMat.get(lnMatW),"").toString();
+							if(haveW != "")
+							{
+								haveW = haveW + ",";
+							}
+							lotsByMat.put(lnMatW,haveW + "{\"lotId\":\"" + lnLotW + "\",\"lotNumber\":\"" + ifnull(lotNumById.get(lnLotW),"").toString() + "\"}");
+						}
+
+						lotQtyByKey.put(qKeyW,prevQW.toDecimal() + lnqW.toDecimal());
+					}
+				}
+			}
+		}
+	}
+
 	for each  plan in Production_Planning[ID == pid]
 	{
 		for each  mr in Material_Requirement[Plan == plan.ID]
@@ -132,9 +222,18 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 							// The movement carries the piece, not the material - the
 							// material comes off the piece it was cut from.
 							wMatId = "";
+							// The remnant of a remnant belongs to the SAME lot the
+							// original piece was cut from - the cloth never changed
+							// tone, it only got smaller.
+							wLotJson = "";
 							for each  wmRec in Waste_Master[ID == wi.Waste_Piece]
 							{
 								wMatId = ifnull(wmRec.SKU,"").toString();
+								wLotTxt = ifnull(wmRec.Lot,"").toString().trim();
+								if(wLotTxt != "")
+								{
+									wLotJson = ",\"lotId\":\"" + wLotTxt + "\",\"lotNumber\":\"" + ifnull(lotNumById.get(wLotTxt),"").toString() + "\"";
+								}
 							}
 
 							pieceW = ifnull(wi.Piece_Width,0);
@@ -164,7 +263,7 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 										{
 											genJson = genJson + ",";
 										}
-										genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideW + ",\"length\":" + usedLen + ",\"count\":" + fullPieces + ",\"origin\":\"side\"}";
+										genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideW + ",\"length\":" + usedLen + ",\"count\":" + fullPieces + ",\"origin\":\"side\"" + wLotJson + "}";
 									}
 									fullTail = pieceL - usedLen;
 									if(fullTail > 0)
@@ -173,7 +272,7 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 										{
 											genJson = genJson + ",";
 										}
-										genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + pieceW + ",\"length\":" + fullTail + ",\"count\":" + fullPieces + ",\"origin\":\"tail\"}";
+										genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + pieceW + ",\"length\":" + fullTail + ",\"count\":" + fullPieces + ",\"origin\":\"tail\"" + wLotJson + "}";
 									}
 									remain = remain - (fullPieces * capacity);
 									avail = avail - fullPieces;
@@ -233,7 +332,22 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 
 						//--------------------------------------------------
 						// Pass 2 - whatever the waste could not cover came off
-						// fresh fabric, cut in whole rows across the width.
+						// FRESH FABRIC, and that is cut ONE LOT AT A TIME.
+						//
+						// This is the same rule issueMaterials budgets by, applied
+						// to the other end of the job. Each lot's cloth is a
+						// separate roll: it gets its own side strip down its own
+						// full rows, and its own part-filled last row. Treating the
+						// fresh metres as one continuous block predicted ONE strip
+						// of 50 rows where the truth is two strips of 30 and 20 -
+						// different physical pieces, belonging to different lots -
+						// and it under-predicted the waste whenever the pieces did
+						// not divide evenly, because each lot has its own partial
+						// row rather than the job having one.
+						//
+						// Lots are walked OLDEST FIRST, the order issueMaterials
+						// spent them in, so the pieces are attributed to the same
+						// cloth it charged them to.
 						//--------------------------------------------------
 						freshCm = 0.0;
 						if(remain > 0)
@@ -242,34 +356,140 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 							if(perRowR > 0)
 							{
 								sideWR = fabricWidthCm - (perRowR * cutW);
-								fullRowsR = (remain / perRowR).floor();
-								lastRowR = remain - (fullRowsR * perRowR);
-								rawRows = fullRowsR;
-								if(lastRowR > 0)
-								{
-									rawRows = rawRows + 1;
-								}
-								freshCm = rawRows * cutL;
 
-								if(fullRowsR > 0 && sideWR > 0)
+								seqTxt = ifnull(lotSeqByMat.get(matId.toString()),"").toString();
+								lotList = List();
+								if(seqTxt != "")
 								{
-									if(genJson != "")
-									{
-										genJson = genJson + ",";
-									}
-									genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideWR + ",\"length\":" + (fullRowsR * cutL) + ",\"count\":1,\"origin\":\"side\"}";
+									lotList = seqTxt.toList("~");
 								}
-								if(lastRowR > 0)
+								else
 								{
-									partWR = fabricWidthCm - (lastRowR * cutW);
-									if(partWR > 0)
+									// No lot on the handover - a pre-lot issue, or
+									// fabric issued before any of this existed. One
+									// nameless pass keeps the old behaviour exactly.
+									lotList.add("");
+								}
+
+								for each  lotCut in lotList
+								{
+									if(remain > 0)
+									{
+										// How many pieces THIS lot's cloth yields,
+										// off its own metres in whole marker rows.
+										//
+										// Always a whole multiple of perRow, so a lot
+										// never ends mid-row: he cuts full rows off
+										// that roll and moves to the next. The
+										// part-filled row happens once, on whichever
+										// lot the requirement runs out on.
+										pcsHere = remain;
+										if(lotCut != "")
+										{
+											lqTxt = ifnull(lotQtyByKey.get(matId.toString() + "|" + lotCut),"0").toString().trim();
+											if(lqTxt == "")
+											{
+												lqTxt = "0";
+											}
+											rowsHere = ((lqTxt.toDecimal() * 100) / cutL).floor();
+											pcsHere = perRowR * rowsHere;
+											if(pcsHere > remain)
+											{
+												pcsHere = remain;
+											}
+										}
+
+										if(pcsHere > 0)
+										{
+											lotIdJson = "";
+											if(lotCut != "")
+											{
+												lotIdJson = ",\"lotId\":\"" + lotCut + "\",\"lotNumber\":\"" + ifnull(lotNumById.get(lotCut),"").toString() + "\"";
+											}
+
+											fullRowsR = (pcsHere / perRowR).floor();
+											lastRowR = pcsHere - (fullRowsR * perRowR);
+											rawRows = fullRowsR;
+											if(lastRowR > 0)
+											{
+												rawRows = rawRows + 1;
+											}
+											freshCm = freshCm + (rawRows * cutL);
+
+											if(fullRowsR > 0 && sideWR > 0)
+											{
+												if(genJson != "")
+												{
+													genJson = genJson + ",";
+												}
+												genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideWR + ",\"length\":" + (fullRowsR * cutL) + ",\"count\":1,\"origin\":\"side\"" + lotIdJson + "}";
+											}
+											if(lastRowR > 0)
+											{
+												partWR = fabricWidthCm - (lastRowR * cutW);
+												if(partWR > 0)
+												{
+													if(genJson != "")
+													{
+														genJson = genJson + ",";
+													}
+													genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + partWR + ",\"length\":" + cutL + ",\"count\":1,\"origin\":\"partial_row\"" + lotIdJson + "}";
+												}
+											}
+
+											remain = remain - pcsHere;
+										}
+									}
+								}
+
+								//------------------------------------------
+								// CLOTH THE HANDOVERS DO NOT ACCOUNT FOR.
+								//
+								// If he cut more pieces than the recorded lines
+								// can explain - a pre-lot handover in the mix, or
+								// cloth issued outside this item's lines - the
+								// remainder still produced real waste, and
+								// dropping it would under-predict the return.
+								//
+								// Predicted with NO LOT rather than charged to the
+								// last one. Naming a lot here would be a guess
+								// about tone, and a remnant later offered as the
+								// wrong shade is the whole thing lots exist to
+								// prevent. He can name it in the dialog.
+								//------------------------------------------
+								if(remain > 0)
+								{
+									fullRowsX = (remain / perRowR).floor();
+									lastRowX = remain - (fullRowsX * perRowR);
+									rawRowsX = fullRowsX;
+									if(lastRowX > 0)
+									{
+										rawRowsX = rawRowsX + 1;
+									}
+									freshCm = freshCm + (rawRowsX * cutL);
+
+									if(fullRowsX > 0 && sideWR > 0)
 									{
 										if(genJson != "")
 										{
 											genJson = genJson + ",";
 										}
-										genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + partWR + ",\"length\":" + cutL + ",\"count\":1,\"origin\":\"partial_row\"}";
+										genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideWR + ",\"length\":" + (fullRowsX * cutL) + ",\"count\":1,\"origin\":\"side\"}";
 									}
+									if(lastRowX > 0)
+									{
+										partWX = fabricWidthCm - (lastRowX * cutW);
+										if(partWX > 0)
+										{
+											if(genJson != "")
+											{
+												genJson = genJson + ",";
+											}
+											genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + partWX + ",\"length\":" + cutL + ",\"count\":1,\"origin\":\"partial_row\"}";
+										}
+									}
+
+									remain = 0;
 								}
 							}
 						}
@@ -278,7 +498,7 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 						{
 							fabJson = fabJson + ",";
 						}
-						fabJson = fabJson + "{\"materialId\":\"" + matId + "\",\"material\":\"" + matLabel + "\",\"cutWidth\":" + cutW + ",\"cutLength\":" + cutL + ",\"fabricWidthCm\":" + fabricWidthCm + ",\"piecesCut\":" + pcsCut + ",\"freshMetres\":" + (freshCm / 100) + ",\"waste\":[" + genJson + "]}";
+						fabJson = fabJson + "{\"materialId\":\"" + matId + "\",\"material\":\"" + matLabel + "\",\"cutWidth\":" + cutW + ",\"cutLength\":" + cutL + ",\"fabricWidthCm\":" + fabricWidthCm + ",\"piecesCut\":" + pcsCut + ",\"freshMetres\":" + (freshCm / 100) + ",\"lots\":[" + ifnull(lotsByMat.get(matId.toString()),"").toString() + "],\"waste\":[" + genJson + "]}";
 					}
 				}
 			}

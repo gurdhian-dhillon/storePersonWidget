@@ -48,6 +48,47 @@ These are not style preferences. Each one caused a real bug in this app.
 - `.size()` is a **List** method. A query result needs `.count()`.
 - Subform `deleteAll()` requires the collection as an argument.
 
+**Picklist values**
+- **A Dropdown choice is stored exactly as typed.** Creator auto-underscores the *field* link
+  name ("Order Status" → `Order_Status`); it does **not** touch the *choices*. A choice typed
+  `Awaiting Material` never matches `Item_Status == "Awaiting_Material"`, and the failure is
+  silent — the record simply isn't found by any query. `Item_Status` carried both spellings at
+  once for a while, which is exactly this bug sitting in the form.
+- **Space or underscore is decided per field, by where the value goes:**
+  > **Raw value reaches the screen → spaces. Widget maps it to a label → underscores.**
+
+  `Order_Status` is printed straight into the plan header, so `In Progress`. `Item_Status` is
+  always mapped (`Awaiting_Material` renders as "No material yet"), so it is a code and its shape
+  does not matter. Nobody designed this, but it holds everywhere and it is the rule for new
+  fields. Normalising the two onto one style was measured and rejected: 62 comparisons across 18
+  files, each re-pasted into Creator by hand, each typo failing silently.
+
+| Form . Field | Style | Values |
+|---|---|---|
+| `Production_Planning.Order_Status` | spaces | `Pending`, `Material Ready`, `Partially Received`, `In Progress`, `Production Complete` |
+| `Sales_Order.Order_Status` | spaces | `Pending`, `In Progress`, `Production Complete`, `Checking Passed`, `Packed`, `Dispatched` |
+| `Plan_Item.Item_Status` | underscores | `Awaiting_Material`, `Ready_For_Production`, `In_Production`, `Awaiting_Check`, `Complete` |
+| `Plan_Item.Remake_Reason` | underscores | `Production_Loss`, `Check_Reject`, `Alteration` |
+| `Material_Requirement.Source` | underscores | `Plan`, `Reissue`, `Check_Remake`, `Alteration` |
+| `Stage_Log.Stage_Status` | underscores | `In_Progress`, `Done` — **only these two**. A stage not started has no `Stage_Log` row at all, so there is no third value and a `Not_Started` option is unreachable by design. |
+| `Item_Check.Check_Type` | spaces | `Stain`, `Measurement`, `Thread`, `Stitching`, `Fabric Softness` |
+| `Waste_Master.Status` | underscores | `Pending_Receipt`, `Available`, `Disputed`, `Issued`, `Consumed`, `Scrapped`, `Lost`, `Miscounted` |
+| `Damage_Lines.Reissue_Status` | underscores | `Pending`, `Requested`, `Not_Needed` |
+
+- **Several forms share the link name `Status`** — `Waste_Master`, `Stock_Dispute`,
+  `Material_Damage`, `Wash_Request`, `Machine_Master`, `Raw_Material_Lot`. A grep for
+  `.Status = "` mixes all of them, so attribute by the variable in front of the dot before
+  trusting a value. `Resolved`, `Closed` and `Occupied` are **not** Waste_Master values however
+  often they appear next to them.
+- **A value the code writes but the picklist lacks is a silent corruption, and both directions
+  have already happened here.** `resolveDispute` writes `Miscounted` and `saveMaterialDamage`
+  writes `Not_Needed`; neither existed on its Dropdown. Conversely `Waste_Master.Status` carried
+  `Reserved` and `Stage_Log.Stage_Status` carried `Not_Started`, which nothing has ever written —
+  leftovers from the rejected reservation ledger and from before stage rows were created at
+  Start. **When adding a status to a function, add it to the Dropdown in the same pass**, and
+  when a Dropdown offers something no function writes, delete it: set by hand from a report it
+  makes the record invisible to every query, with nothing to say why.
+
 **JSON**
 - **Build every JSON response by hand.** `Map.toString()` does not emit valid JSON once the
   structure nests (Map → List → Map), and `List.toString()` does not wrap in `[]`. This
@@ -368,6 +409,12 @@ Deluge cannot be run here, so:
   > one that matters.
 - **No finished-goods stock.** Production says how many were made; nothing receives them.
 - **QC / Packing / Dispatch** have Creator nav but no widgets.
+- **Scaling debt is found, listed and deliberately unfixed** — see `docs/scaling.md`. Ten
+  queries fetch a whole transactional form and get slowly worse as records accumulate; the
+  worst is `createProductionPlans` fetching every plan ever to read one integer. None is broken
+  today. That doc also records what is already *correct* and must not be "fixed": nothing ever
+  scans `Material_Requirement`, the hot path is bounded by WIP rather than history, master-data
+  fetch-alls are fine, and the paged history functions are the shape to copy.
 - **`resolveStockDispute.dg`** is a legacy form workflow duplicating `resolveDispute`. It has
   none of the current logic. **Delete it in Creator.**
 - **Old `Production_Planning` subforms** (`Item_Table`, `Production_Tracking`,

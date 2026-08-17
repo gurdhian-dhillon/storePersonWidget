@@ -56,6 +56,14 @@ string getStoreLots()
 				{
 					ldS = "0";
 				}
+				// Cloth at the wash house. Off the rack but still ours, so it
+				// belongs on this screen - a lot that looks empty because its
+				// greige is out being washed needs to say so.
+				lhS = ifnull(lt.In_Wash_Qty,"0").toString().trim();
+				if(lhS == "")
+				{
+					lhS = "0";
+				}
 
 				ltNum = ifnull(lt.Lot_Number,"").toString().replaceAll("\"","'");
 				ltLab = ifnull(lt.Lot_Label,"").toString().replaceAll("\"","'");
@@ -67,7 +75,7 @@ string getStoreLots()
 
 				// Ids forced to string - an 18-digit id breaks JSON.parse on the
 				// widget side.
-				oneLot = "{\"lotId\":\"" + lt.ID + "\",\"lotNumber\":\"" + ltNum + "\",\"label\":\"" + ltLab + "\",\"status\":\"" + ltSt + "\",\"unwash\":" + luS.toDecimal() + ",\"wash\":" + lwS.toDecimal() + ",\"inTransit\":" + liS.toDecimal() + ",\"disputed\":" + ldS.toDecimal() + "}";
+				oneLot = "{\"lotId\":\"" + lt.ID + "\",\"lotNumber\":\"" + ltNum + "\",\"label\":\"" + ltLab + "\",\"status\":\"" + ltSt + "\",\"unwash\":" + luS.toDecimal() + ",\"wash\":" + lwS.toDecimal() + ",\"inTransit\":" + liS.toDecimal() + ",\"disputed\":" + ldS.toDecimal() + ",\"inWash\":" + lhS.toDecimal() + "}";
 
 				prevJson = ifnull(lotJsonByMat.get(ltMat),"").toString();
 				if(prevJson != "")
@@ -117,6 +125,11 @@ string getStoreLots()
 				{
 					maS = "0";
 				}
+				miwS = ifnull(rm.In_Wash_Qty,"0").toString().trim();
+				if(miwS == "")
+				{
+					miwS = "0";
+				}
 
 				// Display name where one is set, else the plain name, else the SKU.
 				// Same fallback chain issueMaterials uses when it stamps a handover.
@@ -144,7 +157,7 @@ string getStoreLots()
 				{
 					matsJson = matsJson + ",";
 				}
-				matsJson = matsJson + "{\"materialId\":\"" + rmKey + "\",\"sku\":\"" + mSku + "\",\"material\":\"" + mDisp.replaceAll("\"","'") + "\",\"unit\":\"" + mUnit + "\",\"unwash\":" + muS.toDecimal() + ",\"wash\":" + mwS.toDecimal() + ",\"unallocated\":" + maS.toDecimal() + ",\"lotCount\":" + myCount.toLong() + ",\"lots\":[" + myLots + "]}";
+				matsJson = matsJson + "{\"materialId\":\"" + rmKey + "\",\"sku\":\"" + mSku + "\",\"material\":\"" + mDisp.replaceAll("\"","'") + "\",\"unit\":\"" + mUnit + "\",\"unwash\":" + muS.toDecimal() + ",\"wash\":" + mwS.toDecimal() + ",\"unallocated\":" + maS.toDecimal() + ",\"inWash\":" + miwS.toDecimal() + ",\"lotCount\":" + myCount.toLong() + ",\"lots\":[" + myLots + "]}";
 			}
 		}
 	}

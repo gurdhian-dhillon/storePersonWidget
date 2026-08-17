@@ -1,0 +1,293 @@
+string recheckOrderComplete(string orderIdTxt)
+{
+	// Decides whether a sales order has been satisfied, and moves it to
+	// "Checking Passed" when it has.
+	//
+	// A PLAIN DELUGE FUNCTION, NOT A CUSTOM API. Nothing calls it from a widget -
+	// it is called through thisapp by every function that can change the answer:
+	//
+	//   saveItemCheck          - the last step of every check
+	//   closeAlterationBatch   - a batch closing with 0 survivors, which never
+	//                            reaches a check at all
+	//   saveProductionPhase    - an item completing with 0 produced, same reason
+	//   Sales_Order workflow   - on edit, when Short_Closed is ticked
+	//
+	// FOUR CALLERS, ONE WRITER. The old design kept this logic inside
+	// createRemakeItems and relied on the Quality_Check record being re-saved to
+	// re-run it. There is no such record now, so nothing can be re-saved - every
+	// path that can satisfy an order has to say so itself. Miss one and the order
+	// hangs at "Production Complete" for ever with nothing on any screen to press.
+	//
+	// THE TEST IS PER ORIGINAL LINE, not per item and not a plan-wide total. A
+	// line is satisfied when everything accepted for it - its own acceptances plus
+	// every batch that hangs off it - reaches what the customer ordered. Remake_Of
+	// always points at the ROOT line, never at the previous batch, so this is one
+	// flat pass instead of a recursive walk, and Deluge has no recursion.
+	//
+	// IT NEVER THROWS. Its own try/catch, returning the failure as text. Callers
+	// invoke it AFTER they have already written records, and Deluge has no
+	// transaction to roll back - so an exception here would make a completed check
+	// report itself failed, the user would retry, and the idempotency guard would
+	// refuse the retry. Same reasoning as the try/catch around sendmail in
+	// createProductionPlans: a late step failing must not invalidate a finished
+	// one. The return string is for the caller's info log.
+
+	verdict = "NOTHING RAN";
+
+	try
+	{
+		idTxt = ifnull(orderIdTxt,"").toString().trim();
+
+		if(idTxt == "" || idTxt.isNumber() == false)
+		{
+			verdict = "SKIP: missing or non-numeric orderId ('" + idTxt + "')";
+		}
+		else
+		{
+			orderId = idTxt.toLong();
+
+			// Read before anything is decided. Short_Closed is somebody deciding on
+			// the record that fewer pieces is the final answer - it forgives the
+			// quantity test and nothing else.
+			orderFound = false;
+			shortClosed = false;
+			statusNow = "";
+
+			for each  soChk in Sales_Order[ID == orderId]
+			{
+				orderFound = true;
+				statusNow = ifnull(soChk.Order_Status,"").toString().trim();
+
+				if(ifnull(soChk.Short_Closed,false) == true)
+				{
+					shortClosed = true;
+				}
+			}
+
+			if(orderFound == false)
+			{
+				verdict = "SKIP: no Sales_Order " + orderId;
+			}
+			else
+			{
+				//----------------------------------------------------------
+				// ONE PASS over every item on the order, gathering both answers
+				// at once: whether anything is still being made, and how much has
+				// been accepted against each original line.
+				//
+				// Deliberately NOT a query per root line. An order with ten lines
+				// and three batches each would be thirty extra queries, and the
+				// statement-execution limit is not catchable - it kills the script
+				// and the caller sees a bare 500 with no error card.
+				//
+				// Ids are forced to string on BOTH sides of the key. Remake_Of is
+				// a lookup holding a record id and ID is a long; comparing them
+				// as-is is a mixed-type comparison, which throws.
+				//----------------------------------------------------------
+				orderedByRoot = Map();
+				acceptedByRoot = Map();
+				nameByRoot = Map();
+				rootKeys = List();
+
+				itemCount = 0;
+				stillMaking = false;
+				openNames = "";
+				orphanNames = "";
+
+				for each  plR in Production_Planning[Sales_Order == orderId]
+				{
+					for each  itR in Plan_Item[Plan == plR.ID]
+					{
+						itemCount = itemCount + 1;
+
+						stTxt = ifnull(itR.Item_Status,"").toString().trim();
+
+						// Awaiting_Check counts as still making. It is the whole
+						// point of the status: an item nobody has inspected has not
+						// finished, whatever production thinks.
+						if(stTxt != "Complete")
+						{
+							stillMaking = true;
+
+							if(openNames != "")
+							{
+								openNames = openNames + ", ";
+							}
+							openNames = openNames + ifnull(itR.Item_Name,"").toString() + " (" + stTxt + ")";
+						}
+
+						// A Creator numeric never written is an EMPTY STRING, not
+						// null, and toDecimal() throws on it.
+						accS = ifnull(itR.Qty_Accepted,"0").toString().trim();
+						if(accS == "")
+						{
+							accS = "0";
+						}
+
+						isRm = ifnull(itR.Is_Remake,false);
+
+						rootKey = itR.ID.toString();
+						if(isRm == true && itR.Remake_Of != null)
+						{
+							rootKey = itR.Remake_Of.toString();
+						}
+
+						// A batch with no Remake_Of cannot be attributed to a line,
+						// so its acceptances would be silently lost. Cannot happen
+						// through saveItemCheck, which always stamps the root - but
+						// it is exactly the kind of loss that must not be quiet.
+						if(isRm == true && itR.Remake_Of == null)
+						{
+							if(orphanNames != "")
+							{
+								orphanNames = orphanNames + ", ";
+							}
+							orphanNames = orphanNames + ifnull(itR.Item_Name,"").toString();
+						}
+
+						// Map values kept as strings throughout - a Map holding a
+						// mix of Decimal and String is one more chance at a
+						// mixed-type comparison further down.
+						haveAcc = ifnull(acceptedByRoot.get(rootKey),"0").toString().trim();
+						if(haveAcc == "")
+						{
+							haveAcc = "0";
+						}
+						acceptedByRoot.put(rootKey,(haveAcc.toDecimal() + accS.toDecimal()).toString());
+
+						// ORDERED comes only from original lines. A batch replaces
+						// pieces the customer already bought, so counting its
+						// Qty_Ordered would turn a 100-piece order into 110.
+						//
+						// Is_Remake reads EMPTY, not false, on anything written
+						// before the field existed, so the false test is the right
+						// way round - those records are original lines.
+						if(isRm == false)
+						{
+							ordS = ifnull(itR.Qty_Ordered,"0").toString().trim();
+							if(ordS == "")
+							{
+								ordS = "0";
+							}
+
+							orderedByRoot.put(rootKey,ordS);
+							nameByRoot.put(rootKey,ifnull(itR.Item_Name,"").toString());
+
+							if(rootKeys.contains(rootKey) == false)
+							{
+								rootKeys.add(rootKey);
+							}
+						}
+					}
+				}
+
+				//----------------------------------------------------------
+				// Is every original line satisfied?
+				//----------------------------------------------------------
+				checkedAny = false;
+				whole = true;
+				shortLines = "";
+
+				for each  rk in rootKeys
+				{
+					checkedAny = true;
+
+					ordTxt = ifnull(orderedByRoot.get(rk),"0").toString().trim();
+					if(ordTxt == "")
+					{
+						ordTxt = "0";
+					}
+					accTxt = ifnull(acceptedByRoot.get(rk),"0").toString().trim();
+					if(accTxt == "")
+					{
+						accTxt = "0";
+					}
+
+					ordN = ordTxt.toDecimal();
+					accN = accTxt.toDecimal();
+
+					if(accN < ordN && shortClosed == false)
+					{
+						whole = false;
+
+						if(shortLines != "")
+						{
+							shortLines = shortLines + "; ";
+						}
+						shortLines = shortLines + ifnull(nameByRoot.get(rk),"").toString() + " " + accN + " of " + ordN;
+					}
+				}
+
+				if(itemCount == 0)
+				{
+					verdict = "SKIP: order " + orderId + " has no plan items";
+				}
+				else if(checkedAny == false)
+				{
+					verdict = "SKIP: order " + orderId + " has no original lines";
+				}
+				else if(stillMaking == true)
+				{
+					//--------------------------------------------------
+					// NOTHING PASSES WHILE THE ORDER IS STILL BEING MADE.
+					//
+					// The quantity test below cannot see this. A batch that has
+					// produced nothing yet has no acceptances to be short of, so
+					// it is invisible to a test that only reads counters - and
+					// Short_Closed makes that test unconditionally true.
+					//
+					// APPLIES EVEN WHEN SHORT-CLOSED, deliberately. Short_Closed
+					// is an answer about QUANTITY - "the customer is getting
+					// fewer than they ordered". It is not a statement that
+					// unfinished work has stopped, and treating it as one is what
+					// once let a queued batch pass while the store still held a
+					// live requirement for it.
+					//--------------------------------------------------
+					verdict = "NOT YET: still open -> " + openNames;
+				}
+				else if(whole == false)
+				{
+					verdict = "NOT YET: short -> " + shortLines;
+				}
+				else if(statusNow == "Production Complete" || statusNow == "In Progress")
+				{
+					for each  soSet in Sales_Order[ID == orderId]
+					{
+						soSet.Order_Status = "Checking Passed";
+					}
+
+					verdict = "PASSED: order " + orderId;
+					if(shortClosed == true)
+					{
+						verdict = verdict + " (closed short)";
+					}
+				}
+				else
+				{
+					// FORWARD ONLY. This runs on every check, and once every line
+					// is satisfied it stays satisfied - so an unguarded write would
+					// drag an order back from Packed or Dispatched to Checking
+					// Passed and put it in front of packing a second time. Same
+					// rule saveProductionPhase applies to the order and
+					// resolveDispute applies to the plan.
+					verdict = "NO MOVE: order " + orderId + " is '" + statusNow + "'";
+				}
+
+				if(orphanNames != "")
+				{
+					verdict = verdict + " | WARNING, batch with no Remake_Of, its acceptances counted against nothing: " + orphanNames;
+				}
+			}
+		}
+	}
+	catch (e)
+	{
+		// Swallowed on purpose - see the header. The caller has already written
+		// records and must not be told they failed.
+		verdict = "ERROR: " + e.toString();
+	}
+
+	info "recheckOrderComplete -> " + verdict;
+
+	return verdict;
+}

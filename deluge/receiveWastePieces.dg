@@ -3,7 +3,13 @@ string receiveWastePieces(string piecesJson)
 	// The store checking declared offcuts onto the rack. POST, one argument:
 	// a JSON array of rows, one per Waste_Master id.
 	//
-	//   [{"id":"1234","count":3,"note":"two missing from the bundle"}]
+	//   [{"id":"1234","count":3,"carton":"C-12","note":"two missing"}]
+	//
+	// CARTON is where the store person has just PUT the pieces. It is captured
+	// here and nowhere else, because this is the only moment anyone physically
+	// handles them - and it is what the issue screen quotes back later so he can
+	// walk to the right box instead of hunting a rack. A remnant whose carton is
+	// unknown is, for practical purposes, lost.
 	//
 	// Pending_Receipt means "the supervisor says he sent it back". Available
 	// means "it is on the rack and I have seen it". Only Available pieces are
@@ -50,6 +56,7 @@ string receiveWastePieces(string piecesJson)
 		wid = "";
 		gotTxt = "";
 		noteTxt = "";
+		cartonTxt = "";
 
 		try
 		{
@@ -57,6 +64,7 @@ string receiveWastePieces(string piecesJson)
 			wid = ifnull(rowMap.get("id"),"").toString().trim();
 			gotTxt = ifnull(rowMap.get("count"),"").toString().trim();
 			noteTxt = ifnull(rowMap.get("note"),"").toString().replaceAll("\"","'");
+			cartonTxt = ifnull(rowMap.get("carton"),"").toString().trim().replaceAll("\"","'");
 		}
 		catch (eShape)
 		{
@@ -69,6 +77,7 @@ string receiveWastePieces(string piecesJson)
 			wid = ifnull(rawRow,"").toString().trim();
 			gotTxt = "";
 			noteTxt = "";
+			cartonTxt = "";
 		}
 
 		// An empty or non-numeric id makes toLong() throw "Error while fetching
@@ -141,6 +150,19 @@ string receiveWastePieces(string piecesJson)
 					rec.Piece_Count = got;
 					movedCount = movedCount + 1;
 					pieceCount = pieceCount + got;
+
+					// Only when pieces actually went into a carton. A row where
+					// nothing turned up ends at Disputed and is not on any shelf,
+					// so stamping it with a carton would send the next person to
+					// an empty box - and if those pieces are later re-sent they
+					// arrive as their own row and are checked in on their own.
+					//
+					// Written only when given, so re-running a receipt with an
+					// older widget cannot blank a carton already recorded.
+					if(got > 0 && cartonTxt != "")
+					{
+						rec.Carton_Number = cartonTxt;
+					}
 
 					// The status says where the pieces are now; the movement says
 					// when they got there and how many. A status alone cannot

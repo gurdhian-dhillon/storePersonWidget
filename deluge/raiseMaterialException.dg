@@ -285,47 +285,55 @@ string raiseMaterialException(string payloadJson)
 		{
 			try
 			{
-				// One open job per material AND LOT.
+				//----------------------------------------------------------
+				// SENDING CLOTH TO THE WASH MOVES IT OFF THE RACK.
 				//
-				// It used to be one per material, which is now too coarse: a
-				// wash running on lot 2 would swallow a request for lot 3,
-				// leaving lot 3's greige on the shelf with nothing queued
-				// against it and the ticket quietly reading as covered.
+				// Greige at the wash house is not greige on the shelf, and until
+				// In_Wash_Qty existed nothing said so - the metres stayed counted
+				// as unwashed, so the store screen offered cloth that was not in
+				// the building and the "to wash" figure was computed against it.
 				//
-				// Matched in code rather than in the query. A lookup that was
-				// never written is EMPTY, not null, so a query on Lot ==
-				// something would drop every pre-lot request instead of letting
-				// them match a request that also has no lot.
-				openWash = Wash_Request[Material == matId.toLong() && (Status == "Pending" || Status == "In_Progress")];
+				// One open job per material and lot USED to be the guard against
+				// that, and it was the wrong tool: it replaced the open ticket's
+				// quantity, so 300m already at the washer silently became 200m
+				// and the record of what was actually sent was gone.
+				//
+				// With the cloth moved, a second request for the same lot is
+				// legitimate - it is different cloth - so there is no dedup at
+				// all now. The real protection is the CAP below: you cannot send
+				// what the lot does not still have on the rack, and each send
+				// lowers the greige the next shortfall is measured against, so it
+				// settles itself.
+				//----------------------------------------------------------
+				washQty = shortQty;
 
-				sameLotJob = null;
-				for each  wqChk in openWash
+				lotUnwHave = 0.0;
+				if(lotIdTxt != "")
 				{
-					if(ifnull(wqChk.Lot,"").toString().trim() == lotIdTxt)
+					for each  wLotChk in Raw_Material_Lot[ID == lotIdTxt.toLong()]
 					{
-						sameLotJob = wqChk.ID;
-					}
-				}
-
-				if(sameLotJob != null)
-				{
-					for each  wq in Wash_Request[ID == sameLotJob]
-					{
-						wq.Requested_Qty = shortQty;
-						if(exRec != null)
+						luChk = ifnull(wLotChk.Unwash_Quantity,"0").toString().trim();
+						if(luChk == "")
 						{
-							wq.Exception = exRec.ID;
+							luChk = "0";
 						}
+						lotUnwHave = luChk.toDecimal();
+					}
+
+					if(washQty > lotUnwHave)
+					{
+						washQty = lotUnwHave;
 					}
 				}
-				else
+
+				if(washQty > 0)
 				{
 					newWash = insert into Wash_Request
 					[
 						Material=matId.toLong()
 						Material_Name=matName
 						Unit=unitTxt
-						Requested_Qty=shortQty
+						Requested_Qty=washQty
 						Status="Pending"
 						Requested_On=zoho.currentdate
 						Remarks=note
@@ -343,6 +351,52 @@ string raiseMaterialException(string payloadJson)
 						if(lotIdTxt != "")
 						{
 							wr.Lot = lotIdTxt.toLong();
+						}
+					}
+
+					//------------------------------------------------------
+					// Off the rack, into the wash. Lot and parent in the same
+					// pass so the two cannot disagree.
+					//
+					// Only when a lot was named. Without one there is nothing to
+					// move it off, and raising the parent's In_Wash_Qty with no
+					// lot behind it would break the invariant that the parent is
+					// the sum of its lots. That path keeps its old behaviour -
+					// the metres stay counted as greige - which is wrong but is
+					// exactly as wrong as it was before.
+					//------------------------------------------------------
+					if(lotIdTxt != "")
+					{
+						for each  wLotMv in Raw_Material_Lot[ID == lotIdTxt.toLong()]
+						{
+							luMv = ifnull(wLotMv.Unwash_Quantity,"0").toString().trim();
+							if(luMv == "")
+							{
+								luMv = "0";
+							}
+							lwMv = ifnull(wLotMv.In_Wash_Qty,"0").toString().trim();
+							if(lwMv == "")
+							{
+								lwMv = "0";
+							}
+							wLotMv.Unwash_Quantity = luMv.toDecimal() - washQty;
+							wLotMv.In_Wash_Qty = lwMv.toDecimal() + washQty;
+						}
+
+						for each  rmMv in Raw_Material[ID == matId.toLong()]
+						{
+							puMv = ifnull(rmMv.Unwash_Quantity,"0").toString().trim();
+							if(puMv == "")
+							{
+								puMv = "0";
+							}
+							pwMv = ifnull(rmMv.In_Wash_Qty,"0").toString().trim();
+							if(pwMv == "")
+							{
+								pwMv = "0";
+							}
+							rmMv.Unwash_Quantity = puMv.toDecimal() - washQty;
+							rmMv.In_Wash_Qty = pwMv.toDecimal() + washQty;
 						}
 					}
 				}

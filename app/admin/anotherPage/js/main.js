@@ -243,7 +243,7 @@ function soStatusClass(status) {
     if (s === 'pending') return 'so-pending';
     if (s === 'in progress') return 'so-progress';
     if (s === 'production complete') return 'so-complete';
-    if (s === 'qc passed') return 'so-qc';
+    if (s === 'checking passed') return 'so-qc';
     if (s === 'packed') return 'so-packed';
     if (s === 'dispatched') return 'so-dispatched';
     return 'so-default';
@@ -267,7 +267,7 @@ function renderPipeline() {
         { label: 'Pending', count: p.pending, cls: 'so-pending' },
         { label: 'In Progress', count: p.inProgress, cls: 'so-progress' },
         { label: 'Prod Complete', count: p.completed, cls: 'so-complete' },
-        { label: 'QC Passed', count: p.qcPassed, cls: 'so-qc' },
+        { label: 'Checking Passed', count: p.qcPassed, cls: 'so-qc' },
         { label: 'Packed', count: p.packed, cls: 'so-packed' },
         { label: 'Dispatched', count: p.dispatched, cls: 'so-dispatched' }
     ];
@@ -449,7 +449,7 @@ function loadPipelineFromOrderAudit(originalError) {
                 if (status === 'pending') counts.pending++;
                 else if (status === 'in progress') counts.inProgress++;
                 else if (status === 'production complete') counts.completed++;
-                else if (status === 'qc passed') counts.qcPassed++;
+                else if (status === 'checking passed') counts.qcPassed++;
                 else if (status === 'packed') counts.packed++;
                 else if (status === 'dispatched') counts.dispatched++;
             });

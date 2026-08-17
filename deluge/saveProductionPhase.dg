@@ -29,6 +29,15 @@ string saveProductionPhase(string payloadJson)
 	// quantity a person types, and it is capped here at Qty_In: you cannot finish
 	// more than you received, whatever the payload claims.
 	//
+	// ON AN ALTERATION STAGE Qty_Out is not typed at all - it is written equal to
+	// Qty_In. Those logs are WORK records - who did what, when - not attrition
+	// records: one garment can be worked at two stages, so per-stage figures
+	// cannot be summed into a batch total without knowing which garments overlap,
+	// and nobody records that. Attrition for the whole batch is declared once, in
+	// closeAlterationBatch. A consequence worth knowing: the "fewer out than in"
+	// shortfall, and the damage prompt behind it, can never fire on an alteration
+	// stage - which is why those cards carry a "Request material" action instead.
+	//
 	// A STAGE CAN BE SPLIT BETWEEN SEVERAL OPERATORS. When it is, each share is a
 	// Stage_Assignment record hanging off this stage's Stage_Log, and the two
 	// quantity rules above move down a level: the payload's qtyOut is IGNORED and
@@ -41,15 +50,25 @@ string saveProductionPhase(string payloadJson)
 	// exactly as it always did. That is not only for history: receiveFromThirdParty
 	// closes an outsourced stage through this function with no operator at all.
 	//
-	// Status rolls up on End: the item goes Complete when its last stage ends, the
-	// plan goes "Production Complete" when every item is, and the sales order
-	// mirrors the plan at that same moment. Each field has exactly one writer,
-	// which is what stops the four levels drifting apart.
+	// Status rolls up on End - but THIS FUNCTION NO LONGER WRITES "Complete".
+	// The last stage ending means production finished, which is not the same as
+	// the garments being any good, so the item goes to Awaiting_Check and stops
+	// there. Only saveItemCheck and closeAlterationBatch write Complete.
+	//
+	// That is the invariant the whole checking module rests on: an item nobody
+	// inspects sits on the checker's queue for ever and its order can never
+	// reach Checking Passed. There is no report anyone has to remember to run.
+	//
+	// The plan still goes "Production Complete" when every item has reached
+	// Awaiting_Check or beyond, and the sales order mirrors it at that moment -
+	// the plan tracks what the floor made, and whether the CUSTOMER's quantity
+	// was met is a separate question owned by recheckOrderComplete. Each field
+	// has exactly one writer, which is what stops the four levels drifting apart.
 	//
 	// "Production Complete" is where the PLAN stops for good. Everything after it
-	// - QC, packing, dispatch - is tracked on Sales_Order.Order_Status, which is a
-	// different field with its own chain. This function is the seam between them,
-	// and it only ever pushes the order forward.
+	// - checking, packing, dispatch - is tracked on Sales_Order.Order_Status,
+	// which is a different field with its own chain. This function is the seam
+	// between them, and it only ever pushes the order forward.
 
 	// Deluge requires a return at the function's top level, so the result is
 	// built into a variable rather than returned from inside the try/catch.
@@ -102,6 +121,32 @@ string saveProductionPhase(string payloadJson)
 
 		newStatus = "In_Progress";
 		if (endTStr != "") { newStatus = "Done"; }
+
+		//------------------------------------------------------------------
+		// IS THIS AN ALTERATION BATCH? Read once, up here, because it changes
+		// three separate decisions further down: what Qty_Out means, whether
+		// Qty_Produced is written, and where the item goes when its last stage
+		// closes.
+		//
+		// Alteration_Stage rows existing IS the test - they are written only by
+		// saveItemCheck when it opens a batch, and an ordinary item never has
+		// any. Nothing else has to be trusted or passed in.
+		//
+		// An alteration stage's Qty_Out is NOT a measurement. The batch travels
+		// as one pile through the stages the checker named, and one garment can
+		// be worked at two of them, so per-stage figures cannot be added up
+		// without knowing which garments overlap - which nobody records. The row
+		// answers "who did what work, when"; how many survived is declared once
+		// for the whole batch in closeAlterationBatch.
+		//------------------------------------------------------------------
+		// Qty_Out is forced to equal Qty_In at each of the two places the row is
+		// written, NOT here - the payload's qtyIn is only populated at Start, so
+		// copying it on an End call would silently close the stage at zero.
+		isAlterationBatch = false;
+		if (Alteration_Stage[Plan_Item == itemId].count() > 0)
+		{
+			isAlterationBatch = true;
+		}
 
 		//------------------------------------------------------------------
 		// One row per Plan_Item x phase - Start creates it, End completes it.
@@ -214,9 +259,16 @@ string saveProductionPhase(string payloadJson)
 				if (existingIn <= 0 && qtyIn > 0) { lg.Qty_In = qtyIn; existingIn = qtyIn; }
 
 				// You cannot finish more than you received.
+				//
+				// An alteration stage does not get a say: its Qty_Out is its
+				// Qty_In, taken from the STORED figure rather than the payload,
+				// which carries a quantity only at Start. The widget sends none
+				// for these, so consulting qtyOut here would close the stage at
+				// zero and read as the whole batch being lost.
 				if (endTStr != "")
 				{
 					capped = qtyOut;
+					if (isAlterationBatch == true) { capped = existingIn; }
 					if (existingIn > 0 && capped > existingIn) { capped = existingIn; }
 					if (capped < 0) { capped = 0; }
 					lg.Qty_Out = capped;
@@ -226,6 +278,9 @@ string saveProductionPhase(string payloadJson)
 		else
 		{
 			capped2 = qtyOut;
+			// Same rule on the first write. Here the payload's qtyIn IS the
+			// stage's input, because the row is being created by this call.
+			if (isAlterationBatch == true) { capped2 = qtyIn; }
 			if (qtyIn > 0 && capped2 > qtyIn) { capped2 = qtyIn; }
 			if (capped2 < 0) { capped2 = 0; }
 
@@ -260,12 +315,49 @@ string saveProductionPhase(string payloadJson)
 		//------------------------------------------------------------------
 		if (endTStr != "")
 		{
+			//--------------------------------------------------------------
+			// THE INVARIANT THE WHOLE CHECKING MODULE RESTS ON.
+			//
+			// THIS FUNCTION NO LONGER WRITES "Complete". The last stage ending
+			// means production has finished, which is not the same thing as the
+			// garments being any good - so it writes Awaiting_Check and stops.
+			// Only saveItemCheck and closeAlterationBatch write Complete.
+			//
+			// That single rule is what makes an unchecked item impossible to
+			// lose: it sits on the checker's queue for ever, the plan's
+			// all-items test below never passes it as done, and the order can
+			// never reach Checking Passed. There is no report anybody has to
+			// remember to run - it simply cannot proceed.
+			//
+			// AN ALTERATION BATCH IS THE EXCEPTION, and it stays In_Production.
+			// Its garments were worked at named stages only, and one garment can
+			// be worked at two of them - so how many are coming back cannot be
+			// derived from any stage's Qty_Out and has to be DECLARED. The
+			// supervisor does that through closeAlterationBatch, which owns both
+			// Qty_Produced and the move to Awaiting_Check for these.
+			//
+			// AN ITEM THAT PRODUCED NOTHING goes straight to Complete. There is
+			// nothing to inspect, and a queued batch with nothing in it would jam
+			// the checker's screen for ever. Because Complete is normally only
+			// reached through saveItemCheck - which recomputes the order as its
+			// last step - this is one of the few paths where the order would
+			// otherwise stop being reassessed, so it recomputes here instead. If
+			// this were the order's last open item it would hang at Production
+			// Complete with nothing on any screen to press.
+			//--------------------------------------------------------------
+			itemDoneStatus = "Awaiting_Check";
+			if (isAlterationBatch == true) { itemDoneStatus = "In_Production"; }
+			else if (qtyOut <= 0) { itemDoneStatus = "Complete"; }
+
 			for each  pi in Plan_Item[ID == itemId]
 			{
 				if (isLast == "true")
 				{
-					pi.Item_Status = "Complete";
-					pi.Qty_Produced = qtyOut;
+					pi.Item_Status = itemDoneStatus;
+
+					// Not written for an alteration batch - the last stage's
+					// Qty_Out describes one stage's share, not the batch.
+					if (isAlterationBatch == false) { pi.Qty_Produced = qtyOut; }
 				}
 				else
 				{
@@ -273,49 +365,41 @@ string saveProductionPhase(string payloadJson)
 				}
 			}
 
-			// Plan is complete only when every one of its items is.
-			//------------------------------------------------------------------
-			// SOMETHING IS NOW WAITING FOR QC.
-			//
-			// Set the moment an item finishes with pieces on it, whether or not
-			// the rest of the plan is done - because he cannot wait. An order
-			// with a remake batch still awaiting cloth stays "In Progress" for
-			// days, and the pieces that ARE finished have to be inspectable in
-			// the meantime or they never reach inventory.
-			//
-			// This flag is what the QC form's Sales_Order lookup filters on,
-			// INSTEAD of Order_Status. Filtering on status would either hide
-			// these pieces until the whole order finished, or - if widened to
-			// In Progress - put every live order in the picker with nothing on
-			// most of them.
-			//
-			// It is deliberately the SAME test qcAutoPopulate uses to decide what
-			// to list: produced beyond what has been inspected. Any other rule
-			// drifts, and "the order is in the picker but the subform is empty"
-			// is the exact failure that produces.
-			//
-			// Cleared by createRemakeItems once nothing is left uninspected.
-			//------------------------------------------------------------------
-			if (isLast == "true" && qtyOut > 0)
+			if (isLast == "true" && isAlterationBatch == false && qtyOut <= 0)
 			{
-				for each  plQ in Production_Planning[ID == planId]
+				emptyOrderId = 0;
+				for each  plZ in Production_Planning[ID == planId]
 				{
-					if (plQ.Sales_Order != null)
-					{
-						for each  soQ in Sales_Order[ID == plQ.Sales_Order]
-						{
-							soQ.Ready_For_QC = true;
-						}
-					}
+					if (plZ.Sales_Order != null) { emptyOrderId = plZ.Sales_Order; }
+				}
+				if (emptyOrderId != 0)
+				{
+					info thisapp.recheckOrderComplete(emptyOrderId.toString());
 				}
 			}
 
+			//------------------------------------------------------------------
+			// THE PLAN IS DONE WHEN PRODUCTION IS DONE, not when inspection is.
+			//
+			// "Awaiting_Check or beyond", not "Complete". The plan tracks what the
+			// floor made; the ORDER tracks whether the customer's quantity was
+			// met, and recheckOrderComplete owns that separately. Two tests, two
+			// questions, and leaving this one on Complete would hold a finished
+			// plan open on the supervisor's screen until an inspector got to it.
+			//
+			// The Ready_For_QC block that stood here is gone with the field. It
+			// existed so the old QC form's picker could find orders with
+			// uninspected pieces; Item_Status == "Awaiting_Check" now answers that
+			// directly, which is one field instead of two kept in sync - and the
+			// drift between them was what the comment here used to warn about.
+			//------------------------------------------------------------------
 			allItemsDone = true;
 			itemCount = 0;
 			for each  pi2 in Plan_Item[Plan == planId]
 			{
 				itemCount = itemCount + 1;
-				if (pi2.Item_Status != "Complete") { allItemsDone = false; }
+				piSt2 = ifnull(pi2.Item_Status,"").toString().trim();
+				if (piSt2 != "Complete" && piSt2 != "Awaiting_Check") { allItemsDone = false; }
 			}
 
 			if (itemCount > 0 && allItemsDone == true)
@@ -344,7 +428,7 @@ string saveProductionPhase(string payloadJson)
 						// FORWARD ONLY. This block re-runs on every stage save,
 						// and allItemsDone stays true once it is true - so a
 						// re-saved last stage would come back through here after
-						// QC had passed the order and drag it from QC Passed back
+						// QC had passed the order and drag it from Checking Passed back
 						// to Production Complete, silently, putting it in front of
 						// QC a second time. Same rule resolveDispute uses on the
 						// plan and receiveMaterials uses on Item_Status: a status
@@ -394,7 +478,7 @@ string saveProductionPhase(string payloadJson)
 					//------------------------------------------------------
 					// WHICH REMAKES COUNT AS PRODUCED, and the reason decides.
 					//
-					// QC_Reject replaces a piece that WAS made and then failed -
+					// Check_Reject replaces a piece that WAS made and then failed -
 					// the original already counted it, so counting the remake
 					// too gives "45 of 36".
 					//
@@ -440,7 +524,7 @@ string saveProductionPhase(string payloadJson)
 					rmTxt = "false";
 					if(isRm == true) { rmTxt = "true"; }
 					rmWhyTxt = rmWhy;
-					if(isRm == true && rmWhyTxt == "") { rmWhyTxt = "QC_Reject"; }
+					if(isRm == true && rmWhyTxt == "") { rmWhyTxt = "Check_Reject"; }
 
 					if (sumJson != "") { sumJson = sumJson + ","; }
 					sumJson = sumJson + "{\"item\":\"" + ifnull(pi4.Item_Name,"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + skuTxt + "\",\"ordered\":" + ordQ + ",\"produced\":" + prodQ + ",\"isRemake\":" + rmTxt + ",\"remakeReason\":\"" + rmWhyTxt + "\"}";

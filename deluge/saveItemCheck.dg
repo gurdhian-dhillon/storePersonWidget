@@ -1,0 +1,967 @@
+string saveItemCheck(string payloadJson)
+{
+	// The checking gate. One round per batch: the inspector records the five
+	// checks, splits what production made three ways, and this creates whatever
+	// work that split implies.
+	//
+	// Custom API, POST, one argument: payloadJson.
+	//   { "planItemId":"9", "inspectorId":"5",
+	//     "checks":[ {"type":"Stain","passed":98,"failed":2,"note":""} ],
+	//     "approved":85, "rejected":5, "alteration":10,
+	//     "alterationLines":[ {"stage":"Stitching","qty":7},
+	//                         {"stage":"Embroidery","qty":3} ],
+	//     "remarks":"" }
+	//
+	// REPLACES createRemakeItems, which hung off a Quality_Check form workflow.
+	// The remake half is lifted from it almost unchanged - new Plan_Item on the
+	// SAME plan, BOM copied not re-resolved, requirements through the shared
+	// buildItemRequirements - and the reasoning behind each of those is repeated
+	// below where it applies, because it is the reasoning that stops the next
+	// change breaking it.
+	//
+	// THE ONE THING IT DOES NOT INHERIT is the order verdict. createRemakeItems
+	// decided that itself and relied on the QC record being re-saved to re-decide
+	// it. There is no such record now, so the decision moved out into
+	// recheckOrderComplete and this calls it as its last step - one writer, four
+	// callers.
+	//
+	// WHAT IT WRITES, in order:
+	//   Item_Check + Check_Lines + Alteration_Lines
+	//   the item: Qty_Accepted, Qty_Rejected, Item_Status = Complete, Check_Ref
+	//   rejected > 0  -> remake batch + Material_Requirement rows
+	//   alteration > 0 -> alteration batch + Alteration_Stage rows, NO material
+	//   plan and order pulled back to In Progress if a batch was created
+	//   Processed = true
+	//   recheckOrderComplete
+	//
+	// ONE ROUND PER BATCH. An item that already carries an Item_Check is refused
+	// outright, and it is also already "Complete" so the status test refuses it
+	// too. Processed is therefore not a retry latch - it is the marker that says
+	// this check finished the work it owed. A run that dies half way leaves
+	// Processed false with an item that is Complete, which is the pair to look
+	// for when repairing one by hand. The Remake_Item / Alteration_Item tests
+	// below are the second line of defence behind that, not the first.
+	//
+	// QUANTITIES ARE READ SERVER-SIDE. Qty_Inspected comes off
+	// Plan_Item.Qty_Produced and never off the payload - same reason
+	// raiseReissueRequest reads its quantities off the damage record. A tab left
+	// open while the supervisor re-closed a stage must not be able to inspect a
+	// number that has since changed.
+	//
+	// AND THE SPLIT MUST BE EXACT. approved + rejected + alteration has to equal
+	// what production made, to the piece. A shortfall that real is a damage
+	// report, not a rounding gap in a form - allow it here and garments vanish
+	// between the supervisor and the checker with nothing recording it.
+
+	res = "{\"success\":false,\"error\":\"Nothing ran\"}";
+	logLines = list();
+
+	try
+	{
+	inp = payloadJson.toMap();
+
+	itemIdTxt = ifnull(inp.get("planItemId"),"").toString().trim();
+	if(itemIdTxt == "" || itemIdTxt.isNumber() == false)
+	{
+		return "{\"success\":false,\"error\":\"Missing or non-numeric planItemId\"}";
+	}
+	itemId = itemIdTxt.toLong();
+
+	inspIdTxt = ifnull(inp.get("inspectorId"),"").toString().trim();
+	remarksTxt = ifnull(inp.get("remarks"),"").toString().trim();
+
+	//----------------------------------------------------------------------
+	// THE ITEM, READ OFF THE RECORD.
+	//
+	// Everything the batches need comes from here - including Item_Sku and BOM,
+	// which are COPIED rather than re-resolved from the item master. If someone
+	// edits the BOM between the original run and the replacement, re-resolving
+	// would build the replacement to a different spec than the piece it
+	// replaces.
+	//----------------------------------------------------------------------
+	itemFound = false;
+	itemName = "";
+	itemStatus = "";
+	planId = 0;
+	srcSku = null;
+	srcBom = null;
+	rootId = itemId;
+	inspected = 0;
+	haveAcc = "0";
+	haveRej = "0";
+
+	for each  itRec in Plan_Item[ID == itemId]
+	{
+		itemFound = true;
+		itemName = ifnull(itRec.Item_Name,"").toString();
+		itemStatus = ifnull(itRec.Item_Status,"").toString().trim();
+
+		// Lookups hold a record id, and toString() on one gives that id. Forced
+		// to a long here, once, so every query and every comparison below is
+		// like with like - a mixed-type comparison throws rather than returning
+		// false.
+		if(itRec.Plan != null)
+		{
+			planId = itRec.Plan.toString().toLong();
+		}
+
+		srcSku = itRec.Item_Sku;
+		srcBom = itRec.BOM;
+
+		// Remake_Of always points at the ROOT line, never at the previous
+		// batch. A batch of a batch still hangs off the original, so "how much
+		// of line 3 has been accepted in total" stays one flat query - and
+		// Deluge has no recursion.
+		if(itRec.Remake_Of != null)
+		{
+			rootId = itRec.Remake_Of.toString().toLong();
+		}
+
+		// A Creator numeric that was never written is an EMPTY STRING, not
+		// null, and toDecimal() throws on it.
+		prodS = ifnull(itRec.Qty_Produced,"0").toString().trim();
+		if(prodS == "")
+		{
+			prodS = "0";
+		}
+		inspected = prodS.toDecimal().toLong();
+
+		haveAcc = ifnull(itRec.Qty_Accepted,"0").toString().trim();
+		if(haveAcc == "")
+		{
+			haveAcc = "0";
+		}
+		haveRej = ifnull(itRec.Qty_Rejected,"0").toString().trim();
+		if(haveRej == "")
+		{
+			haveRej = "0";
+		}
+	}
+
+	if(itemFound == false)
+	{
+		return "{\"success\":false,\"error\":\"No Plan_Item " + itemId + "\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// Awaiting_Check IS the checker's queue - there is no handover record,
+	// because the transfer is physical. So the status is also the permission:
+	// an item that has not finished production, or that somebody has already
+	// checked, is not his to split.
+	//----------------------------------------------------------------------
+	if(itemStatus != "Awaiting_Check")
+	{
+		return "{\"success\":false,\"error\":\"" + itemName.replaceAll("\"","'") + " is '" + itemStatus.replaceAll("\"","'") + "', not Awaiting_Check\"}";
+	}
+
+	if(planId == 0)
+	{
+		return "{\"success\":false,\"error\":\"Item " + itemId + " has no plan\"}";
+	}
+
+	// count(), not size() - this is a query result, not a List.
+	if(Item_Check[Plan_Item == itemId].count() > 0)
+	{
+		return "{\"success\":false,\"error\":\"" + itemName.replaceAll("\"","'") + " has already been checked. One round per batch - what failed comes back as a new batch.\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// The plan and its supervisor. Assigned_To on a requirement is the store's
+	// filter, so a remake requirement without it is invisible on their screen -
+	// it comes off the plan rather than the payload for the same reason the
+	// quantities do.
+	//----------------------------------------------------------------------
+	planStatus = "";
+	planSup = null;
+	orderId = null;
+
+	for each  plRec in Production_Planning[ID == planId]
+	{
+		planStatus = ifnull(plRec.Order_Status,"").toString().trim();
+		planSup = plRec.Assigned_To;
+		if(plRec.Sales_Order != null)
+		{
+			orderId = plRec.Sales_Order.toString().toLong();
+		}
+	}
+
+	//----------------------------------------------------------------------
+	// THE SPLIT. Exact, or nothing is written at all.
+	//----------------------------------------------------------------------
+	appS = ifnull(inp.get("approved"),"0").toString().trim();
+	if(appS == "")
+	{
+		appS = "0";
+	}
+	rejS = ifnull(inp.get("rejected"),"0").toString().trim();
+	if(rejS == "")
+	{
+		rejS = "0";
+	}
+	altS = ifnull(inp.get("alteration"),"0").toString().trim();
+	if(altS == "")
+	{
+		altS = "0";
+	}
+
+	if(appS.isNumber() == false || rejS.isNumber() == false || altS.isNumber() == false)
+	{
+		return "{\"success\":false,\"error\":\"approved, rejected and alteration must all be numbers\"}";
+	}
+
+	approved = appS.toDecimal().toLong();
+	rejected = rejS.toDecimal().toLong();
+	alteration = altS.toDecimal().toLong();
+
+	if(approved < 0 || rejected < 0 || alteration < 0)
+	{
+		return "{\"success\":false,\"error\":\"approved, rejected and alteration cannot be negative\"}";
+	}
+
+	if(approved + rejected + alteration != inspected)
+	{
+		return "{\"success\":false,\"error\":\"" + (approved + rejected + alteration) + " does not match the " + inspected + " produced. Approved plus rejected plus alteration must equal what was made.\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// THE ROOT ITEM'S BOM IS WHAT THE STAGE LIST IS VALIDATED AGAINST.
+	//
+	// Not the batch's own Alteration_Stage rows. Otherwise the choices narrow
+	// every round, and by the third alteration he cannot name the stage that is
+	// actually wrong. The batch's BOM is a copy of the root's, but the root is
+	// what the checker's screen offers, so the root is what this tests.
+	//----------------------------------------------------------------------
+	rootBom = null;
+	for each  rtRec in Plan_Item[ID == rootId]
+	{
+		rootBom = rtRec.BOM;
+	}
+
+	seqByStage = Map();
+	if(rootBom != null)
+	{
+		for each  bomRec in BOM[ID == rootBom]
+		{
+			for each  bomStg in bomRec.Production_Stages
+			{
+				opName = ifnull(bomStg.Operation,"").toString().trim();
+				if(opName != "")
+				{
+					// Kept as text so the comparison further down is like with
+					// like - a mixed-type comparison throws rather than
+					// returning false.
+					seqByStage.put(opName,ifnull(bomStg.Sequence_No,0).toString());
+				}
+			}
+		}
+	}
+
+	if(alteration > 0 && rootBom == null)
+	{
+		return "{\"success\":false,\"error\":\"The original line has no BOM, so there is no stage list to send an alteration back to\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// THE ALTERATION LINES.
+	//
+	// They may sum ABOVE Qty_Alteration and that is expected, not a fault: one
+	// garment can need two stages fixed. What they may not do is sum BELOW it -
+	// that would leave garments set aside with no stage named to fix them - or
+	// carry a single line bigger than the batch itself.
+	//
+	// Stage names are matched with == against the BOM, never contains. They
+	// collide as substrings ("Machine Embroidery" is inside "Manual Machine
+	// Embroidery") and a contains match would silently accept the wrong one.
+	//----------------------------------------------------------------------
+	altRawList = ifnull(inp.get("alterationLines"),list());
+
+	selNames = List();
+	qtyByStage = Map();
+	seqKeyByStage = Map();
+	seqOrder = List();
+	altSum = 0;
+
+	for each  altRaw in altRawList
+	{
+		am = altRaw.toMap();
+
+		stgName = ifnull(am.get("stage"),"").toString().trim();
+		qTxt = ifnull(am.get("qty"),"0").toString().trim();
+		if(qTxt == "")
+		{
+			qTxt = "0";
+		}
+		if(qTxt.isNumber() == false)
+		{
+			return "{\"success\":false,\"error\":\"Alteration quantity for '" + stgName.replaceAll("\"","'") + "' is not a number\"}";
+		}
+		lnQty = qTxt.toDecimal().toLong();
+
+		// A zero line is the checker leaving a stage's box empty on a form that
+		// offers every stage. It is not an instruction, so it is dropped rather
+		// than written as an Alteration_Stage row nobody has to do.
+		if(lnQty > 0)
+		{
+			if(stgName == "")
+			{
+				return "{\"success\":false,\"error\":\"An alteration line has a quantity but no stage\"}";
+			}
+			if(selNames.contains(stgName) == true)
+			{
+				return "{\"success\":false,\"error\":\"'" + stgName.replaceAll("\"","'") + "' is listed twice. One line per stage.\"}";
+			}
+			if(seqByStage.get(stgName) == null)
+			{
+				return "{\"success\":false,\"error\":\"'" + stgName.replaceAll("\"","'") + "' is not a stage on this item's BOM\"}";
+			}
+			if(lnQty > alteration)
+			{
+				return "{\"success\":false,\"error\":\"'" + stgName.replaceAll("\"","'") + "' is " + lnQty + ", more than the " + alteration + " going to alteration\"}";
+			}
+
+			selNames.add(stgName);
+			qtyByStage.put(stgName,lnQty.toString());
+
+			// Normalised HERE, once, and compared in this form everywhere after.
+			// The raw map holds whatever the BOM's Number field gave; matching
+			// that string against a re-derived one is how a stage quietly falls
+			// out of the ordering below.
+			sqv = ifnull(seqByStage.get(stgName),"0").toString().trim();
+			if(sqv == "")
+			{
+				sqv = "0";
+			}
+			sqNum = sqv.toDecimal().toLong();
+			seqKeyByStage.put(stgName,sqNum.toString());
+
+			if(seqOrder.contains(sqNum) == false)
+			{
+				seqOrder.add(sqNum);
+			}
+
+			altSum = altSum + lnQty;
+		}
+	}
+
+	// size() is right - these are Lists, not query results.
+	if(alteration > 0 && selNames.size() == 0)
+	{
+		return "{\"success\":false,\"error\":\"" + alteration + " going to alteration, but no stage was named\"}";
+	}
+	if(alteration == 0 && selNames.size() > 0)
+	{
+		return "{\"success\":false,\"error\":\"Stages were named but nothing is going to alteration\"}";
+	}
+	if(alteration > 0 && altSum < alteration)
+	{
+		return "{\"success\":false,\"error\":\"The stages account for " + altSum + " of the " + alteration + " going to alteration. Every garment needs a stage naming.\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// BOM ORDER, DECIDED BEFORE ANYTHING IS WRITTEN.
+	//
+	// Readers of Alteration_Stage are supposed to sort by Sequence_No - and in
+	// Deluge that means a sort by on its own assignment, which is exactly the
+	// kind of line that gets left off. Writing the rows in order as well means
+	// both have to fail before a batch runs Stitching before Embroidery because
+	// that is the order the checker happened to type them.
+	//
+	// sort(true) on a List of numbers. Sequence_No is 10 / 20 / 30 - spaced on
+	// purpose so a stage can be inserted between two others later - so the
+	// numbers themselves carry the order and nothing here does arithmetic on
+	// the gaps.
+	//----------------------------------------------------------------------
+	seqOrder.sort(true);
+
+	orderedStages = List();
+	for each  sqR in seqOrder
+	{
+		for each  nmO in selNames
+		{
+			if(ifnull(seqKeyByStage.get(nmO),"").toString() == sqR.toString())
+			{
+				orderedStages.add(nmO);
+			}
+		}
+	}
+
+	// Defensive, and cheap while nothing has been written yet. A stage that
+	// failed to place would otherwise be dropped from the batch silently, which
+	// is a garment nobody is told to fix.
+	if(orderedStages.size() != selNames.size())
+	{
+		return "{\"success\":false,\"error\":\"Could not put the alteration stages in BOM order\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// THE FIVE CHECKS.
+	//
+	// Record only - a piece can fail two of them, so they do not reconcile with
+	// each other or with the split, and nothing computes from them. Validated
+	// all the same: a Dropdown value the code writes but the picklist lacks is
+	// a silent corruption, and the record simply stops being found by any query.
+	//----------------------------------------------------------------------
+	checksRaw = ifnull(inp.get("checks"),list());
+
+	knownChecks = List();
+	knownChecks.add("Stain");
+	knownChecks.add("Measurement");
+	knownChecks.add("Thread");
+	knownChecks.add("Stitching");
+	knownChecks.add("Fabric Softness");
+
+	for each  chkVal in checksRaw
+	{
+		cv = chkVal.toMap();
+		cTypeV = ifnull(cv.get("type"),"").toString().trim();
+		if(knownChecks.contains(cTypeV) == false)
+		{
+			return "{\"success\":false,\"error\":\"'" + cTypeV.replaceAll("\"","'") + "' is not one of the five checks\"}";
+		}
+	}
+
+	//----------------------------------------------------------------------
+	// THE ROUND NUMBER, counted against the ORIGINAL LINE and not this batch.
+	//
+	// Round 2 means "the second time somebody looked at line 3", which is what
+	// anyone reading it wants to know - a remake batch's own first check is not
+	// a first inspection of that line.
+	//
+	// Counted per line member rather than by scanning Item_Check whole. That
+	// table only grows - a year in it is every check the factory has ever done -
+	// and reading all of it to answer a question about one line is the shape
+	// that walks into the statement limit later, when there is live data and no
+	// way to test it. A line carries a handful of batches at most.
+	//
+	// This is the same count getCheckingQueue puts on the card, arrived at the
+	// same way. The two must not disagree: the checker is told "round 3" and
+	// then the record says round 4.
+	//
+	// count(), not size() - these are query results, not Lists.
+	//----------------------------------------------------------------------
+	lineIds = List();
+	lineIds.add(rootId);
+
+	// Remake_Of never points at the row itself, so nothing here is counted
+	// twice.
+	for each  kidRec in Plan_Item[Remake_Of == rootId]
+	{
+		lineIds.add(kidRec.ID);
+	}
+
+	roundNo = 1;
+	for each  lineKey in lineIds
+	{
+		priorChecks = Item_Check[Plan_Item == lineKey];
+		roundNo = roundNo + priorChecks.count();
+	}
+
+	//----------------------------------------------------------------------
+	// THE CHECK RECORD.
+	//
+	// Plan_Item goes in the insert block because it can never be null here and
+	// an Item_Check that is not keyed to an item is invisible to everything
+	// that reads one. The other three lookups can legitimately be missing, and
+	// a null lookup inside an insert block fails the WHOLE block - so they are
+	// set afterwards.
+	//
+	// Processed starts false and is set at the very end, once every record this
+	// check owes exists.
+	//----------------------------------------------------------------------
+	newCheck = insert into Item_Check
+	[
+		Plan_Item=itemId
+		Check_Date=zoho.currentdate
+		Round=roundNo
+		Qty_Inspected=inspected
+		Qty_Approved=approved
+		Qty_Rejected=rejected
+		Qty_Alteration=alteration
+		Remarks=remarksTxt
+		Processed=false
+	];
+
+	checkId = newCheck.toLong();
+
+	lineCount = 0;
+
+	for each  icNew in Item_Check[ID == checkId]
+	{
+		icNew.Plan = planId;
+		if(orderId != null)
+		{
+			icNew.Sales_Order = orderId;
+		}
+		if(inspIdTxt != "" && inspIdTxt.isNumber())
+		{
+			icNew.Inspector = inspIdTxt.toLong();
+		}
+
+		// New subform rows go in as a collection in one call - assigning to the
+		// subform directly does not work.
+		chkRows = Collection();
+
+		for each  chkRaw in checksRaw
+		{
+			cm = chkRaw.toMap();
+
+			pS = ifnull(cm.get("passed"),"0").toString().trim();
+			if(pS == "")
+			{
+				pS = "0";
+			}
+			fS = ifnull(cm.get("failed"),"0").toString().trim();
+			if(fS == "")
+			{
+				fS = "0";
+			}
+			if(pS.isNumber() == false)
+			{
+				pS = "0";
+			}
+			if(fS.isNumber() == false)
+			{
+				fS = "0";
+			}
+
+			cRow = Item_Check.Check_Lines();
+			cRow.Check_Type=ifnull(cm.get("type"),"").toString().trim();
+			cRow.Passed_Qty=pS.toDecimal().toLong();
+			cRow.Failed_Qty=fS.toDecimal().toLong();
+			cRow.Note=ifnull(cm.get("note"),"").toString().trim();
+			chkRows.insert(cRow);
+
+			lineCount = lineCount + 1;
+		}
+
+		icNew.Check_Lines.insert(chkRows);
+
+		// In BOM order here too, for the same reason the Alteration_Stage rows
+		// are - this subform is what anybody reading the check back sees.
+		altRows = Collection();
+
+		for each  nmL in orderedStages
+		{
+			qL = ifnull(qtyByStage.get(nmL),"0").toString().trim();
+			if(qL == "")
+			{
+				qL = "0";
+			}
+
+			aRow = Item_Check.Alteration_Lines();
+			aRow.Stage_Name=nmL;
+			aRow.Planned_Qty=qL.toDecimal().toLong();
+			altRows.insert(aRow);
+		}
+
+		icNew.Alteration_Lines.insert(altRows);
+	}
+
+	logLines.add("CHECK " + checkId + " round " + roundNo + " -> " + itemName + " | inspected " + inspected + " | approved " + approved + " rejected " + rejected + " alteration " + alteration + " | check lines " + lineCount);
+
+	//----------------------------------------------------------------------
+	// THE ITEM ITSELF.
+	//
+	// ADDED, never replaced - the item may already carry acceptances from a
+	// previous life, and the totals are cumulative. Item_Status = "Complete" is
+	// written HERE and nowhere else: saveProductionPhase stops at
+	// Awaiting_Check, which is what forces every garment through checking.
+	//
+	// Check_Ref is deliberately NOT written here, and that is not an omission.
+	// On a Plan_Item the field means "the check that CREATED this batch" - the
+	// job QC_Ref did before it - and it is set on the remake and alteration
+	// batches further down. Writing it here would give it a second, opposite
+	// meaning on the same field, and the two collide: a batch created by round 1
+	// carries Check_Ref = 1, and its own inspection in round 2 would overwrite
+	// that with 2, destroying the only record of why the batch exists.
+	//
+	// Nothing is lost. "Which check inspected this item" is already a query from
+	// the other side - Item_Check[Plan_Item == itemId] - so this write was
+	// redundant as well as destructive.
+	//----------------------------------------------------------------------
+	for each  tgtRec in Plan_Item[ID == itemId]
+	{
+		tgtRec.Qty_Accepted = haveAcc.toDecimal().toLong() + approved;
+		tgtRec.Qty_Rejected = haveRej.toDecimal().toLong() + rejected;
+		tgtRec.Item_Status = "Complete";
+	}
+
+	//----------------------------------------------------------------------
+	// The next free Line_No on the plan, read once and handed out from there.
+	// Both batches can be created in one check, and reading the maximum twice
+	// would give them the same number.
+	//----------------------------------------------------------------------
+	nextLineNo = 1;
+
+	if(rejected > 0 || alteration > 0)
+	{
+		maxLine = 0;
+		// sort by on its own assignment, never inline in a for each header.
+		// Ascending, so the last one read is the largest.
+		planItemsAsc = Plan_Item[Plan == planId] sort by Line_No;
+		for each  plAsc in planItemsAsc
+		{
+			lnS = ifnull(plAsc.Line_No,"0").toString().trim();
+			if(lnS == "")
+			{
+				lnS = "0";
+			}
+			maxLine = lnS.toDecimal().toLong();
+		}
+		nextLineNo = maxLine + 1;
+	}
+
+	madeAny = false;
+	remakeId = 0;
+	altItemId = 0;
+
+	//----------------------------------------------------------------------
+	// THE REMAKE BATCH.
+	//
+	// WHY A NEW ITEM AND NOT A RE-RUN OF THE OLD ONE. saveProductionPhase finds
+	// a stage log with Stage_Log[Plan_Item == itemId && Phase_Name == phaseName]
+	// and UPDATES it - one row per item per phase, with no notion of a second
+	// pass. Re-running Cutting on the original would overwrite the first run's
+	// operator, times and quantities: the original production record would be
+	// destroyed in order to record the remake. A new Plan_Item means new stage
+	// logs, new requirements, new waste - nothing is overwritten.
+	//
+	// WHY THE SAME PLAN AND NOT A SECOND ONE. saveProductionPhase mirrors plan
+	// completion onto the sales order, and that is only correct because one
+	// order produces exactly one plan. A second plan against the same order
+	// would complete the order when the FIRST plan finished.
+	//
+	// Qty_Ordered is the REJECTED quantity - what still has to be made, not
+	// what the customer bought. Every report that sums "ordered" filters
+	// Is_Remake out, so the plan does not start claiming a 100-piece order was
+	// 110.
+	//----------------------------------------------------------------------
+	haveRemake = false;
+	for each  icG1 in Item_Check[ID == checkId]
+	{
+		if(icG1.Remake_Item != null)
+		{
+			haveRemake = true;
+		}
+	}
+
+	if(rejected > 0 && haveRemake == false)
+	{
+		newRemake = insert into Plan_Item
+		[
+			Plan=planId
+			Item_Name=itemName
+			Qty_Ordered=rejected
+			Qty_Produced=0
+			Qty_Accepted=0
+			Qty_Rejected=0
+			Item_Status="Awaiting_Material"
+			Line_No=nextLineNo
+			Is_Remake=true
+			Remake_Reason="Check_Reject"
+			Added_User=zoho.loginuser
+		];
+
+		remakeId = newRemake.toLong();
+		nextLineNo = nextLineNo + 1;
+
+		// Lookups after the insert - a null one fails the whole block.
+		for each  rmNew in Plan_Item[ID == remakeId]
+		{
+			if(srcSku != null)
+			{
+				rmNew.Item_Sku = srcSku;
+			}
+			if(srcBom != null)
+			{
+				rmNew.BOM = srcBom;
+			}
+			rmNew.Remake_Of = rootId;
+			rmNew.Check_Ref = checkId;
+		}
+
+		//--------------------------------------------------------------
+		// Its material. The same shared function createProductionPlans uses,
+		// so the remake is costed by exactly the same arithmetic as the
+		// original - fabric width, cut size, whole marker rows. A second copy
+		// of that maths would drift, and the drift would be silent until the
+		// store came up short.
+		//
+		// SOURCE AND CHECK_REF ARE THE FIX FOR createRemakeItems' DEFECT. It
+		// set no Source at all, so every remake's material read as "Plan" and
+		// was invisible in any breakdown of where an order's cloth went. A
+		// rejection needs no Material_Damage record - the BOM already says
+		// exactly what one garment takes, so the loss is fully derivable, and
+		// booking it as damage AS WELL would double the reported loss.
+		// Item_Check IS the reason record, reached through Check_Ref.
+		//--------------------------------------------------------------
+		matCount = 0;
+
+		if(srcBom != null)
+		{
+			matsJson = thisapp.buildItemRequirements(srcBom.toString(),rejected.toString(),"check remake of " + itemName + " (check " + checkId + ")");
+			matsList = matsJson.toJSONList();
+
+			for each  mRaw in matsList
+			{
+				mm = mRaw.toMap();
+
+				newReqId = insert into Material_Requirement
+				[
+					Plan=planId
+					Plan_Item=remakeId
+					Material_Name=mm.get("name")
+					Is_Fabric=mm.get("isFab")
+					Unit=mm.get("unit")
+					Required_Qty=mm.get("req")
+					Issued_Qty=0
+					Received_Qty=0
+					Cut_Size_Length=mm.get("cutLen")
+					Cut_Size_Width=mm.get("cutWid")
+					Required_Pieces=mm.get("pcs")
+					Pieces_From_Waste=0
+					Pieces_From_Raw=0
+					Source="Check_Remake"
+					Added_User=zoho.loginuser
+				];
+
+				reqId = newReqId.toLong();
+
+				for each  mrq in Material_Requirement[ID == reqId]
+				{
+					mrq.Material = mm.get("mat").toString().toLong();
+					mrq.Check_Ref = checkId;
+					if(planSup != null)
+					{
+						mrq.Assigned_To = planSup;
+					}
+				}
+
+				matCount = matCount + 1;
+			}
+		}
+		else
+		{
+			// Cannot happen through the front door - createProductionPlans
+			// rejects an order whose item has no BOM - but an item planned
+			// before that rule existed could still reach here.
+			logLines.add("WARN (no BOM on the item, the remake batch has no material) -> " + itemName);
+		}
+
+		// Written back once the batch and its material exist.
+		for each  icS1 in Item_Check[ID == checkId]
+		{
+			icS1.Remake_Item = remakeId;
+		}
+
+		madeAny = true;
+		logLines.add("REMAKE line " + (nextLineNo - 1) + " -> " + itemName + " | qty " + rejected + " | materials " + matCount);
+	}
+
+	//----------------------------------------------------------------------
+	// THE ALTERATION BATCH.
+	//
+	// ONE Plan_Item for the garments set aside, never one per stage. One per
+	// stage would double-count any garment needing two stages fixed, and the
+	// order would read complete while the customer was short.
+	//
+	// Ready_For_Production AND NO REQUIREMENTS is what makes material OPTIONAL.
+	// Alteration needs no cloth unless he asks for it, and when he does the
+	// existing damage-then-reissue route puts the batch back to
+	// Awaiting_Material itself.
+	//
+	// BOM is copied even though this batch builds no material from it, because
+	// the alteration picker at the NEXT check needs the root's full stage list
+	// and has nothing else to resolve it through. Item_Sku for the same reason
+	// the remake copies it: the checker's queue shows a SKU.
+	//----------------------------------------------------------------------
+	haveAlt = false;
+	for each  icG2 in Item_Check[ID == checkId]
+	{
+		if(icG2.Alteration_Item != null)
+		{
+			haveAlt = true;
+		}
+	}
+
+	if(alteration > 0 && haveAlt == false)
+	{
+		newAlt = insert into Plan_Item
+		[
+			Plan=planId
+			Item_Name=itemName
+			Qty_Ordered=alteration
+			Qty_Produced=0
+			Qty_Accepted=0
+			Qty_Rejected=0
+			Item_Status="Ready_For_Production"
+			Line_No=nextLineNo
+			Is_Remake=true
+			Remake_Reason="Alteration"
+			Added_User=zoho.loginuser
+		];
+
+		altItemId = newAlt.toLong();
+		nextLineNo = nextLineNo + 1;
+
+		for each  altNew in Plan_Item[ID == altItemId]
+		{
+			if(srcSku != null)
+			{
+				altNew.Item_Sku = srcSku;
+			}
+			if(srcBom != null)
+			{
+				altNew.BOM = srcBom;
+			}
+			altNew.Remake_Of = rootId;
+			altNew.Check_Ref = checkId;
+		}
+
+		//--------------------------------------------------------------
+		// The stages, in BOM order. Sequence_No is copied from the root BOM's
+		// own sequence for that stage, so the batch runs Embroidery before
+		// Stitching whatever order the checker listed them in. Nothing in the
+		// arithmetic depends on that order any more, but the physical work
+		// does.
+		//
+		// Plan_Item goes in the insert block: it was created moments ago and
+		// can never be null, and a row not keyed to its batch is invisible to
+		// the supervisor's screen.
+		//--------------------------------------------------------------
+		stageCount = 0;
+
+		for each  nmS in orderedStages
+		{
+			qS2 = ifnull(qtyByStage.get(nmS),"0").toString().trim();
+			if(qS2 == "")
+			{
+				qS2 = "0";
+			}
+			sqS2 = ifnull(seqKeyByStage.get(nmS),"0").toString().trim();
+			if(sqS2 == "")
+			{
+				sqS2 = "0";
+			}
+
+			newStage = insert into Alteration_Stage
+			[
+				Plan_Item=altItemId
+				Sequence_No=sqS2.toDecimal().toLong()
+				Stage_Name=nmS
+				Planned_Qty=qS2.toDecimal().toLong()
+			];
+
+			stageCount = stageCount + 1;
+		}
+
+		for each  icS2 in Item_Check[ID == checkId]
+		{
+			icS2.Alteration_Item = altItemId;
+		}
+
+		madeAny = true;
+		logLines.add("ALTERATION line " + (nextLineNo - 1) + " -> " + itemName + " | qty " + alteration + " | stages " + stageCount);
+	}
+
+	//----------------------------------------------------------------------
+	// PLAN AND ORDER GO BACK TO WORK.
+	//
+	// Only when something was actually created, and only FROM Production
+	// Complete. Forward-only is the same rule saveProductionPhase applies to
+	// the order and resolveDispute applies to the plan - an order already
+	// packed or dispatched is never dragged backwards by a late check, and a
+	// plan already at work owns its own status.
+	//
+	// This is what puts the plan back on the store's issue list and the
+	// supervisor's screen. No new status value anywhere: In Progress is one of
+	// the three getStoreMaterialRequirements and issueMaterials accept.
+	//----------------------------------------------------------------------
+	if(madeAny == true)
+	{
+		if(planStatus == "Production Complete")
+		{
+			for each  plBack in Production_Planning[ID == planId]
+			{
+				plBack.Order_Status = "In Progress";
+			}
+			logLines.add("PLAN " + planId + " pulled back from Production Complete to In Progress");
+		}
+
+		if(orderId != null)
+		{
+			for each  soBack in Sales_Order[ID == orderId]
+			{
+				sStNow = ifnull(soBack.Order_Status,"").toString().trim();
+				if(sStNow == "Production Complete")
+				{
+					soBack.Order_Status = "In Progress";
+					logLines.add("ORDER " + orderId + " pulled back to In Progress");
+				}
+				else
+				{
+					logLines.add("NOTE (order is '" + sStNow + "', left alone) -> batches still created");
+				}
+			}
+		}
+	}
+
+	//----------------------------------------------------------------------
+	// PROCESSED LAST, once every record this check owed exists. Set any
+	// earlier and a failure part-way through would leave a check that claims
+	// it finished with no batch behind it.
+	//----------------------------------------------------------------------
+	for each  icDone in Item_Check[ID == checkId]
+	{
+		icDone.Processed = true;
+	}
+
+	//----------------------------------------------------------------------
+	// AND THE ORDER VERDICT.
+	//
+	// recheckOrderComplete is the one writer of "Checking Passed" and it never
+	// throws - it returns its failure as text - because this function has
+	// already written records by now and Deluge has no transaction to roll
+	// back. A late step failing must not make a finished check report itself
+	// failed: the user would retry and the one-round-per-batch guard would
+	// refuse the retry.
+	//----------------------------------------------------------------------
+	verdict = "";
+	if(orderId != null)
+	{
+		verdict = thisapp.recheckOrderComplete(orderId.toString()).toString();
+	}
+	else
+	{
+		verdict = "SKIP: the plan has no sales order";
+	}
+	logLines.add("VERDICT -> " + verdict);
+
+	info logLines;
+
+	// Ids stringified - an 18-digit id breaks JSON.parse on the widget side.
+	// Built by hand, because Map.toString() does not emit valid JSON.
+	remakeTxt = "";
+	if(remakeId != 0)
+	{
+		remakeTxt = remakeId.toString();
+	}
+	altTxt = "";
+	if(altItemId != 0)
+	{
+		altTxt = altItemId.toString();
+	}
+
+	res = "{\"success\":true,\"checkId\":\"" + checkId + "\",\"remakeItem\":\"" + remakeTxt + "\",\"alterationItem\":\"" + altTxt + "\",\"orderVerdict\":\"" + verdict.replaceAll("\"","'") + "\"}";
+	}
+	catch (e)
+	{
+		// Creator collapses every runtime failure to a widget into "code 9430",
+		// so the real message has to travel back inside the payload.
+		res = "{\"success\":false,\"error\":\"" + e.toString().replaceAll("\"","'") + "\"}";
+		logLines.add(res);
+		info logLines;
+	}
+
+	return res;
+}
