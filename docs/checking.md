@@ -1,8 +1,11 @@
 # Checking — build spec
 
 Checking replaces the old order-level `Quality_Check` entirely. It is the gate every
-garment crosses between production and dispatch, done by a Quality Inspector on his own
-widget, one round per batch.
+garment crosses between production and dispatch, one round per batch.
+
+**The screen belongs to the SUPERVISOR, not the inspector.** Quality inspectors have no login;
+supervisors do. So the checking widget opens on a supervisor's own finished batches and he names
+which inspector judged each one, per check. See *Widgets* below.
 
 **The word "QC" leaves the system with the form.** Every name that carried it is renamed to
 Checking — see *Renaming* below, which is a migration step in its own right, not a cosmetic pass.
@@ -566,7 +569,7 @@ Sets `Order_Status = "Checking Passed"` when every line is satisfied (or the ord
 `In Progress` — and from `QC Passed`, so an order passed under the old name settles on the new
 one rather than being stuck.
 
-**`getCheckingQueue(inspectorId)`** — Custom API, POST, one argument.
+**`getCheckingQueue(supervisorId)`** — Custom API, POST, one argument.
 
 Returns an `inspectors` array for the picker, plus supervisors each with their items at
 `Awaiting_Check`. Per item: id, name, SKU, plan no, sales order, `batch` (one of the four kinds
@@ -651,9 +654,21 @@ writer of that field. `Round` comes off `Item_Check` or is dropped.
 
 ## Widgets
 
-**`app/checker/` — new.** Employee picker filtered to `Designation == "Quality Inspector"` as the
-login stand-in, same pattern as the supervisor screen. An accordion of supervisors, each opening
-to their items at `Awaiting_Check`.
+**`app/checker/` — new.** A SUPERVISOR picker at the top, not an inspector one, and that
+reversal is the design rather than a detail.
+
+**Quality inspectors have no login; supervisors do.** So the man at this screen is the supervisor
+who made the garments, working through his own batches — the same shape as the production screen
+he already knows — and **which inspector judged each batch is chosen inside the check dialog**.
+
+That is not just where the control sits. Who inspected a batch is a fact about *that inspection*,
+not about who happens to be looking at a screen, so it belongs on the record per check: two
+batches on one trolley can honestly have been judged by two different people. `saveItemCheck`
+refuses a check with no inspector, on the server as well as in the widget — it is a Custom API and
+callable from anywhere, and an unattributed rejection can never be recovered afterwards.
+
+The dropdown lists only supervisors with something waiting, each with its count. A flat list of
+that supervisor's items follows, with a badge on the queue tab and a History tab beside it.
 
 The check dialog: five check rows (pass / fail / note), then approved / rejected / alteration
 which must sum to what production made, then — only when alteration is above zero — the root

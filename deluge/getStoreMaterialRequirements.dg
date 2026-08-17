@@ -387,53 +387,65 @@ string getStoreMaterialRequirements()
 			lrSt = "Active";
 		}
 
-		if(lrSt != "Blocked")
+		// BLOCKED LOTS ARE SENT, FLAGGED - not dropped.
+		//
+		// Quarantined cloth must never be allocated, and the widget does not
+		// allocate it. But dropping the row entirely left a screen saying "nothing
+		// on the rack" while the store person stood in front of eighteen metres of
+		// the stuff, which reads as the screen being broken and is the fastest way
+		// to lose his trust in every other figure on it.
+		//
+		// The flag travels; the allocator refuses it and the row names it.
+		lrBlocked = "false";
+		if(lrSt == "Blocked")
 		{
-			// Creator numerics never written are EMPTY, not null, and toDecimal()
-			// throws on empty - normalise to string first.
-			lrwS = ifnull(lotR.Wash_Quantity,"0").toString().trim();
-			if(lrwS == "")
-			{
-				lrwS = "0";
-			}
-			lruS = ifnull(lotR.Unwash_Quantity,"0").toString().trim();
-			if(lruS == "")
-			{
-				lruS = "0";
-			}
-			// At the wash house: not issuable, not on the rack either. Shown so
-			// a lot that looks empty explains itself.
-			lriS = ifnull(lotR.In_Wash_Qty,"0").toString().trim();
-			if(lriS == "")
-			{
-				lriS = "0";
-			}
+			lrBlocked = "true";
+		}
 
-			lrWash = lrwS.toDecimal();
-			lrUnwash = lruS.toDecimal();
+		// Creator numerics never written are EMPTY, not null, and toDecimal()
+		// throws on empty - normalise to string first.
+		lrwS = ifnull(lotR.Wash_Quantity,"0").toString().trim();
+		if(lrwS == "")
+		{
+			lrwS = "0";
+		}
+		lruS = ifnull(lotR.Unwash_Quantity,"0").toString().trim();
+		if(lruS == "")
+		{
+			lruS = "0";
+		}
+		// At the wash house: not issuable, not on the rack either. Shown so
+		// a lot that looks empty explains itself.
+		lriS = ifnull(lotR.In_Wash_Qty,"0").toString().trim();
+		if(lriS == "")
+		{
+			lriS = "0";
+		}
 
-			// An empty lot is not a choice. It stays on the form for its history
-			// but must not clutter a screen about what can be issued today -
-			// unless its cloth is at the wash, which is exactly why it looks
-			// empty and exactly what the store person needs told.
-			if(lrWash > 0 || lrUnwash > 0 || lriS.toDecimal() > 0)
+		lrWash = lrwS.toDecimal();
+		lrUnwash = lruS.toDecimal();
+
+		// An empty lot is not a choice. It stays on the form for its history
+		// but must not clutter a screen about what can be issued today -
+		// unless its cloth is at the wash, which is exactly why it looks
+		// empty and exactly what the store person needs told.
+		if(lrWash > 0 || lrUnwash > 0 || lriS.toDecimal() > 0)
+		{
+			// Fabric is issued as WASHED metres - issueMaterials reads
+			// Wash_Quantity for fabric - so wash is the issuable figure and
+			// unwash is context, exactly as unwashedStock is at material level.
+			lrNum = ifnull(lotR.Lot_Number,"").toString().replaceAll("\"","'");
+			lrLab = ifnull(lotR.Lot_Label,"").toString().replaceAll("\"","'");
+
+			// Ids as strings - an 18-digit id breaks JSON.parse on the widget.
+			lotFrag = "{\"lotId\":\"" + lotR.ID + "\",\"lotNumber\":\"" + lrNum + "\",\"label\":\"" + lrLab + "\",\"blocked\":" + lrBlocked + ",\"wash\":" + lrWash + ",\"unwash\":" + lrUnwash + ",\"inWash\":" + lriS.toDecimal() + "}";
+
+			prevLots = ifnull(lotJsonByMat.get(lrMat),"").toString();
+			if(prevLots != "")
 			{
-				// Fabric is issued as WASHED metres - issueMaterials reads
-				// Wash_Quantity for fabric - so wash is the issuable figure and
-				// unwash is context, exactly as unwashedStock is at material level.
-				lrNum = ifnull(lotR.Lot_Number,"").toString().replaceAll("\"","'");
-				lrLab = ifnull(lotR.Lot_Label,"").toString().replaceAll("\"","'");
-
-				// Ids as strings - an 18-digit id breaks JSON.parse on the widget.
-				lotFrag = "{\"lotId\":\"" + lotR.ID + "\",\"lotNumber\":\"" + lrNum + "\",\"label\":\"" + lrLab + "\",\"wash\":" + lrWash + ",\"unwash\":" + lrUnwash + ",\"inWash\":" + lriS.toDecimal() + "}";
-
-				prevLots = ifnull(lotJsonByMat.get(lrMat),"").toString();
-				if(prevLots != "")
-				{
-					prevLots = prevLots + ",";
-				}
-				lotJsonByMat.put(lrMat,prevLots + lotFrag);
+				prevLots = prevLots + ",";
 			}
+			lotJsonByMat.put(lrMat,prevLots + lotFrag);
 		}
 
 		}
@@ -469,6 +481,16 @@ string getStoreMaterialRequirements()
 			exMap = Map();
 			exMap.put("type",exT);
 			exMap.put("planIds",coveredPlans);
+			// WHICH LOT'S GREIGE THIS TICKET IS FOR. A wash ticket belongs to a
+			// lot, not to a material: one fabric can have jobs waiting on two
+			// shades at once and each needs its own ticket. Matched on the
+			// material alone, raising the first greyed out the second lot's
+			// button and that shade was never queued at all.
+			//
+			// A lookup holds a record id, so this is the Raw_Material_Lot id as
+			// text. Empty on a purchase ticket - there is no cloth to name yet -
+			// and on any wash ticket raised before the field existed.
+			exMap.put("lot",ifnull(oex.Lot,"").toString().trim());
 
 			exList = excBySku.get(exSku);
 			if(exList == null)
@@ -793,7 +815,7 @@ string getStoreMaterialRequirements()
 					}
 					pidsJson = pidsJson + "\"" + pidE + "\"";
 				}
-				exsJson = exsJson + "{\"type\":\"" + exE.get("type").toString().replaceAll("\"","'") + "\",\"planIds\":[" + pidsJson + "]}";
+				exsJson = exsJson + "{\"type\":\"" + exE.get("type").toString().replaceAll("\"","'") + "\",\"lot\":\"" + ifnull(exE.get("lot"),"").toString() + "\",\"planIds\":[" + pidsJson + "]}";
 			}
 
 			matsJson = matsJson + "{\"materialId\":\"" + mEnt.get("materialId") + "\",\"material\":\"" + mEnt.get("material").toString().replaceAll("\"","'") + "\",\"sku\":\"" + mEnt.get("sku").toString().replaceAll("\"","'") + "\",\"unit\":\"" + mEnt.get("unit").toString().replaceAll("\"","'") + "\",\"isFabric\":" + mEnt.get("isFabric") + ",\"isReissue\":" + mEnt.get("isReissue") + ",\"required\":" + mEnt.get("required") + ",\"issued\":" + mEnt.get("issued") + ",\"remaining\":" + mEnt.get("remaining") + ",\"availableStock\":" + mEnt.get("availableStock") + ",\"lines\":[" + linesJson + "],\"openExceptions\":[" + exsJson + "]";

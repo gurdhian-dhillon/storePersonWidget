@@ -1,21 +1,28 @@
-// Quality Inspector's screen. One job: take a batch that has finished
-// production and split it three ways — approved, rejected, alteration.
+// The checking screen. One job: take a batch that has finished production and
+// split it three ways — approved, rejected, alteration.
 //
 // Creator JS API v2 (ZOHO.CREATOR.DATA.invokeCustomApi, no init()), ES5-flavoured
 // var/function to match main.js and the other widgets.
 //
-// WHY AN ACCORDION BY SUPERVISOR rather than one flat list. He collects a
-// trolley from one man at a time. Forty items across six supervisors in one flat
-// list is not the order he works in, and the supervisor is also who he goes back
-// to when the count on the trolley disagrees with the screen.
+// DRIVEN BY THE SUPERVISOR, NOT THE INSPECTOR. Quality inspectors have no login;
+// supervisors do. So the picker at the top is a supervisor, the cards below are
+// his own batches waiting to be checked — the same shape as the production
+// screen he already knows — and WHICH INSPECTOR judged each batch is chosen
+// inside the check dialog.
+//
+// That is not just where the control sits. Who inspected a batch is a fact about
+// that inspection, not about who happens to be looking at the screen, so it
+// belongs on the record per check. Two batches on one trolley can honestly have
+// been judged by two different people.
 //
 // THE THREE NUMBERS MUST TOTAL WHAT PRODUCTION MADE, and that is enforced here
 // as well as on the server. A garment in none of the three has silently vanished
 // between the supervisor and this screen, and the server refuses it — but being
 // told so after typing five check rows is a bad way to find out.
 
-var QUEUE = { inspectors: [], supervisors: [] };
-var openSupId = null;
+var QUEUE = { inspectors: [], supervisors: [], items: [] };
+// Which card is expanded. One at a time — see scrollCardIntoView.
+var openItemId = null;
 var saving = false;
 
 // EXACTLY the five values on Item_Check.Check_Lines.Check_Type. These are
@@ -57,7 +64,7 @@ function loadQueue() {
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getCheckingQueue',
         http_method: 'POST',
-        payload: { inspectorId: currentInspectorId() || '' }
+        payload: { supervisorId: currentSupervisorId() || '' }
     }).then(function (response) {
         console.log('getCheckingQueue raw:', response);
         if (btn) btn.disabled = false;
@@ -87,9 +94,14 @@ function loadQueue() {
 
         QUEUE = {
             inspectors: parsed.inspectors || [],
-            supervisors: parsed.supervisors || []
+            supervisors: parsed.supervisors || [],
+            items: parsed.items || []
         };
-        fillInspectors();
+        // The server decides the default when nothing was chosen — the oldest
+        // waiting item's supervisor. Adopting its answer rather than picking our
+        // own is what stops the dropdown and the list disagreeing about whose
+        // work is on screen.
+        fillSupervisors(parsed.selectedSupervisor || '');
         renderQueue();
     }).catch(function (err) {
         console.error('getCheckingQueue failed:', err);
@@ -99,33 +111,43 @@ function loadQueue() {
     });
 }
 
-function currentInspectorId() {
-    var sel = el('insp-select');
+function currentSupervisorId() {
+    var sel = el('sup-select');
     return sel ? sel.value : '';
 }
 
+// Only supervisors who actually have something waiting, each with its count.
+// Listing every supervisor means picking a name and landing on an empty screen
+// with nothing to say why — the same rule the production filter follows.
+//
 // Rebuilt on every load, keeping whoever was already chosen. Losing the
 // selection on Refresh would send him back to the picker every time.
-function fillInspectors() {
-    var sel = el('insp-select');
+function fillSupervisors(serverChoice) {
+    var sel = el('sup-select');
     if (!sel) return;
 
     var keep = sel.value;
-    sel.innerHTML = '<option value="">Choose inspector…</option>';
+    sel.innerHTML = '<option value="">Choose supervisor…</option>';
 
-    QUEUE.inspectors.forEach(function (i) {
+    // Just the name. The count belongs on the "To check" tab badge, which
+    // already carries it for whoever is selected — repeating it here said the
+    // same thing twice, and a number beside a person's name reads as an
+    // employee id anyway. The server still sends `count`; nothing renders it.
+    QUEUE.supervisors.forEach(function (s) {
         var o = document.createElement('option');
-        o.value = i.id;
-        o.textContent = i.name;
+        o.value = s.id;
+        o.textContent = s.name;
         sel.appendChild(o);
     });
 
-    if (keep && QUEUE.inspectors.some(function (i) { return i.id === keep; })) {
+    var have = function (v) {
+        return v && QUEUE.supervisors.some(function (s) { return String(s.id) === String(v); });
+    };
+
+    if (have(keep)) {
         sel.value = keep;
-    } else if (QUEUE.inspectors.length === 1) {
-        // One inspector is the common case on this floor. Making him pick his
-        // own name out of a list of one is friction for nothing.
-        sel.value = QUEUE.inspectors[0].id;
+    } else if (have(serverChoice)) {
+        sel.value = String(serverChoice);
     }
 }
 
@@ -137,67 +159,50 @@ function renderQueue() {
     var root = el('queue-root');
     root.innerHTML = '';
 
-    var withWork = QUEUE.supervisors.filter(function (s) {
-        return (s.items || []).length > 0;
-    });
+    var items = QUEUE.items || [];
 
-    // Counted across supervisors, not per accordion — the badge answers "is
-    // there anything for me", which is one number regardless of whose trolley
-    // it came off.
-    var waiting = withWork.reduce(function (n, s) {
-        return n + (s.items || []).length;
-    }, 0);
-    setQueueCount(waiting);
+    // The badge counts THIS supervisor's waiting batches, because that is whose
+    // screen it is. The dropdown carries every other supervisor's count beside
+    // his name, so nothing is hidden — it is just not summed into one number
+    // that would belong to nobody.
+    setQueueCount(items.length);
 
-    if (!withWork.length) {
-        root.innerHTML = '<p class="empty-note">Nothing is waiting to be checked.</p>';
+    if (!currentSupervisorId()) {
+        root.innerHTML = QUEUE.supervisors.length
+            ? '<p class="empty-note">Choose a supervisor to see what is waiting.</p>'
+            : '<p class="empty-note">Nothing is waiting to be checked.</p>';
         return;
     }
 
-    // Auto-open when there is only one supervisor with work — an accordion of
-    // one closed row is a click that answers no question.
-    if (openSupId === null && withWork.length === 1) {
-        openSupId = withWork[0].id;
+    if (!items.length) {
+        root.innerHTML = '<p class="empty-note">Nothing from this supervisor is waiting to be checked.</p>';
+        return;
     }
 
-    withWork.forEach(function (sup) {
-        var isOpen = String(sup.id) === String(openSupId);
-        var items = sup.items || [];
+    // An open card whose item has left the queue — just checked, or checked
+    // by somebody else since — cannot stay open over nothing.
+    if (openItemId !== null && !items.some(function (i) { return String(i.id) === String(openItemId); })) {
+        openItemId = null;
+    }
 
-        var block = document.createElement('div');
-        block.className = 'sup-block' + (isOpen ? ' is-open' : '');
+    var openItem = null;
+    var openCard = null;
 
-        var head = document.createElement('button');
-        head.type = 'button';
-        head.className = 'sup-head';
-        head.innerHTML =
-            '<span class="sup-caret">' + (isOpen ? '▾' : '▸') + '</span>' +
-            '<span class="sup-name">' + escapeHtml(sup.name) + '</span>' +
-            '<span class="sup-count">' + items.length +
-            (items.length === 1 ? ' batch' : ' batches') + '</span>';
-        head.addEventListener('click', function () {
-            openSupId = isOpen ? null : sup.id;
-            renderQueue();
-        });
-        block.appendChild(head);
-
-        if (isOpen) {
-            var body = document.createElement('div');
-            body.className = 'sup-body';
-            items.forEach(function (item) {
-                body.appendChild(renderItemCard(item, sup));
-            });
-            block.appendChild(body);
+    items.forEach(function (item) {
+        var card = renderItemCard(item);
+        root.appendChild(card);
+        if (String(item.id) === String(openItemId)) {
+            openItem = item;
+            openCard = card;
         }
-
-        root.appendChild(block);
     });
+
+    // AFTER every card is in the document. The form reads its own fields through
+    // document.getElementById, which cannot find an element that has been built
+    // but not yet appended.
+    if (openCard) wireCheckForm(openCard, openItem, num(openItem.produced));
 }
 
-// FOUR KINDS, and the last two must not be drawn the same. A Remake replaces a
-// garment that failed HIS check; a Replacement replaces one spoiled on the floor
-// that he never saw. Labelling the second as a rejection tells him it came back
-// from his own last round, which is both wrong and an accusation.
 function batchTag(item) {
     if (item.batch === 'Alteration') {
         return '<span class="batch-tag is-alt">Alteration batch</span>';
@@ -228,17 +233,21 @@ function linePosition(item) {
         ' accepted · <b>' + out + ' still to come</b></span>';
 }
 
-function renderItemCard(item, sup) {
-    var card = document.createElement('div');
-    card.className = 'item-card';
+function renderItemCard(item) {
+    var isOpen = String(item.id) === String(openItemId);
+    var produced = num(item.produced);
 
-    card.innerHTML =
+    var card = document.createElement('div');
+    card.className = 'item-card' + (isOpen ? ' is-open' : '');
+    card.setAttribute('data-item-id', item.id);
+
+    var header =
         '<div class="item-header">' +
         '<div class="item-header-info">' +
         '<h2><span class="mat-name">' + escapeHtml(item.name) + '</span>' +
         (item.sku ? '<span class="mat-sku">' + escapeHtml(item.sku) + '</span>' : '') + '</h2>' +
         '<div class="item-meta-line">' +
-        '<span class="item-qty">' + num(item.produced) + ' pcs to inspect</span>' +
+        '<span class="item-qty">' + produced + ' pcs to inspect</span>' +
         batchTag(item) +
         '<span class="round-tag">Round ' + num(item.round) + '</span>' +
         '</div>' +
@@ -248,28 +257,57 @@ function renderItemCard(item, sup) {
         linePosition(item) +
         '</div>' +
         '</div>' +
-        '<button type="button" class="primary-btn check-btn">Check</button>' +
+        // The chevron alone, exactly as the production screen does it. A Check
+        // button beside it was a second control doing the same job — the whole
+        // header already toggles, so the button could only ever agree with it.
+        '<div class="item-header-right">' +
+        '<span class="chevron">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+        '<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>' +
+        '</span>' +
+        '</div>' +
         '</div>';
 
-    card.querySelector('.check-btn').addEventListener('click', function () {
-        openCheckDialog(item, sup);
+    card.innerHTML = header + (isOpen ? checkFormHtml(item, produced) : '');
+
+    // The whole header toggles, not just the button — the production screen
+    // behaves that way, and a card that only opens from one small target is a
+    // different interaction for no reason.
+    card.querySelector('.item-header').addEventListener('click', function () {
+        openItemId = isOpen ? null : item.id;
+        renderQueue();
+        if (!isOpen) scrollCardIntoView(item.id);
     });
 
+    // NOT wired here. The form is wired by renderQueue AFTER the card is in the
+    // document, because refreshTotals reads #disp-total through
+    // document.getElementById — and an element that has been built but not yet
+    // appended is not findable that way. Wiring here threw, renderQueue died
+    // mid-loop, and the whole list vanished the moment a card was clicked.
     return card;
 }
 
-// ---------------------------------------------------------------------------
-// The check dialog
-// ---------------------------------------------------------------------------
-
-function closeModal() {
-    var m = el('check-modal');
-    m.classList.add('hidden');
-    m.innerHTML = '';
+// ONE CARD OPEN AT A TIME, and not merely for tidiness: the form uses fixed
+// element ids, so two open cards would put two #disp-approved in the page and
+// every read would find whichever came first.
+function scrollCardIntoView(id) {
+    var c = document.querySelector('[data-item-id="' + id + '"]');
+    if (c && c.scrollIntoView) c.scrollIntoView({ block: 'nearest' });
 }
 
-function openCheckDialog(item, sup) {
-    var produced = num(item.produced);
+// ---------------------------------------------------------------------------
+// The check form, rendered inside the card
+// ---------------------------------------------------------------------------
+
+// Rebuilt each time a card opens rather than held in the DOM, so a Refresh that
+// changes the roster cannot leave a stale name selectable.
+function inspectorOptions() {
+    return (QUEUE.inspectors || []).map(function (i) {
+        return '<option value="' + escapeHtml(i.id) + '">' + escapeHtml(i.name) + '</option>';
+    }).join('');
+}
+
+function checkFormHtml(item, produced) {
     var stages = (item.stages || []).slice().sort(function (a, b) {
         return num(a.sequence) - num(b.sequence);
     });
@@ -295,29 +333,34 @@ function openCheckDialog(item, sup) {
             '</tr>';
     }).join('');
 
-    var m = el('check-modal');
-    m.classList.remove('hidden');
-    m.innerHTML =
-        '<div class="modal-panel">' +
+    return '' +
+        '<div class="item-body">' +
 
-        '<h3>' + escapeHtml(item.name) +
-        (item.sku ? ' <span class="mat-sku">' + escapeHtml(item.sku) + '</span>' : '') + '</h3>' +
-        '<p class="modal-sub">' + escapeHtml(sup.name) + ' · ' +
-        escapeHtml(item.salesOrder || '') + ' · ' + produced + ' pcs from production</p>' +
+        // WHO JUDGED THIS, chosen per check rather than once at the top of the
+        // screen. It is a fact about the inspection, not about who is looking —
+        // two batches on one trolley can honestly have been judged by two
+        // different people. And it is the first thing anyone asks when a
+        // rejection is disputed, so the save is refused without it.
+        '<div class="insp-row">' +
+        '<label for="chk-inspector">Checked by</label>' +
+        '<select id="chk-inspector">' +
+        '<option value="">Choose inspector…</option>' +
+        inspectorOptions() +
+        '</select>' +
+        '</div>' +
 
         // Recorded, not calculated. A garment can fail two checks, so these do
-        // not add up to the disposition below and nothing derives from them —
-        // they exist so "what is actually going wrong" is answerable later.
-        '<h4>Checks</h4>' +
-        '<p class="hint">A record of what was found. A piece can fail more than one check, ' +
-        'so these do not have to add up to the decision below.</p>' +
+        // not add up to the decision below and nothing derives from them — they
+        // exist so "what is actually going wrong" is answerable later.
+        '<div class="section-title">Checks</div>' +
+        '<p class="hint">A record of what was found. A piece can fail more than one check, so these need not add up to the decision.</p>' +
         '<div class="table-wrapper">' +
         '<table class="chk-table"><thead><tr>' +
         '<th>Check</th><th class="col-num">Failed</th><th class="col-num">Passed</th><th>Note</th>' +
         '</tr></thead><tbody>' + checkRows + '</tbody></table>' +
         '</div>' +
 
-        '<h4>Decision</h4>' +
+        '<div class="section-title">Decision</div>' +
         '<div class="disp-row">' +
         '<label>Approved<input type="number" min="0" step="1" id="disp-approved" value="' + produced + '"></label>' +
         '<label>Rejected<input type="number" min="0" step="1" id="disp-rejected" value="0"></label>' +
@@ -326,11 +369,10 @@ function openCheckDialog(item, sup) {
         '<p class="disp-total" id="disp-total"></p>' +
 
         '<div id="alt-block" class="hidden">' +
-        '<h4>Which stages need the work?</h4>' +
-        '<p class="hint">One garment can need two stages fixed, so these may add up to more ' +
-        'than the alteration count. They may not add up to less.</p>' +
+        '<div class="section-title">Which stages need the work?</div>' +
+        '<p class="hint">A garment can need two stages fixed, so these may total more than the alteration count &mdash; never less.</p>' +
         '<div class="table-wrapper">' +
-        '<table class="chk-table"><thead><tr>' +
+        '<table class="chk-table alt-table"><thead><tr>' +
         '<th>Stage</th><th class="col-num">Pieces</th>' +
         '</tr></thead><tbody>' + stageRows + '</tbody></table>' +
         '</div>' +
@@ -338,22 +380,30 @@ function openCheckDialog(item, sup) {
 
         '<label class="rem-label">Remarks<textarea id="chk-remarks" rows="2"></textarea></label>' +
 
-        '<p class="modal-error hidden" id="chk-error"></p>' +
+        '<p class="chk-error hidden" id="chk-error"></p>' +
 
-        '<div class="modal-actions">' +
+        '<div class="chk-actions">' +
         '<button type="button" class="ghost-btn" id="chk-cancel">Cancel</button>' +
         '<button type="button" class="primary-btn" id="chk-save">Save check</button>' +
         '</div>' +
 
         '</div>';
+}
+
+function wireCheckForm(card, item, produced) {
+    // Clicks inside the form must not reach the header handler, which would
+    // close the card mid-typing.
+    card.querySelector('.item-body').addEventListener('click', function (ev) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+    });
 
     // Passed follows Failed, because within ONE check every piece either passed
     // or failed — the counts only stop reconciling ACROSS checks. Still editable
     // in case he inspected a subset.
-    m.querySelectorAll('.chk-failed').forEach(function (inp) {
+    card.querySelectorAll('.chk-failed').forEach(function (inp) {
         inp.addEventListener('input', function () {
             var i = inp.getAttribute('data-i');
-            var pass = m.querySelector('.chk-passed[data-i="' + i + '"]');
+            var pass = card.querySelector('.chk-passed[data-i="' + i + '"]');
             var left = produced - num(inp.value);
             pass.value = left < 0 ? 0 : left;
         });
@@ -383,8 +433,18 @@ function openCheckDialog(item, sup) {
     });
     refreshTotals();
 
-    el('chk-cancel').addEventListener('click', closeModal);
+    el('chk-cancel').addEventListener('click', function () {
+        openItemId = null;
+        renderQueue();
+    });
     el('chk-save').addEventListener('click', function () { saveCheck(item, produced); });
+}
+
+// Opens a card by item. Kept under this name because the harness and the save
+// path both call it.
+function openCheckDialog(item) {
+    openItemId = item.id;
+    renderQueue();
 }
 
 // ---------------------------------------------------------------------------
@@ -400,8 +460,20 @@ function showDialogError(msg) {
 function saveCheck(item, produced) {
     if (saving) return;
 
-    var m = el('check-modal');
+    // The form lives in the item's own card now, not in the overlay. Scoped to
+    // that card rather than searched page-wide: only one card is open at a time,
+    // but a page-wide query would silently start reading a second one the moment
+    // that ever changed.
+    var m = document.querySelector('[data-item-id="' + item.id + '"]');
+    if (!m) return;
+
     el('chk-error').classList.add('hidden');
+
+    var inspectorId = el('chk-inspector') ? el('chk-inspector').value : '';
+    if (!inspectorId) {
+        showDialogError('Say who checked these. A rejection opens a remake batch, and the first question anyone asks is who judged it.');
+        return;
+    }
 
     var approved = num(el('disp-approved').value);
     var rejected = num(el('disp-rejected').value);
@@ -455,7 +527,7 @@ function saveCheck(item, produced) {
 
     var payload = {
         planItemId: String(item.id),
-        inspectorId: String(currentInspectorId() || ''),
+        inspectorId: String(inspectorId),
         checks: checks,
         approved: approved,
         rejected: rejected,
@@ -490,7 +562,7 @@ function saveCheck(item, produced) {
             return;
         }
 
-        closeModal();
+        openItemId = null;
         showOutcome(item, approved, rejected, alteration, parsed);
         loadQueue();
     }).catch(function (err) {
@@ -506,6 +578,15 @@ function saveCheck(item, produced) {
 // cloth from the store and a fresh run from Cutting; an alteration puts work
 // back on the supervisor's screen. Both are consequences he should see named
 // rather than infer from the item leaving the list.
+// The ONE thing still shown as an overlay. The check form moved into the card,
+// but this is not a form — it is the answer to "what did that just set in
+// motion", and the card it would sit in has by then left the queue.
+function closeModal() {
+    var m = el('check-modal');
+    m.classList.add('hidden');
+    m.innerHTML = '';
+}
+
 function showOutcome(item, approved, rejected, alteration, res) {
     var bits = [];
     if (approved > 0) bits.push('<li><b>' + approved + '</b> approved</li>');
@@ -627,10 +708,10 @@ function loadHistory() {
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getCheckerHistory',
         http_method: 'POST',
-        // Deliberately NOT narrowed to the picked inspector. "Who checked this"
-        // is exactly the question a disputed rejection turns into, and hiding
-        // everyone else's rounds would answer it wrongly.
-        payload: { inspectorId: '', dateTxt: dayTxt }
+        // Scoped to the SUPERVISOR whose screen this is — his batches, whoever
+        // inspected them. The inspector is a column here, never a filter: "who
+        // checked this" is exactly the question a disputed rejection turns into.
+        payload: { supervisorId: currentSupervisorId() || '', dateTxt: dayTxt }
     }).then(function (response) {
         console.log('getCheckerHistory raw:', response);
         var parsed;
@@ -662,61 +743,103 @@ function renderHistory(data) {
     var t = data.totals || {};
 
     if (!checks.length) {
-        el('hist-totals').textContent = '';
+        el('hist-totals').innerHTML = '';
         el('history-root').innerHTML = '<p class="empty-note">Nothing was checked that day.</p>';
         return;
     }
 
+    // The day in one line. Inspected is the anchor everything else is a share of,
+    // so it leads; a zero outcome is left out rather than printed as "0 rejected",
+    // which reads as a finding.
     el('hist-totals').innerHTML =
-        '<b>' + num(t.checks) + '</b> ' + (num(t.checks) === 1 ? 'batch' : 'batches') +
-        ' · <b>' + num(t.inspected) + '</b> inspected · ' +
-        num(t.approved) + ' approved · ' + num(t.rejected) + ' rejected · ' +
-        num(t.alteration) + ' to alter';
+        '<span class="day-stat"><b>' + num(t.checks) + '</b> ' +
+        (num(t.checks) === 1 ? 'batch' : 'batches') + '</span>' +
+        '<span class="day-stat"><b>' + num(t.inspected) + '</b> inspected</span>' +
+        (num(t.approved) > 0
+            ? '<span class="day-stat is-ok"><b>' + num(t.approved) + '</b> approved</span>' : '') +
+        (num(t.rejected) > 0
+            ? '<span class="day-stat is-rej"><b>' + num(t.rejected) + '</b> rejected</span>' : '') +
+        (num(t.alteration) > 0
+            ? '<span class="day-stat is-alt"><b>' + num(t.alteration) + '</b> to alter</span>' : '');
 
     var html = checks.map(function (c) {
-        // The five checks are carried through untouched. They do not reconcile
-        // with the decision and are not meant to — one garment can fail two —
-        // so only the ones that actually found something are worth the row.
+        var inspected = num(c.inspected);
+
+        // ONE TILE PER OUTCOME, and a zero outcome is omitted. Printing "0
+        // rejected" beside "3 approved" gives a clean batch the same shape as a
+        // bad one and makes the row something to read rather than something to
+        // scan.
+        var tiles = '';
+        if (num(c.approved) > 0) {
+            tiles += '<span class="out-tile is-ok"><b>' + num(c.approved) + '</b>approved</span>';
+        }
+        if (num(c.rejected) > 0) {
+            tiles += '<span class="out-tile is-rej"><b>' + num(c.rejected) + '</b>rejected</span>';
+        }
+        if (num(c.alteration) > 0) {
+            tiles += '<span class="out-tile is-alt"><b>' + num(c.alteration) + '</b>to alter</span>';
+        }
+        tiles += '<span class="out-tile is-tot"><b>' + inspected + '</b>inspected</span>';
+
+        // Only checks that actually found something. The five never reconcile
+        // with the decision — one garment can fail two — so listing all five
+        // every time would bury the one that matters among four zeroes.
         var failed = (c.lines || []).filter(function (l) { return num(l.failed) > 0; });
         var failHtml = failed.length
-            ? '<div class="hist-fails">' + failed.map(function (l) {
-                return '<span class="hist-fail">' + escapeHtml(l.type) + ' ' + num(l.failed) +
-                    (l.note ? ' · ' + escapeHtml(l.note) : '') + '</span>';
-            }).join('') + '</div>'
-            : '<div class="hist-fails"><span class="hist-fail is-clean">No check found anything</span></div>';
-
-        var altHtml = (c.alterationLines || []).length
-            ? '<div class="hist-alt">Back to: ' + (c.alterationLines || []).map(function (a) {
-                return escapeHtml(a.stage) + ' (' + num(a.qty) + ')';
-            }).join(', ') + '</div>'
+            ? '<div class="hist-row">' +
+                '<span class="hist-row-label">Found</span>' +
+                '<span class="hist-row-body">' + failed.map(function (l) {
+                    return '<span class="fail-pill">' + escapeHtml(l.type) +
+                        ' <b>' + num(l.failed) + '</b>' +
+                        (l.note ? '<i>' + escapeHtml(l.note) + '</i>' : '') + '</span>';
+                }).join('') + '</span>' +
+              '</div>'
             : '';
 
+        var alt = (c.alterationLines || []);
+        var altHtml = alt.length
+            ? '<div class="hist-row">' +
+                '<span class="hist-row-label">Back to</span>' +
+                '<span class="hist-row-body">' + alt.map(function (a) {
+                    return '<span class="stage-pill">' + escapeHtml(a.stage) +
+                        ' <b>' + num(a.qty) + '</b></span>';
+                }).join('') + '</span>' +
+              '</div>'
+            : '';
+
+        var remHtml = c.remarks
+            ? '<div class="hist-row">' +
+                '<span class="hist-row-label">Note</span>' +
+                '<span class="hist-row-body hist-remark">' + escapeHtml(c.remarks) + '</span>' +
+              '</div>'
+            : '';
+
+        // A batch where nothing failed and nothing was sent back says so once,
+        // quietly. Left blank it reads as a card that failed to load.
+        var detail = failHtml + altHtml + remHtml;
+        if (!detail) {
+            detail = '<div class="hist-row"><span class="hist-row-label"></span>' +
+                '<span class="hist-row-body hist-clean">Every check clean</span></div>';
+        }
+
         return '' +
-            '<div class="item-card">' +
-            '<div class="item-header">' +
-            '<div class="item-header-info">' +
-            '<h2><span class="mat-name">' + escapeHtml(c.item) + '</span>' +
-            (c.sku ? '<span class="mat-sku">' + escapeHtml(c.sku) + '</span>' : '') + '</h2>' +
-            '<div class="item-meta-line">' +
+            '<div class="hist-card">' +
+            '<div class="hist-head">' +
+            '<div class="hist-title">' +
+            '<h3>' + escapeHtml(c.item) +
+            (c.sku ? '<span class="mat-sku">' + escapeHtml(c.sku) + '</span>' : '') + '</h3>' +
+            '<div class="hist-meta">' +
             '<span class="so-ref">' + escapeHtml(c.salesOrder || '—') +
             (c.planNo ? ' · ' + escapeHtml(c.planNo) : '') + '</span>' +
             batchTag(c) +
             '<span class="round-tag">Round ' + num(c.round) + '</span>' +
             '</div>' +
-            '<div class="item-meta-line">' +
-            '<span class="so-ref">' + escapeHtml(c.inspector || 'Unknown inspector') +
-            ' · ' + escapeHtml(c.checkedOn || '') + '</span>' +
+            '<div class="hist-who">' + escapeHtml(c.inspector || 'Unknown inspector') +
+            (c.checkedOn ? ' · ' + escapeHtml(c.checkedOn) : '') + '</div>' +
             '</div>' +
+            '<div class="out-tiles">' + tiles + '</div>' +
             '</div>' +
-            '<div class="hist-nums">' +
-            '<span class="hist-num is-ok"><b>' + num(c.approved) + '</b> approved</span>' +
-            (num(c.rejected) > 0 ? '<span class="hist-num is-rej"><b>' + num(c.rejected) + '</b> rejected</span>' : '') +
-            (num(c.alteration) > 0 ? '<span class="hist-num is-alt"><b>' + num(c.alteration) + '</b> to alter</span>' : '') +
-            '<span class="hist-num is-muted">of ' + num(c.inspected) + '</span>' +
-            '</div>' +
-            '</div>' +
-            failHtml + altHtml +
-            (c.remarks ? '<div class="hist-remarks">' + escapeHtml(c.remarks) + '</div>' : '') +
+            '<div class="hist-detail">' + detail + '</div>' +
             '</div>';
     }).join('');
 
@@ -749,9 +872,15 @@ el('refresh-btn').addEventListener('click', function () {
     }
 });
 
-el('insp-select').addEventListener('change', function () {
-    // The queue is the same whoever is looking — the picker only decides who the
-    // check is recorded against — so this does not refetch.
+// Changing supervisor changes WHAT IS ON SCREEN, so it refetches — unlike the
+// old inspector picker, which only decided whose name went on the record.
+el('sup-select').addEventListener('change', function () {
+    histLoaded = false;
+    loadQueue();
+    if (activeTab() === 'history') {
+        histLoaded = true;
+        loadHistory();
+    }
 });
 
 loadQueue();

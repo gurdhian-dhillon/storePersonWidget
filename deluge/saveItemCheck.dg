@@ -67,7 +67,23 @@ string saveItemCheck(string payloadJson)
 	}
 	itemId = itemIdTxt.toLong();
 
+	//----------------------------------------------------------------------
+	// WHO JUDGED THIS. REQUIRED, and refused here rather than only in the
+	// widget - this is a Custom API and callable from anywhere.
+	//
+	// Quality inspectors have no login, so the name cannot be inferred from who
+	// is calling: the supervisor picks it per check, and if he does not pick one
+	// there is nothing else that could supply it. An unattributed check is not a
+	// cosmetic gap - a rejection opens a remake batch costing real cloth and
+	// real hours, and "who decided that" is the first question asked when one is
+	// disputed. Written blank it can never be recovered.
+	//----------------------------------------------------------------------
 	inspIdTxt = ifnull(inp.get("inspectorId"),"").toString().trim();
+	if(inspIdTxt == "" || inspIdTxt.isNumber() == false)
+	{
+		return "{\"success\":false,\"code\":\"NO_INSPECTOR\",\"error\":\"Say who checked these garments. A rejection opens a remake batch, and the check has to record who judged it.\"}";
+	}
+
 	remarksTxt = ifnull(inp.get("remarks"),"").toString().trim();
 
 	//----------------------------------------------------------------------

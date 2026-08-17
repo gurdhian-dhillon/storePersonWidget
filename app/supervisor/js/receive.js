@@ -50,20 +50,20 @@ function setEditMode(on) {
 // they are separate rolls on his bench: he is not signing for "5.5 metres", he
 // is signing for 3 off L2 and 2.5 off L3 — and if only one of them is on the
 // trolley, that is exactly the discrepancy this screen exists to catch.
-function lotLine(m) {
+function lotColumn(m) {
     var lots = (m.isFabric && m.lots) ? m.lots : [];
-    if (lots.length === 0) return '';
+    if (lots.length === 0) return '<td class="col-lot">-</td>';
 
     var parts = lots.map(function (l) {
-        return '<span class="rcv-lot"><b>' + escapeHtml(l.lot) + '</b> ' +
-               fmt(l.qty) + ' ' + escapeHtml(m.unit) + '</span>';
+        if (lots.length > 1) {
+            return '<div class="rcv-lot"><b>' + escapeHtml(l.lot) + '</b> <span style="font-size: 0.9em; color: #666;">(' +
+                   fmt(l.qty) + ' ' + escapeHtml(m.unit) + ')</span></div>';
+        } else {
+            return '<div class="rcv-lot"><b>' + escapeHtml(l.lot) + '</b></div>';
+        }
     }).join('');
 
-    return '<div class="rcv-lots">' +
-               '<span class="rcv-lots-label">' +
-                   (lots.length > 1 ? 'from' : 'from lot') +
-               '</span>' + parts +
-           '</div>';
+    return '<td class="col-lot">' + parts + '</td>';
 }
 
 function renderMaterialRow(m, i) {
@@ -105,8 +105,8 @@ function renderMaterialRow(m, i) {
                             ? '<span class="reissue-tag">incl. reissue</span>'
                             : '') +
                     '</div>' +
-                    lotLine(m) +
                 '</td>' +
+                lotColumn(m) +
                 '<td class="col-num col-strong">' + qtyCell + '</td>' +
                 '<td class="col-issue">' +
                     '<span class="status-pill status-partial">Awaiting check</span>' +
@@ -132,9 +132,9 @@ function renderMaterialRow(m, i) {
                         ? '<span class="reissue-tag">incl. reissue</span>'
                         : '') +
                 '</div>' +
-                lotLine(m) +
                 orders +
             '</td>' +
+            lotColumn(m) +
             '<td class="col-num col-strong">' + qtyCell + '</td>' +
             '<td class="col-issue">' +
                 '<span class="issue-input-group">' +
@@ -185,6 +185,7 @@ function renderWasteRow(w, i) {
                     ' &middot; cut into ' + fmt(w.cutLength) + '&times;' + fmt(w.cutWidth) +
                     ' cm &middot; yields ' + w.yields + ' pcs</div>' +
             '</td>' +
+            '<td class="col-lot">-</td>' +
             '<td class="col-num col-strong">' +
                 '<span class="qty-big">' + w.pending + '<span class="unit">pcs</span></span>' +
                 '<div class="qty-sub">' + fmt(w.length) + ' &times; ' + fmt(w.width) + ' cm</div>' +
@@ -214,6 +215,7 @@ function renderTable(title, note, rowsHtml) {
                 '<table>' +
                     '<thead><tr>' +
                         '<th>Item</th>' +
+                        '<th class="col-lot">Lot no.</th>' +
                         '<th class="col-num">Issued to you</th>' +
                         '<th class="col-issue">' + (EDIT ? 'Actually received' : 'Status') + '</th>' +
                         (EDIT ? '<th class="col-note">Note</th>' : '') +
