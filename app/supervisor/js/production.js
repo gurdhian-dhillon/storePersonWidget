@@ -51,7 +51,7 @@ function remakeTagText(reason) {
 	// An empty reason reads as a rejection on purpose. A batch of unknown cause
 	// is more honestly a failed check than an alteration, which would promise
 	// alteration stages that do not exist.
-	return "Failed checking";
+	return "Remake";
 }
 
 // Waste rows being edited in the End dialog. Kept flat with a rowKey so add and
@@ -949,7 +949,6 @@ function renderItemCard(plan, item, index) {
                 <span>${isAlt ? "Alteration stages" : "Production Flow"}</span>
                 ${reqMatBtn}
                 ${closeAltBtn}
-                <button type="button" class="outsource-btn"></button>
             </div>`;
 		phHtml += `<div class="flow-trail"><div class="flow-trail-track">`;
 		item.phases.forEach((phase, idx) => {
@@ -1044,7 +1043,10 @@ function renderItemCard(plan, item, index) {
                     <div class="stage-card is-outsourced" data-phase="${phase.operation}">
                         <div class="stage-card-head">
                             <span>${stepLabel}</span>
-                            <span class="stage-status">At ${party ? party.name : "third party"}</span>
+                            <div style="display:flex; align-items:center; gap:0.5rem;">
+                                <span class="stage-status">At ${party ? party.name : "third party"}</span>
+                                <button type="button" class="outsource-btn"></button>
+                            </div>
                         </div>
                         <div class="stage-summary">
                             <span>sent <b>${log.qtyIn}</b> pcs</span>
@@ -1076,7 +1078,10 @@ function renderItemCard(plan, item, index) {
                 <div class="stage-card is-running" data-phase="${phase.operation}" data-qtyin="${qtyIn}" data-logid="${logId}" data-legacy="1">
                     <div class="stage-card-head">
                         <span>${stepLabel}</span>
-                        <span class="stage-status">In progress</span>
+                        <div style="display:flex; align-items:center; gap:0.5rem;">
+                            <span class="stage-status">In progress</span>
+                            <button type="button" class="outsource-btn"></button>
+                        </div>
                     </div>
                     <div class="stage-card-body">
                         <p class="share-note">Started before the work was split between operators, so it is finished the old way — one operator, one count.</p>
@@ -1262,7 +1267,10 @@ function renderItemCard(plan, item, index) {
                 <div class="stage-card ${isActive ? "is-running" : "is-todo"}" data-phase="${phase.operation}" data-qtyin="${qtyIn}" data-qtyout="${madeQty}" data-logid="${logId}">
                     <div class="stage-card-head">
                         <span>${stepLabel}</span>
-                        <span class="stage-status">${isActive ? "In progress" : "Not started"}</span>
+                        <div style="display:flex; align-items:center; gap:0.5rem;">
+                            <span class="stage-status">${isActive ? "In progress" : "Not started"}</span>
+                            <button type="button" class="outsource-btn"></button>
+                        </div>
                     </div>
                     <div class="stage-card-body">
                         ${meter}
@@ -1328,8 +1336,8 @@ function renderItemCard(plan, item, index) {
 	// Send out / take back. Label and action both depend on whether anything of
 	// this item is currently at a third party — one button, two states, because
 	// the two are never both available.
-	const btnOs = body.querySelector(".outsource-btn");
-	if (btnOs) {
+	const btnOsList = body.querySelectorAll(".outsource-btn");
+	btnOsList.forEach((btnOs) => {
 		const blockOut =
 			typeof openOsBlock === "function" ? openOsBlock(item) : null;
 		if (typeof openSendDialog !== "function") {
@@ -1344,7 +1352,7 @@ function renderItemCard(plan, item, index) {
 			btnOs.textContent = "Send to third party";
 			btnOs.addEventListener("click", () => openSendDialog(plan, item));
 		}
-	}
+	});
 
 	// Alteration batches only. Opens the damage dialog in its MANUAL mode — no
 	// third argument — where the spoiled-piece count starts at 0 and he types
