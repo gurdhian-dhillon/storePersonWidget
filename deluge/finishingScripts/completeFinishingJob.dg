@@ -4,20 +4,28 @@ string completeFinishingJob(string payloadJson)
 	try
 	{
 		inp = payloadJson.toMap();
-		itemIdStr = ifnull(inp.get("planItemId"),"").toString().trim();
+		checkIdStr = ifnull(inp.get("itemCheckId"),"").toString().trim();
 		staffName = ifnull(inp.get("staffName"),"").toString().trim();
 		
-		// Sub-stage durations (in seconds)
-		foldingDur = ifnull(inp.get("foldingDuration"),"0").toDecimal().toLong();
-		pressingDur = ifnull(inp.get("pressingDuration"),"0").toDecimal().toLong();
-		brandingDur = ifnull(inp.get("brandingDuration"),"0").toDecimal().toLong();
-		totalDuration = foldingDur + pressingDur + brandingDur;
+		// Sub-stage Times (formatted string HH:mm:ss from JS)
+		foldingStartStr = ifnull(inp.get("foldingStart"),"").toString().trim();
+		foldingEndStr = ifnull(inp.get("foldingEnd"),"").toString().trim();
+		pressingStartStr = ifnull(inp.get("pressingStart"),"").toString().trim();
+		pressingEndStr = ifnull(inp.get("pressingEnd"),"").toString().trim();
+		brandingStartStr = ifnull(inp.get("brandingStart"),"").toString().trim();
+		brandingEndStr = ifnull(inp.get("brandingEnd"),"").toString().trim();
 		
-		if (itemIdStr == "")
+		// Overall start/end Date-Times (formatted string yyyy-MM-dd HH:mm:ss from JS)
+		finishingStartStr = ifnull(inp.get("finishingStart"),"").toString().trim();
+		finishingEndStr = ifnull(inp.get("finishingEnd"),"").toString().trim();
+		
+		finStart = if(finishingStartStr == "", null, finishingStartStr.toTime("yyyy-MM-dd HH:mm:ss"));
+		finEnd = if(finishingEndStr == "", null, finishingEndStr.toTime("yyyy-MM-dd HH:mm:ss"));
+		
+		if (checkIdStr == "")
 		{
-			return "{\"success\":false,\"error\":\"Missing planItemId\"}";
+			return "{\"success\":false,\"error\":\"Missing itemCheckId\"}";
 		}
-		itemId = itemIdStr.toLong();
 		
 		// Find the employee ID for the staff name
 		empId = null;
@@ -26,33 +34,50 @@ string completeFinishingJob(string payloadJson)
 			empId = emp.ID;
 		}
 		
-		// Find the Finishing stage log for this plan item
-		logId = 0;
-		for each lg in Stage_Log[Plan_Item == itemId && Phase_Name == "Finishing"]
+		// checkIdStr contains a comma-separated list of check IDs
+		checkIdsList = checkIdStr.toList(",");
+		for each checkIdVal in checkIdsList
 		{
-			logId = lg.ID;
-			// Update the stage log to completed
-			lg.Stage_Status = "Done";
-			lg.End_Time = zoho.currenttime;
-			if(empId != null)
+			checkId = checkIdVal.trim().toLong();
+			
+			// Resolve Qty Approved and Plan Item from this specific check record
+			checkQty = 0;
+			itemId = null;
+			for each chk in Item_Check[ID == checkId]
 			{
-				lg.Operator = empId;
+				itemId = chk.Plan_Item;
+				checkQty = ifnull(chk.Qty_Approved, 0).toLong();
 			}
-			// Set quantity out equal to quantity in
-			lg.Qty_Out = lg.Qty_In;
-			lg.Remarks = "Completed via Finishing Dashboard. Folding: " + foldingDur + "s, Pressing: " + pressingDur + "s, Branding: " + brandingDur + "s";
+			
+			// Insert finishing record into new 'Finishing_Data' form
+			newFin = insert into Finishing_Data
+			[
+				Plan_Item = itemId
+				Item_Check = checkId
+				Folding_Start_Time = foldingStartStr
+				Folding_End_Time = foldingEndStr
+				Pressing_Start_Time = pressingStartStr
+				Pressing_End_Time = pressingEndStr
+				Branding_Start_Time = brandingStartStr
+				Branding_End_Time = brandingEndStr
+				Finishing_Start_Time = finStart
+				Finishing_End_Time = finEnd
+				Qty_Finished = checkQty
+			];
+			
+			finId = newFin.toLong();
+			
+			// Update Operator lookup since lookups can be null and fail in block
+			for each f in Finishing_Data[ID == finId]
+			{
+				if(empId != null)
+				{
+					f.Operator = empId;
+				}
+			}
 		}
 		
-		if(logId != 0)
-		{
-			res = "{\"success\":true,\"message\":\"Finishing stage updated successfully\"}";
-		}
-		else
-		{
-			// If no stage log for Finishing exists, let's create one or just mark the item complete!
-			// In typical production, there is a stage log. Let's return success anyway.
-			res = "{\"success\":true,\"message\":\"Item completed (no stage log found)\"}";
-		}
+		res = "{\"success\":true,\"message\":\"Finishing records saved successfully\"}";
 	}
 	catch (e)
 	{
@@ -60,3 +85,4 @@ string completeFinishingJob(string payloadJson)
 	}
 	return res;
 }
+

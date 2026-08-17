@@ -1,0 +1,87 @@
+string getFinishingItems(string planNo)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		rowsJson = "";
+		
+		pNo = ifnull(planNo, "").toString().trim();
+		if (pNo == "")
+		{
+			return "{\"errors\":[],\"queue\":[]}";
+		}
+		
+		// Resolve the plan ID from plan number to avoid lookup query limitations
+		planId = 0;
+		for each p in Production_Planning[Plan_No == pNo]
+		{
+			planId = p.ID;
+		}
+		
+		// Query checked items that belong to the selected plan
+		checks = Item_Check[Plan == planId && Qty_Approved > 0] sort by Added_Time desc;
+		
+		for each chk in checks
+		{
+			// Check if this item has already been completed in finishing
+			isCompleted = false;
+			for each lg in Finishing_Data[Item_Check == chk.ID]
+			{
+				isCompleted = true;
+			}
+			
+			if(!isCompleted)
+			{
+				itemId = chk.Plan_Item;
+				
+				planNoTxt = "";
+				soNo = "";
+				itemName = "";
+				skuTxt = "";
+				
+				// Resolve details from Plan_Item and Production_Planning
+				for each pi in Plan_Item[ID == itemId]
+				{
+					itemName = ifnull(pi.Item_Name, "").toString().replaceAll("\"", "'");
+					for each imRec in Item_Master[ID == pi.Item_Sku]
+					{
+						skuTxt = ifnull(imRec.SKU, "").toString().replaceAll("\"", "'");
+					}
+					for each p in Production_Planning[ID == pi.Plan]
+					{
+						planNoTxt = ifnull(p.Plan_No, "").toString().replaceAll("\"", "'");
+						for each so in Sales_Order[ID == p.Sales_Order]
+						{
+							soNo = ifnull(so.Sales_Order, "").toString().replaceAll("\"", "'");
+						}
+					}
+				}
+				
+				qtyVal = ifnull(chk.Qty_Approved, 0).toLong();
+				
+				if(rowsJson != "")
+				{
+					rowsJson = rowsJson + ",";
+				}
+				
+				rowsJson = rowsJson + "{\"id\":\"" + chk.ID + "\","
+					+ "\"planItemId\":\"" + itemId + "\","
+					+ "\"salesOrder\":\"" + soNo + "\","
+					+ "\"planNo\":\"" + planNoTxt + "\","
+					+ "\"itemName\":\"" + itemName + "\","
+					+ "\"sku\":\"" + skuTxt + "\","
+					+ "\"qty\":" + qtyVal + ","
+					+ "\"round\":" + ifnull(chk.Round, 1).toLong() + ","
+					+ "\"status\":\"Pending\","
+					+ "\"stages\":{\"folding\":{\"start\":null,\"end\":null,\"duration\":null},\"pressing\":{\"start\":null,\"end\":null,\"duration\":null},\"branding\":{\"start\":null,\"end\":null,\"duration\":null}}}";
+			}
+		}
+		
+		res = "{\"errors\":[],\"queue\":[" + rowsJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

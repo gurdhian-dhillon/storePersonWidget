@@ -1,16 +1,10 @@
 /* Custom Styles for Finishing and Packing Prototype Widget */
 
 .finishing-container {
-    display: grid;
-    grid-template-columns: 1fr 2fr;
+    display: flex;
+    flex-direction: column;
     gap: 1.5rem;
     margin-top: 1rem;
-}
-
-@media (max-width: 1024px) {
-    .finishing-container {
-        grid-template-columns: 1fr;
-    }
 }
 
 /* Sidebar: Queue */

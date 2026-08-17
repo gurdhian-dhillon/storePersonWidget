@@ -4,26 +4,19 @@ string getFinishingHistory()
 	try
 	{
 		rowsJson = "";
-		// Query all completed finishing stages
-		completedLogs = Stage_Log[Phase_Name == "Finishing" && Stage_Status == "Done"] sort by Added_Time desc;
+		// Query all completed finishing stages from the new 'Finishing' form
+		completedRuns = Finishing_Data[ID != 0] sort by Added_Time desc range from 0 to 49;
 		
-		for each lg in completedLogs
+		for each run in completedRuns
 		{
-			planItemRec = Plan_Item[ID == lg.Plan_Item];
+			planItemRec = Plan_Item[ID == run.Plan_Item];
 			itemName = "";
-			qtyVal = 0;
 			planNo = "";
 			soNo = "";
 			
 			for each pi in planItemRec
 			{
 				itemName = ifnull(pi.Item_Name, "").toString().replaceAll("\"", "'");
-				qtyVal = ifnull(pi.Qty_Accepted, 0).toLong();
-				if(qtyVal == 0)
-				{
-					qtyVal = ifnull(pi.Qty_Ordered, 0).toLong();
-				}
-				
 				planRec = Production_Planning[ID == pi.Plan];
 				for each p in planRec
 				{
@@ -37,66 +30,297 @@ string getFinishingHistory()
 			
 			// Get staff name
 			staffName = "Unknown";
-			if(lg.Operator != null)
+			if(run.Operator != null)
 			{
-				for each emp in Employee[ID == lg.Operator]
+				for each emp in Employee[ID == run.Operator]
 				{
 					staffName = emp.Employee_Name;
 				}
 			}
 			
-			// Parse sub-stage durations from remarks if present
-			rem = ifnull(lg.Remarks, "").toString();
-			foldDur = 0;
-			pressDur = 0;
-			brandDur = 0;
-			
-			if(rem.contains("Folding: "))
-			{
-				// Simple parsing logic in Deluge
-				// Remarks format: "Completed via Finishing Dashboard. Folding: 10s, Pressing: 20s, Branding: 30s"
-				parts = rem.toList("Folding: ");
-				if(parts.size() > 1)
-				{
-					foldPart = parts.get(1).toList("s,").get(0).trim();
-					foldDur = foldPart.toDecimal().toLong();
-				}
-			}
-			if(rem.contains("Pressing: "))
-			{
-				parts = rem.toList("Pressing: ");
-				if(parts.size() > 1)
-				{
-					pressPart = parts.get(1).toList("s,").get(0).trim();
-					pressDur = pressPart.toDecimal().toLong();
-				}
-			}
-			if(rem.contains("Branding: "))
-			{
-				parts = rem.toList("Branding: ");
-				if(parts.size() > 1)
-				{
-					brandPart = parts.get(1).toList("s").get(0).trim();
-					brandDur = brandPart.toDecimal().toLong();
-				}
-			}
-			
-			// If not parsed, distribute total time (e.g. 75s/120s/45s defaults)
-			if(foldDur == 0 && pressDur == 0 && brandDur == 0)
-			{
-				foldDur = 75;
-				pressDur = 120;
-				brandDur = 45;
-			}
+			qtyVal = ifnull(run.Qty_Finished, 0).toLong();
 			
 			completedOnTxt = "";
-			if(lg.End_Time != null)
+			if(run.Finishing_End_Time != null)
 			{
-				completedOnTxt = lg.End_Time.toString("dd-MMM-yyyy HH:mm");
+				completedOnTxt = run.Finishing_End_Time.toString("dd-MMM-yyyy HH:mm:ss");
 			}
 			else
 			{
-				completedOnTxt = lg.Added_Time.toString("dd-MMM-yyyy HH:mm");
+				completedOnTxt = run.Added_Time.toString("dd-MMM-yyyy HH:mm:ss");
+			}
+			
+			// Calculate Folding Duration
+			foldingDur = null;
+			foldingStartClean = "";
+			foldingStartStr = "";
+			if(run.Folding_Start_Time != null)
+			{
+				foldingStartStr = run.Folding_Start_Time.toString();
+				fParts = foldingStartStr.toList(" ");
+				for each part in fParts
+				{
+					if(part.contains(":"))
+					{
+						foldingStartClean = part;
+					}
+				}
+			}
+			foldingEndClean = "";
+			foldingEndStr = "";
+			if(run.Folding_End_Time != null)
+			{
+				foldingEndStr = run.Folding_End_Time.toString();
+				fParts = foldingEndStr.toList(" ");
+				for each part in fParts
+				{
+					if(part.contains(":"))
+					{
+						foldingEndClean = part;
+					}
+				}
+			}
+			if(foldingStartClean != "" && foldingEndClean != "")
+			{
+				fsParts = foldingStartClean.toList(":");
+				feParts = foldingEndClean.toList(":");
+				if(fsParts.size() >= 2 && feParts.size() >= 2)
+				{
+					fsHour = fsParts.get(0).toLong();
+					fsMin = fsParts.get(1).toLong();
+					fsSec = 0;
+					if(fsParts.size() > 2)
+					{
+						fsSecVal = fsParts.get(2).replaceAll("[^0-9]", "");
+						if(fsSecVal != "")
+						{
+							fsSec = fsSecVal.toLong();
+						}
+					}
+					if(foldingStartStr.toLowerCase().contains("pm") && fsHour < 12)
+					{
+						fsHour = fsHour + 12;
+					}
+					else if(foldingStartStr.toLowerCase().contains("am") && fsHour == 12)
+					{
+						fsHour = 0;
+					}
+					feHour = feParts.get(0).toLong();
+					feMin = feParts.get(1).toLong();
+					feSec = 0;
+					if(feParts.size() > 2)
+					{
+						feSecVal = feParts.get(2).replaceAll("[^0-9]", "");
+						if(feSecVal != "")
+						{
+							feSec = feSecVal.toLong();
+						}
+					}
+					if(foldingEndStr.toLowerCase().contains("pm") && feHour < 12)
+					{
+						feHour = feHour + 12;
+					}
+					else if(foldingEndStr.toLowerCase().contains("am") && feHour == 12)
+					{
+						feHour = 0;
+					}
+					fsSecs = fsHour * 3600 + fsMin * 60 + fsSec;
+					feSecs = feHour * 3600 + feMin * 60 + feSec;
+					diff = feSecs - fsSecs;
+					if(diff < 0)
+					{
+						diff = diff + 86400;
+					}
+					foldingDur = diff;
+				}
+			}
+
+			// Calculate Pressing Duration
+			pressingDur = null;
+			pressingStartClean = "";
+			pressingStartStr = "";
+			if(run.Pressing_Start_Time != null)
+			{
+				pressingStartStr = run.Pressing_Start_Time.toString();
+				fParts = pressingStartStr.toList(" ");
+				for each part in fParts
+				{
+					if(part.contains(":"))
+					{
+						pressingStartClean = part;
+					}
+				}
+			}
+			pressingEndClean = "";
+			pressingEndStr = "";
+			if(run.Pressing_End_Time != null)
+			{
+				pressingEndStr = run.Pressing_End_Time.toString();
+				fParts = pressingEndStr.toList(" ");
+				for each part in fParts
+				{
+					if(part.contains(":"))
+					{
+						pressingEndClean = part;
+					}
+				}
+			}
+			if(pressingStartClean != "" && pressingEndClean != "")
+			{
+				psParts = pressingStartClean.toList(":");
+				peParts = pressingEndClean.toList(":");
+				if(psParts.size() >= 2 && peParts.size() >= 2)
+				{
+					psHour = psParts.get(0).toLong();
+					psMin = psParts.get(1).toLong();
+					psSec = 0;
+					if(psParts.size() > 2)
+					{
+						psSecVal = psParts.get(2).replaceAll("[^0-9]", "");
+						if(psSecVal != "")
+						{
+							psSec = psSecVal.toLong();
+						}
+					}
+					if(pressingStartStr.toLowerCase().contains("pm") && psHour < 12)
+					{
+						psHour = psHour + 12;
+					}
+					else if(pressingStartStr.toLowerCase().contains("am") && psHour == 12)
+					{
+						psHour = 0;
+					}
+					peHour = peParts.get(0).toLong();
+					feMin = peParts.get(1).toLong();
+					peSec = 0;
+					if(peParts.size() > 2)
+					{
+						peSecVal = peParts.get(2).replaceAll("[^0-9]", "");
+						if(peSecVal != "")
+						{
+							peSec = peSecVal.toLong();
+						}
+					}
+					if(pressingEndStr.toLowerCase().contains("pm") && peHour < 12)
+					{
+						peHour = peHour + 12;
+					}
+					else if(pressingEndStr.toLowerCase().contains("am") && peHour == 12)
+					{
+						peHour = 0;
+					}
+					psSecs = psHour * 3600 + psMin * 60 + psSec;
+					peSecs = peHour * 3600 + feMin * 60 + peSec;
+					diff = peSecs - psSecs;
+					if(diff < 0)
+					{
+						diff = diff + 86400;
+					}
+					pressingDur = diff;
+				}
+			}
+
+			// Calculate Branding Duration
+			brandingDur = null;
+			brandingStartClean = "";
+			brandingStartStr = "";
+			if(run.Branding_Start_Time != null)
+			{
+				brandingStartStr = run.Branding_Start_Time.toString();
+				fParts = brandingStartStr.toList(" ");
+				for each part in fParts
+				{
+					if(part.contains(":"))
+					{
+						brandingStartClean = part;
+					}
+				}
+			}
+			brandingEndClean = "";
+			brandingEndStr = "";
+			if(run.Branding_End_Time != null)
+			{
+				brandingEndStr = run.Branding_End_Time.toString();
+				fParts = brandingEndStr.toList(" ");
+				for each part in fParts
+				{
+					if(part.contains(":"))
+					{
+						brandingEndClean = part;
+					}
+				}
+			}
+			if(brandingStartClean != "" && brandingEndClean != "")
+			{
+				bsParts = brandingStartClean.toList(":");
+				beParts = brandingEndClean.toList(":");
+				if(bsParts.size() >= 2 && beParts.size() >= 2)
+				{
+					bsHour = bsParts.get(0).toLong();
+					bsMin = bsParts.get(1).toLong();
+					bsSec = 0;
+					if(bsParts.size() > 2)
+					{
+						bsSecVal = bsParts.get(2).replaceAll("[^0-9]", "");
+						if(bsSecVal != "")
+						{
+							bsSec = bsSecVal.toLong();
+						}
+					}
+					if(brandingStartStr.toLowerCase().contains("pm") && bsHour < 12)
+					{
+						bsHour = bsHour + 12;
+					}
+					else if(brandingStartStr.toLowerCase().contains("am") && bsHour == 12)
+					{
+						bsHour = 0;
+					}
+					beHour = beParts.get(0).toLong();
+					beMin = beParts.get(1).toLong();
+					beSec = 0;
+					if(beParts.size() > 2)
+					{
+						beSecVal = beParts.get(2).replaceAll("[^0-9]", "");
+						if(beSecVal != "")
+						{
+							beSec = beSecVal.toLong();
+						}
+					}
+					if(brandingEndStr.toLowerCase().contains("pm") && beHour < 12)
+					{
+						beHour = beHour + 12;
+					}
+					else if(brandingEndStr.toLowerCase().contains("am") && beHour == 12)
+					{
+						beHour = 0;
+					}
+					bsSecs = bsHour * 3600 + bsMin * 60 + bsSec;
+					beSecs = beHour * 3600 + beMin * 60 + beSec;
+					diff = beSecs - bsSecs;
+					if(diff < 0)
+					{
+						diff = diff + 86400;
+					}
+					brandingDur = diff;
+				}
+			}
+			
+			foldDurStr = "null";
+			if(foldingDur != null)
+			{
+				foldDurStr = foldingDur.toString();
+			}
+			
+			pressDurStr = "null";
+			if(pressingDur != null)
+			{
+				pressDurStr = pressingDur.toString();
+			}
+			
+			brandDurStr = "null";
+			if(brandingDur != null)
+			{
+				brandDurStr = brandingDur.toString();
 			}
 			
 			if(rowsJson != "")
@@ -104,7 +328,7 @@ string getFinishingHistory()
 				rowsJson = rowsJson + ",";
 			}
 			
-			rowsJson = rowsJson + "{\"id\":\"" + lg.ID + "\","
+			rowsJson = rowsJson + "{\"id\":\"" + run.ID + "\","
 				+ "\"salesOrder\":\"" + soNo + "\","
 				+ "\"planNo\":\"" + planNo + "\","
 				+ "\"itemName\":\"" + itemName + "\","
@@ -112,9 +336,9 @@ string getFinishingHistory()
 				+ "\"staff\":\"" + staffName + "\","
 				+ "\"completedOn\":\"" + completedOnTxt + "\","
 				+ "\"stages\":{"
-				+ "\"folding\":{\"duration\":" + foldDur + "},"
-				+ "\"pressing\":{\"duration\":" + pressDur + "},"
-				+ "\"branding\":{\"duration\":" + brandDur + "}"
+				+ "\"folding\":{\"start\":\"" + ifnull(run.Folding_Start_Time, "") + "\",\"end\":\"" + ifnull(run.Folding_End_Time, "") + "\",\"duration\":" + foldDurStr + "},"
+				+ "\"pressing\":{\"start\":\"" + ifnull(run.Pressing_Start_Time, "") + "\",\"end\":\"" + ifnull(run.Pressing_End_Time, "") + "\",\"duration\":" + pressDurStr + "},"
+				+ "\"branding\":{\"start\":\"" + ifnull(run.Branding_Start_Time, "") + "\",\"end\":\"" + ifnull(run.Branding_End_Time, "") + "\",\"duration\":" + brandDurStr + "}"
 				+ "}}";
 		}
 		
@@ -126,3 +350,4 @@ string getFinishingHistory()
 	}
 	return res;
 }
+
