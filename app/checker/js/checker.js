@@ -21,6 +21,8 @@
 // told so after typing five check rows is a bad way to find out.
 
 var QUEUE = { inspectors: [], supervisors: [], items: [] };
+// Which card is expanded. One at a time — see scrollCardIntoView.
+var openItemId = null;
 var saving = false;
 
 // EXACTLY the five values on Item_Check.Check_Lines.Check_Type. These are
@@ -177,9 +179,28 @@ function renderQueue() {
         return;
     }
 
+    // An open card whose item has left the queue — just checked, or checked
+    // by somebody else since — cannot stay open over nothing.
+    if (openItemId !== null && !items.some(function (i) { return String(i.id) === String(openItemId); })) {
+        openItemId = null;
+    }
+
+    var openItem = null;
+    var openCard = null;
+
     items.forEach(function (item) {
-        root.appendChild(renderItemCard(item));
+        var card = renderItemCard(item);
+        root.appendChild(card);
+        if (String(item.id) === String(openItemId)) {
+            openItem = item;
+            openCard = card;
+        }
     });
+
+    // AFTER every card is in the document. The form reads its own fields through
+    // document.getElementById, which cannot find an element that has been built
+    // but not yet appended.
+    if (openCard) wireCheckForm(openCard, openItem, num(openItem.produced));
 }
 
 function batchTag(item) {
@@ -213,16 +234,20 @@ function linePosition(item) {
 }
 
 function renderItemCard(item) {
-    var card = document.createElement('div');
-    card.className = 'item-card';
+    var isOpen = String(item.id) === String(openItemId);
+    var produced = num(item.produced);
 
-    card.innerHTML =
+    var card = document.createElement('div');
+    card.className = 'item-card' + (isOpen ? ' is-open' : '');
+    card.setAttribute('data-item-id', item.id);
+
+    var header =
         '<div class="item-header">' +
         '<div class="item-header-info">' +
         '<h2><span class="mat-name">' + escapeHtml(item.name) + '</span>' +
         (item.sku ? '<span class="mat-sku">' + escapeHtml(item.sku) + '</span>' : '') + '</h2>' +
         '<div class="item-meta-line">' +
-        '<span class="item-qty">' + num(item.produced) + ' pcs to inspect</span>' +
+        '<span class="item-qty">' + produced + ' pcs to inspect</span>' +
         batchTag(item) +
         '<span class="round-tag">Round ' + num(item.round) + '</span>' +
         '</div>' +
@@ -232,36 +257,57 @@ function renderItemCard(item) {
         linePosition(item) +
         '</div>' +
         '</div>' +
-        '<button type="button" class="primary-btn check-btn">Check</button>' +
+        // The chevron alone, exactly as the production screen does it. A Check
+        // button beside it was a second control doing the same job — the whole
+        // header already toggles, so the button could only ever agree with it.
+        '<div class="item-header-right">' +
+        '<span class="chevron">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+        '<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>' +
+        '</span>' +
+        '</div>' +
         '</div>';
 
-    card.querySelector('.check-btn').addEventListener('click', function () {
-        openCheckDialog(item);
+    card.innerHTML = header + (isOpen ? checkFormHtml(item, produced) : '');
+
+    // The whole header toggles, not just the button — the production screen
+    // behaves that way, and a card that only opens from one small target is a
+    // different interaction for no reason.
+    card.querySelector('.item-header').addEventListener('click', function () {
+        openItemId = isOpen ? null : item.id;
+        renderQueue();
+        if (!isOpen) scrollCardIntoView(item.id);
     });
 
+    // NOT wired here. The form is wired by renderQueue AFTER the card is in the
+    // document, because refreshTotals reads #disp-total through
+    // document.getElementById — and an element that has been built but not yet
+    // appended is not findable that way. Wiring here threw, renderQueue died
+    // mid-loop, and the whole list vanished the moment a card was clicked.
     return card;
 }
 
+// ONE CARD OPEN AT A TIME, and not merely for tidiness: the form uses fixed
+// element ids, so two open cards would put two #disp-approved in the page and
+// every read would find whichever came first.
+function scrollCardIntoView(id) {
+    var c = document.querySelector('[data-item-id="' + id + '"]');
+    if (c && c.scrollIntoView) c.scrollIntoView({ block: 'nearest' });
+}
+
 // ---------------------------------------------------------------------------
-// The check dialog
+// The check form, rendered inside the card
 // ---------------------------------------------------------------------------
 
-// Rebuilt per dialog rather than held in the DOM, so a Refresh that changes the
-// roster cannot leave a stale name selectable.
+// Rebuilt each time a card opens rather than held in the DOM, so a Refresh that
+// changes the roster cannot leave a stale name selectable.
 function inspectorOptions() {
     return (QUEUE.inspectors || []).map(function (i) {
         return '<option value="' + escapeHtml(i.id) + '">' + escapeHtml(i.name) + '</option>';
     }).join('');
 }
 
-function closeModal() {
-    var m = el('check-modal');
-    m.classList.add('hidden');
-    m.innerHTML = '';
-}
-
-function openCheckDialog(item) {
-    var produced = num(item.produced);
+function checkFormHtml(item, produced) {
     var stages = (item.stages || []).slice().sort(function (a, b) {
         return num(a.sequence) - num(b.sequence);
     });
@@ -287,17 +333,8 @@ function openCheckDialog(item) {
             '</tr>';
     }).join('');
 
-    var m = el('check-modal');
-    m.classList.remove('hidden');
-    m.innerHTML =
-        '<div class="modal-panel">' +
-
-        '<h3>' + escapeHtml(item.name) +
-        (item.sku ? ' <span class="mat-sku">' + escapeHtml(item.sku) + '</span>' : '') + '</h3>' +
-        '<p class="modal-sub">' +
-        escapeHtml(item.salesOrder || '') +
-        (item.planNo ? ' · ' + escapeHtml(item.planNo) : '') +
-        ' · ' + produced + ' pcs from production</p>' +
+    return '' +
+        '<div class="item-body">' +
 
         // WHO JUDGED THIS, chosen per check rather than once at the top of the
         // screen. It is a fact about the inspection, not about who is looking —
@@ -313,9 +350,9 @@ function openCheckDialog(item) {
         '</div>' +
 
         // Recorded, not calculated. A garment can fail two checks, so these do
-        // not add up to the disposition below and nothing derives from them —
-        // they exist so "what is actually going wrong" is answerable later.
-        '<h4>Checks</h4>' +
+        // not add up to the decision below and nothing derives from them — they
+        // exist so "what is actually going wrong" is answerable later.
+        '<div class="section-title">Checks</div>' +
         '<p class="hint">A record of what was found. A piece can fail more than one check, ' +
         'so these do not have to add up to the decision below.</p>' +
         '<div class="table-wrapper">' +
@@ -324,7 +361,7 @@ function openCheckDialog(item) {
         '</tr></thead><tbody>' + checkRows + '</tbody></table>' +
         '</div>' +
 
-        '<h4>Decision</h4>' +
+        '<div class="section-title">Decision</div>' +
         '<div class="disp-row">' +
         '<label>Approved<input type="number" min="0" step="1" id="disp-approved" value="' + produced + '"></label>' +
         '<label>Rejected<input type="number" min="0" step="1" id="disp-rejected" value="0"></label>' +
@@ -333,7 +370,7 @@ function openCheckDialog(item) {
         '<p class="disp-total" id="disp-total"></p>' +
 
         '<div id="alt-block" class="hidden">' +
-        '<h4>Which stages need the work?</h4>' +
+        '<div class="section-title">Which stages need the work?</div>' +
         '<p class="hint">One garment can need two stages fixed, so these may add up to more ' +
         'than the alteration count. They may not add up to less.</p>' +
         '<div class="table-wrapper">' +
@@ -345,22 +382,30 @@ function openCheckDialog(item) {
 
         '<label class="rem-label">Remarks<textarea id="chk-remarks" rows="2"></textarea></label>' +
 
-        '<p class="modal-error hidden" id="chk-error"></p>' +
+        '<p class="chk-error hidden" id="chk-error"></p>' +
 
-        '<div class="modal-actions">' +
+        '<div class="chk-actions">' +
         '<button type="button" class="ghost-btn" id="chk-cancel">Cancel</button>' +
         '<button type="button" class="primary-btn" id="chk-save">Save check</button>' +
         '</div>' +
 
         '</div>';
+}
+
+function wireCheckForm(card, item, produced) {
+    // Clicks inside the form must not reach the header handler, which would
+    // close the card mid-typing.
+    card.querySelector('.item-body').addEventListener('click', function (ev) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+    });
 
     // Passed follows Failed, because within ONE check every piece either passed
     // or failed — the counts only stop reconciling ACROSS checks. Still editable
     // in case he inspected a subset.
-    m.querySelectorAll('.chk-failed').forEach(function (inp) {
+    card.querySelectorAll('.chk-failed').forEach(function (inp) {
         inp.addEventListener('input', function () {
             var i = inp.getAttribute('data-i');
-            var pass = m.querySelector('.chk-passed[data-i="' + i + '"]');
+            var pass = card.querySelector('.chk-passed[data-i="' + i + '"]');
             var left = produced - num(inp.value);
             pass.value = left < 0 ? 0 : left;
         });
@@ -390,8 +435,18 @@ function openCheckDialog(item) {
     });
     refreshTotals();
 
-    el('chk-cancel').addEventListener('click', closeModal);
+    el('chk-cancel').addEventListener('click', function () {
+        openItemId = null;
+        renderQueue();
+    });
     el('chk-save').addEventListener('click', function () { saveCheck(item, produced); });
+}
+
+// Opens a card by item. Kept under this name because the harness and the save
+// path both call it.
+function openCheckDialog(item) {
+    openItemId = item.id;
+    renderQueue();
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +462,13 @@ function showDialogError(msg) {
 function saveCheck(item, produced) {
     if (saving) return;
 
-    var m = el('check-modal');
+    // The form lives in the item's own card now, not in the overlay. Scoped to
+    // that card rather than searched page-wide: only one card is open at a time,
+    // but a page-wide query would silently start reading a second one the moment
+    // that ever changed.
+    var m = document.querySelector('[data-item-id="' + item.id + '"]');
+    if (!m) return;
+
     el('chk-error').classList.add('hidden');
 
     var inspectorId = el('chk-inspector') ? el('chk-inspector').value : '';
@@ -503,7 +564,7 @@ function saveCheck(item, produced) {
             return;
         }
 
-        closeModal();
+        openItemId = null;
         showOutcome(item, approved, rejected, alteration, parsed);
         loadQueue();
     }).catch(function (err) {
@@ -519,6 +580,15 @@ function saveCheck(item, produced) {
 // cloth from the store and a fresh run from Cutting; an alteration puts work
 // back on the supervisor's screen. Both are consequences he should see named
 // rather than infer from the item leaving the list.
+// The ONE thing still shown as an overlay. The check form moved into the card,
+// but this is not a form — it is the answer to "what did that just set in
+// motion", and the card it would sit in has by then left the queue.
+function closeModal() {
+    var m = el('check-modal');
+    m.classList.add('hidden');
+    m.innerHTML = '';
+}
+
 function showOutcome(item, approved, rejected, alteration, res) {
     var bits = [];
     if (approved > 0) bits.push('<li><b>' + approved + '</b> approved</li>');
