@@ -340,10 +340,12 @@ function activateTab(name) {
     var employeeTab = document.getElementById('employee-tab');
     var pipelineTab = document.getElementById('pipeline-tab');
     var materialsTab = document.getElementById('materials-tab');
+    var disputesTab = document.getElementById('disputes-tab');
     
     var employeePanel = document.getElementById('employee-panel');
     var pipelinePanel = document.getElementById('pipeline-panel');
     var materialsPanel = document.getElementById('materials-panel');
+    var disputesPanel = document.getElementById('disputes-panel');
 
     if (employeeTab) {
         employeeTab.classList.toggle('is-active', name === 'employee');
@@ -357,10 +359,15 @@ function activateTab(name) {
         materialsTab.classList.toggle('is-active', name === 'materials');
         materialsTab.setAttribute('aria-selected', String(name === 'materials'));
     }
+    if (disputesTab) {
+        disputesTab.classList.toggle('is-active', name === 'disputes');
+        disputesTab.setAttribute('aria-selected', String(name === 'disputes'));
+    }
 
     if (employeePanel) employeePanel.classList.toggle('is-active', name === 'employee');
     if (pipelinePanel) pipelinePanel.classList.toggle('is-active', name === 'pipeline');
     if (materialsPanel) materialsPanel.classList.toggle('is-active', name === 'materials');
+    if (disputesPanel) disputesPanel.classList.toggle('is-active', name === 'disputes');
 
     if (name === 'materials') {
         EXPANDED_PATTERNS = {};
@@ -1052,6 +1059,219 @@ function setupAccordionListeners() {
     });
 }
 
+var adminDisputes = [];
+var adminDisputeCounts = {
+    openInbound: 0,
+    resolvedInbound: 0,
+    openOutbound: 0,
+    resolvedOutbound: 0,
+    totalOpen: 0,
+    totalResolved: 0
+};
+
+function isLocalStandalone() {
+    return (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') && window.self === window.top;
+}
+
+function loadAdminDisputes() {
+    var panel = document.getElementById('disputes-panel');
+    if (!panel) return;
+    panel.innerHTML = '<div class="panel-loading">Loading disputes…</div>';
+
+    if (isLocalStandalone()) {
+        setTimeout(function () {
+            adminDisputeCounts = {
+                totalOpen: 3,
+                totalResolved: 8,
+                openInbound: 1,
+                resolvedInbound: 5,
+                openOutbound: 2,
+                resolvedOutbound: 3
+            };
+            adminDisputes = [
+                {
+                    id: "100000000000000001",
+                    material: "Linen / Olive",
+                    unit: "m",
+                    isWaste: true,
+                    direction: "Inbound",
+                    width: 150,
+                    length: 45,
+                    supervisor: "John Doe",
+                    salesOrder: "SO-12345",
+                    planNo: "PLAN-987",
+                    issued: 10,
+                    received: 8,
+                    remaining: 2,
+                    resolved: 0,
+                    raisedOn: "12-Aug-2026",
+                    raisedNote: "Fewer pieces found on return than declared by supervisor.",
+                    supervisorDenied: false,
+                    storeDenied: false
+                },
+                {
+                    id: "100000000000000002",
+                    material: "Cotton / White",
+                    unit: "m",
+                    isWaste: false,
+                    direction: "Outbound",
+                    supervisor: "Jane Smith",
+                    salesOrder: "SO-54321",
+                    planNo: "PLAN-765",
+                    issued: 25,
+                    received: 20,
+                    remaining: 5,
+                    resolved: 0,
+                    raisedOn: "10-Aug-2026",
+                    raisedNote: "Received less raw material roll length than marked on ticket.",
+                    supervisorDenied: true,
+                    storeDenied: false
+                }
+            ];
+            renderAdminDisputes();
+        }, 600);
+        return;
+    }
+
+    var p1 = ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getStoreCounts',
+        workspace_name: 'livelinenstore',
+        http_method: 'GET'
+    });
+
+    var p2 = ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getStoreDisputes',
+        workspace_name: 'livelinenstore',
+        http_method: 'GET'
+    });
+
+    Promise.all([p1, p2]).then(function (results) {
+        try {
+            var r1 = results[0];
+            var r2 = results[1];
+
+            var res1 = typeof r1.result === 'string' ? JSON.parse(r1.result) : r1.result;
+            if (res1 && res1.data !== undefined) res1 = typeof res1.data === 'string' ? JSON.parse(res1.data) : res1.data;
+
+            var res2 = typeof r2.result === 'string' ? JSON.parse(r2.result) : r2.result;
+            if (res2 && res2.data !== undefined) res2 = typeof res2.data === 'string' ? JSON.parse(res2.data) : res2.data;
+
+            adminDisputeCounts.totalOpen = res1.openDisputes || 0;
+            adminDisputeCounts.totalResolved = res1.resolvedDisputes || 0;
+            adminDisputeCounts.openInbound = res1.openInbound || 0;
+            adminDisputeCounts.resolvedInbound = res1.resolvedInbound || 0;
+            adminDisputeCounts.openOutbound = res1.openOutbound || 0;
+            adminDisputeCounts.resolvedOutbound = res1.resolvedOutbound || 0;
+
+            adminDisputes = res2.disputes || [];
+            
+            renderAdminDisputes();
+        } catch (e) {
+            console.error('loadAdminDisputes parse failed:', e, results);
+            panel.innerHTML = '<div class="panel-placeholder"><h2>Could not read disputes</h2><p>Check the browser console.</p></div>';
+        }
+    }).catch(function (err) {
+        console.error('loadAdminDisputes API failed:', err);
+        panel.innerHTML = '<div class="panel-placeholder"><h2>Failed to load disputes</h2><p>Check the browser console.</p></div>';
+    });
+}
+
+function renderAdminDisputes() {
+    var panel = document.getElementById('disputes-panel');
+    if (!panel) return;
+
+    var summaryHtml = '' +
+        '<div class="tiles">' +
+            '<div class="tile tile-people" style="border-left-color: #3b82f6;">' +
+                '<span class="tile-label">Store Disputes (Inbound)</span>' +
+                '<span class="tile-value" style="font-variant-numeric: tabular-nums;">' + adminDisputeCounts.openInbound + '</span>' +
+                '<span class="tile-sub">' + adminDisputeCounts.resolvedInbound + ' resolved · raised by store person</span>' +
+            '</div>' +
+            '<div class="tile tile-stages" style="border-left-color: #f59e0b;">' +
+                '<span class="tile-label">Supervisor Disputes (Outbound)</span>' +
+                '<span class="tile-value" style="font-variant-numeric: tabular-nums;">' + adminDisputeCounts.openOutbound + '</span>' +
+                '<span class="tile-sub">' + adminDisputeCounts.resolvedOutbound + ' resolved · raised by supervisor</span>' +
+            '</div>' +
+            '<div class="tile tile-out" style="border-left-color: #10b981;">' +
+                '<span class="tile-label">Total Disputes</span>' +
+                '<span class="tile-value" style="font-variant-numeric: tabular-nums;">' + adminDisputeCounts.totalOpen + '</span>' +
+                '<span class="tile-sub">' + adminDisputeCounts.totalResolved + ' total resolved disputes</span>' +
+            '</div>' +
+        '</div>';
+
+    var tableHtml = '';
+    if (adminDisputes.length === 0) {
+        tableHtml = '' +
+            '<div class="empty-state" style="margin-top: 20px;">' +
+                '<div class="icon">🧵</div>' +
+                '<h2>No open disputes</h2>' +
+                '<p>All materials and waste returns are fully accounted for.</p>' +
+            '</div>';
+    } else {
+        var rows = adminDisputes.map(function (d) {
+            var isIb = d.direction === 'Inbound';
+            var dirBadge = isIb
+                ? '<span class="pill pill-running" style="background:#eff6ff; color:#1e40af; font-size:10px;">Inbound / Store</span>'
+                : '<span class="pill pill-done" style="background:#fffbeb; color:#854d0e; font-size:10px;">Outbound / Supervisor</span>';
+
+            var materialDetails = '<strong>' + escapeHtml(d.material || '—') + '</strong>';
+            if (d.isWaste && d.length > 0) {
+                materialDetails += '<div class="emp-sub">' + fmt(d.length) + ' &times; ' + fmt(d.width) + ' cm</div>';
+            }
+            if (d.salesOrder) {
+                materialDetails += '<div class="emp-sub">' + escapeHtml(d.salesOrder) + (d.planNo ? ' · ' + escapeHtml(d.planNo) : '') + '</div>';
+            }
+
+            var checkState = '';
+            if (d.supervisorDenied && d.storeDenied) {
+                checkState = '<div class="emp-sub" style="color:var(--status-danger); font-weight:600;">Both denied (Lost)</div>';
+            } else if (d.supervisorDenied) {
+                checkState = '<div class="emp-sub" style="color:var(--status-warning); font-weight:600;">Supervisor denied</div>';
+            } else if (d.storeDenied) {
+                checkState = '<div class="emp-sub" style="color:var(--status-warning); font-weight:600;">Store denied</div>';
+            }
+
+            return '<tr>' +
+                '<td>' + materialDetails + '</td>' +
+                '<td>' + escapeHtml(d.supervisor || '—') + '</td>' +
+                '<td>' + dirBadge + '</td>' +
+                '<td class="r" style="font-variant-numeric: tabular-nums;">' + fmt(d.issued) + ' <span class="unit" style="font-size:11px; color:var(--text-muted);">' + escapeHtml(d.unit || '') + '</span></td>' +
+                '<td class="r" style="font-variant-numeric: tabular-nums;">' + fmt(d.received) + ' <span class="unit" style="font-size:11px; color:var(--text-muted);">' + escapeHtml(d.unit || '') + '</span></td>' +
+                '<td class="r" style="font-variant-numeric: tabular-nums; font-weight:700; color:var(--status-danger);">' + fmt(d.remaining) + ' <span class="unit" style="font-size:11px; color:var(--text-muted); font-weight:normal;">' + escapeHtml(d.unit || '') + '</span>' + checkState + '</td>' +
+                '<td>' + escapeHtml(d.raisedOn || '—') + '</td>' +
+                '<td style="white-space:normal; max-width:250px; font-size:12px; color:var(--text-muted);">' + escapeHtml(d.raisedNote || '—') + '</td>' +
+                '</tr>';
+        }).join('');
+
+        tableHtml = '' +
+            '<div class="item-card" style="margin-top: 20px; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow-sm);">' +
+                '<div class="pipeline-header pipeline-toolbar" style="padding:14px 16px; background:#f8fafc; border-bottom:1px solid var(--border);">' +
+                    '<div>' +
+                        '<h2 style="margin:0; font-size:13px; font-weight:700; letter-spacing:0.03em; text-transform:uppercase; color:var(--text-muted);">Active Disputes Details</h2>' +
+                        '<span class="pipeline-help" style="display:block; margin-top:3px; font-size:12px; color:var(--text-muted);">Details of outstanding disputes currently in process</span>' +
+                    '</div>' +
+                '</div>' +
+                '<div class="table-wrapper" style="margin-top:0; border-top:none; border-top-left-radius:0; border-top-right-radius:0;">' +
+                    '<table class="rep-table" style="margin-bottom:0; width:100%; border-collapse:collapse;">' +
+                        '<thead><tr>' +
+                            '<th>Material</th>' +
+                            '<th>Supervisor</th>' +
+                            '<th>Direction / Raiser</th>' +
+                            '<th class="r">Handed Over</th>' +
+                            '<th class="r">Confirmed</th>' +
+                            '<th class="r">Outstanding</th>' +
+                            '<th>Raised On</th>' +
+                            '<th>Raiser\'s Note</th>' +
+                        '</tr></thead>' +
+                        '<tbody>' + rows + '</tbody>' +
+                    '</table>' +
+                '</div>' +
+            '</div>';
+    }
+
+    panel.innerHTML = summaryHtml + tableHtml;
+}
+
 // ---- wiring ----
 //
 // Creator JS API v2. No init() — the SDK resolves the app context itself, and
@@ -1079,6 +1299,11 @@ document.addEventListener('DOMContentLoaded', function () {
             tabsLoaded['materials'] = true;
             loadMaterials();
         }
+    });
+    document.getElementById('disputes-tab').addEventListener('click', function () {
+        activateTab('disputes');
+        tabsLoaded['disputes'] = true;
+        loadAdminDisputes();
     });
 
     document.getElementById('day-prev').addEventListener('click', function () {
@@ -1108,6 +1333,9 @@ document.addEventListener('DOMContentLoaded', function () {
         loadSalesOrderProgress();
         if (tabsLoaded['materials']) {
             loadMaterials();
+        }
+        if (tabsLoaded['disputes']) {
+            loadAdminDisputes();
         }
     });
 

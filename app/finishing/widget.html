@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Finishing Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Load shared styles and local custom styles -->
+    <link rel="stylesheet" href="../css/style.css">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="app-container">
+
+        <header class="app-header">
+            <div class="app-header-left">
+                <h1>Finishing Dashboard</h1>
+                <p>Track folding, pressing, and branding operations</p>
+            </div>
+            <div class="app-header-right">
+                <!-- Dedicated Finishing & Packing Staff Selector -->
+                <div class="staff-info">
+                    <span class="staff-avatar" id="staff-avatar-initial">F</span>
+                    <div style="display: flex; flex-direction: column;">
+                        <span style="font-size: 10px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">Logged In Staff</span>
+                        <select class="staff-select" id="staff-select-el">
+                            <option value="">Loading staff...</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Workspace split into Queue and Active tracker -->
+        <div class="finishing-container">
+            
+            <!-- Left: Checked Items Queue -->
+            <aside>
+                <div class="item-card" style="height: 100%; display: flex; flex-direction: column; overflow: hidden; max-height: 70vh;">
+                    <div class="item-header static-header" style="background:#f8fafc; border-bottom:1px solid var(--border); padding: 12px 16px;">
+                        <div class="item-header-info">
+                            <h2 style="font-size: 13px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: var(--text-muted);">Checked Items Queue</h2>
+                            <span class="pipeline-help">Select an item below to begin process tracking</span>
+                        </div>
+                    </div>
+                    <div style="overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px;" id="queue-list">
+                        <!-- Dynamic list populated by main.js -->
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Right: Active Tracker and Time Logger -->
+            <main id="active-tracker-panel">
+                <!-- Stepper and Timer rendered by main.js -->
+            </main>
+
+        </div>
+
+        <!-- Bottom: Completed Finishing History Log -->
+        <section class="finishing-history">
+            <div class="item-card" style="border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow-sm);">
+                <div class="pipeline-header pipeline-toolbar" style="padding:14px 16px; background:#f8fafc; border-bottom:1px solid var(--border);">
+                    <div>
+                        <h2 style="margin:0; font-size:13px; font-weight:700; letter-spacing:0.03em; text-transform:uppercase; color:var(--text-muted);">Completed Finishing History</h2>
+                        <span class="pipeline-help" style="display:block; margin-top:3px; font-size:12px; color:var(--text-muted);">Time tracking log of finished items</span>
+                    </div>
+                </div>
+                <div class="table-wrapper" style="margin-top:0; border-top:none; border-top-left-radius:0; border-top-right-radius:0;">
+                    <table class="rep-table" style="margin-bottom:0; width:100%; border-collapse:collapse;">
+                        <thead>
+                            <tr>
+                                <th>Sales Order / Plan</th>
+                                <th>Item Name</th>
+                                <th class="r">Qty</th>
+                                <th>Finished By</th>
+                                <th class="r">Folding Time</th>
+                                <th class="r">Pressing Time</th>
+                                <th class="r">Branding Time</th>
+                                <th>Completed On</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-list">
+                            <!-- Dynamic completed rows populated by main.js -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+    </div>
+
+    <!-- Zoho Creator SDK and Widget JS -->
+    <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

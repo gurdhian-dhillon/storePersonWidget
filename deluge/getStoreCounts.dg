@@ -10,29 +10,32 @@ string getStoreCounts()
 	//
 	// Called once when the widget loads. The tabs themselves fetch their own data
 	// only when opened - a badge is worth one count, not a full list.
-
 	pendingWaste = 0;
 	openDisputes = 0;
 	openRequests = 0;
-
+	resolvedDisputes = 0;
+	openInbound = 0;
+	resolvedInbound = 0;
 	// Same debug wrapper as the other functions - Creator collapses every
 	// runtime failure into a generic "code 9430", so catch the real message.
-	try
+	try 
 	{
-	// Remnants the supervisor says he sent back but nobody has confirmed are
-	// on the rack. Until this is done they are invisible to the allocator, so
-	// a number here is the whole point of the tab.
-	pendingWaste = Waste_Master[Status == "Pending_Receipt"].count();
-
-	openDisputes = Stock_Dispute[Status == "Open"].count();
-
-	// Shortage and wash tickets the store raised and nobody has closed.
-	openRequests = Material_Exception[Status == "Open"].count();
-	}
-	catch (e)
+		// Remnants the supervisor says he sent back but nobody has confirmed are
+		// on the rack. Until this is done they are invisible to the allocator, so
+		// a number here is the whole point of the tab.
+		pendingWaste = Waste_Master[Status == "Pending_Receipt"].count();
+		openDisputes = Stock_Dispute[Status == "Open"].count();
+		resolvedDisputes = Stock_Dispute[Status == "Resolved"].count();
+		openInbound = Stock_Dispute[Status == "Open" && Direction == "Inbound"].count();
+		resolvedInbound = Stock_Dispute[Status == "Resolved" && Direction == "Inbound"].count();
+		// Outbound includes empty/null direction. Calculating by subtraction is safe and handles all cases.
+		openOutbound = openDisputes - openInbound;
+		resolvedOutbound = resolvedDisputes - resolvedInbound;
+		// Shortage and wash tickets the store raised and nobody has closed.
+		openRequests = Material_Exception[Status == "Open"].count();
+	}	catch (e)
 	{
-		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"pendingWaste\":0,\"openDisputes\":0,\"openRequests\":0}";
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"pendingWaste\":0,\"openDisputes\":0,\"openRequests\":0,\"resolvedDisputes\":0,\"openInbound\":0,\"resolvedInbound\":0,\"openOutbound\":0,\"resolvedOutbound\":0}";
 	}
-
-	return "{\"errors\":[],\"pendingWaste\":" + pendingWaste + ",\"openDisputes\":" + openDisputes + ",\"openRequests\":" + openRequests + "}";
+	return "{\"errors\":[],\"pendingWaste\":" + pendingWaste + ",\"openDisputes\":" + openDisputes + ",\"openRequests\":" + openRequests + ",\"resolvedDisputes\":" + resolvedDisputes + ",\"openInbound\":" + openInbound + ",\"resolvedInbound\":" + resolvedInbound + ",\"openOutbound\":" + openOutbound + ",\"resolvedOutbound\":" + resolvedOutbound + "}";
 }
