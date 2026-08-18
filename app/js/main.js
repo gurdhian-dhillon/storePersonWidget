@@ -98,7 +98,7 @@ function lotsFor(material) {
 function usableLots(material) {
     return lotsFor(material).filter(function (l) {
         return !l.blocked &&
-               ((Number(l.wash) || 0) + (Number(l.unwash) || 0) +
+            ((Number(l.wash) || 0) + (Number(l.unwash) || 0) +
                 (Number(l.inWash) || 0)) > 0;
     });
 }
@@ -157,8 +157,10 @@ function perRowFor(fab, cutW) {
 // Demands are {cutW, cutL, pieces}. Nothing passed in is mutated.
 function lotFill(lot, demands, fab, greige) {
     var rem = (lot.waste || []).map(function (r) {
-        return { wasteId: r.wasteId, width: r.width, length: r.length,
-                 pieces: Number(r.pieces) || 0 };
+        return {
+            wasteId: r.wasteId, width: r.width, length: r.length,
+            pieces: Number(r.pieces) || 0
+        };
     });
     var metres = round2(Number(lot.wash) || 0);
     if (greige) metres = round2(metres + (Number(lot.unwash) || 0));
@@ -211,7 +213,7 @@ function lotFill(lot, demands, fab, greige) {
         var cl = Number(d.cutL) || 0;
         if (pr <= 0 || cl <= 0) return;
         var rows = Math.min(Math.ceil(owed[i] / pr),
-                            Math.floor((metres * 100 + 0.0001) / cl));
+            Math.floor((metres * 100 + 0.0001) / cl));
         if (rows <= 0) return;
         var m = round2((rows * cl) / 100);
         metres = round2(metres - m);
@@ -365,50 +367,50 @@ function openLotOverride(supIdx, matIdx) {
     if (opts.length === 0) {
         el.innerHTML =
             '<div class="exc-panel">' +
-                '<h3>No other lot to use</h3>' +
-                '<p class="exc-sub">' + escapeHtml(m.material) + '</p>' +
-                '<div class="exc-nolot">Nothing else of this fabric has stock or ' +
-                    'greige. This one has to be bought before the order can finish.</div>' +
-                '<div class="exc-foot">' +
-                    '<button type="button" class="ghost-btn" onclick="closeExceptionDialog()">Close</button>' +
-                '</div>' +
+            '<h3>No other lot to use</h3>' +
+            '<p class="exc-sub">' + escapeHtml(m.material) + '</p>' +
+            '<div class="exc-nolot">Nothing else of this fabric has stock or ' +
+            'greige. This one has to be bought before the order can finish.</div>' +
+            '<div class="exc-foot">' +
+            '<button type="button" class="ghost-btn" onclick="closeExceptionDialog()">Close</button>' +
+            '</div>' +
             '</div>';
         return;
     }
 
     el.innerHTML =
         '<div class="exc-panel">' +
-            '<h3>Finish this order from another lot</h3>' +
-            '<p class="exc-sub">' + escapeHtml(m.material) + ' &middot; ' + escapeHtml(m.sku) + '</p>' +
-            '<div class="lot-dry">' +
-                ((m.pinnedDryOrders || []).length > 1
-                    ? 'These ' + m.pinnedDryOrders.length + ' orders were cut from <b>'
-                    : 'This order was cut from <b>') +
-                escapeHtml(m.pinnedDry) +
-                '</b>. Finishing from a different lot means the new pieces will ' +
-                'not match the ones already made. Only do this if you have compared ' +
-                'the cloth and accept the difference.</div>' +
-            '<label class="exc-label">Which lot instead</label>' +
-            '<select id="ov-lot" class="note-input">' +
-                opts.map(function (l) {
-                    return '<option value="' + l.lotId + '">' +
-                        escapeHtml(l.lotNumber || '—') + ' &mdash; ' +
-                        fmt(l.wash) + ' ' + escapeHtml(m.unit) + ' washed' +
-                        ((Number(l.unwash) || 0) > 0
-                            ? ', ' + fmt(l.unwash) + ' unwashed' : '') +
-                        '</option>';
-                }).join('') +
-            '</select>' +
-            '<label class="exc-label">Why this is acceptable</label>' +
-            '<textarea id="ov-note" rows="2" ' +
-                'placeholder="e.g. checked against a finished cover, difference not visible"></textarea>' +
-            '<div class="exc-lot-short" id="ov-err"></div>' +
-            '<div class="exc-foot">' +
-                '<button type="button" class="ghost-btn" onclick="closeExceptionDialog()">Cancel</button>' +
-                '<button type="button" class="primary-btn" ' +
-                    'onclick="confirmLotOverride(' + supIdx + ',' + matIdx + ')">' +
-                    'Use this lot</button>' +
-            '</div>' +
+        '<h3>Finish this order from another lot</h3>' +
+        '<p class="exc-sub">' + escapeHtml(m.material) + ' &middot; ' + escapeHtml(m.sku) + '</p>' +
+        '<div class="lot-dry">' +
+        ((m.pinnedDryOrders || []).length > 1
+            ? 'These ' + m.pinnedDryOrders.length + ' orders were cut from <b>'
+            : 'This order was cut from <b>') +
+        escapeHtml(m.pinnedDry) +
+        '</b>. Finishing from a different lot means the new pieces will ' +
+        'not match the ones already made. Only do this if you have compared ' +
+        'the cloth and accept the difference.</div>' +
+        '<label class="exc-label">Which lot instead</label>' +
+        '<select id="ov-lot" class="note-input">' +
+        opts.map(function (l) {
+            return '<option value="' + l.lotId + '">' +
+                escapeHtml(l.lotNumber || '—') + ' &mdash; ' +
+                fmt(l.wash) + ' ' + escapeHtml(m.unit) + ' washed' +
+                ((Number(l.unwash) || 0) > 0
+                    ? ', ' + fmt(l.unwash) + ' unwashed' : '') +
+                '</option>';
+        }).join('') +
+        '</select>' +
+        '<label class="exc-label">Why this is acceptable</label>' +
+        '<textarea id="ov-note" rows="2" ' +
+        'placeholder="e.g. checked against a finished cover, difference not visible"></textarea>' +
+        '<div class="exc-lot-short" id="ov-err"></div>' +
+        '<div class="exc-foot">' +
+        '<button type="button" class="ghost-btn" onclick="closeExceptionDialog()">Cancel</button>' +
+        '<button type="button" class="primary-btn" ' +
+        'onclick="confirmLotOverride(' + supIdx + ',' + matIdx + ')">' +
+        'Use this lot</button>' +
+        '</div>' +
         '</div>';
 }
 
@@ -556,10 +558,12 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
             inWash: round2(Number(l.inWash) || 0),
             waste: (m0.wasteStock || []).filter(function (r) {
                 return r.lotId && String(r.lotId) === String(l.lotId) &&
-                       (wasteLeft[r.wasteId] || 0) > 0;
+                    (wasteLeft[r.wasteId] || 0) > 0;
             }).map(function (r) {
-                return { wasteId: r.wasteId, width: r.width, length: r.length,
-                         pieces: wasteLeft[r.wasteId], carton: r.carton, lot: r.lot };
+                return {
+                    wasteId: r.wasteId, width: r.width, length: r.length,
+                    pieces: wasteLeft[r.wasteId], carton: r.carton, lot: r.lot
+                };
             })
         };
     });
@@ -610,10 +614,12 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
             if (owed <= 0) return;
             var oid = String(ln.planId || '');
             if (!byOrder[oid]) {
-                byOrder[oid] = { demands: [], pin: pinOf[oid] || '',
-                                 pinNo: pinNoOf[oid] || '',
-                                 origPin: origPin[oid] || '', note: '',
-                                 oid: oid };
+                byOrder[oid] = {
+                    demands: [], pin: pinOf[oid] || '',
+                    pinNo: pinNoOf[oid] || '',
+                    origPin: origPin[oid] || '', note: '',
+                    oid: oid
+                };
                 orderSeq.push(oid);
             }
             byOrder[oid].demands.push({
@@ -635,38 +641,40 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
     var res = {};
     var waitingWash = {};
     rows.forEach(function (rw) {
-        res[rw.idx] = { picks: {}, lotLines: [], fromWaste: 0, fromFresh: 0,
-                        freshMetres: 0, owed: 0,
-                        washLotId: '', washLotNumber: '', washQty: 0,
-                        // EVERY lot this row is waiting on, not the last one
-                        // written. One row carries several orders and each picks
-                        // its own lot, so two of them can be waiting on two
-                        // different piles of greige — and a single field kept
-                        // whichever order happened to be processed last. The
-                        // shortfall summary then raised one wash ticket for the
-                        // material and aimed it at that lot, so the other order's
-                        // tone was never queued at all.
-                        washLots: [],
-                        // …and how much of each lot's greige THIS ROW's orders
-                        // are waiting on. Not the lot's pile: "L2 has 15.69 Mtr
-                        // unwashed" on a row 35.62 short is an offer that does
-                        // not add up, and it is not even his — most of that pile
-                        // is spoken for by another supervisor's order.
-                        washNeed: {},
-                        // Every lot chosen for an order on this row, whether or
-                        // not it needs washing. A short row whose lot has no
-                        // greige left has to say THAT — the greige on other lots
-                        // is another tone and cannot serve this order, so
-                        // quoting it would offer cloth that can never be used.
-                        lotsUsed: [],
-                        pinnedDryLots: [], pinnedDryOrders: [],
-                        // NOTHING ON THE RACK COVERS A WHOLE JOB. Kept as the
-                        // size of the smallest job that was turned away, because
-                        // that is the number that ends the argument: he is
-                        // looking at cloth, and "no lot holds enough" does not
-                        // tell him how much short it is.
-                        noFitSmallest: 0,
-                        overrideFrom: '', overrideNote: '', noPieceData: false };
+        res[rw.idx] = {
+            picks: {}, lotLines: [], fromWaste: 0, fromFresh: 0,
+            freshMetres: 0, owed: 0,
+            washLotId: '', washLotNumber: '', washQty: 0,
+            // EVERY lot this row is waiting on, not the last one
+            // written. One row carries several orders and each picks
+            // its own lot, so two of them can be waiting on two
+            // different piles of greige — and a single field kept
+            // whichever order happened to be processed last. The
+            // shortfall summary then raised one wash ticket for the
+            // material and aimed it at that lot, so the other order's
+            // tone was never queued at all.
+            washLots: [],
+            // …and how much of each lot's greige THIS ROW's orders
+            // are waiting on. Not the lot's pile: "L2 has 15.69 Mtr
+            // unwashed" on a row 35.62 short is an offer that does
+            // not add up, and it is not even his — most of that pile
+            // is spoken for by another supervisor's order.
+            washNeed: {},
+            // Every lot chosen for an order on this row, whether or
+            // not it needs washing. A short row whose lot has no
+            // greige left has to say THAT — the greige on other lots
+            // is another tone and cannot serve this order, so
+            // quoting it would offer cloth that can never be used.
+            lotsUsed: [],
+            pinnedDryLots: [], pinnedDryOrders: [],
+            // NOTHING ON THE RACK COVERS A WHOLE JOB. Kept as the
+            // size of the smallest job that was turned away, because
+            // that is the number that ends the argument: he is
+            // looking at cloth, and "no lot holds enough" does not
+            // tell him how much short it is.
+            noFitSmallest: 0,
+            overrideFrom: '', overrideNote: '', noPieceData: false
+        };
     });
 
     // `greigeUsed` is the cloth this order has COMMITTED a lot's greige to but
@@ -700,10 +708,12 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
             r.fromFresh += fill.fromFresh[i];
             r.freshMetres = round2(r.freshMetres + fill.metresPer[i]);
             if (fill.metresPer[i] > 0) {
-                r.lotLines.push({ lotId: lot.lotId, lotNumber: lot.lotNumber,
-                                  qty: fill.metresPer[i], planItemId: d.planItemId,
-                                  planId: d.planId,
-                                  note: noteOn, overrideFrom: fromOn });
+                r.lotLines.push({
+                    lotId: lot.lotId, lotNumber: lot.lotNumber,
+                    qty: fill.metresPer[i], planItemId: d.planItemId,
+                    planId: d.planId,
+                    note: noteOn, overrideFrom: fromOn
+                });
             }
             // KEYED BY REMNANT **AND** ITEM.
             //
@@ -720,8 +730,10 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
                 var k = wid + '|' + d.planItemId;
                 if (!r.picks[k]) {
                     var src = lot.waste.filter(function (x) { return String(x.wasteId) === String(wid); })[0] || {};
-                    r.picks[k] = { wasteId: wid, pieces: 0, width: src.width, length: src.length,
-                                   lot: lot.lotNumber, carton: src.carton, planItemId: d.planItemId };
+                    r.picks[k] = {
+                        wasteId: wid, pieces: 0, width: src.width, length: src.length,
+                        lot: lot.lotNumber, carton: src.carton, planItemId: d.planItemId
+                    };
                 }
                 r.picks[k].pieces += fill.picksPer[i][wid];
             });
@@ -796,7 +808,7 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
         if (ord.pin && pinnedLot) {
             var trial = lotFill(pinnedLot, ord.demands, fab, true);
             pinUsable = trial.freshMetres > 0 || Object.keys(trial.picks).length > 0 ||
-                        (Number(pinnedLot.inWash) || 0) > 0;
+                (Number(pinnedLot.inWash) || 0) > 0;
         }
 
         if (ord.pin && !pinUsable) {
@@ -898,8 +910,8 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
                 : round2(Math.max(0, withWash.freshMetres - washUse));
 
             spend(lot, ord.demands, useFill, washUse, greigeUse,
-                  ord.note, (ord.note && ord.origPin !== ord.pin) ? ord.origPin : '',
-                  ready);
+                ord.note, (ord.note && ord.origPin !== ord.pin) ? ord.origPin : '',
+                ready);
 
             // What the row has to ask the wash for. Handed-over rows want the
             // gap; a committed row wants everything its lot cannot give washed
@@ -940,8 +952,10 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
                         if (String(w.lotId) === String(lot.lotId)) seen = true;
                     });
                     if (!seen) {
-                        r.washLots.push({ lotId: String(lot.lotId),
-                                          lotNumber: lot.lotNumber });
+                        r.washLots.push({
+                            lotId: String(lot.lotId),
+                            lotNumber: lot.lotNumber
+                        });
                     }
                     r.washNeed[lot.lotId] = round2((r.washNeed[lot.lotId] || 0) + greige);
                     if (!r.washLotId) {
@@ -981,9 +995,11 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
                 return String(pk.wasteId) === String(rk.wasteId);
             });
             if (already) return;
-            m.wastePicks.push({ wasteId: rk.wasteId, pieces: 0, width: rk.width,
-                                length: rk.length, lot: rk.lot, carton: rk.carton,
-                                planItemId: '' });
+            m.wastePicks.push({
+                wasteId: rk.wasteId, pieces: 0, width: rk.width,
+                length: rk.length, lot: rk.lot, carton: rk.carton,
+                planItemId: ''
+            });
         });
         m.piecesCoveredByWaste = r.fromWaste;
         m.freshPieces = Math.max(0, r.owed - r.fromWaste);
@@ -1045,12 +1061,14 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft) {
         // figure for a shared lot — the summary must therefore take it once per
         // card, never add the rows up.
         m.washLots = r.washLots.map(function (w) {
-            return { lotId: w.lotId, lotNumber: w.lotNumber,
-                     qty: round2(waitingWash[w.lotId] || 0),
-                     // THIS ROW's share — what the row itself is waiting on, and
-                     // the only figure that belongs on the row. `qty` above is
-                     // the card's total for the lot and is for the summary.
-                     rowQty: round2(r.washNeed[w.lotId] || 0) };
+            return {
+                lotId: w.lotId, lotNumber: w.lotNumber,
+                qty: round2(waitingWash[w.lotId] || 0),
+                // THIS ROW's share — what the row itself is waiting on, and
+                // the only figure that belongs on the row. `qty` above is
+                // the card's total for the lot and is for the summary.
+                rowQty: round2(r.washNeed[w.lotId] || 0)
+            };
         });
         m.committedLots = r.lotsUsed;
         m.shortReason = shortReasonFor(m, r, lots);
@@ -1085,8 +1103,10 @@ function shortReasonFor(m, r, lots) {
     // An order already cut in a shade that has run out. He has to decide, and
     // until he does the order cannot move at all.
     if (r.pinnedDryLots.length > 0) {
-        return { kind: r.pinnedBlocked ? 'pinnedBlocked' : 'pinnedDry',
-                 lot: r.pinnedDryLots.join(' and ') };
+        return {
+            kind: r.pinnedBlocked ? 'pinnedBlocked' : 'pinnedDry',
+            lot: r.pinnedDryLots.join(' and ')
+        };
     }
 
     var byId = {};
@@ -1098,10 +1118,12 @@ function shortReasonFor(m, r, lots) {
         return byId[String(w.lotId)] && round2(Number(w.rowQty) || 0) > 0;
     });
     if (wash.length > 0) {
-        return { kind: 'wash',
-                 lots: wash.map(function (w) {
-                     return { lotNumber: w.lotNumber, qty: round2(Number(w.rowQty) || 0) };
-                 }) };
+        return {
+            kind: 'wash',
+            lots: wash.map(function (w) {
+                return { lotNumber: w.lotNumber, qty: round2(Number(w.rowQty) || 0) };
+            })
+        };
     }
 
     // Committed, nothing left to wash, but cloth already at the washer. Not a
@@ -1110,8 +1132,10 @@ function shortReasonFor(m, r, lots) {
     (r.lotsUsed || []).forEach(function (u) {
         var l = byId[String(u.lotId)];
         if (!atWash && l && (Number(l.inWash) || 0) > 0) {
-            atWash = { kind: 'atWash', lot: l.lotNumber,
-                       qty: round2(Number(l.inWash) || 0) };
+            atWash = {
+                kind: 'atWash', lot: l.lotNumber,
+                qty: round2(Number(l.inWash) || 0)
+            };
         }
     });
     if (atWash) return atWash;
@@ -1130,8 +1154,10 @@ function shortReasonFor(m, r, lots) {
             }
         });
         if (big) {
-            return { kind: 'nofit', lot: big.lotNumber, have: big.qty,
-                     need: round2(r.noFitSmallest) };
+            return {
+                kind: 'nofit', lot: big.lotNumber, have: big.qty,
+                need: round2(r.noFitSmallest)
+            };
         }
     }
 
@@ -1231,12 +1257,12 @@ function wasteRowsFor(sup) {
 // looks like a rendering fault.
 function wasteWhereHtml(p) {
     var bits = [];
+    if (p.lot) bits.push('Lot <b>' + escapeHtml(p.lot) + '</b>');
     if (p.carton) {
-        bits.push('carton <b>' + escapeHtml(p.carton) + '</b>');
+        bits.push('Carton <b>' + escapeHtml(p.carton) + '</b>');
     } else {
-        bits.push('<span class="waste-nocarton">carton not recorded</span>');
+        bits.push('<span class="waste-nocarton">Carton not recorded</span>');
     }
-    if (p.lot) bits.push('lot <b>' + escapeHtml(p.lot) + '</b>');
     return '<div class="qty-sub waste-where">' + bits.join(' &middot; ') + '</div>';
 }
 
@@ -1262,7 +1288,7 @@ function wasteRowId(supIdx, matIdx, pickIdx) {
 function applyStockAllocation(data) {
     // Stock is shared. Rather than hiding stock from later supervisors, we show
     // the true stock to everyone and attach a warning about who else needs it.
-    
+
     // 1. Gather all demand across all supervisors
     var demand = {};
     data.forEach(function (sup) {
@@ -1685,12 +1711,12 @@ function washLotPickerHtml(e, entry) {
     return '' +
         '<label class="exc-label">Which lot goes to the wash</label>' +
         '<select id="exc-lot" class="note-input" onchange="onWashLotChange(' +
-            (Number(entry && entry.qty) || 0) + ')">' + opts + '</select>' +
+        (Number(entry && entry.qty) || 0) + ')">' + opts + '</select>' +
         '<div class="exc-lot-short" id="exc-lot-short"></div>' +
         (lots.length > 1 && rec && (Number(rec.wash) || 0) > 0
             ? '<div class="exc-lot-why">Suggested because this lot already has washed ' +
-              'cloth &mdash; washing it keeps the tone together instead of spreading ' +
-              'washed stock across lots.</div>'
+            'cloth &mdash; washing it keeps the tone together instead of spreading ' +
+            'washed stock across lots.</div>'
             : '');
 }
 
@@ -1782,63 +1808,63 @@ function openSummaryException(kind, idx) {
         var out = Math.max(0, round2(req - iss));
         return '<tr' + (out === 0 ? ' class="is-settled"' : '') + '>' +
             '<td>' +
-                '<div class="exc-who">' + escapeHtml(who) +
-                    (agg.remake
-                        ? ' <span class="exc-remake">incl. QC remake</span>'
-                        : '') +
-                '</div>' +
+            '<div class="exc-who">' + escapeHtml(who) +
+            (agg.remake
+                ? ' <span class="exc-remake">incl. QC remake</span>'
+                : '') +
+            '</div>' +
             '</td>' +
             '<td class="col-num">' + fmt(req) + '</td>' +
             '<td class="col-num">' + fmt(iss) + '</td>' +
             '<td class="col-num col-strong">' + fmt(out) + '</td>' +
-        '</tr>';
+            '</tr>';
     }).join('');
 
     el.classList.remove('hidden');
     el.innerHTML =
         '<div class="exc-panel exc-panel-wide">' +
-            '<h3>' + title + '</h3>' +
-            '<p class="exc-sub">' + escapeHtml(e.material) + ' &middot; ' + escapeHtml(e.sku) + '</p>' +
-            '<div class="exc-facts">' +
-                // "Still needed", not "Needed in total". This figure is what is
-                // OUTSTANDING across every line; the Required column below is
-                // the gross requirement. Both were called some form of "needed",
-                // so a row reading 28.35 under a header reading 5.4 looked like
-                // one of the two was wrong.
-                '<span>Still needed <b>' + fmt(e.needed) + ' ' + escapeHtml(e.unit) + '</b></span>' +
-                '<span>In stock <b>' + fmt(e.stock) + ' ' + escapeHtml(e.unit) + '</b></span>' +
-                (isWash
-                    ? '<span class="exc-unwashed">Unwashed <b>' + fmt(e.unwashed) + ' ' + escapeHtml(e.unit) + '</b></span>'
-                    : '') +
-                '<span class="exc-strong">' + actionLabel + ' <b>' + fmt(entry.qty) + ' ' + escapeHtml(e.unit) + '</b></span>' +
-            '</div>' +
-            // Said out loud, because the figure is deliberately MORE than the
-            // shortfall and would otherwise read as an arithmetic fault.
-            (isWash && entry.qty > round2(e.needed - e.stock) + 0.0001
-                ? '<div class="exc-why-more">Washing the whole requirement, not just the ' +
-                      fmt(round2(e.needed - e.stock)) + ' ' + escapeHtml(e.unit) +
-                      ' short, so it can all be issued off one lot &mdash; one tone. ' +
-                      'The washed stock on the other lots keeps for a later order.</div>'
-                : '') +
-            '<label class="exc-label">Who is waiting on it</label>' +
-            '<div class="table-wrapper exc-lines">' +
-                '<table><thead><tr>' +
-                    '<th>Supervisor</th>' +
-                    '<th class="col-num">Required</th>' +
-                    '<th class="col-num">Issued</th>' +
-                    '<th class="col-num">Outstanding</th>' +
-                '</tr></thead><tbody>' + lineRows + '</tbody></table>' +
-            '</div>' +
-            // Wash only. A purchase ticket has no lot — the cloth does not
-            // exist yet, so there is nothing to name.
-            (isWash ? washLotPickerHtml(e, entry) : '') +
-            '<label class="exc-label">Note</label>' +
-            '<textarea id="exc-note" rows="2" placeholder="Anything the next person needs to know"></textarea>' +
-            '<div class="exc-foot">' +
-                '<button type="button" class="ghost-btn" onclick="closeExceptionDialog()">Cancel</button>' +
-                '<button type="button" class="primary-btn" id="exc-send" ' +
-                    'onclick="submitSummaryException(\'' + kind + '\',' + idx + ')">Raise it</button>' +
-            '</div>' +
+        '<h3>' + title + '</h3>' +
+        '<p class="exc-sub">' + escapeHtml(e.material) + ' &middot; ' + escapeHtml(e.sku) + '</p>' +
+        '<div class="exc-facts">' +
+        // "Still needed", not "Needed in total". This figure is what is
+        // OUTSTANDING across every line; the Required column below is
+        // the gross requirement. Both were called some form of "needed",
+        // so a row reading 28.35 under a header reading 5.4 looked like
+        // one of the two was wrong.
+        '<span>Still needed <b>' + fmt(e.needed) + ' ' + escapeHtml(e.unit) + '</b></span>' +
+        '<span>In stock <b>' + fmt(e.stock) + ' ' + escapeHtml(e.unit) + '</b></span>' +
+        (isWash
+            ? '<span class="exc-unwashed">Unwashed <b>' + fmt(e.unwashed) + ' ' + escapeHtml(e.unit) + '</b></span>'
+            : '') +
+        '<span class="exc-strong">' + actionLabel + ' <b>' + fmt(entry.qty) + ' ' + escapeHtml(e.unit) + '</b></span>' +
+        '</div>' +
+        // Said out loud, because the figure is deliberately MORE than the
+        // shortfall and would otherwise read as an arithmetic fault.
+        (isWash && entry.qty > round2(e.needed - e.stock) + 0.0001
+            ? '<div class="exc-why-more">Washing the whole requirement, not just the ' +
+            fmt(round2(e.needed - e.stock)) + ' ' + escapeHtml(e.unit) +
+            ' short, so it can all be issued off one lot &mdash; one tone. ' +
+            'The washed stock on the other lots keeps for a later order.</div>'
+            : '') +
+        '<label class="exc-label">Who is waiting on it</label>' +
+        '<div class="table-wrapper exc-lines">' +
+        '<table><thead><tr>' +
+        '<th>Supervisor</th>' +
+        '<th class="col-num">Required</th>' +
+        '<th class="col-num">Issued</th>' +
+        '<th class="col-num">Outstanding</th>' +
+        '</tr></thead><tbody>' + lineRows + '</tbody></table>' +
+        '</div>' +
+        // Wash only. A purchase ticket has no lot — the cloth does not
+        // exist yet, so there is nothing to name.
+        (isWash ? washLotPickerHtml(e, entry) : '') +
+        '<label class="exc-label">Note</label>' +
+        '<textarea id="exc-note" rows="2" placeholder="Anything the next person needs to know"></textarea>' +
+        '<div class="exc-foot">' +
+        '<button type="button" class="ghost-btn" onclick="closeExceptionDialog()">Cancel</button>' +
+        '<button type="button" class="primary-btn" id="exc-send" ' +
+        'onclick="submitSummaryException(\'' + kind + '\',' + idx + ')">Raise it</button>' +
+        '</div>' +
         '</div>';
 }
 
@@ -2038,32 +2064,32 @@ function lotShortHtml(m, supIdx, matIdx) {
         // shades and can never serve this job at all.
         return why.lots.map(function (w) {
             return '<div class="lot-short"><b>' + escapeHtml(w.lotNumber || '') +
-                   '</b> &middot; ' + fmt(w.qty) + ' ' + u + ' to wash</div>';
+                '</b> &middot; ' + fmt(w.qty) + ' ' + u + ' to wash</div>';
         }).join('');
     }
     if (why.kind === 'atWash') {
         return '<div class="lot-short"><b>' + escapeHtml(why.lot || '') + '</b> &middot; ' +
-               fmt(why.qty) + ' ' + u + ' at the wash house</div>';
+            fmt(why.qty) + ' ' + u + ' at the wash house</div>';
     }
     if (why.kind === 'pinnedDry' || why.kind === 'pinnedBlocked') {
         return '<div class="lot-dry">' +
-               (why.kind === 'pinnedBlocked'
-                   ? 'Cut from <b>' + escapeHtml(why.lot) + '</b>, which is blocked'
-                   : '<b>' + escapeHtml(why.lot) + '</b> is empty &mdash; this was cut from ' +
-                     escapeHtml(why.lot)) +
-               '</div>' +
-               '<button type="button" class="lot-override-btn" ' +
-                   'onclick="openLotOverride(' + supIdx + ',' + matIdx + ')">' +
-                   'Use another lot&hellip;</button>';
+            (why.kind === 'pinnedBlocked'
+                ? 'Cut from <b>' + escapeHtml(why.lot) + '</b>, which is blocked'
+                : '<b>' + escapeHtml(why.lot) + '</b> is empty &mdash; this was cut from ' +
+                escapeHtml(why.lot)) +
+            '</div>' +
+            '<button type="button" class="lot-override-btn" ' +
+            'onclick="openLotOverride(' + supIdx + ',' + matIdx + ')">' +
+            'Use another lot&hellip;</button>';
     }
     if (why.kind === 'nofit') {
         return '<div class="lot-dry">' + fmt(why.have) + ' ' + u + ' on <b>' +
-               escapeHtml(why.lot) + '</b>, smallest job needs ' + fmt(why.need) +
-               '</div>';
+            escapeHtml(why.lot) + '</b>, smallest job needs ' + fmt(why.need) +
+            '</div>';
     }
     if (why.kind === 'blocked') {
         return '<div class="lot-dry">' + fmt(why.qty) + ' ' + u + ' on <b>' +
-               escapeHtml(why.lot) + '</b> is blocked</div>';
+            escapeHtml(why.lot) + '</b> is blocked</div>';
     }
     if (why.kind === 'nodata') {
         return '<div class="lot-dry">No cut size on the material</div>';
@@ -2103,17 +2129,17 @@ function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
     } else {
         issueCell =
             '<div class="issue-cell">' +
-                '<input type="checkbox" class="issue-checkbox" id="' + rowCheckboxId(supIdx, matIdx) + '" ' +
-                    (rowIssuable(m) && !byLot ? 'checked' : '') + ' ' + disabled + ' ' +
-                    'aria-label="Issue ' + escapeHtml(m.material) + '" ' +
-                    'onchange="onIssueCheckboxChange(' + supIdx + ',' + matIdx + ')" />' +
-                '<span class="issue-input-group">' +
-                    '<input type="number" step="0.01" min="0" max="' + issueCeiling(m) + '" ' +
-                        'class="issue-input" id="' + rowInputId(supIdx, matIdx) + '" ' + disabled + ' ' +
-                        (byLot ? 'readonly ' : '') +
-                        'value="' + defaultIssue + '" oninput="onIssueInputChange(' + supIdx + ',' + matIdx + ')" />' +
-                    '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
-                '</span>' +
+            '<input type="checkbox" class="issue-checkbox" id="' + rowCheckboxId(supIdx, matIdx) + '" ' +
+            (rowIssuable(m) && !byLot ? 'checked' : '') + ' ' + disabled + ' ' +
+            'aria-label="Issue ' + escapeHtml(m.material) + '" ' +
+            'onchange="onIssueCheckboxChange(' + supIdx + ',' + matIdx + ')" />' +
+            '<span class="issue-input-group">' +
+            '<input type="number" step="0.01" min="0" max="' + issueCeiling(m) + '" ' +
+            'class="issue-input" id="' + rowInputId(supIdx, matIdx) + '" ' + disabled + ' ' +
+            (byLot ? 'readonly ' : '') +
+            'value="' + defaultIssue + '" oninput="onIssueInputChange(' + supIdx + ',' + matIdx + ')" />' +
+            '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
+            '</span>' +
             '</div>';
     }
 
@@ -2128,25 +2154,25 @@ function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
 
     var warning = '';
     if (!done && isContested(m)) {
-        var names = m.contestedBy.map(function(c) { return escapeHtml(c.name); }).join(', ');
+        var names = m.contestedBy.map(function (c) { return escapeHtml(c.name); }).join(', ');
         warning = '<div class="contested-warn">&#9888; Also needed by ' + names + '</div>';
     }
 
     return '' +
         '<tr id="' + rowId(supIdx, matIdx) + '" class="' + (done ? 'row-issued' : 'row-selected') + '">' +
-            '<td class="material-name-cell">' +
-                '<div class="mat-name">' + escapeHtml(m.material) + (labelBadge || '') + '</div>' +
-                '<div class="mat-sku">' + escapeHtml(m.sku) + '</div>' +
-                reissueWhy(m) +
-                warning +
-            '</td>' +
-            '<td class="col-num col-strong">' +
-                '<span class="qty-big">' + fmt(m.remaining) +
-                    '<span class="unit">' + escapeHtml(m.unit) + '</span></span>' +
-                (done ? '' : shortPill(m)) +
-            '</td>' +
-            stockCells +
-            '<td class="col-issue">' + issueCell + '</td>' +
+        '<td class="material-name-cell">' +
+        '<div class="mat-name">' + escapeHtml(m.material) + (labelBadge || '') + '</div>' +
+        '<div class="mat-sku">' + escapeHtml(m.sku) + '</div>' +
+        reissueWhy(m) +
+        warning +
+        '</td>' +
+        '<td class="col-num col-strong">' +
+        '<span class="qty-big">' + fmt(m.remaining) +
+        '<span class="unit">' + escapeHtml(m.unit) + '</span></span>' +
+        (done ? '' : shortPill(m)) +
+        '</td>' +
+        stockCells +
+        '<td class="col-issue">' + issueCell + '</td>' +
         '</tr>';
 }
 
@@ -2184,16 +2210,14 @@ function renderFabricRows(m, supIdx, matIdx) {
     if (wantsFresh) {
         toIssue =
             '<span class="qty-big">' + fmt(m.remaining) +
-                '<span class="unit">' + escapeHtml(m.unit) + '</span></span>';
+            '<span class="unit">' + escapeHtml(m.unit) + '</span></span>';
     }
     picks.forEach(function (p) {
         toIssue +=
-            '<div class="qty-sub qty-sub-waste">&#9851; ' + p.pieces + ' pc' + (p.pieces === 1 ? '' : 's') +
-                ' waste &middot; ' + fmt(p.length) + ' &times; ' + fmt(p.width) + ' cm</div>' +
-            // WHERE TO FETCH IT FROM. The allocator names a remnant; without the
-            // carton he is searching a rack for it, and without the lot he cannot
-            // tell it apart from an identically-sized offcut of another tone.
-            wasteWhereHtml(p);
+            '<div class="qty-sub qty-sub-waste">' +
+            '<div>&#9851; ' + p.pieces + ' pc' + (p.pieces === 1 ? '' : 's') + ' waste</div>' +
+            '<div class="waste-dim">' + fmt(p.length) + ' &times; ' + fmt(p.width) + ' cm</div>' +
+            '</div>';
     });
     if (!toIssue) {
         toIssue = '<span class="is-zero">&mdash;</span>';
@@ -2226,22 +2250,22 @@ function renderFabricRows(m, supIdx, matIdx) {
 
             issueCell +=
                 '<div class="issue-cell">' +
-                    '<input type="checkbox" class="issue-checkbox" id="' + rowCheckboxId(supIdx, matIdx) + '" ' +
-                        (rowIssuable(m) && startQty > 0 ? 'checked' : '') + ' ' + disabled + ' ' +
-                        'aria-label="Issue ' + escapeHtml(m.material) + '" ' +
-                        'onchange="onIssueCheckboxChange(' + supIdx + ',' + matIdx + ')" />' +
-                    '<span class="issue-input-group">' +
-                        // Read-only when it comes off lots: this box is the
-                        // running total of what he typed against each lot, not
-                        // somewhere to type. Keeping it means the checkbox,
-                        // validation and card footer all work unchanged.
-                        '<input type="number" step="0.01" min="0" max="' + issueCeiling(m) + '" ' +
-                            'class="issue-input" id="' + rowInputId(supIdx, matIdx) + '" ' + disabled + ' ' +
-                            (byLot ? 'readonly ' : '') +
-                            'value="' + startQty + '" ' +
-                            'oninput="onIssueInputChange(' + supIdx + ',' + matIdx + ')" />' +
-                        '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
-                    '</span>' +
+                '<input type="checkbox" class="issue-checkbox" id="' + rowCheckboxId(supIdx, matIdx) + '" ' +
+                (rowIssuable(m) && startQty > 0 ? 'checked' : '') + ' ' + disabled + ' ' +
+                'aria-label="Issue ' + escapeHtml(m.material) + '" ' +
+                'onchange="onIssueCheckboxChange(' + supIdx + ',' + matIdx + ')" />' +
+                '<span class="issue-input-group">' +
+                // Read-only when it comes off lots: this box is the
+                // running total of what he typed against each lot, not
+                // somewhere to type. Keeping it means the checkbox,
+                // validation and card footer all work unchanged.
+                '<input type="number" step="0.01" min="0" max="' + issueCeiling(m) + '" ' +
+                'class="issue-input" id="' + rowInputId(supIdx, matIdx) + '" ' + disabled + ' ' +
+                (byLot ? 'readonly ' : '') +
+                'value="' + startQty + '" ' +
+                'oninput="onIssueInputChange(' + supIdx + ',' + matIdx + ')" />' +
+                '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
+                '</span>' +
                 '</div>';
         }
 
@@ -2250,15 +2274,15 @@ function renderFabricRows(m, supIdx, matIdx) {
         picks.forEach(function (p, pickIdx) {
             issueCell +=
                 '<div class="issue-cell issue-cell-waste" id="' + wasteRowId(supIdx, matIdx, pickIdx) + '">' +
-                    '<input type="checkbox" class="issue-checkbox" id="' + wasteCheckboxId(supIdx, matIdx, pickIdx) + '" checked ' +
-                        'aria-label="Issue waste pieces of ' + escapeHtml(m.material) + '" ' +
-                        'onchange="onWasteCheckboxChange(' + supIdx + ',' + matIdx + ',' + pickIdx + ')" />' +
-                    '<span class="issue-input-group">' +
-                        '<input type="number" step="1" min="0" max="' + p.pieces + '" ' +
-                            'class="issue-input" id="' + wasteInputId(supIdx, matIdx, pickIdx) + '" value="' + p.pieces + '" ' +
-                            'oninput="onWasteInputChange(' + supIdx + ',' + matIdx + ',' + pickIdx + ')" />' +
-                        '<span class="issue-unit">pcs</span>' +
-                    '</span>' +
+                '<input type="checkbox" class="issue-checkbox" id="' + wasteCheckboxId(supIdx, matIdx, pickIdx) + '" checked ' +
+                'aria-label="Issue waste pieces of ' + escapeHtml(m.material) + '" ' +
+                'onchange="onWasteCheckboxChange(' + supIdx + ',' + matIdx + ',' + pickIdx + ')" />' +
+                '<span class="issue-input-group">' +
+                '<input type="number" step="1" min="0" max="' + p.pieces + '" ' +
+                'class="issue-input" id="' + wasteInputId(supIdx, matIdx, pickIdx) + '" value="' + p.pieces + '" ' +
+                'oninput="onWasteInputChange(' + supIdx + ',' + matIdx + ',' + pickIdx + ')" />' +
+                '<span class="issue-unit">pcs</span>' +
+                '</span>' +
                 '</div>';
         });
 
@@ -2277,32 +2301,35 @@ function renderFabricRows(m, supIdx, matIdx) {
     // warning is therefore something he can do something about.
     return '' +
         '<tr id="' + rowId(supIdx, matIdx) + '" class="' + (done ? 'row-issued' : 'row-selected') + '">' +
-            '<td class="material-name-cell">' +
-                '<div class="mat-name">' + escapeHtml(m.material) +
-                    (picks.length > 0 ? '<span class="waste-badge">&#9851; incl. waste</span>' : '') +
-                '</div>' +
-                '<div class="mat-sku">' + escapeHtml(m.sku) + '</div>' +
-                reissueWhy(m) +
-            '</td>' +
-            '<td class="col-num col-strong">' + toIssue + '</td>' +
-            // The hidden inputs live in here now. They are keyed by id, not by
-            // position, so the submit path reads them exactly as before.
-            '<td class="col-lot-issue">' +
-                (byLot ? lotLinesHtml(m, supIdx, matIdx) + lotShortHtml(m, supIdx, matIdx) : '') +
-            '</td>' +
-            '<td class="col-issue">' + issueCell + '</td>' +
+        '<td class="material-name-cell">' +
+        '<div class="mat-name">' + escapeHtml(m.material) +
+        (picks.length > 0 ? '<span class="waste-badge">&#9851; incl. waste</span>' : '') +
+        '</div>' +
+        '<div class="mat-sku">' + escapeHtml(m.sku) + '</div>' +
+        reissueWhy(m) +
+        '</td>' +
+        '<td class="col-num col-strong">' + toIssue + '</td>' +
+        // The hidden inputs live in here now. They are keyed by id, not by
+        // position, so the submit path reads them exactly as before.
+        '<td class="col-lot-issue">' +
+        (byLot ? lotLinesHtml(m, supIdx, matIdx) + lotShortHtml(m, supIdx, matIdx) : '') +
+        // WHERE TO FETCH EACH WASTE PIECE FROM — carton and lot, now
+        // shown in the LOT column so all location info is grouped.
+        picks.map(function (p) { return wasteWhereHtml(p); }).join('') +
+        '</td>' +
+        '<td class="col-issue">' + issueCell + '</td>' +
         '</tr>';
 }
 
 function selectAllHeader(supIdx, section, label) {
     return '' +
         '<th class="col-issue">' +
-            '<label class="select-all-label" title="Select every issuable row in this section">' +
-                '<input type="checkbox" class="issue-checkbox" id="' + selectAllId(supIdx, section) + '" ' +
-                    'onchange="onSelectAllChange(' + supIdx + ',\'' + section + '\')" ' +
-                    'aria-label="Select all ' + label + '" />' +
-                '<span>Issue now</span>' +
-            '</label>' +
+        '<label class="select-all-label" title="Select every issuable row in this section">' +
+        '<input type="checkbox" class="issue-checkbox" id="' + selectAllId(supIdx, section) + '" ' +
+        'onchange="onSelectAllChange(' + supIdx + ',\'' + section + '\')" ' +
+        'aria-label="Select all ' + label + '" />' +
+        '<span>Issue now</span>' +
+        '</label>' +
         '</th>';
 }
 
@@ -2330,15 +2357,15 @@ function renderSection(title, note, headCells, rowsHtml) {
     if (!rowsHtml) return '';
     return '' +
         '<div class="mat-section">' +
-            '<div class="section-title">' + escapeHtml(title) +
-                (note ? '<span class="section-note">' + escapeHtml(note) + '</span>' : '') +
-            '</div>' +
-            '<div class="table-wrapper">' +
-                '<table>' +
-                    '<thead><tr>' + headCells + '</tr></thead>' +
-                    '<tbody>' + rowsHtml + '</tbody>' +
-                '</table>' +
-            '</div>' +
+        '<div class="section-title">' + escapeHtml(title) +
+        (note ? '<span class="section-note">' + escapeHtml(note) + '</span>' : '') +
+        '</div>' +
+        '<div class="table-wrapper">' +
+        '<table>' +
+        '<thead><tr>' + headCells + '</tr></thead>' +
+        '<tbody>' + rowsHtml + '</tbody>' +
+        '</table>' +
+        '</div>' +
         '</div>';
 }
 
@@ -2437,8 +2464,10 @@ function buildShortfallSummary(data) {
             (m.washLots || []).forEach(function (w) {
                 var ck2 = key + '|' + w.lotId;
                 // Assigned, not added — the card's figure, taken once.
-                cardWash[ck2] = { matKey: key, lotId: String(w.lotId),
-                                  lotNumber: w.lotNumber, qty: Number(w.qty) || 0 };
+                cardWash[ck2] = {
+                    matKey: key, lotId: String(w.lotId),
+                    lotNumber: w.lotNumber, qty: Number(w.qty) || 0
+                };
             });
         });
 
@@ -2513,8 +2542,8 @@ function buildShortfallSummary(data) {
         // overall; otherwise it is the tone override's business, and that lives
         // on the row where the decision is.
         var owned = round2((Number(e.stock) || 0) +
-                           (Number(e.unwashed) || 0) +
-                           (Number(e.inWash) || 0));
+            (Number(e.unwashed) || 0) +
+            (Number(e.inWash) || 0));
         var buyQty = round2(e.needed - owned);
         if (buyQty > 0) {
             toBuy.push({ e: e, qty: buyQty, kind: 'buy' });
@@ -2589,56 +2618,56 @@ function summaryRow(entry, idx) {
 
     return '' +
         '<tr>' +
-            '<td class="material-name-cell">' +
-                '<div class="mat-name">' + escapeHtml(e.material) + '</div>' +
-                '<div class="mat-sku">' + escapeHtml(e.sku) + '</div>' +
-            '</td>' +
-            '<td class="col-num">' + qty(e.needed, e.unit, { keepZero: true }) + '</td>' +
-            // WASHED AND UNWASHED ARE THE LOT'S, not the material's, on any row
-            // that names a lot. A ticket capped at what L2 holds beside a greige
-            // figure totalling every lot of the SKU is the same "two figures on
-            // one row" fault the issue screen had: 706.09 unwashed next to
-            // "wash 50, all it has" reads as an arithmetic error.
-            '<td class="col-num">' +
-                qty((kind === 'wash' && entry.lot) ? (Number(entry.lot.wash) || 0) : e.stock, e.unit) +
-            '</td>' +
-            // Wash rows only — the greige pile and the lot it comes off. A
-            // purchase row has neither: the cloth does not exist yet.
-            (kind === 'wash'
-                ? '<td class="col-num">' +
-                      qty(entry.lot ? (Number(entry.lot.unwash) || 0) : e.unwashed, e.unit) +
-                      (((entry.lot ? Number(entry.lot.inWash) : Number(e.inWash)) || 0) > 0
-                          ? '<div class="sum-inwash">+' +
-                                fmt(entry.lot ? entry.lot.inWash : e.inWash) + ' at wash</div>'
-                          : '') +
-                  '</td>'
+        '<td class="material-name-cell">' +
+        '<div class="mat-name">' + escapeHtml(e.material) + '</div>' +
+        '<div class="mat-sku">' + escapeHtml(e.sku) + '</div>' +
+        '</td>' +
+        '<td class="col-num">' + qty(e.needed, e.unit, { keepZero: true }) + '</td>' +
+        // WASHED AND UNWASHED ARE THE LOT'S, not the material's, on any row
+        // that names a lot. A ticket capped at what L2 holds beside a greige
+        // figure totalling every lot of the SKU is the same "two figures on
+        // one row" fault the issue screen had: 706.09 unwashed next to
+        // "wash 50, all it has" reads as an arithmetic error.
+        '<td class="col-num">' +
+        qty((kind === 'wash' && entry.lot) ? (Number(entry.lot.wash) || 0) : e.stock, e.unit) +
+        '</td>' +
+        // Wash rows only — the greige pile and the lot it comes off. A
+        // purchase row has neither: the cloth does not exist yet.
+        (kind === 'wash'
+            ? '<td class="col-num">' +
+            qty(entry.lot ? (Number(entry.lot.unwash) || 0) : e.unwashed, e.unit) +
+            (((entry.lot ? Number(entry.lot.inWash) : Number(e.inWash)) || 0) > 0
+                ? '<div class="sum-inwash">+' +
+                fmt(entry.lot ? entry.lot.inWash : e.inWash) + ' at wash</div>'
                 : '') +
-            '<td class="col-num col-strong">' +
-                '<span class="qty-big">' + fmt(entry.qty) +
-                    '<span class="unit">' + escapeHtml(e.unit) + '</span></span>' +
-            '</td>' +
-            (kind === 'wash'
-                ? '<td class="sum-lot">' +
-                      (entry.lot
-                          ? '<span class="lot-id">' + escapeHtml(entry.lot.lotNumber || '—') + '</span>' +
-                            // Only worth saying when the ticket has taken the
-                            // lot's whole pile — that is when the figure is
-                            // capped rather than chosen, and when washing it
-                            // still will not clear the block.
-                            (round2(entry.qty) + 0.0001 >= (Number(entry.lot.unwash) || 0)
-                                ? '<div class="sum-lot-note">all it has</div>'
-                                : '')
-                          : '<span class="is-zero">&mdash;</span>') +
-                  '</td>'
-                : '') +
-            '<td class="col-action">' +
-                '<button type="button" class="raise-btn' + (state === 'stale' ? ' is-stale' : '') + '" ' +
-                    'id="' + summaryBtnId(kind, idx) + '" ' +
-                    (state === 'open' ? 'disabled' : '') + ' ' +
-                    'onclick="openSummaryException(\'' + kind + '\',' + idx + ')">' +
-                    btnLabel +
-                '</button>' +
-            '</td>' +
+            '</td>'
+            : '') +
+        '<td class="col-num col-strong">' +
+        '<span class="qty-big">' + fmt(entry.qty) +
+        '<span class="unit">' + escapeHtml(e.unit) + '</span></span>' +
+        '</td>' +
+        (kind === 'wash'
+            ? '<td class="sum-lot">' +
+            (entry.lot
+                ? '<span class="lot-id">' + escapeHtml(entry.lot.lotNumber || '—') + '</span>' +
+                // Only worth saying when the ticket has taken the
+                // lot's whole pile — that is when the figure is
+                // capped rather than chosen, and when washing it
+                // still will not clear the block.
+                (round2(entry.qty) + 0.0001 >= (Number(entry.lot.unwash) || 0)
+                    ? '<div class="sum-lot-note">all it has</div>'
+                    : '')
+                : '<span class="is-zero">&mdash;</span>') +
+            '</td>'
+            : '') +
+        '<td class="col-action">' +
+        '<button type="button" class="raise-btn' + (state === 'stale' ? ' is-stale' : '') + '" ' +
+        'id="' + summaryBtnId(kind, idx) + '" ' +
+        (state === 'open' ? 'disabled' : '') + ' ' +
+        'onclick="openSummaryException(\'' + kind + '\',' + idx + ')">' +
+        btnLabel +
+        '</button>' +
+        '</td>' +
         '</tr>';
 }
 
@@ -2687,22 +2716,22 @@ function renderShortfallSummary(data) {
 
     return '' +
         '<div class="item-card summary-card open">' +
-            '<div class="item-header">' +
-                '<div class="item-title-row">' +
-                    '<div class="item-header-info">' +
-                        '<h2>What is missing</h2>' +
-                        '<div class="item-meta-line">' +
-                            '<span>Totalled across every supervisor, so contested stock counts once</span>' +
-                        '</div>' +
-                    '</div>' +
-                '</div>' +
-                '<div class="item-header-right">' +
-                    '<span class="item-qty item-qty-danger">' + counts.join(' &middot; ') + '</span>' +
-                '</div>' +
-            '</div>' +
-            '<div class="item-body">' +
-                '<div class="tables-container">' + sections + '</div>' +
-            '</div>' +
+        '<div class="item-header">' +
+        '<div class="item-title-row">' +
+        '<div class="item-header-info">' +
+        '<h2>What is missing</h2>' +
+        '<div class="item-meta-line">' +
+        '<span>Totalled across every supervisor, so contested stock counts once</span>' +
+        '</div>' +
+        '</div>' +
+        '</div>' +
+        '<div class="item-header-right">' +
+        '<span class="item-qty item-qty-danger">' + counts.join(' &middot; ') + '</span>' +
+        '</div>' +
+        '</div>' +
+        '<div class="item-body">' +
+        '<div class="tables-container">' + sections + '</div>' +
+        '</div>' +
         '</div>';
 }
 
@@ -2827,33 +2856,33 @@ function renderSupervisorCard(sup, idx, arr) {
 
     return '' +
         '<div class="item-card" id="sup-card-' + idx + '">' +
-            '<div class="item-header" onclick="toggleSupervisor(' + idx + ')">' +
-                '<div class="item-title-row">' +
-                    '<span class="item-serial">' + (idx + 1) + '</span>' +
-                    '<div class="item-header-info">' +
-                        '<h2>' + escapeHtml(sup.supervisorName) + '</h2>' +
-                        '<div class="item-meta-line">' +
-                            '<span class="' + prioClass + '">' + prioText + '</span>' +
-                            '<span>' + metaText + '</span>' +
-                        '</div>' +
-                    '</div>' +
-                '</div>' +
-                '<div class="item-header-right">' +
-                    headerPill +
-                    '<span class="chevron" aria-hidden="true">' +
-                        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
-                            'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
-                    '</span>' +
-                '</div>' +
-            '</div>' +
-            '<div class="item-body">' +
-                '<div class="tables-container">' + rows + '</div>' +
-                '<div class="card-footer" id="sup-footer-' + idx + '">' +
-                    '<span class="sel-count" id="sel-count-' + idx + '">No materials selected</span>' +
-                    '<button type="button" class="primary-btn" id="issue-btn-' + idx + '" ' +
-                        'onclick="issueForSupervisor(' + idx + ')">Issue to ' + escapeHtml(sup.supervisorName) + '</button>' +
-                '</div>' +
-            '</div>' +
+        '<div class="item-header" onclick="toggleSupervisor(' + idx + ')">' +
+        '<div class="item-title-row">' +
+        '<span class="item-serial">' + (idx + 1) + '</span>' +
+        '<div class="item-header-info">' +
+        '<h2>' + escapeHtml(sup.supervisorName) + '</h2>' +
+        '<div class="item-meta-line">' +
+        '<span class="' + prioClass + '">' + prioText + '</span>' +
+        '<span>' + metaText + '</span>' +
+        '</div>' +
+        '</div>' +
+        '</div>' +
+        '<div class="item-header-right">' +
+        headerPill +
+        '<span class="chevron" aria-hidden="true">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
+        'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
+        '</span>' +
+        '</div>' +
+        '</div>' +
+        '<div class="item-body">' +
+        '<div class="tables-container">' + rows + '</div>' +
+        '<div class="card-footer" id="sup-footer-' + idx + '">' +
+        '<span class="sel-count" id="sel-count-' + idx + '">No materials selected</span>' +
+        '<button type="button" class="primary-btn" id="issue-btn-' + idx + '" ' +
+        'onclick="issueForSupervisor(' + idx + ')">Issue to ' + escapeHtml(sup.supervisorName) + '</button>' +
+        '</div>' +
+        '</div>' +
         '</div>';
 }
 
@@ -3030,8 +3059,10 @@ function issueForSupervisor(supIdx) {
             // planItemId travels with the pick so the server credits the item
             // this remnant was actually allocated to, rather than the oldest row
             // that happens to match on material and cut size.
-            if (pieces > 0) picks.push({ wasteId: p.wasteId, pieces: pieces,
-                                         planItemId: p.planItemId || '' });
+            if (pieces > 0) picks.push({
+                wasteId: p.wasteId, pieces: pieces,
+                planItemId: p.planItemId || ''
+            });
         });
 
         // WHICH CLOTH COMES OFF WHICH LOT, AND FOR WHICH ITEM.
@@ -3048,11 +3079,13 @@ function issueForSupervisor(supIdx) {
         var lotLines = (m.lotLines || []).filter(function (ln) {
             return (Number(ln.qty) || 0) > 0;
         }).map(function (ln) {
-            var out = { lotId: ln.lotId, qty: round2(ln.qty),
-                        planItemId: ln.planItemId || '',
-                        // The order, so issueMaterials can enforce one lot per
-                        // order rather than infer it from the item.
-                        planId: ln.planId || '' };
+            var out = {
+                lotId: ln.lotId, qty: round2(ln.qty),
+                planItemId: ln.planItemId || '',
+                // The order, so issueMaterials can enforce one lot per
+                // order rather than infer it from the item.
+                planId: ln.planId || ''
+            };
             // Only on a deliberate override. The handover records the lot that
             // actually left the shelf while Issued_Lot keeps the original, and
             // this says a person decided that rather than a rule slipping.
@@ -3399,11 +3432,11 @@ function wastePendingHtml() {
         if (wasteRecvEdit) {
             actionCell =
                 '<span class="issue-input-group">' +
-                    '<input type="number" step="1" min="0" max="' + p.count + '" ' +
-                        'class="issue-input" id="' + wasteRecvGotId(i) + '" value="' + p.count + '" ' +
-                        'oninput="onWasteRecvInput(' + i + ')" ' +
-                        'onblur="onWasteRecvCommit(' + i + ')" />' +
-                    '<span class="issue-unit">pcs</span>' +
+                '<input type="number" step="1" min="0" max="' + p.count + '" ' +
+                'class="issue-input" id="' + wasteRecvGotId(i) + '" value="' + p.count + '" ' +
+                'oninput="onWasteRecvInput(' + i + ')" ' +
+                'onblur="onWasteRecvCommit(' + i + ')" />' +
+                '<span class="issue-unit">pcs</span>' +
                 '</span>' +
                 // Says the shortfall out loud instead of leaving him to subtract
                 // two numbers in his head — and it is the shortfall, not the
@@ -3415,42 +3448,42 @@ function wastePendingHtml() {
 
         return '' +
             '<tr>' +
-                '<td class="material-name-cell">' +
-                    '<div class="mat-name">&#9851; ' + escapeHtml(p.material || '—') + '</div>' +
-                    '<div class="mat-sku">' + escapeHtml(p.salesOrder || '') +
-                        (p.planNo ? ' · ' + escapeHtml(p.planNo) : '') +
-                        ' · from ' + escapeHtml(p.supervisor || '—') +
-                        ' · ' + escapeHtml(p.declaredOn || '') + '</div>' +
-                '</td>' +
-                '<td class="col-num col-strong">' +
-                    '<span class="qty-big">' + p.count + '<span class="unit">pcs</span></span>' +
-                    '<div class="qty-sub">' + fmt(p.length) + ' &times; ' + fmt(p.width) + ' cm</div>' +
-                '</td>' +
-                // The lot it was cut from. It goes back to that lot, so the store
-                // person is checking in a tone, not just a size — two identical
-                // remnants of different lots must not read as the same thing.
-                '<td class="col-lot">' +
-                    (p.lot
-                        ? '<span class="lot-id">' + escapeHtml(p.lot) + '</span>'
-                        : '<span class="w-lot-none">not recorded</span>') +
-                '</td>' +
-                // Always shown, in BOTH modes. The usual path is "all received as
-                // declared" and it still has to say where they went — putting the
-                // carton behind the edit toggle would mean it was only ever
-                // recorded on the rows that went wrong.
-                '<td class="col-carton">' +
-                    '<input type="text" class="carton-input" id="' + wasteRecvCartonId(i) + '" ' +
-                        'value="' + escapeHtml(p.carton || '') + '" ' +
-                        'placeholder="Carton" ' +
-                        'oninput="onWasteCartonInput(' + i + ')" />' +
-                '</td>' +
-                '<td class="col-issue">' + actionCell + '</td>' +
-                (wasteRecvEdit
-                    ? '<td class="col-note">' +
-                          '<input type="text" class="note-input" id="' + wasteRecvNoteId(i) + '" ' +
-                              'placeholder="Why is it short?" disabled />' +
-                      '</td>'
-                    : '') +
+            '<td class="material-name-cell">' +
+            '<div class="mat-name">&#9851; ' + escapeHtml(p.material || '—') + '</div>' +
+            '<div class="mat-sku">' + escapeHtml(p.salesOrder || '') +
+            (p.planNo ? ' · ' + escapeHtml(p.planNo) : '') +
+            ' · from ' + escapeHtml(p.supervisor || '—') +
+            ' · ' + escapeHtml(p.declaredOn || '') + '</div>' +
+            '</td>' +
+            '<td class="col-num col-strong">' +
+            '<span class="qty-big">' + p.count + '<span class="unit">pcs</span></span>' +
+            '<div class="qty-sub">' + fmt(p.length) + ' &times; ' + fmt(p.width) + ' cm</div>' +
+            '</td>' +
+            // The lot it was cut from. It goes back to that lot, so the store
+            // person is checking in a tone, not just a size — two identical
+            // remnants of different lots must not read as the same thing.
+            '<td class="col-lot">' +
+            (p.lot
+                ? '<span class="lot-id">' + escapeHtml(p.lot) + '</span>'
+                : '<span class="w-lot-none">not recorded</span>') +
+            '</td>' +
+            // Always shown, in BOTH modes. The usual path is "all received as
+            // declared" and it still has to say where they went — putting the
+            // carton behind the edit toggle would mean it was only ever
+            // recorded on the rows that went wrong.
+            '<td class="col-carton">' +
+            '<input type="text" class="carton-input" id="' + wasteRecvCartonId(i) + '" ' +
+            'value="' + escapeHtml(p.carton || '') + '" ' +
+            'placeholder="Carton" ' +
+            'oninput="onWasteCartonInput(' + i + ')" />' +
+            '</td>' +
+            '<td class="col-issue">' + actionCell + '</td>' +
+            (wasteRecvEdit
+                ? '<td class="col-note">' +
+                '<input type="text" class="note-input" id="' + wasteRecvNoteId(i) + '" ' +
+                'placeholder="Why is it short?" disabled />' +
+                '</td>'
+                : '') +
             '</tr>';
     }).join('');
 
@@ -3458,49 +3491,49 @@ function wastePendingHtml() {
     if (wasteRecvEdit) {
         footer =
             '<div class="card-footer">' +
-                '<span class="sel-count" id="wr-sel-count">' +
-                    'Everything as declared — change only what is actually short.' +
-                '</span>' +
-                '<button type="button" class="ghost-btn" onclick="setWasteRecvEdit(false)">Cancel</button>' +
-                '<button type="button" class="primary-btn" id="wr-receive-btn" ' +
-                    'onclick="submitWasteReceipt()">Confirm what I received</button>' +
+            '<span class="sel-count" id="wr-sel-count">' +
+            'Everything as declared — change only what is actually short.' +
+            '</span>' +
+            '<button type="button" class="ghost-btn" onclick="setWasteRecvEdit(false)">Cancel</button>' +
+            '<button type="button" class="primary-btn" id="wr-receive-btn" ' +
+            'onclick="submitWasteReceipt()">Confirm what I received</button>' +
             '</div>';
     } else {
         footer =
             '<div class="card-footer">' +
-                '<span class="sel-count">' + wastePending.length +
-                    (wastePending.length === 1 ? ' line' : ' lines') + ' to check</span>' +
-                '<button type="button" class="ghost-btn" onclick="setWasteRecvEdit(true)">Something&rsquo;s missing</button>' +
-                '<button type="button" class="primary-btn" id="wr-receive-btn" ' +
-                    'onclick="submitWasteReceipt()">All received as declared</button>' +
+            '<span class="sel-count">' + wastePending.length +
+            (wastePending.length === 1 ? ' line' : ' lines') + ' to check</span>' +
+            '<button type="button" class="ghost-btn" onclick="setWasteRecvEdit(true)">Something&rsquo;s missing</button>' +
+            '<button type="button" class="primary-btn" id="wr-receive-btn" ' +
+            'onclick="submitWasteReceipt()">All received as declared</button>' +
             '</div>';
     }
 
     return '' +
         '<div class="item-card open">' +
-            '<div class="item-header static-header">' +
-                '<div class="item-header-info">' +
-                    '<h2>Waste awaiting receipt</h2>' +
-                    '<div class="item-meta-line"><span>' + wastePending.length +
-                        ' piece row(s) he says he sent back, not yet checked in</span></div>' +
-                '</div>' +
-            '</div>' +
-            '<div class="item-body is-open">' +
-                '<div class="tables-container">' +
-                    '<div class="table-wrapper">' +
-                        '<table><thead><tr>' +
-                            '<th>Piece</th>' +
-                            '<th class="col-num">Declared</th>' +
-                            '<th class="col-lot">Lot</th>' +
-                            '<th class="col-carton">Carton</th>' +
-                            '<th class="col-issue">' +
-                                (wasteRecvEdit ? 'Actually received' : 'Status') + '</th>' +
-                            (wasteRecvEdit ? '<th class="col-note">Note</th>' : '') +
-                        '</tr></thead><tbody>' + rows + '</tbody></table>' +
-                    '</div>' +
-                '</div>' +
-                footer +
-            '</div>' +
+        '<div class="item-header static-header">' +
+        '<div class="item-header-info">' +
+        '<h2>Waste awaiting receipt</h2>' +
+        '<div class="item-meta-line"><span>' + wastePending.length +
+        ' piece row(s) he says he sent back, not yet checked in</span></div>' +
+        '</div>' +
+        '</div>' +
+        '<div class="item-body is-open">' +
+        '<div class="tables-container">' +
+        '<div class="table-wrapper">' +
+        '<table><thead><tr>' +
+        '<th>Piece</th>' +
+        '<th class="col-num">Declared</th>' +
+        '<th class="col-lot">Lot</th>' +
+        '<th class="col-carton">Carton</th>' +
+        '<th class="col-issue">' +
+        (wasteRecvEdit ? 'Actually received' : 'Status') + '</th>' +
+        (wasteRecvEdit ? '<th class="col-note">Note</th>' : '') +
+        '</tr></thead><tbody>' + rows + '</tbody></table>' +
+        '</div>' +
+        '</div>' +
+        footer +
+        '</div>' +
         '</div>';
 }
 
@@ -3667,9 +3700,9 @@ function pagerHtml(cfg) {
 
     return '<div class="card-footer pager">' +
         '<span class="sel-count">Showing ' + from + '&ndash;' + to +
-            ' of ' + total + noun + '</span>' +
+        ' of ' + total + noun + '</span>' +
         controls +
-    '</div>';
+        '</div>';
 }
 
 // The STORE's reading of a piece's status, which is not the supervisor's. He
@@ -3708,19 +3741,19 @@ function wasteHistHtml() {
         var st = wasteHistStatus(p.status);
         return '' +
             '<tr>' +
-                '<td class="material-name-cell">' +
-                    '<div class="mat-name">&#9851; ' + escapeHtml(p.material || '—') + '</div>' +
-                    '<div class="mat-sku">' + escapeHtml(p.salesOrder || '') +
-                        (p.planNo ? ' · ' + escapeHtml(p.planNo) : '') + '</div>' +
-                '</td>' +
-                '<td class="col-num">' + fmt(p.length) + ' &times; ' + fmt(p.width) +
-                    '<span class="unit"> cm</span></td>' +
-                '<td class="col-num col-strong">' + p.count +
-                    '<span class="unit"> pcs</span></td>' +
-                '<td>' + escapeHtml(p.supervisor || '—') + '</td>' +
-                '<td><span class="status-pill ' + st.cls + '">' +
-                    escapeHtml(st.text) + '</span></td>' +
-                '<td>' + escapeHtml(p.declaredOn || '') + '</td>' +
+            '<td class="material-name-cell">' +
+            '<div class="mat-name">&#9851; ' + escapeHtml(p.material || '—') + '</div>' +
+            '<div class="mat-sku">' + escapeHtml(p.salesOrder || '') +
+            (p.planNo ? ' · ' + escapeHtml(p.planNo) : '') + '</div>' +
+            '</td>' +
+            '<td class="col-num">' + fmt(p.length) + ' &times; ' + fmt(p.width) +
+            '<span class="unit"> cm</span></td>' +
+            '<td class="col-num col-strong">' + p.count +
+            '<span class="unit"> pcs</span></td>' +
+            '<td>' + escapeHtml(p.supervisor || '—') + '</td>' +
+            '<td><span class="status-pill ' + st.cls + '">' +
+            escapeHtml(st.text) + '</span></td>' +
+            '<td>' + escapeHtml(p.declaredOn || '') + '</td>' +
             '</tr>';
     }).join('');
 
@@ -3739,29 +3772,29 @@ function wasteHistHtml() {
 
     return '' +
         '<div class="item-card open">' +
-            '<div class="item-header static-header">' +
-                '<div class="item-header-info">' +
-                    '<h2>Declared history</h2>' +
-                    '<div class="item-meta-line"><span>Every offcut sent back, ' +
-                        'newest first &mdash; including ones still awaiting a check ' +
-                        'and ones that ended in a dispute</span></div>' +
-                '</div>' +
-            '</div>' +
-            '<div class="item-body is-open">' +
-                '<div class="tables-container">' +
-                    '<div class="table-wrapper">' +
-                        '<table><thead><tr>' +
-                            '<th>Piece</th>' +
-                            '<th class="col-num">Cut piece size (L &times; W)</th>' +
-                            '<th class="col-num">Pieces</th>' +
-                            '<th>From</th>' +
-                            '<th>Status</th>' +
-                            '<th>Declared</th>' +
-                        '</tr></thead><tbody>' + rows + '</tbody></table>' +
-                    '</div>' +
-                '</div>' +
-                pager +
-            '</div>' +
+        '<div class="item-header static-header">' +
+        '<div class="item-header-info">' +
+        '<h2>Declared history</h2>' +
+        '<div class="item-meta-line"><span>Every offcut sent back, ' +
+        'newest first &mdash; including ones still awaiting a check ' +
+        'and ones that ended in a dispute</span></div>' +
+        '</div>' +
+        '</div>' +
+        '<div class="item-body is-open">' +
+        '<div class="tables-container">' +
+        '<div class="table-wrapper">' +
+        '<table><thead><tr>' +
+        '<th>Piece</th>' +
+        '<th class="col-num">Cut piece size (L &times; W)</th>' +
+        '<th class="col-num">Pieces</th>' +
+        '<th>From</th>' +
+        '<th>Status</th>' +
+        '<th>Declared</th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table>' +
+        '</div>' +
+        '</div>' +
+        pager +
+        '</div>' +
         '</div>';
 }
 
@@ -4036,10 +4069,10 @@ function loadDisputes() {
         if (errs.length > 0 && disputes.length === 0) {
             panel.innerHTML =
                 '<div class="panel-placeholder">' +
-                    '<h2>The dispute list could not be built</h2>' +
-                    '<p>' + escapeHtml(errs[0]) + '</p>' +
-                    '<p>The disputes are still there — this screen cannot read them. ' +
-                    'Run the function in Creator with Execute to see the real error.</p>' +
+                '<h2>The dispute list could not be built</h2>' +
+                '<p>' + escapeHtml(errs[0]) + '</p>' +
+                '<p>The disputes are still there — this screen cannot read them. ' +
+                'Run the function in Creator with Execute to see the real error.</p>' +
                 '</div>';
             return;
         }
@@ -4049,8 +4082,8 @@ function loadDisputes() {
         if (errs.length > 0) {
             panel.innerHTML =
                 '<div class="exc-warn">' +
-                    '<b>' + errs.length + ' dispute(s) could not be read and are missing below.</b>' +
-                    '<div class="exc-warn-quote">' + escapeHtml(errs[0]) + '</div>' +
+                '<b>' + errs.length + ' dispute(s) could not be read and are missing below.</b>' +
+                '<div class="exc-warn-quote">' + escapeHtml(errs[0]) + '</div>' +
                 '</div>' + panel.innerHTML;
         }
     }).catch(function (err) {
@@ -4065,8 +4098,8 @@ function renderDisputes() {
     if (disputes.length === 0) {
         panel.innerHTML =
             '<div class="panel-placeholder">' +
-                '<h2>No open disputes</h2>' +
-                '<p>Everything issued out, and every leftover piece sent back, has been accounted for.</p>' +
+            '<h2>No open disputes</h2>' +
+            '<p>Everything issued out, and every leftover piece sent back, has been accounted for.</p>' +
             '</div>';
         setTabCount('count-disputes', 0);
         return;
@@ -4076,78 +4109,78 @@ function renderDisputes() {
         var inbound = disputeIsInbound(d);
         return '' +
             '<tr>' +
-                '<td class="material-name-cell">' +
-                    '<div class="mat-name">' + escapeHtml(d.material || '—') +
-                        (d.isWaste ? '<span class="waste-badge">&#9851; waste</span>' : '') +
-                        (inbound
-                            ? '<span class="dir-badge dir-in">&#8601; came back</span>'
-                            : '<span class="dir-badge dir-out">&#8599; issued out</span>') +
-                    '</div>' +
-                    // The size is how anybody finds one specific remnant on the
-                    // rack — the material name alone matches a dozen rows.
-                    (d.isWaste && d.length > 0
-                        ? '<div class="mat-sku">' + fmt(d.length) + ' × ' + fmt(d.width) + ' cm</div>'
-                        : '') +
-                    '<div class="mat-sku">' + escapeHtml(d.salesOrder || '') +
-                        (d.planNo ? ' · ' + escapeHtml(d.planNo) : '') + '</div>' +
-                '</td>' +
-                '<td>' + escapeHtml(d.supervisor || '—') + '</td>' +
-                '<td class="col-num">' + fmt(d.issued) + '<span class="unit">' + escapeHtml(d.unit || '') + '</span></td>' +
-                '<td class="col-num">' + fmt(d.received) + '<span class="unit">' + escapeHtml(d.unit || '') + '</span></td>' +
-                '<td class="col-num col-strong">' +
-                    '<span class="qty-big">' + fmt(d.remaining) +
-                        '<span class="unit">' + escapeHtml(d.unit || '') + '</span></span>' +
-                    (d.resolved > 0
-                        ? '<div class="qty-sub">' + fmt(d.resolved) + ' already settled</div>'
-                        : '') +
-                '</td>' +
-                '<td>' + escapeHtml(d.raisedOn || '—') + '</td>' +
-                '<td class="col-action">' +
-                    // The supervisor's answer belongs on the row, not buried in
-                    // the dialog. A denial resolves nothing on its own, so a
-                    // bare Resolve button next to an unchanged Outstanding reads
-                    // as his answer having gone nowhere.
-                    (d.supervisorDenied
-                        ? '<div class="answer-tag">He answered: &ldquo;' +
-                              escapeHtml(disputeSupervisorAnswer(d)) + '&rdquo;</div>'
-                        : '') +
-                    '<button type="button" class="raise-btn' +
-                        (d.supervisorDenied ? ' is-danger' : '') +
-                        '" onclick="openResolveDialog(' + i + ')">Resolve</button>' +
-                    (disputeWaitingOn(d)
-                        ? '<div class="turn-tag">' + escapeHtml(disputeWaitingOn(d)) + '</div>'
-                        : '') +
-                '</td>' +
+            '<td class="material-name-cell">' +
+            '<div class="mat-name">' + escapeHtml(d.material || '—') +
+            (d.isWaste ? '<span class="waste-badge">&#9851; waste</span>' : '') +
+            (inbound
+                ? '<span class="dir-badge dir-in">&#8601; came back</span>'
+                : '<span class="dir-badge dir-out">&#8599; issued out</span>') +
+            '</div>' +
+            // The size is how anybody finds one specific remnant on the
+            // rack — the material name alone matches a dozen rows.
+            (d.isWaste && d.length > 0
+                ? '<div class="mat-sku">' + fmt(d.length) + ' × ' + fmt(d.width) + ' cm</div>'
+                : '') +
+            '<div class="mat-sku">' + escapeHtml(d.salesOrder || '') +
+            (d.planNo ? ' · ' + escapeHtml(d.planNo) : '') + '</div>' +
+            '</td>' +
+            '<td>' + escapeHtml(d.supervisor || '—') + '</td>' +
+            '<td class="col-num">' + fmt(d.issued) + '<span class="unit">' + escapeHtml(d.unit || '') + '</span></td>' +
+            '<td class="col-num">' + fmt(d.received) + '<span class="unit">' + escapeHtml(d.unit || '') + '</span></td>' +
+            '<td class="col-num col-strong">' +
+            '<span class="qty-big">' + fmt(d.remaining) +
+            '<span class="unit">' + escapeHtml(d.unit || '') + '</span></span>' +
+            (d.resolved > 0
+                ? '<div class="qty-sub">' + fmt(d.resolved) + ' already settled</div>'
+                : '') +
+            '</td>' +
+            '<td>' + escapeHtml(d.raisedOn || '—') + '</td>' +
+            '<td class="col-action">' +
+            // The supervisor's answer belongs on the row, not buried in
+            // the dialog. A denial resolves nothing on its own, so a
+            // bare Resolve button next to an unchanged Outstanding reads
+            // as his answer having gone nowhere.
+            (d.supervisorDenied
+                ? '<div class="answer-tag">He answered: &ldquo;' +
+                escapeHtml(disputeSupervisorAnswer(d)) + '&rdquo;</div>'
+                : '') +
+            '<button type="button" class="raise-btn' +
+            (d.supervisorDenied ? ' is-danger' : '') +
+            '" onclick="openResolveDialog(' + i + ')">Resolve</button>' +
+            (disputeWaitingOn(d)
+                ? '<div class="turn-tag">' + escapeHtml(disputeWaitingOn(d)) + '</div>'
+                : '') +
+            '</td>' +
             '</tr>';
     }).join('');
 
     panel.innerHTML =
         '<div class="item-card">' +
-            '<div class="item-header static-header">' +
-                '<div class="item-header-info">' +
-                    '<h2>Open disputes</h2>' +
-                    '<div class="item-meta-line"><span>Material issued but not confirmed, and leftover pieces that did not come back</span></div>' +
-                '</div>' +
-            '</div>' +
-            '<div class="item-body is-open">' +
-                '<div class="tables-container">' +
-                    '<div class="table-wrapper">' +
-                        '<table><thead><tr>' +
-                            '<th>Material</th>' +
-                            '<th>Supervisor</th>' +
-                            // Not "Issued"/"Received": on an inbound row the
-                            // supervisor is the one who handed over and the store
-                            // is the one who confirmed. A column has to mean the
-                            // same thing on every row of the table.
-                            '<th class="col-num">Handed over</th>' +
-                            '<th class="col-num">Confirmed</th>' +
-                            '<th class="col-num">Outstanding</th>' +
-                            '<th>Raised</th>' +
-                            '<th class="col-action"></th>' +
-                        '</tr></thead><tbody>' + rows + '</tbody></table>' +
-                    '</div>' +
-                '</div>' +
-            '</div>' +
+        '<div class="item-header static-header">' +
+        '<div class="item-header-info">' +
+        '<h2>Open disputes</h2>' +
+        '<div class="item-meta-line"><span>Material issued but not confirmed, and leftover pieces that did not come back</span></div>' +
+        '</div>' +
+        '</div>' +
+        '<div class="item-body is-open">' +
+        '<div class="tables-container">' +
+        '<div class="table-wrapper">' +
+        '<table><thead><tr>' +
+        '<th>Material</th>' +
+        '<th>Supervisor</th>' +
+        // Not "Issued"/"Received": on an inbound row the
+        // supervisor is the one who handed over and the store
+        // is the one who confirmed. A column has to mean the
+        // same thing on every row of the table.
+        '<th class="col-num">Handed over</th>' +
+        '<th class="col-num">Confirmed</th>' +
+        '<th class="col-num">Outstanding</th>' +
+        '<th>Raised</th>' +
+        '<th class="col-action"></th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table>' +
+        '</div>' +
+        '</div>' +
+        '</div>' +
         '</div>';
 
     setTabCount('count-disputes', disputes.length);
@@ -4167,75 +4200,75 @@ function openResolveDialog(idx) {
     // whether the material is in this person's hands, not a name for a state.
     var options = inbound
         ? '<option value="Found">I have the pieces after all</option>' +
-          '<option value="Denied">I don\'t have the pieces</option>'
+        '<option value="Denied">I don\'t have the pieces</option>'
         : '<option value="Store_Correction">I over-recorded, it never left the shelf</option>' +
-          '<option value="Denied">I don\'t have it, it left the store</option>';
+        '<option value="Denied">I don\'t have it, it left the store</option>';
 
     el.classList.remove('hidden');
     el.innerHTML =
         '<div class="exc-panel exc-panel-wide">' +
-            '<h3>Resolve dispute</h3>' +
-            '<p class="exc-sub">' + escapeHtml(d.material || '') + ' &middot; ' +
-                escapeHtml(d.supervisor || '') + '</p>' +
-            '<div class="exc-facts">' +
-                '<span>' + (inbound ? 'Declared' : 'Issued') + ' <b>' + fmt(d.issued) + ' ' + escapeHtml(d.unit || '') + '</b></span>' +
-                '<span>' + (inbound ? 'Found' : 'Received') + ' <b>' + fmt(d.received) + ' ' + escapeHtml(d.unit || '') + '</b></span>' +
-                '<span class="exc-strong">Outstanding <b>' + fmt(d.remaining) + ' ' + escapeHtml(d.unit || '') + '</b></span>' +
-            '</div>' +
+        '<h3>Resolve dispute</h3>' +
+        '<p class="exc-sub">' + escapeHtml(d.material || '') + ' &middot; ' +
+        escapeHtml(d.supervisor || '') + '</p>' +
+        '<div class="exc-facts">' +
+        '<span>' + (inbound ? 'Declared' : 'Issued') + ' <b>' + fmt(d.issued) + ' ' + escapeHtml(d.unit || '') + '</b></span>' +
+        '<span>' + (inbound ? 'Found' : 'Received') + ' <b>' + fmt(d.received) + ' ' + escapeHtml(d.unit || '') + '</b></span>' +
+        '<span class="exc-strong">Outstanding <b>' + fmt(d.remaining) + ' ' + escapeHtml(d.unit || '') + '</b></span>' +
+        '</div>' +
 
-            // Lost is nobody's to declare — it is what the system concludes
-            // once both sides have said no.
-            '<label class="exc-label">What happened?</label>' +
-            '<select id="res-type" onchange="onResTypeChange(' + idx + ')">' +
-                options +
-            '</select>' +
+        // Lost is nobody's to declare — it is what the system concludes
+        // once both sides have said no.
+        '<label class="exc-label">What happened?</label>' +
+        '<select id="res-type" onchange="onResTypeChange(' + idx + ')">' +
+        options +
+        '</select>' +
 
-            // What the raiser said at the time. On an outbound dispute this is
-            // the supervisor's reason and the store has not seen it before.
-            (d.raisedNote
-                ? '<div class="exc-quote">Raised as: &ldquo;' + escapeHtml(d.raisedNote) + '&rdquo;</div>'
+        // What the raiser said at the time. On an outbound dispute this is
+        // the supervisor's reason and the store has not seen it before.
+        (d.raisedNote
+            ? '<div class="exc-quote">Raised as: &ldquo;' + escapeHtml(d.raisedNote) + '&rdquo;</div>'
+            : '') +
+
+        (d.supervisorDenied
+            ? '<div class="exc-warn" id="res-warn">' +
+            // The same Supervisor_Denied line means the opposite
+            // sentence each way round: outbound he never received it,
+            // inbound he insists he sent it.
+            '<b>' + (inbound
+                ? 'The supervisor says he does not have them — he sent them back.'
+                : 'The supervisor says he does not have it.') + '</b>' +
+            (d.supervisorNote
+                ? '<div class="exc-warn-quote">&ldquo;' + escapeHtml(d.supervisorNote) + '&rdquo;</div>'
                 : '') +
-
-            (d.supervisorDenied
-                ? '<div class="exc-warn" id="res-warn">' +
-                      // The same Supervisor_Denied line means the opposite
-                      // sentence each way round: outbound he never received it,
-                      // inbound he insists he sent it.
-                      '<b>' + (inbound
-                          ? 'The supervisor says he does not have them — he sent them back.'
-                          : 'The supervisor says he does not have it.') + '</b>' +
-                      (d.supervisorNote
-                          ? '<div class="exc-warn-quote">&ldquo;' + escapeHtml(d.supervisorNote) + '&rdquo;</div>'
-                          : '') +
-                      '<div>If you also say it is not with you, the ' +
-                      fmt(d.remaining) + ' ' + escapeHtml(d.unit || '') +
-                      (inbound
-                          ? ' is written off as lost. The store never had it, so nothing comes out of stock.'
-                          : ' is written off as lost and comes out of stock.') +
-                      '</div>' +
-                  '</div>'
-                : '') +
-
-            '<div id="res-qty-wrap">' +
-                '<label class="exc-label">How much</label>' +
-                '<input type="number" id="res-qty" ' +
-                    (inbound ? 'step="1"' : 'step="0.01"') +
-                    ' min="0" max="' + d.remaining + '" value="' + d.remaining + '">' +
-                '<p class="exc-hint">' +
-                    (inbound
-                        ? 'Enter only what the store has actually got in hand — the rest stays open.'
-                        : 'Correct part of it if only some was over-recorded — the rest stays open.') +
-                '</p>' +
+            '<div>If you also say it is not with you, the ' +
+            fmt(d.remaining) + ' ' + escapeHtml(d.unit || '') +
+            (inbound
+                ? ' is written off as lost. The store never had it, so nothing comes out of stock.'
+                : ' is written off as lost and comes out of stock.') +
             '</div>' +
+            '</div>'
+            : '') +
 
-            '<label class="exc-label">Note</label>' +
-            '<textarea id="res-note" rows="2" placeholder="What did you check, and what did you find"></textarea>' +
+        '<div id="res-qty-wrap">' +
+        '<label class="exc-label">How much</label>' +
+        '<input type="number" id="res-qty" ' +
+        (inbound ? 'step="1"' : 'step="0.01"') +
+        ' min="0" max="' + d.remaining + '" value="' + d.remaining + '">' +
+        '<p class="exc-hint">' +
+        (inbound
+            ? 'Enter only what the store has actually got in hand — the rest stays open.'
+            : 'Correct part of it if only some was over-recorded — the rest stays open.') +
+        '</p>' +
+        '</div>' +
 
-            '<div class="exc-foot">' +
-                '<button type="button" class="ghost-btn" onclick="closeExceptionDialog()">Cancel</button>' +
-                '<button type="button" class="primary-btn" id="res-send" ' +
-                    'onclick="submitResolve(' + idx + ')">Save</button>' +
-            '</div>' +
+        '<label class="exc-label">Note</label>' +
+        '<textarea id="res-note" rows="2" placeholder="What did you check, and what did you find"></textarea>' +
+
+        '<div class="exc-foot">' +
+        '<button type="button" class="ghost-btn" onclick="closeExceptionDialog()">Cancel</button>' +
+        '<button type="button" class="primary-btn" id="res-send" ' +
+        'onclick="submitResolve(' + idx + ')">Save</button>' +
+        '</div>' +
         '</div>';
 
     // Sets the opening state: correction is selected, so the quantity box is
@@ -4302,9 +4335,9 @@ function submitResolve(idx) {
             fmt(d.remaining) + ' ' + (d.unit || '') + ' of ' + d.material +
             (disputeIsInbound(d)
                 ? ' will be written off as lost. The store never had it, so it ' +
-                  'will not be offered to any order.'
+                'will not be offered to any order.'
                 : ' will be written off as lost and removed from stock.\n\n' +
-                  'The order still needs it, so the requirement re-opens for you to issue again.')
+                'The order still needs it, so the requirement re-opens for you to issue again.')
         );
         if (!ok) return;
     }
@@ -4345,9 +4378,9 @@ function submitResolve(idx) {
             } else if (parsed.applied === 'Lost') {
                 alert(disputeIsInbound(d)
                     ? 'Written off as lost. The store never had them, so ' +
-                      'they will not be offered to any order.'
+                    'they will not be offered to any order.'
                     : 'Written off as lost. The requirement has re-opened, so it ' +
-                      'will show on your issue list again.');
+                    'will show on your issue list again.');
             }
             loadDisputes();
             loadCounts();
@@ -4518,16 +4551,16 @@ function histBar(handovers, lineCount) {
 
     return '' +
         '<div class="day-bar">' +
-            '<label class="range-label">From</label>' +
-            '<input type="date" id="hist-from" value="' + toInputDate(histFrom) +
-                '" max="' + toInputDate(todayMidnight()) + '" onchange="onHistRangeChange()">' +
-            '<label class="range-label">To</label>' +
-            '<input type="date" id="hist-to" value="' + toInputDate(histTo) +
-                '" max="' + toInputDate(todayMidnight()) + '" onchange="onHistRangeChange()">' +
-            '<button type="button" class="raise-btn is-stale" onclick="histPreset(1)">Today</button>' +
-            '<button type="button" class="raise-btn is-stale" onclick="histPreset(7)">7 days</button>' +
-            '<button type="button" class="raise-btn is-stale" onclick="histPreset(30)">30 days</button>' +
-            '<span class="day-bar-sub">' + escapeHtml(summary) + '</span>' +
+        '<label class="range-label">From</label>' +
+        '<input type="date" id="hist-from" value="' + toInputDate(histFrom) +
+        '" max="' + toInputDate(todayMidnight()) + '" onchange="onHistRangeChange()">' +
+        '<label class="range-label">To</label>' +
+        '<input type="date" id="hist-to" value="' + toInputDate(histTo) +
+        '" max="' + toInputDate(todayMidnight()) + '" onchange="onHistRangeChange()">' +
+        '<button type="button" class="raise-btn is-stale" onclick="histPreset(1)">Today</button>' +
+        '<button type="button" class="raise-btn is-stale" onclick="histPreset(7)">7 days</button>' +
+        '<button type="button" class="raise-btn is-stale" onclick="histPreset(30)">30 days</button>' +
+        '<span class="day-bar-sub">' + escapeHtml(summary) + '</span>' +
         '</div>';
 }
 
@@ -4543,8 +4576,8 @@ function renderHistory(handovers, lineCount) {
     if (handovers.length === 0) {
         panel.innerHTML = bar +
             '<div class="panel-placeholder">' +
-                '<h2>Nothing issued in this range</h2>' +
-                '<p>Try a wider range, or one of the shortcuts above.</p>' +
+            '<h2>Nothing issued in this range</h2>' +
+            '<p>Try a wider range, or one of the shortcuts above.</p>' +
             '</div>';
         return;
     }
@@ -4564,14 +4597,14 @@ function renderHistory(handovers, lineCount) {
             var hasCut = Number(l.cutWidth) > 0 && Number(l.cutLength) > 0;
             return '<tr>' +
                 '<td class="material-name-cell">' +
-                    '<div class="mat-name">' + escapeHtml(l.material || '—') + '</div>' +
-                    (l.sku ? '<div class="mat-sku">' + escapeHtml(l.sku) + '</div>' : '') +
+                '<div class="mat-name">' + escapeHtml(l.material || '—') + '</div>' +
+                (l.sku ? '<div class="mat-sku">' + escapeHtml(l.sku) + '</div>' : '') +
                 '</td>' +
                 '<td>' + (hasCut
                     ? '<span class="cut-size">' + fmt(l.cutLength) + ' &times; ' + fmt(l.cutWidth) + '<span class="unit">cm</span></span>'
                     : '<span class="is-muted">&mdash;</span>') + '</td>' +
                 '<td class="col-num col-strong">' + fmt(l.qty) + '<span class="unit">' + escapeHtml(l.unit || '') + '</span></td>' +
-            '</tr>';
+                '</tr>';
         }).join('');
 
         // Date on every card now — over a range, "18:05" alone does not say
@@ -4591,31 +4624,31 @@ function renderHistory(handovers, lineCount) {
 
         return '' +
             '<div class="item-card' + (idx === 0 ? ' open' : '') + '" id="hist-card-' + idx + '">' +
-                '<div class="item-header" onclick="toggleHistory(' + idx + ')">' +
-                    '<div class="item-header-info">' +
-                        '<h2>' + escapeHtml(h.supervisor || 'Unknown') + '</h2>' +
-                        '<div class="item-meta-line"><span>' + when + '</span></div>' +
-                    '</div>' +
-                    '<div class="item-header-right">' +
-                        '<span class="status-pill ' +
-                            (h.status === 'Received' ? 'status-sufficient' : 'status-partial') + '">' +
-                            escapeHtml((h.status || '').replace('_', ' ')) +
-                        '</span>' +
-                        '<span class="chevron" aria-hidden="true">' +
-                            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
-                                'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
-                        '</span>' +
-                    '</div>' +
-                '</div>' +
-                '<div class="item-body">' +
-                    '<div class="tables-container">' +
-                        '<div class="table-wrapper">' +
-                            '<table><thead><tr>' +
-                                '<th>Material</th><th>Cut piece size</th><th class="col-num">Qty issued</th>' +
-                            '</tr></thead><tbody>' + lines + '</tbody></table>' +
-                        '</div>' +
-                    '</div>' +
-                '</div>' +
+            '<div class="item-header" onclick="toggleHistory(' + idx + ')">' +
+            '<div class="item-header-info">' +
+            '<h2>' + escapeHtml(h.supervisor || 'Unknown') + '</h2>' +
+            '<div class="item-meta-line"><span>' + when + '</span></div>' +
+            '</div>' +
+            '<div class="item-header-right">' +
+            '<span class="status-pill ' +
+            (h.status === 'Received' ? 'status-sufficient' : 'status-partial') + '">' +
+            escapeHtml((h.status || '').replace('_', ' ')) +
+            '</span>' +
+            '<span class="chevron" aria-hidden="true">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
+            'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
+            '</span>' +
+            '</div>' +
+            '</div>' +
+            '<div class="item-body">' +
+            '<div class="tables-container">' +
+            '<div class="table-wrapper">' +
+            '<table><thead><tr>' +
+            '<th>Material</th><th>Cut piece size</th><th class="col-num">Qty issued</th>' +
+            '</tr></thead><tbody>' + lines + '</tbody></table>' +
+            '</div>' +
+            '</div>' +
+            '</div>' +
             '</div>';
     }).join('');
 
@@ -4631,7 +4664,7 @@ function renderHistory(handovers, lineCount) {
             fn: 'histGoto',
             noun: 'handovers'
         }) +
-    '</div>';
+        '</div>';
 
     panel.innerHTML = bar + cards + pager;
 }
@@ -4693,8 +4726,8 @@ function renderRequests(requests, openCount) {
     if (requests.length === 0) {
         panel.innerHTML =
             '<div class="panel-placeholder">' +
-                '<h2>No requests raised</h2>' +
-                '<p>Shortage and wash requests you raise will be listed here.</p>' +
+            '<h2>No requests raised</h2>' +
+            '<p>Shortage and wash requests you raise will be listed here.</p>' +
             '</div>';
         setTabCount('count-requests', 0);
         return;
@@ -4710,44 +4743,44 @@ function renderRequests(requests, openCount) {
         var open = requestIsOpen(r);
         return '<tr class="' + (open ? '' : 'row-issued') + '">' +
             '<td><span class="status-pill ' + (open ? 'status-partial' : 'status-sufficient') + '">' +
-                escapeHtml(requestKindLabel(r.kind)) + '</span></td>' +
+            escapeHtml(requestKindLabel(r.kind)) + '</span></td>' +
             '<td class="material-name-cell">' +
-                '<div class="mat-name">' + escapeHtml(r.material || '—') + '</div>' +
-                (r.orders > 0
-                    ? '<div class="mat-sku">' + r.orders + ' order' + (r.orders === 1 ? '' : 's') + ' waiting</div>'
-                    : '') +
+            '<div class="mat-name">' + escapeHtml(r.material || '—') + '</div>' +
+            (r.orders > 0
+                ? '<div class="mat-sku">' + r.orders + ' order' + (r.orders === 1 ? '' : 's') + ' waiting</div>'
+                : '') +
             '</td>' +
             '<td class="col-num">' + fmt(r.qty) + '<span class="unit">' + escapeHtml(r.unit || '') + '</span></td>' +
             '<td class="col-num col-strong">' +
-                (Number(r.done) > 0
-                    ? fmt(r.done) + '<span class="unit">' + escapeHtml(r.unit || '') + '</span>'
-                    : '<span class="is-muted">&mdash;</span>') +
+            (Number(r.done) > 0
+                ? fmt(r.done) + '<span class="unit">' + escapeHtml(r.unit || '') + '</span>'
+                : '<span class="is-muted">&mdash;</span>') +
             '</td>' +
             '<td>' + escapeHtml((r.status || '').replace('_', ' ')) + '</td>' +
             '<td>' + escapeHtml(r.raisedOn || '—') + '</td>' +
-        '</tr>';
+            '</tr>';
     }).join('');
 
     panel.innerHTML =
         '<div class="item-card">' +
-            '<div class="item-header static-header">' +
-                '<div class="item-header-info">' +
-                    '<h2>My requests</h2>' +
-                    '<div class="item-meta-line"><span>' + openCount + ' still outstanding</span></div>' +
-                '</div>' +
-            '</div>' +
-            '<div class="item-body is-open">' +
-                '<div class="tables-container">' +
-                    '<div class="table-wrapper">' +
-                        '<table><thead><tr>' +
-                            '<th>Type</th><th>Material</th>' +
-                            '<th class="col-num">Requested</th>' +
-                            '<th class="col-num">Received</th>' +
-                            '<th>Status</th><th>Raised</th>' +
-                        '</tr></thead><tbody>' + rows + '</tbody></table>' +
-                    '</div>' +
-                '</div>' +
-            '</div>' +
+        '<div class="item-header static-header">' +
+        '<div class="item-header-info">' +
+        '<h2>My requests</h2>' +
+        '<div class="item-meta-line"><span>' + openCount + ' still outstanding</span></div>' +
+        '</div>' +
+        '</div>' +
+        '<div class="item-body is-open">' +
+        '<div class="tables-container">' +
+        '<div class="table-wrapper">' +
+        '<table><thead><tr>' +
+        '<th>Type</th><th>Material</th>' +
+        '<th class="col-num">Requested</th>' +
+        '<th class="col-num">Received</th>' +
+        '<th>Status</th><th>Raised</th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table>' +
+        '</div>' +
+        '</div>' +
+        '</div>' +
         '</div>';
 
     setTabCount('count-requests', openCount);
@@ -4853,8 +4886,8 @@ function renderStockIn() {
     var panel = document.getElementById('panel-stockin');
     panel.innerHTML =
         '<div class="stockin-search">' +
-            '<input type="text" id="stockin-filter" class="note-input" ' +
-                'placeholder="Search SKU or material…" oninput="onStockFilter()" />' +
+        '<input type="text" id="stockin-filter" class="note-input" ' +
+        'placeholder="Search SKU or material…" oninput="onStockFilter()" />' +
         '</div>' +
         '<div id="stockin-list">' + stockInListHtml() + '</div>';
 }
@@ -4874,7 +4907,7 @@ function stockInMatches() {
     if (!stockFilter) return stockMats;
     return stockMats.filter(function (m) {
         return (m.sku || '').toLowerCase().indexOf(stockFilter) !== -1 ||
-               (m.material || '').toLowerCase().indexOf(stockFilter) !== -1;
+            (m.material || '').toLowerCase().indexOf(stockFilter) !== -1;
     });
 }
 
@@ -4912,20 +4945,20 @@ function stockInListHtml() {
 
         return '' +
             '<div class="item-card' + (open ? ' open' : '') + '">' +
-                '<div class="item-header" onclick="toggleStockCard(\'' + m.materialId + '\')">' +
-                    '<div class="item-header-info">' +
-                        '<h2>' + escapeHtml(m.material || m.sku || '—') + '</h2>' +
-                        '<div class="item-meta-line">' +
-                            '<span>' + escapeHtml(m.sku || '') + '</span>' +
-                            '<span>' + m.lotCount + (m.lotCount === 1 ? ' lot' : ' lots') + '</span>' +
-                            '<span>' + fmt(m.wash) + ' washed &middot; ' + fmt(m.unwash) + ' unwashed' +
-                                ((Number(m.inWash) || 0) > 0
-                                    ? ' &middot; ' + fmt(m.inWash) + ' at wash' : '') + '</span>' +
-                            unalloc +
-                        '</div>' +
-                    '</div>' +
-                '</div>' +
-                (open ? stockCardBodyHtml(m) : '') +
+            '<div class="item-header" onclick="toggleStockCard(\'' + m.materialId + '\')">' +
+            '<div class="item-header-info">' +
+            '<h2>' + escapeHtml(m.material || m.sku || '—') + '</h2>' +
+            '<div class="item-meta-line">' +
+            '<span>' + escapeHtml(m.sku || '') + '</span>' +
+            '<span>' + m.lotCount + (m.lotCount === 1 ? ' lot' : ' lots') + '</span>' +
+            '<span>' + fmt(m.wash) + ' washed &middot; ' + fmt(m.unwash) + ' unwashed' +
+            ((Number(m.inWash) || 0) > 0
+                ? ' &middot; ' + fmt(m.inWash) + ' at wash' : '') + '</span>' +
+            unalloc +
+            '</div>' +
+            '</div>' +
+            '</div>' +
+            (open ? stockCardBodyHtml(m) : '') +
             '</div>';
     }).join('');
 }
@@ -4939,33 +4972,33 @@ function stockCardBodyHtml(m) {
     var rows = lots.map(function (l) {
         return '' +
             '<tr>' +
-                '<td class="material-name-cell">' +
-                    '<div class="mat-name">' + escapeHtml(l.lotNumber) + '</div>' +
-                '</td>' +
-                '<td class="col-num">' + fmt(l.wash) + '</td>' +
-                '<td class="col-num">' + fmt(l.unwash) + '</td>' +
-                '<td class="col-num">' + fmt(l.inWash) + '</td>' +
-                '<td class="col-num">' + fmt(l.inTransit) + '</td>' +
-                '<td class="col-num">' + fmt(l.disputed) + '</td>' +
-                '<td>' + (l.status === 'Blocked'
-                    ? '<span class="status-pill status-danger">Blocked</span>'
-                    : '<span class="status-pill status-sufficient">Active</span>') + '</td>' +
+            '<td class="material-name-cell">' +
+            '<div class="mat-name">' + escapeHtml(l.lotNumber) + '</div>' +
+            '</td>' +
+            '<td class="col-num">' + fmt(l.wash) + '</td>' +
+            '<td class="col-num">' + fmt(l.unwash) + '</td>' +
+            '<td class="col-num">' + fmt(l.inWash) + '</td>' +
+            '<td class="col-num">' + fmt(l.inTransit) + '</td>' +
+            '<td class="col-num">' + fmt(l.disputed) + '</td>' +
+            '<td>' + (l.status === 'Blocked'
+                ? '<span class="status-pill status-danger">Blocked</span>'
+                : '<span class="status-pill status-sufficient">Active</span>') + '</td>' +
             '</tr>';
     }).join('');
 
     var lotTable = lots.length === 0
         ? '<div class="waste-none">No lots yet &mdash; the first booking creates one.</div>'
         : '<div class="table-wrapper"><table>' +
-              '<thead><tr>' +
-                  '<th>Lot</th>' +
-                  '<th class="col-num">Washed</th>' +
-                  '<th class="col-num">Unwashed</th>' +
-                  '<th class="col-num">In wash</th>' +
-                  '<th class="col-num">In transit</th>' +
-                  '<th class="col-num">Disputed</th>' +
-                  '<th>Status</th>' +
-              '</tr></thead>' +
-              '<tbody>' + rows + '</tbody></table></div>';
+        '<thead><tr>' +
+        '<th>Lot</th>' +
+        '<th class="col-num">Washed</th>' +
+        '<th class="col-num">Unwashed</th>' +
+        '<th class="col-num">In wash</th>' +
+        '<th class="col-num">In transit</th>' +
+        '<th class="col-num">Disputed</th>' +
+        '<th>Status</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody></table></div>';
 
     // A blocked lot is quarantined — it must not be offered somewhere it could
     // quietly grow. saveStockInward refuses one anyway; this keeps the screen
@@ -4978,28 +5011,28 @@ function stockCardBodyHtml(m) {
 
     return '' +
         '<div class="item-body is-open">' +
-            lotTable +
-            '<div class="stockin-form">' +
-                '<label class="si-field"><span>Lot</span>' +
-                    '<select id="si-lot-' + m.materialId + '" class="note-input" ' +
-                        'onchange="onStockLotChange(\'' + m.materialId + '\')">' + opts + '</select>' +
-                '</label>' +
-                '<label class="si-field" id="si-num-wrap-' + m.materialId + '"><span>Lot number</span>' +
-                    '<input type="text" id="si-num-' + m.materialId + '" class="note-input" ' +
-                        'placeholder="as written on the roll" />' +
-                '</label>' +
-                '<label class="si-field"><span>Quantity</span>' +
-                    '<input type="number" step="0.01" min="0" id="si-qty-' + m.materialId + '" class="issue-input" />' +
-                '</label>' +
-                // No state to choose. Cloth arrives greige and is washed
-                // in-house, so everything booked here lands in unwashed; the
-                // wash flow is the only way into washed stock.
-            '</div>' +
-            '<div class="card-footer">' +
-                '<span class="sel-count">Goes in as <b>unwashed</b>. Match it against the rack first &mdash; a new lot cannot be merged back later.</span>' +
-                '<button type="button" class="primary-btn" id="si-btn-' + m.materialId + '" ' +
-                    'onclick="submitStockIn(\'' + m.materialId + '\')">Add to stock</button>' +
-            '</div>' +
+        lotTable +
+        '<div class="stockin-form">' +
+        '<label class="si-field"><span>Lot</span>' +
+        '<select id="si-lot-' + m.materialId + '" class="note-input" ' +
+        'onchange="onStockLotChange(\'' + m.materialId + '\')">' + opts + '</select>' +
+        '</label>' +
+        '<label class="si-field" id="si-num-wrap-' + m.materialId + '"><span>Lot number</span>' +
+        '<input type="text" id="si-num-' + m.materialId + '" class="note-input" ' +
+        'placeholder="as written on the roll" />' +
+        '</label>' +
+        '<label class="si-field"><span>Quantity</span>' +
+        '<input type="number" step="0.01" min="0" id="si-qty-' + m.materialId + '" class="issue-input" />' +
+        '</label>' +
+        // No state to choose. Cloth arrives greige and is washed
+        // in-house, so everything booked here lands in unwashed; the
+        // wash flow is the only way into washed stock.
+        '</div>' +
+        '<div class="card-footer">' +
+        '<span class="sel-count">Goes in as <b>unwashed</b>. Match it against the rack first &mdash; a new lot cannot be merged back later.</span>' +
+        '<button type="button" class="primary-btn" id="si-btn-' + m.materialId + '" ' +
+        'onclick="submitStockIn(\'' + m.materialId + '\')">Add to stock</button>' +
+        '</div>' +
         '</div>';
 }
 
@@ -5191,7 +5224,7 @@ function renderMaterials() {
     if (!listContainer) {
         var activeClassFabric = RAW_MATERIAL_FILTER === 'fabric' ? ' is-active' : '';
         var activeClassOther = RAW_MATERIAL_FILTER === 'other' ? ' is-active' : '';
-        
+
         var headerHtml = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">' +
             '<nav class="tab-strip" style="margin-bottom:0; box-shadow:none; border:none; background:none; padding:0;">' +
             '<button type="button" class="tab-btn' + activeClassFabric + '" id="subtab-fabric">Fabric</button>' +
@@ -5202,7 +5235,7 @@ function renderMaterials() {
             '</div>' +
             '</div>' +
             '<div id="materials-list-container"></div>';
-        
+
         panel.innerHTML = headerHtml;
         listContainer = document.getElementById('materials-list-container');
         setupMaterialsHeaderListeners();
@@ -5229,7 +5262,7 @@ function renderMaterials() {
                 var stockClass = rm.stock > 0 ? 'yes' : 'no';
                 var stockLabel = rm.stock > 0 ? fmt(rm.stock) : 'Out';
                 var unitLabel = rm.stock > 0 ? ' <span class="unit" style="color:var(--text-muted); font-size:11px;">' + escapeHtml(rm.unit) + '</span>' : '';
-                
+
                 var washLabel = rm.isFabric ? (rm.washQty > 0 ? (fmt(rm.washQty) + ' <span class="unit" style="color:var(--text-muted); font-size:11px;">' + escapeHtml(rm.unit) + '</span>') : '0') : '<span class="muted">—</span>';
                 var unwashLabel = rm.isFabric ? (rm.unwashQty > 0 ? (fmt(rm.unwashQty) + ' <span class="unit" style="color:var(--text-muted); font-size:11px;">' + escapeHtml(rm.unit) + '</span>') : '0') : '<span class="muted">—</span>';
                 var widthLabel = rm.isFabric ? (rm.width ? (escapeHtml(rm.width) + '"') : '<span class="muted">—</span>') : '<span class="muted">—</span>';
@@ -5279,8 +5312,8 @@ function renderMaterials() {
             '<button type="button" class="group-header-btn" data-pattern="' + escapeHtml(grp) + '" style="display:flex; width:100%; align-items:center; justify-content:space-between; padding:12px 16px; background:#f8fafc; border:none; text-align:left; font:inherit; font-weight:700; color:var(--text-main); cursor:pointer; ' + expandedHeaderStyle + '">' +
             '<span>' + escapeHtml(grp) + ' <span style="font-weight:400; color:var(--text-muted); font-size:12px; margin-left:6px;">(' + list.length + ')</span></span>' +
             '<span class="chevron" aria-hidden="true">' +
-                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
-                    'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
+            'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
             '</span>' +
             '</button>' +
             tableHtml +
