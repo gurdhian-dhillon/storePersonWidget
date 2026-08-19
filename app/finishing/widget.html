@@ -3,22 +3,48 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Finishing Dashboard</title>
+    <title>Finishing & Packing Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <!-- Load shared styles and local custom styles -->
     <link rel="stylesheet" href="../css/style.css">
     <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/packing.css">
 </head>
 <body>
     <div class="app-container">
 
+        <!-- Shared Top Header (Fixed for both tabs) -->
         <header class="app-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 1rem; flex-wrap: wrap; gap: 1rem;">
-            <div class="app-header-left">
-                <h1 style="margin: 0; font-size: 1.5rem; font-weight: 700;">Finishing Dashboard</h1>
-                <p style="margin: 4px 0 0 0; font-size: 0.875rem; color: var(--text-muted);">Track folding, pressing, and branding operations</p>
+            <div class="app-header-left" style="display: flex; align-items: baseline; gap: 10px;">
+                <h1 id="app-title-el" style="margin: 0; font-size: 1.5rem; font-weight: 700;">Finishing Dashboard</h1>
+                <p style="margin: 0; font-size: 0.875rem; color: var(--text-muted);" id="app-date-el">Wednesday, 19 Aug 2026</p>
             </div>
             
-            <div class="app-header-right" style="display: flex; gap: 1.5rem; align-items: center; flex-wrap: wrap;">
+            <div class="app-header-right" style="display: flex; gap: 1rem; align-items: center;">
+                <!-- Shared Supervisor Selector -->
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <select class="staff-select" id="staff-select-el" style="min-width: 180px; font-weight: 600; padding: 0.55rem 0.75rem; border-radius: 0.5rem; background: #fff; color: var(--text-main); border: 1px solid var(--border);">
+                        <option value="">Loading supervisors...</option>
+                    </select>
+                </div>
+                <button id="refresh-dashboard-btn" class="primary-btn" type="button" onclick="onRefreshClicked()">Refresh</button>
+            </div>
+        </header>
+
+        <!-- Top Navigation Tabs (Finishing vs Packing) -->
+        <nav class="tab-strip" id="top-tab-strip" style="margin-top: 1rem; margin-bottom: 1.5rem;">
+            <button type="button" class="tab-btn is-active" id="tab-top-finishing" onclick="switchTopTab('finishing')">
+                🧵 Finishing Dashboard
+            </button>
+            <button type="button" class="tab-btn" id="tab-top-packing" onclick="switchTopTab('packing')">
+                📦 Packing Dashboard
+            </button>
+        </nav>
+
+        <!-- PANEL 1: FINISHING -->
+        <div class="tab-panel is-active" id="panel-top-finishing">
+            <!-- Finishing Sub-Toolbar -->
+            <div style="display: flex; justify-content: flex-end; margin-bottom: 1.25rem;">
                 <!-- Plan dropdown selector -->
                 <div style="display: flex; flex-direction: column; gap: 4px;">
                     <span style="font-size: 10px; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;">Select Plan No</span>
@@ -26,75 +52,197 @@
                         <option value="">Choose a Plan...</option>
                     </select>
                 </div>
-
-                <!-- Supervisor Selector -->
-                <div class="staff-info" style="display: flex; align-items: center; gap: 0.75rem; border-left: 1px solid var(--border); padding-left: 1.5rem;">
-                    <span class="staff-avatar" id="staff-avatar-initial" style="margin: 0;">S</span>
-                    <div style="display: flex; flex-direction: column; gap: 4px;">
-                        <span style="font-size: 10px; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;">Supervisor</span>
-                        <select class="staff-select" id="staff-select-el" style="min-width: 180px; font-weight: 600;">
-                            <option value="">Loading supervisors...</option>
-                        </select>
-                    </div>
-                </div>
             </div>
-        </header>
 
-        <!-- Dynamic Plan Summary Bar (rendered when a plan is selected) -->
-        <div id="plan-summary-container" style="margin-top: 1.5rem;"></div>
+            <!-- Dynamic Plan Summary Bar (rendered when a plan is selected) -->
+            <div id="plan-summary-container" style="margin-top: 1.5rem;"></div>
 
-        <!-- Main Workspace: Single Column Accordion List -->
-        <div class="finishing-container" style="margin-top: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem;">
-            
-            <div class="item-card" style="display: flex; flex-direction: column; overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; box-shadow: var(--shadow-sm);">
-                <h2 style="font-size: 13px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: var(--text-muted); margin: 0 0 1rem 0;">Items Pending Finishing</h2>
-                
-                <div id="queue-list" style="display: flex; flex-direction: column; gap: 1rem;">
-                    <!-- Dynamic list populated by main.js with active job expanded inline -->
-                    <div class="empty-state" style="padding: 2rem 1rem;">
-                        <div class="icon">🔍</div>
-                        <p>Please select a plan number to load items</p>
+            <!-- Main Workspace: Single Column Accordion List -->
+            <div class="finishing-container" style="margin-top: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem;">
+                <div class="item-card" style="display: flex; flex-direction: column; overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; box-shadow: var(--shadow-sm);">
+                    <h2 style="font-size: 13px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: var(--text-muted); margin: 0 0 1rem 0;">Items Pending Finishing</h2>
+                    <div id="queue-list" style="display: flex; flex-direction: column; gap: 1rem;">
+                        <div class="empty-state" style="padding: 2rem 1rem;">
+                            <div class="icon">🔍</div>
+                            <p>Please select a plan number to load items</p>
+                        </div>
                     </div>
                 </div>
             </div>
 
+            <!-- Bottom: Completed Finishing History Log -->
+            <section class="finishing-history" style="margin-top: 1.5rem;">
+                <div class="item-card" style="border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow-sm);">
+                    <div class="pipeline-header pipeline-toolbar" style="padding:14px 16px; background:#f8fafc; border-bottom:1px solid var(--border);">
+                        <div>
+                            <h2 style="margin:0; font-size:13px; font-weight:700; letter-spacing:0.03em; text-transform:uppercase; color:var(--text-muted);">Completed Finishing History</h2>
+                            <span class="pipeline-help" style="display:block; margin-top:3px; font-size:12px; color:var(--text-muted);">Time tracking log of finished items</span>
+                        </div>
+                    </div>
+                    <div class="table-wrapper" style="margin-top:0; border-top:none; border-top-left-radius:0; border-top-right-radius:0;">
+                        <table class="rep-table" style="margin-bottom:0; width:100%; border-collapse:collapse;">
+                            <thead>
+                                <tr>
+                                    <th>Sales Order / Plan</th>
+                                    <th>Item Name</th>
+                                    <th class="r">Qty</th>
+                                    <th>Finished By</th>
+                                    <th class="r">Folding Time</th>
+                                    <th class="r">Pressing Time</th>
+                                    <th class="r">Branding Time</th>
+                                    <th>Completed On</th>
+                                </tr>
+                            </thead>
+                            <tbody id="history-list">
+                                <!-- Dynamic completed rows populated by main.js -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
         </div>
 
-        <!-- Bottom: Completed Finishing History Log -->
-        <section class="finishing-history" style="margin-top: 1.5rem;">
-            <div class="item-card" style="border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow-sm);">
-                <div class="pipeline-header pipeline-toolbar" style="padding:14px 16px; background:#f8fafc; border-bottom:1px solid var(--border);">
-                    <div>
-                        <h2 style="margin:0; font-size:13px; font-weight:700; letter-spacing:0.03em; text-transform:uppercase; color:var(--text-muted);">Completed Finishing History</h2>
-                        <span class="pipeline-help" style="display:block; margin-top:3px; font-size:12px; color:var(--text-muted);">Time tracking log of finished items</span>
-                    </div>
-                </div>
-                <div class="table-wrapper" style="margin-top:0; border-top:none; border-top-left-radius:0; border-top-right-radius:0;">
-                    <table class="rep-table" style="margin-bottom:0; width:100%; border-collapse:collapse;">
-                        <thead>
-                            <tr>
-                                <th>Sales Order / Plan</th>
-                                <th>Item Name</th>
-                                <th class="r">Qty</th>
-                                <th>Finished By</th>
-                                <th class="r">Folding Time</th>
-                                <th class="r">Pressing Time</th>
-                                <th class="r">Branding Time</th>
-                                <th>Completed On</th>
-                            </tr>
-                        </thead>
-                        <tbody id="history-list">
-                            <!-- Dynamic completed rows populated by main.js -->
-                        </tbody>
-                    </table>
+        <!-- PANEL 2: PACKING -->
+        <div class="tab-panel" id="panel-top-packing" style="display: none;">
+            <!-- Packing Sub-Toolbar: Packer selector only (Refresh is in shared header) -->
+            <div style="display: flex; justify-content: flex-end; align-items: center; margin-bottom: 1.25rem; gap: 1rem;">
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                    <span style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;">Packer / Staff:</span>
+                    <select class="staff-select" id="packer-select-el" style="min-width: 180px; font-weight: 600; padding: 0.55rem 0.75rem; border-radius: 0.5rem; background: #fff; color: var(--text-main); border: 1px solid var(--border);">
+                        <option value="">Loading staff...</option>
+                    </select>
                 </div>
             </div>
-        </section>
 
+            <!-- Top Horizontal Sales Orders Queue (Straight horizontal window) -->
+            <div class="packing-top-queue" style="margin-bottom: 1.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; box-shadow: var(--shadow-sm);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                    <h3 style="margin: 0; font-size: 0.875rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em;">📋 Orders to Pack</h3>
+                    <span class="badge" id="packing-queue-count" style="background: var(--primary); color: white; font-size: 0.75rem; font-weight: 700; padding: 2px 8px; border-radius: 9999px;">0</span>
+                </div>
+                <div id="packing-order-queue-list" style="display: flex; gap: 0.75rem; overflow-x: auto; padding-bottom: 0.5rem;">
+                    <div class="empty-state-small" style="width: 100%;">
+                        <div class="icon">📦</div>
+                        <p>No orders pending packing</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="packing-main-layout" style="display: flex; flex-direction: column; gap: 1.5rem; margin-top: 0;">
+                <!-- Main Packing Workspace -->
+                <main class="packing-workspace" style="padding: 0; width: 100%;">
+                    <div id="packing-workspace-empty-state" class="empty-state">
+                        <div class="icon">🔍</div>
+                        <h2>No Sales Order Selected</h2>
+                        <p>Select a sales order from the queue above to start packing</p>
+                    </div>
+
+                    <div id="packing-editor" class="packing-editor hidden">
+                        <!-- Order Details Panel -->
+                        <section class="order-details-card" style="padding: 1.25rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm);">
+                            <div class="order-info-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem;">
+                                <div style="display:flex; align-items:center; gap:0.75rem;">
+                                    <span class="order-no-label" id="packing-active-order-no" style="font-size:1.75rem; font-weight:800; color:var(--text-main); letter-spacing:-0.02em;">SO-0000</span>
+                                    <span class="badge" id="packing-active-source-badge" style="background:#e2e8f0; color:#475569;">Shopify</span>
+                                    <div class="order-meta-info" style="font-size:0.875rem; color:var(--text-muted); margin-left:1rem; display:flex; gap:1rem; border-left:1px solid var(--border); padding-left:1rem; align-items:center;">
+                                        <span>Items: <strong id="packing-active-items-count" style="color:var(--text-main);">0</strong></span>
+                                        <span>Total Pcs: <strong id="packing-active-pcs-count" style="color:var(--text-main);">0</strong></span>
+                                    </div>
+                                </div>
+                                <div>
+                                    <button type="button" class="action-btn-primary" onclick="autoPackItems3D()" style="background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%); color: white; padding: 0.55rem 1.15rem; font-weight: 700; border-radius: 0.5rem; border: none; box-shadow: 0 4px 6px -1px rgba(29, 78, 216, 0.15); cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 0.5rem; font-size: 13px;">
+                                        ⚡ Auto-Pack Items
+                                    </button>
+                                </div>
+                            </div>
+                        </section>
+
+                        <!-- Dynamic notification banner -->
+                        <div id="packing-notification-banner" class="hidden" style="margin-top: 1rem; margin-bottom: 0.5rem;"></div>
+
+                        <!-- Sub-tab Navigation -->
+                        <nav class="tab-strip" style="margin-top: 1rem;">
+                            <button type="button" class="tab-btn is-active" id="tab-inner-btn" onclick="switchPackingTab('inner')">
+                                1. Inner Boxes Packing
+                            </button>
+                            <button type="button" class="tab-btn" id="tab-outer-btn" onclick="switchPackingTab('outer')">
+                                2. Outer Box Placement
+                            </button>
+                        </nav>
+
+                        <div class="tab-body">
+                            <!-- TAB 1: INNER PACKING — Item-Centric Accordion -->
+                            <section class="tab-panel is-active" id="panel-inner">
+                                <div class="packing-instruction">
+                                    <span class="info-icon">ℹ️</span>
+                                    <p>Each item is packed into dedicated inner boxes (one item type per box). Click an item to expand and configure its boxes. Use ⚡ Auto-Pack to start automatically.</p>
+                                </div>
+
+                                <!-- Item Accordion List -->
+                                <div id="packing-items-accordion" style="display:flex; flex-direction:column; gap:0.75rem;">
+                                    <!-- Dynamically rendered by renderItemAccordion() -->
+                                </div>
+                            </section>
+
+                            <!-- TAB 2: OUTER PACKING -->
+                            <section class="tab-panel" id="panel-outer" style="display: none;">
+                                <div class="packing-instruction">
+                                    <span class="info-icon">ℹ️</span>
+                                    <p>Select outer boxes and assign inner boxes to them. Capacity and physical fit are calculated in real time using 3D dimensions.</p>
+                                </div>
+
+                                <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+                                    <!-- Unplaced Inner Boxes Panel -->
+                                    <div class="unplaced-boxes-panel" style="max-height: none; overflow-y: visible;">
+                                        <h3>Unplaced Inner Boxes</h3>
+                                        <div id="packing-unplaced-inner-boxes-list" style="display: flex; flex-wrap: wrap; gap: 0.75rem;">
+                                            <!-- List of inner boxes not yet placed in any outer box -->
+                                        </div>
+                                    </div>
+
+                                    <!-- Outer Boxes Panel -->
+                                    <div class="outer-boxes-panel" style="display: flex; flex-direction: column; gap: 1rem;">
+                                        <div class="panel-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                            <h3 style="margin: 0;">Outer Boxes</h3>
+                                            <button type="button" class="action-btn-primary" onclick="addOuterBox3D()">
+                                                ➕ Add Outer Box
+                                            </button>
+                                        </div>
+                                        <div id="packing-outer-boxes-list" class="boxes-container" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem;">
+                                            <!-- Dynamic outer boxes -->
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
+                        </div>
+
+                        <!-- Bottom Packing Action Bar -->
+                        <footer class="packing-action-bar">
+                            <div class="packing-validation-msg" id="packing-validation-msg">
+                                <!-- Verification issues displayed here -->
+                            </div>
+                            <div class="packing-buttons">
+                                <button type="button" class="action-btn-secondary" onclick="printPackingSlip3D()">
+                                    🖨️ Print Packing Slip
+                                </button>
+                                <button type="button" class="primary-btn" id="save-packing-btn" onclick="savePackingData3D()">
+                                    Check & Complete Packing
+                                </button>
+                            </div>
+                        </footer>
+                    </div>
+                </main>
+            </div>
+        </div>
     </div>
+
+    <!-- Print Slip Layout (Hidden by default, shown during print media) -->
+    <div id="print-layout" class="print-only"></div>
 
     <!-- Zoho Creator SDK and Widget JS -->
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <script src="js/packing-3d.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>
+

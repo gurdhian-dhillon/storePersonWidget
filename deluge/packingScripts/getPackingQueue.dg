@@ -1,0 +1,43 @@
+string getPackingQueue(string payloadJson)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		ordersJson = "";
+		for each so in Sales_Order[Order_Status == "Finishing Complete"]
+		{
+			if(ordersJson != "")
+			{
+				ordersJson = ordersJson + ",";
+			}
+			orderNo = ifnull(so.Sales_Order, "").toString().replaceAll("\"", "'");
+			orderSrc = ifnull(so.Order_Source, "").toString().replaceAll("\"", "'");
+			
+			// Count items in the order
+			itemCount = 0;
+			for each soRow in so.Item_Table
+			{
+				itemCount = itemCount + 1;
+			}
+			
+			// Calculate finished pieces directly from Plan_Item.Qty_Accepted
+			totalFinished = 0;
+			for each plan in Production_Planning[Sales_Order == so.ID]
+			{
+				for each pi in Plan_Item[Plan == plan.ID]
+				{
+					totalFinished = totalFinished + ifnull(pi.Qty_Accepted, 0).toLong();
+				}
+			}
+			
+			ordersJson = ordersJson + "{\"id\":\"" + so.ID + "\",\"orderNo\":\"" + orderNo + "\",\"source\":\"" + orderSrc + "\",\"itemCount\":" + itemCount + ",\"totalPieces\":" + totalFinished + "}";
+		}
+		
+		res = "{\"errors\":[],\"orders\":[" + ordersJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

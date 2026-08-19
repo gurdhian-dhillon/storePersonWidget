@@ -34,6 +34,7 @@ string completeFinishingJob(string payloadJson)
 			empId = emp.ID;
 		}
 		
+		ordersToRecheck = List();
 		// checkIdStr contains a comma-separated list of check IDs
 		checkIdsList = checkIdStr.toList(",");
 		for each checkIdVal in checkIdsList
@@ -43,10 +44,19 @@ string completeFinishingJob(string payloadJson)
 			// Resolve Qty Approved and Plan Item from this specific check record
 			checkQty = 0;
 			itemId = null;
+			planId = null;
 			for each chk in Item_Check[ID == checkId]
 			{
 				itemId = chk.Plan_Item;
+				if(chk.Plan != null)
+				{
+					planId = chk.Plan;
+				}
 				checkQty = ifnull(chk.Qty_Approved, 0).toLong();
+				if (chk.Sales_Order != null && !ordersToRecheck.contains(chk.Sales_Order.toString()))
+				{
+					ordersToRecheck.add(chk.Sales_Order.toString());
+				}
 			}
 			
 			// Insert finishing record into new 'Finishing_Data' form
@@ -75,7 +85,19 @@ string completeFinishingJob(string payloadJson)
 					f.Operator = empId;
 				}
 			}
+
+			// Update Plan_Item status to Finishing Done
+			for each pi in Plan_Item[ID == itemId]
+			{
+				pi.Item_Status = "Finishing Done";
+			}
 		}
+
+		for each oId in ordersToRecheck
+		{
+			thisapp.recheckFinishingComplete(oId);
+		}
+		
 		
 		res = "{\"success\":true,\"message\":\"Finishing records saved successfully\"}";
 	}

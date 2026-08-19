@@ -1,0 +1,87 @@
+string getPackingDetails(string payloadJson)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		inp = payloadJson.toMap();
+		salesIdStr = ifnull(inp.get("salesOrderId"), "").toString().trim();
+		if(salesIdStr == "" || salesIdStr.isNumber() == false)
+		{
+			return "{\"errors\":[\"Missing or invalid salesOrderId\"]}";
+		}
+		salesId = salesIdStr.toLong();
+		
+		// 1. Fetch Sales Order header details
+		orderNo = "";
+		orderSrc = "";
+		for each so in Sales_Order[ID == salesId]
+		{
+			orderNo = ifnull(so.Sales_Order, "").toString().replaceAll("\"", "'");
+			orderSrc = ifnull(so.Order_Source, "").toString().replaceAll("\"", "'");
+		}
+		
+		// 2. Fetch items and finished quantities
+		itemsJson = "";
+		for each so in Sales_Order[ID == salesId]
+		{
+			idx = 0;
+			for each soRow in so.Item_Table
+			{
+				idx = idx + 1;
+				skuTxt = "";
+				for each im in Item_Master[ID == soRow.SKU]
+				{
+					skuTxt = ifnull(im.SKU, "").toString();
+				}
+				
+				// Find finished quantity for this specific line (idx) from Plan_Item.Qty_Accepted
+				finQty = 0;
+				for each plan in Production_Planning[Sales_Order == salesId]
+				{
+					rootId = null;
+					for each pi in Plan_Item[Plan == plan.ID && Line_No == idx]
+					{
+						if(ifnull(pi.Is_Remake, false) == false)
+						{
+							rootId = pi.ID;
+						}
+					}
+					
+					if(rootId != null)
+					{
+						for each pi in Plan_Item[Plan == plan.ID && (ID == rootId || Remake_Of == rootId)]
+						{
+							finQty = finQty + ifnull(pi.Qty_Accepted, 0).toLong();
+						}
+					}
+				}
+				
+				if(itemsJson != "")
+				{
+					itemsJson = itemsJson + ",";
+				}
+				itemsJson = itemsJson + "{\"lineNo\":" + idx + ",\"sku\":\"" + skuTxt + "\",\"itemName\":\"" + ifnull(soRow.Item_Name, "").toString().replaceAll("\"", "'") + "\",\"qty\":" + finQty + "}";
+			}
+		}
+		
+		// 3. Expose Box Size Master list (Hardcoded to prevent form dependency errors)
+		boxesJson = "{\"id\":\"b1\",\"name\":\"Box 1 (O1/I1)\",\"length\":35.0,\"width\":35.0,\"height\":10.0,\"innerLength\":32.5,\"innerWidth\":32.5,\"innerHeight\":7.5,\"cost\":1.2,\"volume\":12250}," +
+		            "{\"id\":\"b2\",\"name\":\"Box 2 (O2/I2)\",\"length\":40.0,\"width\":40.0,\"height\":15.0,\"innerLength\":37.5,\"innerWidth\":37.5,\"innerHeight\":13.5,\"cost\":1.8,\"volume\":24000}," +
+		            "{\"id\":\"b3\",\"name\":\"Box 3 (O3/I3)\",\"length\":35.0,\"width\":28.0,\"height\":5.0,\"innerLength\":32.5,\"innerWidth\":26.5,\"innerHeight\":4.0,\"cost\":0.8,\"volume\":4900}," +
+		            "{\"id\":\"b4\",\"name\":\"Box 4 (O4/I4)\",\"length\":60.0,\"width\":40.0,\"height\":30.0,\"innerLength\":57.5,\"innerWidth\":37.5,\"innerHeight\":27.5,\"cost\":3.5,\"volume\":72000}," +
+		            "{\"id\":\"b5\",\"name\":\"Box 5 (O5/I5)\",\"length\":30.0,\"width\":20.0,\"height\":4.0,\"innerLength\":28.0,\"innerWidth\":18.0,\"innerHeight\":3.0,\"cost\":0.6,\"volume\":2400}," +
+		            "{\"id\":\"b6\",\"name\":\"Box 6 (O6)\",\"length\":58.0,\"width\":30.0,\"height\":22.0,\"innerLength\":58.0,\"innerWidth\":30.0,\"innerHeight\":22.0,\"cost\":2.2,\"volume\":38280}," +
+		            "{\"id\":\"b7\",\"name\":\"Box 7 (O7)\",\"length\":42.0,\"width\":22.0,\"height\":20.0,\"innerLength\":42.0,\"innerWidth\":22.0,\"innerHeight\":20.0,\"cost\":1.5,\"volume\":18480}," +
+		            "{\"id\":\"b8\",\"name\":\"Box 8 (O8)\",\"length\":55.0,\"width\":28.0,\"height\":19.0,\"innerLength\":55.0,\"innerWidth\":28.0,\"innerHeight\":19.0,\"cost\":2.0,\"volume\":29260}";
+
+		// 4. Expose SKU Box Capacity Rules
+		capacitiesJson = "";
+		
+		res = "{\"errors\":[],\"salesOrderId\":\"" + salesIdStr + "\",\"orderNo\":\"" + orderNo + "\",\"source\":\"" + orderSrc + "\",\"items\":[" + itemsJson + "],\"boxSizes\":[" + boxesJson + "],\"capacities\":[" + capacitiesJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

@@ -10,6 +10,7 @@ var STAGE_LABELS = ['Folding', 'Pressing', 'Branding'];
 var SELECTED_STAFF = 'Abhijay'; // Default staff
 var SELECTED_OPERATOR = ''; // Default operator
 var OPERATORS_LIST = [];
+var ACTIVE_TOP_TAB = 'finishing'; // Track active tab ('finishing' or 'packing')
 
 // Queue of items that have passed the checking stage
 var JOBS_QUEUE = [];
@@ -518,6 +519,7 @@ function loadStaffDropdown() {
                                '<option value="Supervisor Y">Supervisor Y</option>';
             SELECTED_STAFF = select.value;
         }
+        populatePackerDropdown3D();
         return;
     }
 
@@ -550,10 +552,16 @@ function loadStaffDropdown() {
 
         // Store operators globally
         OPERATORS_LIST = parsed.staff || [];
+        OPERATORS_LIST.sort(function (a, b) {
+            return a.name.localeCompare(b.name);
+        });
         console.log('Successfully fetched operators:', OPERATORS_LIST);
 
         // Populate supervisors dropdown
         var supervisors = parsed.supervisors || [];
+        supervisors.sort(function (a, b) {
+            return a.name.localeCompare(b.name);
+        });
         console.log('Successfully fetched supervisors:', supervisors);
         if (supervisors.length > 0) {
             var optionsHtml = supervisors.map(function (emp) {
@@ -564,6 +572,9 @@ function loadStaffDropdown() {
         } else {
             select.innerHTML = '<option value="">No supervisors found</option>';
         }
+
+        // Populate packer dropdown with finishing operators list
+        populatePackerDropdown3D();
     }).catch(function (err) {
         console.error('Failed to load dynamic supervisor list:', err);
         var errStr = String(err && err.message ? err.message : err);
@@ -848,10 +859,12 @@ document.addEventListener('DOMContentLoaded', function () {
         SELECTED_STAFF = select.value;
         select.addEventListener('change', function () {
             SELECTED_STAFF = select.value;
+            onSupervisorChanged();
         });
     }
 
-
+    // Set header date dynamically
+    renderHeaderDate();
 
     // Call load functions with a small delay to allow SDK handshake to finish
     setTimeout(function () {
@@ -962,5 +975,1570 @@ function onSupervisorChanged() {
     var select = document.getElementById('staff-select-el');
     if (select) {
         SELECTED_STAFF = select.value;
+        
+        // Update supervisor initials avatar
+        var avatar = document.getElementById('staff-avatar-initial');
+        if (avatar) {
+            avatar.innerText = SELECTED_STAFF ? SELECTED_STAFF.charAt(0).toUpperCase() : 'S';
+        }
+
+        // Trigger updates on active screen
+        if (ACTIVE_TOP_TAB === 'finishing') {
+            onPlanSelected();
+        } else {
+            loadPackingDashboardData();
+        }
     }
+}
+
+function renderHeaderDate() {
+    var dateEl = document.getElementById('app-date-el');
+    if (dateEl) {
+        var now = new Date();
+        // Format: Wednesday, 19 Aug 2026
+        var formattedDate = now.toLocaleDateString('en-US', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
+        dateEl.innerText = formattedDate;
+    }
+}
+
+function onRefreshClicked() {
+    loadDashboardData();
+    loadPackingDashboardData();
+}
+
+function loadDashboardData() {
+    loadFinishingPlans();
+    var select = document.getElementById('plan-select-el');
+    var selectedPlan = select ? select.value : '';
+    loadFinishingQueue(selectedPlan);
+    loadFinishingHistory();
+}
+
+// ----------------------------------------------------
+// TOP LEVEL TAB NAVIGATION
+// ----------------------------------------------------
+
+function switchTopTab(tab) {
+    ACTIVE_TOP_TAB = tab;
+    var tabFin = document.getElementById('tab-top-finishing');
+    var tabPack = document.getElementById('tab-top-packing');
+    var panelFin = document.getElementById('panel-top-finishing');
+    var panelPack = document.getElementById('panel-top-packing');
+    var titleEl = document.getElementById('app-title-el');
+    
+    if (tab === 'finishing') {
+        tabFin.classList.add('is-active');
+        tabPack.classList.remove('is-active');
+        panelFin.style.display = 'block';
+        panelPack.style.display = 'none';
+        if (titleEl) titleEl.innerText = "Finishing Dashboard";
+        
+        // Refresh finishing dashboard
+        loadDashboardData();
+    } else {
+        tabFin.classList.remove('is-active');
+        tabPack.classList.add('is-active');
+        panelFin.style.display = 'none';
+        panelPack.style.display = 'block';
+        if (titleEl) titleEl.innerText = "Packing Dashboard";
+        
+        // Boot packing dashboard
+        initPackingDashboard();
+    }
+}
+
+// ----------------------------------------------------
+// PACKING CONTROLLER & STATE
+// ----------------------------------------------------
+
+var ACTIVE_PACKING_ORDER_ID = null;
+var ACTIVE_PACKING_ORDER = null;
+var PACKING_QUEUE = [];
+var ACTIVE_PACKING_TAB = 'inner';
+var SELECTED_PACKER = '';
+var BOX_SIZES_MASTER = []; // Processed box master list
+var SELECTED_OUTER_BOX_INDEX = null; // Visualized outer box index
+var EXPANDED_SKUS = {}; // Track expanded items in accordion
+
+var packingInnerCounter = 1;
+var packingOuterCounter = 1;
+
+function initPackingDashboard() {
+    populatePackerDropdown3D();
+    loadPackingDashboardData();
+}
+
+function populatePackerDropdown3D() {
+    var select = document.getElementById('packer-select-el');
+    if (!select) return;
+
+    var listToUse = OPERATORS_LIST;
+    if (DEMO_MODE || !isRunningInCreator() || listToUse.length === 0) {
+        listToUse = [
+            { id: "e1", name: "Operator A" },
+            { id: "e2", name: "Operator B" },
+            { id: "e3", name: "Operator C" }
+        ];
+    }
+
+    var sortedList = listToUse.slice().sort(function (a, b) {
+        return a.name.localeCompare(b.name);
+    });
+
+    select.innerHTML = sortedList.map(function (emp) {
+        var selected = (SELECTED_PACKER === emp.name) ? ' selected' : '';
+        return '<option value="' + escapeHtml(emp.name) + '"' + selected + '>' + escapeHtml(emp.name) + '</option>';
+    }).join('');
+
+    SELECTED_PACKER = select.value;
+    updatePackerAvatar();
+
+    select.onchange = function () {
+        SELECTED_PACKER = select.value;
+        updatePackerAvatar();
+    };
+}
+
+function updatePackerAvatar() {
+    var avatar = document.getElementById('packer-avatar-initial');
+    if (avatar) {
+        avatar.innerText = SELECTED_PACKER ? SELECTED_PACKER.charAt(0).toUpperCase() : 'P';
+    }
+}
+
+function loadPackingDashboardData() {
+    var queueContainer = document.getElementById('packing-order-queue-list');
+    if (queueContainer) {
+        queueContainer.innerHTML = '<div style="padding:2rem; text-align:center;"><div class="skeleton-line" style="width:80%; margin: 8px auto;"></div><div class="skeleton-line" style="width:60%; margin: 8px auto;"></div></div>';
+    }
+
+    if (!isRunningInCreator() || DEMO_MODE) {
+        PACKING_QUEUE = [
+            { id: "10001", orderNo: "SO-2026-0801", source: "Shopify", itemCount: 2, totalPieces: 5 },
+            { id: "10002", orderNo: "SO-2026-0802", source: "Faire", itemCount: 1, totalPieces: 10 }
+        ];
+        renderPackingQueueList();
+        return;
+    }
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getPackingQueue',
+        http_method: 'POST',
+        payload: { payloadJson: "" }
+    }).then(function (response) {
+        var parsed;
+        try {
+            parsed = JSON.parse(response.result);
+        } catch (e) {
+            console.error('getPackingQueue parse error:', e);
+            return;
+        }
+
+        if (parsed.errors && parsed.errors.length > 0) {
+            console.error('getPackingQueue error:', parsed.errors);
+            return;
+        }
+
+        PACKING_QUEUE = parsed.orders || [];
+        renderPackingQueueList();
+    }).catch(function (err) {
+        console.error('getPackingQueue failed:', err);
+    });
+}
+
+function renderPackingQueueList() {
+    var container = document.getElementById('packing-order-queue-list');
+    var countLabel = document.getElementById('packing-queue-count');
+    if (!container) return;
+
+    if (countLabel) countLabel.innerText = PACKING_QUEUE.length;
+
+    if (PACKING_QUEUE.length === 0) {
+        container.innerHTML = '<div class="empty-state-small"><div class="icon">📦</div><p>No orders pending packing</p></div>';
+        return;
+    }
+
+    container.innerHTML = PACKING_QUEUE.map(function (order) {
+        var activeClass = (ACTIVE_PACKING_ORDER_ID === order.id) ? ' is-active' : '';
+        return '<div class="queue-item-card' + activeClass + '" onclick="selectPackingOrder(\'' + escapeHtml(order.id) + '\')">' +
+            '<span class="order-no">' + escapeHtml(order.orderNo) + '</span>' +
+            '<div class="order-meta">' +
+                '<span>Src: ' + escapeHtml(order.source) + '</span>' +
+                '<span>' + order.totalPieces + ' pcs</span>' +
+            '</div>' +
+            '</div>';
+    }).join('');
+}
+
+function selectPackingOrder(orderId) {
+    ACTIVE_PACKING_ORDER_ID = orderId;
+    renderPackingQueueList();
+
+    var editor = document.getElementById('packing-editor');
+    var emptyState = document.getElementById('packing-workspace-empty-state');
+    if (emptyState) emptyState.classList.add('hidden');
+    if (editor) {
+        editor.classList.remove('hidden');
+        document.querySelector('#panel-top-packing .tab-body').style.opacity = '0.5';
+    }
+
+    if (!isRunningInCreator() || DEMO_MODE) {
+        var matched = PACKING_QUEUE.filter(function (o) { return o.id === orderId; })[0] || PACKING_QUEUE[0];
+        
+        var mockItems = [];
+        if (matched.id === "10002") {
+            // Faire order: 10 Linen Tshirts (large batch to test multi-box inner and outer packing!)
+            mockItems = [
+                { lineNo: 1, sku: "Linen Tshirt", itemName: "Linen Tshirt - White / S", qty: 10, length: 15, width: 10, height: 4, weight: 0.2 }
+            ];
+        } else {
+            // Shopify order: mixed order
+            mockItems = [
+                { lineNo: 1, sku: "Linen Tshirt", itemName: "Linen Tshirt - White / S", qty: 3, length: 15, width: 10, height: 4, weight: 0.2 },
+                { lineNo: 2, sku: "Linen Basket", itemName: "Linen Basket - Large", qty: 2, length: 30, width: 30, height: 6, weight: 0.4 }
+            ];
+        }
+
+        var mockDetails = {
+            salesOrderId: orderId,
+            orderNo: matched.orderNo,
+            source: matched.source,
+            items: mockItems,
+            boxSizes: [
+                { id: "b1", name: "Box 1 (O1/I1)", length: 35, width: 35, height: 10, volume: 12250 },
+                { id: "b2", name: "Box 2 (O2/I2)", length: 40, width: 40, height: 15, volume: 24000 },
+                { id: "b3", name: "Box 3 (O3/I3)", length: 35, width: 28, height: 5, volume: 4900 },
+                { id: "b4", name: "Box 4 (O4/I4)", length: 60, width: 40, height: 30, volume: 72000 },
+                { id: "b5", name: "Box 5 (O5/I5)", length: 30, width: 20, height: 4, volume: 2400 },
+                { id: "b6", name: "Box 6 (O6)", length: 58, width: 30, height: 22, volume: 38280 },
+                { id: "b7", name: "Box 7 (O7)", length: 42, width: 22, height: 20, volume: 18480 },
+                { id: "b8", name: "Box 8 (O8)", length: 55, width: 28, height: 19, volume: 29260 }
+            ],
+            capacities: []
+        };
+        setupActivePackingOrder(mockDetails);
+        return;
+    }
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getPackingDetails',
+        http_method: 'POST',
+        payload: {
+            payloadJson: JSON.stringify({ salesOrderId: orderId })
+        }
+    }).then(function (response) {
+        var parsed;
+        try {
+            parsed = JSON.parse(response.result);
+        } catch (e) {
+            console.error('getPackingDetails parse failed:', e);
+            alert("Error parsing order details.");
+            return;
+        }
+
+        if (parsed.errors && parsed.errors.length > 0) {
+            alert("Creator API Error: " + parsed.errors.join(', '));
+            return;
+        }
+
+        setupActivePackingOrder(parsed);
+    }).catch(function (err) {
+        console.error('getPackingDetails call failed:', err);
+    });
+}
+
+function setupActivePackingOrder(details) {
+    // Process boxSizes using default fallback config
+    BOX_SIZES_MASTER = (details.boxSizes || []).map(function (box) {
+        var def = Packing3D.DEFAULT_BOX_MASTER.filter(function (d) {
+            return d.name === box.name || box.name.indexOf(d.code) !== -1;
+        })[0];
+
+        return {
+            id: box.id,
+            code: def ? def.code : box.name,
+            name: box.name,
+            boxLevel: def ? def.boxLevel : "BOTH",
+            outer: (function () {
+                var isWLH = (box.name.indexOf("Box 6") !== -1 || box.name.indexOf("Box 7") !== -1 || box.name.indexOf("Box 8") !== -1 || (def && (def.code === "O6" || def.code === "O7" || def.code === "O8")));
+                if (isWLH) {
+                    return {
+                        w: box.length || (def ? def.outer.w : 58),
+                        l: box.width || (def ? def.outer.l : 30),
+                        h: box.height || (def ? def.outer.h : 22)
+                    };
+                } else {
+                    return {
+                        w: box.width || (def ? def.outer.w : 35),
+                        l: box.length || (def ? def.outer.l : 35),
+                        h: box.height || (def ? def.outer.h : 10)
+                    };
+                }
+            })(),
+            inner: (function () {
+                var isWLH = (box.name.indexOf("Box 6") !== -1 || box.name.indexOf("Box 7") !== -1 || box.name.indexOf("Box 8") !== -1 || (def && (def.code === "O6" || def.code === "O7" || def.code === "O8")));
+                if (box.innerLength && box.innerWidth && box.innerHeight) {
+                    if (isWLH) {
+                        return {
+                            w: box.innerLength,
+                            l: box.innerWidth,
+                            h: box.innerHeight
+                        };
+                    } else {
+                        return {
+                            w: box.innerWidth,
+                            l: box.innerLength,
+                            h: box.innerHeight
+                        };
+                    }
+                } else if (def && def.inner) {
+                    return {
+                        w: def.inner.w,
+                        l: def.inner.l,
+                        h: def.inner.h
+                    };
+                }
+                return null;
+            })(),
+            cost: box.cost || (def ? def.cost : 1.0),
+            active: true
+        };
+    });
+
+    if (BOX_SIZES_MASTER.length === 0) {
+        BOX_SIZES_MASTER = Packing3D.DEFAULT_BOX_MASTER.slice();
+    }
+
+    ACTIVE_PACKING_ORDER = {
+        id: details.salesOrderId,
+        orderNo: details.orderNo,
+        source: details.source,
+        items: details.items || [],
+        innerBoxes: [],
+        outerBoxes: []
+    };
+
+    document.getElementById('packing-active-order-no').innerText = ACTIVE_PACKING_ORDER.orderNo;
+    var badgeEl = document.getElementById('packing-active-source-badge');
+    if (badgeEl) badgeEl.innerText = ACTIVE_PACKING_ORDER.source;
+    var itemsCountEl = document.getElementById('packing-active-items-count');
+    if (itemsCountEl) itemsCountEl.innerText = ACTIVE_PACKING_ORDER.items.length;
+
+    var totalPcs = ACTIVE_PACKING_ORDER.items.reduce(function (sum, it) { return sum + it.qty; }, 0);
+    var pcsCountEl = document.getElementById('packing-active-pcs-count');
+    if (pcsCountEl) pcsCountEl.innerText = totalPcs;
+
+    var banner = document.getElementById('packing-notification-banner');
+    if (banner) banner.className = 'hidden';
+
+    packingInnerCounter = 1;
+    packingOuterCounter = 1;
+
+    // Run 3D Auto Packer
+    autoPackItems3D();
+
+    document.querySelector('#panel-top-packing .tab-body').style.opacity = '1';
+    switchPackingTab('inner');
+}
+
+function switchPackingTab(tab) {
+    ACTIVE_PACKING_TAB = tab;
+    var btnInner = document.getElementById('tab-inner-btn');
+    var btnOuter = document.getElementById('tab-outer-btn');
+    var panelInner = document.getElementById('panel-inner');
+    var panelOuter = document.getElementById('panel-outer');
+
+    if (tab === 'inner') {
+        if (btnInner) btnInner.classList.add('is-active');
+        if (btnOuter) btnOuter.classList.remove('is-active');
+        if (panelInner) panelInner.style.display = 'block';
+        if (panelOuter) panelOuter.style.display = 'none';
+        renderInnerBoxes3D();
+    } else {
+        if (btnInner) btnInner.classList.remove('is-active');
+        if (btnOuter) btnOuter.classList.add('is-active');
+        if (panelInner) panelInner.style.display = 'none';
+        if (panelOuter) panelOuter.style.display = 'block';
+        renderOuterBoxes3D();
+    }
+    validatePacking3D();
+}
+
+// ----------------------------------------------------
+// 3D SOLVER INTEGRATION
+// ----------------------------------------------------
+
+function showPackingNotification(message, type) {
+    var banner = document.getElementById('packing-notification-banner');
+    if (!banner) return;
+
+    var bg = type === 'success' ? '#ecfdf5' : '#fef2f2';
+    var border = type === 'success' ? '#10b981' : '#ef4444';
+    var color = type === 'success' ? '#065f46' : '#991b1b';
+    var icon = type === 'success' ? '⚡' : '⚠️';
+
+    banner.innerHTML = '<div style="display:flex; align-items:center; gap:0.5rem; padding:0.75rem 1rem; border-radius:var(--radius); border:1px solid ' + border + '; background:' + bg + '; color:' + color + '; font-size:0.875rem; font-weight:600; animation:slideDownFade 0.25s ease-out;">' +
+        '<span>' + icon + '</span>' +
+        '<span style="flex-grow:1;">' + message + '</span>' +
+        '<button type="button" onclick="document.getElementById(\'packing-notification-banner\').classList.add(\'hidden\')" style="background:none; border:none; color:' + color + '; font-weight:bold; cursor:pointer; font-size:14px; padding:0 4px;">✕</button>' +
+    '</div>';
+    banner.classList.remove('hidden');
+}
+
+function autoPackItems3D() {
+    if (!ACTIVE_PACKING_ORDER) return;
+
+    try {
+        // Run Level 1 Solver: Products -> Inner Boxes
+        var packedInners = Packing3D.packItemsIntoInnerBoxes(ACTIVE_PACKING_ORDER.items, BOX_SIZES_MASTER);
+
+        // Run Level 2 Solver: Inner Boxes -> Outer Boxes
+        var packedOuters = Packing3D.packInnerBoxesIntoOuterBoxes(packedInners, BOX_SIZES_MASTER);
+
+        ACTIVE_PACKING_ORDER.innerBoxes = packedInners.map(function (ib) {
+            // Find which outer box this inner box was placed in and its placement coordinates
+            var parentOuter = null;
+            var placement = null;
+            packedOuters.forEach(function (ob) {
+                var matches = ob.innerBoxes.filter(function (oib) { return oib.boxNo === ib.boxNo; });
+                if (matches.length > 0) {
+                    parentOuter = ob.outerBoxNo;
+                    placement = matches[0].placement;
+                }
+            });
+
+            return {
+                boxNo: ib.boxNo,
+                boxSize: ib.boxSize,
+                boxCode: ib.boxCode,
+                cost: ib.cost,
+                sku: ib.sku, // Map SKU
+                outerDim: ib.outerDim,
+                innerDim: (function() {
+                    var cfg = BOX_SIZES_MASTER.filter(function(b){ return b.name === ib.boxSize; })[0];
+                    return (cfg && cfg.inner) ? { w: cfg.inner.w, l: cfg.inner.l, h: cfg.inner.h } : null;
+                })(),
+                items: ib.items,
+                utilization: ib.utilization || 0,
+                outerBoxNo: parentOuter,
+                placement: placement
+            };
+        });
+
+        ACTIVE_PACKING_ORDER.outerBoxes = packedOuters.map(function (ob) {
+            return {
+                outerBoxNo: ob.outerBoxNo,
+                boxName: ob.boxName,
+                boxCode: ob.boxCode,
+                cost: ob.cost,
+                dimensions: ob.dimensions,
+                volumeUsed: ob.volumeUsed,
+                utilization: ob.utilization,
+                weight: parseFloat((ob.innerBoxes.reduce(function (w, ib) { return w + 1; }, 0) * 0.2 + 0.5).toFixed(1))
+            };
+        });
+
+        // Set visualizer to focus on first outer box
+        if (ACTIVE_PACKING_ORDER.outerBoxes.length > 0) {
+            SELECTED_OUTER_BOX_INDEX = 0;
+        } else {
+            SELECTED_OUTER_BOX_INDEX = null;
+        }
+
+        var innerCount = ACTIVE_PACKING_ORDER.innerBoxes.length;
+        var outerCount = ACTIVE_PACKING_ORDER.outerBoxes.length;
+        var totalPcs = ACTIVE_PACKING_ORDER.items.reduce(function (sum, it) { return sum + it.qty; }, 0);
+        showPackingNotification("Auto-pack completed successfully! Packed " + totalPcs + " items into " + innerCount + " inner box(es), which were placed into " + outerCount + " outer box(es).", "success");
+
+    } catch (e) {
+        showPackingNotification("3D Auto-Pack failed: " + e.message, "error");
+        ACTIVE_PACKING_ORDER.innerBoxes = [];
+        ACTIVE_PACKING_ORDER.outerBoxes = [];
+        SELECTED_OUTER_BOX_INDEX = null;
+    }
+
+    updatePackingProgress3D();
+    if (ACTIVE_PACKING_TAB === 'inner') {
+        renderInnerBoxes3D();
+    } else {
+        renderOuterBoxes3D();
+    }
+    validatePacking3D();
+}
+
+function updatePackingProgress3D() {
+    if (!ACTIVE_PACKING_ORDER) return;
+
+    var progressMap = {};
+    ACTIVE_PACKING_ORDER.items.forEach(function (itm) {
+        progressMap[itm.sku] = 0;
+    });
+
+    ACTIVE_PACKING_ORDER.innerBoxes.forEach(function (ib) {
+        ib.items.forEach(function (itm) {
+            if (progressMap[itm.sku] !== undefined) {
+                progressMap[itm.sku]++;
+            }
+        });
+    });
+
+    var container = document.getElementById('packing-items-progress-list');
+    if (!container) return;
+
+    container.innerHTML = ACTIVE_PACKING_ORDER.items.map(function (item) {
+        var packed = progressMap[item.sku] || 0;
+        var percent = Math.min(100, Math.round((packed / item.qty) * 100)) || 0;
+        var barClass = 'item-progress-bar';
+        if (packed === item.qty) barClass += ' complete';
+        else if (packed > item.qty) barClass += ' overpack';
+
+        var dimsTxt = (item.length && item.width && item.height) ? 
+            ' (' + item.length + 'x' + item.width + 'x' + item.height + ' cm)' : '';
+
+        return '<div class="item-progress-row">' +
+            '<div class="item-progress-header">' +
+                '<span>' + escapeHtml(item.itemName) + '<span style="font-size:10px; color:var(--text-muted); font-weight:normal;">' + dimsTxt + '</span></span>' +
+                '<span class="sku-label">' + escapeHtml(item.sku) + '</span>' +
+            '</div>' +
+            '<div class="item-progress-header" style="font-size:11px; font-weight:normal; color:var(--text-muted);">' +
+                '<span>Progress: ' + packed + ' / ' + item.qty + ' pcs</span>' +
+                '<span>' + percent + '%</span>' +
+            '</div>' +
+            '<div class="item-progress-bar-wrapper">' +
+                '<div class="' + barClass + '" style="width: ' + percent + '%;"></div>' +
+            '</div>' +
+            '</div>';
+    }).join('');
+}
+
+function toggleSkuAccordion(sku) {
+    EXPANDED_SKUS[sku] = !EXPANDED_SKUS[sku];
+    renderInnerBoxes3D();
+}
+
+function renderInnerBoxes3D() {
+    var accordionContainer = document.getElementById('packing-items-accordion');
+    if (!accordionContainer) return;
+
+    if (!ACTIVE_PACKING_ORDER) {
+        accordionContainer.innerHTML = '';
+        return;
+    }
+
+    if (ACTIVE_PACKING_ORDER.items.length === 0) {
+        accordionContainer.innerHTML = '<div class="empty-state-small" style="grid-column: 1/-1;"><div class="icon">📦</div><p>No items in this order.</p></div>';
+        return;
+    }
+
+    // Initialize EXPANDED_SKUS if empty
+    if (Object.keys(EXPANDED_SKUS).length === 0) {
+        ACTIVE_PACKING_ORDER.items.forEach(function (itm, idx) {
+            EXPANDED_SKUS[itm.sku] = (idx === 0); // First one expanded by default
+        });
+    }
+
+    // Build the inner-box options HTML (all box types that can serve as inner boxes)
+    var innerBoxOptions = BOX_SIZES_MASTER.filter(function (b) {
+        return (b.boxLevel === 'INNER' || b.boxLevel === 'BOTH') && b.inner !== null;
+    }).map(function (b) {
+        var cleanName = b.name.split(' ')[0] + ' ' + b.name.split(' ')[1];
+        var innerDimTxt = b.inner.l + '×' + b.inner.w + '×' + b.inner.h + ' cm';
+        return '<option value="' + escapeHtml(b.name) + '">' + escapeHtml(cleanName) + ' (' + innerDimTxt + ')</option>';
+    }).join('');
+
+    var html = ACTIVE_PACKING_ORDER.items.map(function (item) {
+        // Find inner boxes assigned to this item
+        var assignedBoxes = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) {
+            return ib.sku === item.sku;
+        });
+
+        // Calculate pieces packed
+        var packedQty = assignedBoxes.reduce(function (sum, ib) {
+            return sum + ib.items.length;
+        }, 0);
+
+        var percent = Math.min(100, Math.round((packedQty / item.qty) * 100)) || 0;
+        var progressClass = 'item-progress-bar';
+        if (packedQty === item.qty) progressClass += ' complete';
+        else if (packedQty > item.qty) progressClass += ' overpack';
+
+        var isExpanded = EXPANDED_SKUS[item.sku];
+        var chevron = isExpanded ? '▲' : '▼';
+        var expandedStyle = isExpanded ? 'display: block;' : 'display: none;';
+
+        // Render box cards inside the body of this accordion item
+        var boxesHtml = '';
+        if (assignedBoxes.length === 0) {
+            boxesHtml = '<div style="font-size:12px; text-align:center; padding: 1.5rem 1rem; color:var(--text-muted); font-style:italic;">' +
+                'No inner boxes created for this item yet. Click "Add Box" to start packing.</div>';
+        } else {
+            boxesHtml = '<div class="boxes-container">' + assignedBoxes.map(function (ib) {
+                var sizeNum = ib.boxCode ? ib.boxCode.replace('I','').replace('O','') : '3';
+                var sizeNumClass = 'size-' + sizeNum;
+                var util = ib.utilization || 0;
+                var utilColor = util > 90 ? '#f59e0b' : 'var(--primary)';
+                var isValid = ib.fits !== false;
+
+                // Box type select element
+                var selectHtml = '<select class="box-type-select" onchange="updateInnerBoxType(\'' + ib.boxNo + '\', this.value)">' +
+                    innerBoxOptions + '</select>';
+
+                var invalidClass = isValid ? '' : ' invalid';
+                var outerPlacementText = ib.outerBoxNo ? ('Placed in ' + ib.outerBoxNo) : 'Unplaced in Outer Box';
+                var outerPlacementColor = ib.outerBoxNo ? '#10b981' : '#f59e0b';
+
+                return '<div class="box-card ' + sizeNumClass + invalidClass + '" id="inner-card-' + ib.boxNo + '">' +
+                    '<div class="box-card-header">' +
+                        '<span class="box-id">' + ib.boxNo + '</span>' +
+                        '<button type="button" class="btn-delete" title="Delete Box" onclick="deleteInnerBox3D(\'' + ib.boxNo + '\')">✕</button>' +
+                    '</div>' +
+                    '<div>' +
+                        '<span class="box-type-label">Box Type</span>' +
+                        selectHtml +
+                    '</div>' +
+                    '<div class="card-divider"></div>' +
+                    '<div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">' +
+                        '<span style="font-size:12px; font-weight:700; color:var(--text-main);">Quantity Packed</span>' +
+                        '<div class="item-qty-stepper">' +
+                            '<button type="button" onclick="stepInnerBoxItemQty(\'' + ib.boxNo + '\',\'' + item.sku + '\',-1)">−</button>' +
+                            '<input class="item-qty-input" type="number" min="0" max="' + item.qty + '" value="' + ib.items.length + '"' +
+                                ' onchange="updateInnerBoxItemQty(\'' + ib.boxNo + '\',\'' + item.sku + '\', parseInt(this.value)||0)"' +
+                                ' onblur="updateInnerBoxItemQty(\'' + ib.boxNo + '\',\'' + item.sku + '\', parseInt(this.value)||0)">' +
+                            '<button type="button" onclick="stepInnerBoxItemQty(\'' + ib.boxNo + '\',\'' + item.sku + '\',1)">+</button>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="card-divider"></div>' +
+                    '<div class="box-util-info">' +
+                        '<span>Space Used: <strong>' + util + '%</strong></span>' +
+                        '<span style="color:' + outerPlacementColor + '; font-size:10px; font-weight:700;">' + outerPlacementText + '</span>' +
+                    '</div>' +
+                    '<div class="box-util-bar-wrapper"><div class="box-util-bar" style="width:' + util + '%; background:' + utilColor + ';"></div></div>' +
+                '</div>';
+            }).join('') + '</div>';
+        }
+
+        var dimsTxt = (item.length && item.width && item.height) ?
+            ' (' + item.length + 'x' + item.width + 'x' + item.height + ' cm)' : '';
+
+        return '<div class="accordion-item" style="border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-sm); overflow: hidden; margin-bottom: 0.75rem;">' +
+            // Accordion Header
+            '<div class="accordion-header" style="padding: 1rem; cursor: pointer; display: flex; align-items: center; justify-content: space-between; background: #f8fafc; border-bottom: ' + (isExpanded ? '1px solid var(--border)' : 'none') + '; user-select: none;" onclick="toggleSkuAccordion(\'' + item.sku + '\')">' +
+                '<div style="display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; padding-right: 1.5rem;">' +
+                    '<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">' +
+                        '<span style="font-weight: 700; color: var(--text-main); font-size: 0.95rem;">' + escapeHtml(item.itemName) + '</span>' +
+                        '<span class="sku-label" style="font-family: monospace; font-size: 0.75rem; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: var(--text-muted); font-weight: 600;">' + escapeHtml(item.sku) + '</span>' +
+                    '</div>' +
+                    '<div style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 8px;">' +
+                        '<span>Dimensions: ' + (dimsTxt ? dimsTxt : 'N/A') + '</span>' +
+                        '<span>|</span>' +
+                        '<span style="font-weight: 700; color: ' + (packedQty === item.qty ? '#10b981' : '#f59e0b') + ';">Packed: ' + packedQty + ' / ' + item.qty + ' pcs</span>' +
+                    '</div>' +
+                    '<div class="item-progress-bar-wrapper" style="width: 150px; height: 6px; margin-top: 4px; background: #e2e8f0; border-radius: 9999px; overflow: hidden;">' +
+                        '<div class="' + progressClass + '" style="width: ' + percent + '%; height: 100%;"></div>' +
+                    '</div>' +
+                '</div>' +
+                '<div style="display: flex; align-items: center; gap: 1rem; flex-shrink: 0;">' +
+                    '<button type="button" class="action-btn-primary" style="padding: 6px 12px; font-size: 0.75rem;" onclick="event.stopPropagation(); addInnerBox3D(\'' + item.sku + '\')">➕ Add Box</button>' +
+                    '<span style="font-size: 0.85rem; color: var(--text-muted); font-weight: bold; width: 15px; text-align: center;">' + chevron + '</span>' +
+                '</div>' +
+            '</div>' +
+            // Accordion Body
+            '<div class="accordion-body" style="padding: 1.25rem; ' + expandedStyle + '">' +
+                boxesHtml +
+            '</div>' +
+        '</div>';
+    }).join('');
+
+    accordionContainer.innerHTML = html;
+
+    // After rendering, set the select value correctly for each card
+    ACTIVE_PACKING_ORDER.innerBoxes.forEach(function (ib) {
+        var card = document.getElementById('inner-card-' + ib.boxNo);
+        if (!card) return;
+        var sel = card.querySelector('.box-type-select');
+        if (sel) sel.value = ib.boxSize;
+    });
+}
+
+function renderOuterBoxes3D() {
+    // 1. Render unplaced inner boxes
+    var unplacedContainer = document.getElementById('packing-unplaced-inner-boxes-list');
+    var unplacedBoxes = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) { return ib.outerBoxNo === null; });
+
+    if (unplacedContainer) {
+        if (unplacedBoxes.length === 0) {
+            unplacedContainer.innerHTML = '<div style="font-size:11px; text-align:center; padding: 1.5rem; color:var(--text-muted); font-style:italic; width:100%;">All inner boxes are placed.</div>';
+        } else {
+            unplacedContainer.innerHTML = unplacedBoxes.map(function (ib) {
+                var sizeNum = ib.boxCode ? ib.boxCode.replace('I', '') : '3';
+                return '<div class="draggable-box-pill size-' + sizeNum + '" data-box-no="' + ib.boxNo + '" style="cursor: default;">' +
+                    '<span>' + ib.boxNo + ' (' + ib.boxCode + ')</span>' +
+                    '<span style="font-size: 11px; font-weight:700; color:var(--primary);">' + ib.items.length + ' pcs</span>' +
+                    '</div>';
+            }).join('');
+        }
+    }
+
+    // 2. Compute compatibility for all outer box types vs. current inner boxes
+    var compatMap = {};
+    getCompatibleOuterBoxes().forEach(function (entry) {
+        compatMap[entry.cfg.name] = entry.fits;
+    });
+
+    // 3. Render Outer Boxes list
+    var outerContainer = document.getElementById('packing-outer-boxes-list');
+    if (!outerContainer) return;
+
+    if (ACTIVE_PACKING_ORDER.outerBoxes.length === 0) {
+        outerContainer.innerHTML = '<div class="empty-state-small" style="grid-column: 1/-1;"><div class="icon">📦</div><p>No outer boxes configured. Click "Add Outer Box" to see options.</p></div>';
+        return;
+    }
+
+    outerContainer.innerHTML = ACTIVE_PACKING_ORDER.outerBoxes.map(function (ob, idx) {
+        var outerNo = ob.outerBoxNo;
+        var isCompatible = (compatMap[ob.boxName] !== false);
+
+        var cardClass = 'outer-box-card' + (isCompatible ? '' : ' incompatible');
+        var borderStyle = ''; // No selected outline since visualizer is removed
+        var compatBadge = isCompatible
+            ? '<span class="compatible-badge">✓ Compatible</span>'
+            : '<span class="incompatible-badge">✗ Incompatible</span>';
+
+        var pctUsed = ob.utilization || 0;
+        var utilColor = pctUsed > 90 ? '#f59e0b' : 'var(--primary)';
+        var placedInThis = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) { return ib.outerBoxNo === outerNo; });
+
+        var innerPillsHtml = placedInThis.map(function (ib) {
+            var sizeNum = ib.boxCode ? ib.boxCode.replace('I','').replace('O','') : '3';
+            return '<div class="draggable-box-pill size-' + sizeNum + '" data-box-no="' + ib.boxNo + '" style="cursor: default;">' +
+                '<span>' + ib.boxNo + ' (' + ib.boxCode + ') — ' + ib.items.length + ' pcs</span>' +
+                '<button type="button" class="pill-del-btn" title="Remove from outer box" onclick="removeBoxFromOuter3D(\'' + ib.boxNo + '\')">✕</button>' +
+                '</div>';
+        }).join('');
+
+        // Generate dropdown select for unplaced inner boxes
+        var selectOptionsHtml = '<option value="">➕ Add Inner Box...</option>' +
+            unplacedBoxes.map(function (ib) {
+                var cfg = BOX_SIZES_MASTER.filter(function (b) { return b.name === ib.boxSize; })[0];
+                var dimText = '';
+                if (cfg && cfg.inner) {
+                    dimText = ' - ' + cfg.inner.l + '×' + cfg.inner.w + '×' + cfg.inner.h + ' cm';
+                }
+                var cleanName = ib.boxSize ? (ib.boxSize.split(' ')[0] + ' ' + ib.boxSize.split(' ')[1]) : ib.boxSize;
+                return '<option value="' + ib.boxNo + '">' + ib.boxNo + ' (' + cleanName + dimText + ') — ' + ib.items.length + ' pcs</option>';
+            }).join('');
+
+        var selectDropdownHtml = '';
+        if (unplacedBoxes.length > 0) {
+            selectDropdownHtml = '<div style="margin-top: 12px;">' +
+                '<select class="add-inner-select" style="width:100%; padding:0.45rem 0.6rem; border-radius:6px; border:1px solid var(--border); font-size:12px; font-weight:600; cursor:pointer; background:#fff; color:var(--text-main);" onchange="if(this.value) { placeBoxInOuter3D(this.value, \'' + outerNo + '\'); this.value=\'\'; }">' +
+                    selectOptionsHtml +
+                '</select>' +
+            '</div>';
+        }
+
+        return '<div class="' + cardClass + '" style="' + borderStyle + '">' +
+            '<div class="outer-box-info">' +
+                '<div style="display:flex; flex-direction:column; gap:4px;">' +
+                    '<span class="outer-box-title">' + outerNo + ' (' + ob.boxName + ')</span>' +
+                    compatBadge +
+                '</div>' +
+                '<button type="button" class="btn-delete" title="Delete Outer Box" onclick="deleteOuterBox3D(\'' + outerNo + '\')">✕</button>' +
+            '</div>' +
+            '<div class="box-util-info">' +
+                '<span style="font-weight:700;">Utilization: ' + pctUsed + '%</span>' +
+                '<span style="color:var(--text-muted); font-size:11px;">' + ob.dimensions.l + '×' + ob.dimensions.w + '×' + ob.dimensions.h + ' cm</span>' +
+            '</div>' +
+            '<div class="box-util-bar-wrapper" style="margin-top: -6px; margin-bottom: 4px;">' +
+                '<div class="box-util-bar" style="width:' + pctUsed + '%; background:' + utilColor + ';"></div>' +
+            '</div>' +
+            '<div class="outer-box-inner-list" data-outer-no="' + outerNo + '">' +
+                innerPillsHtml +
+            '</div>' +
+            selectDropdownHtml +
+        '</div>';
+    }).join('');
+}
+
+function selectOuterBoxForVis(idx) {
+    SELECTED_OUTER_BOX_INDEX = idx;
+    renderOuterBoxes3D();
+}
+
+// ----------------------------------------------------
+// DRAG & DROP WITH 3D FIT VALIDATION
+// ----------------------------------------------------
+
+var draggedBoxNo = null;
+
+function onBoxDragStart(ev) {
+    draggedBoxNo = ev.currentTarget.getAttribute('data-box-no');
+    ev.dataTransfer.setData("text", draggedBoxNo);
+}
+
+function onBoxDragOver(ev) {
+    ev.preventDefault();
+    ev.currentTarget.classList.add('dragover');
+}
+
+function onBoxDragLeave(ev) {
+    ev.currentTarget.classList.remove('dragover');
+}
+
+function onBoxDrop(ev) {
+    ev.preventDefault();
+    var container = ev.currentTarget;
+    container.classList.remove('dragover');
+
+    var boxNo = ev.dataTransfer.getData("text") || draggedBoxNo;
+    var outerBoxNo = container.getAttribute('data-outer-no');
+
+    if (boxNo && outerBoxNo) {
+        placeBoxInOuter3D(boxNo, outerBoxNo);
+    }
+}
+
+function placeBoxInOuter3D(innerBoxNo, outerBoxNo) {
+    if (!ACTIVE_PACKING_ORDER) return;
+
+    // Find inner box
+    var innerBox = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) { return ib.boxNo === innerBoxNo; })[0];
+    // Find target outer box
+    var outerBox = ACTIVE_PACKING_ORDER.outerBoxes.filter(function (ob) { return ob.outerBoxNo === outerBoxNo; })[0];
+
+    if (!innerBox || !outerBox) return;
+
+    // Evaluate 3D spatial layout including this new box
+    var outerBoxConfig = BOX_SIZES_MASTER.filter(function (b) { return b.name === outerBox.boxName; })[0];
+    if (!outerBoxConfig) return;
+
+    // Gather all inner boxes currently in this outer box, plus the new one
+    var siblings = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) {
+        return ib.outerBoxNo === outerBoxNo && ib.boxNo !== innerBoxNo;
+    }).concat([innerBox]);
+
+    var trialItems = siblings.map(function (ib) {
+        var sz = ib.innerDim ? ib.innerDim : ib.outerDim;
+        return {
+            w: sz.w,
+            l: sz.l,
+            h: sz.h
+        };
+    });
+
+    // Run 3D Checker
+    var container = outerBoxConfig.outer;
+    var check = Packing3D.fitItemsInContainer(container, trialItems, true);
+
+    if (!check.fit) {
+        var innerSize = innerBox.innerDim ? innerBox.innerDim : innerBox.outerDim;
+        alert("⚠️ Physical Mismatch! Inner Box " + innerBoxNo + " (" + innerSize.l + "x" + innerSize.w + "x" + innerSize.h + " cm) does not physically fit in Outer Box " + outerBoxNo + " with existing items due to dimension limits.");
+        return;
+    }
+
+    // Move successful! Save coordinates
+    innerBox.outerBoxNo = outerBoxNo;
+
+    // Update coordinates in the outer box for display
+    siblings.forEach(function (sib, idx) {
+        var placement = check.placements.filter(function (p) { return p.originalIndex === idx; })[0];
+        sib.placement = placement; // store for isometric visualizer
+    });
+
+    // Update outer box properties
+    outerBox.volumeUsed = check.volumeUsed;
+    outerBox.utilization = check.utilization;
+
+    renderOuterBoxes3D();
+    validatePacking3D();
+}
+
+function removeBoxFromOuter3D(innerBoxNo) {
+    if (!ACTIVE_PACKING_ORDER) return;
+
+    var innerBox = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) { return ib.boxNo === innerBoxNo; })[0];
+    if (!innerBox) return;
+
+    var prevOuterNo = innerBox.outerBoxNo;
+    innerBox.outerBoxNo = null;
+    innerBox.placement = null;
+
+    // Recalculate properties for the previous outer box
+    if (prevOuterNo) {
+        var outerBox = ACTIVE_PACKING_ORDER.outerBoxes.filter(function (ob) { return ob.outerBoxNo === prevOuterNo; })[0];
+        if (outerBox) {
+            var siblings = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) { return ib.outerBoxNo === prevOuterNo; });
+            var outerBoxConfig = BOX_SIZES_MASTER.filter(function (b) { return b.name === outerBox.boxName; })[0];
+
+            if (siblings.length === 0) {
+                outerBox.volumeUsed = 0;
+                outerBox.utilization = 0;
+            } else if (outerBoxConfig) {
+                var trialItems = siblings.map(function (ib) {
+                    var sz = ib.innerDim ? ib.innerDim : ib.outerDim;
+                    return { w: sz.w, l: sz.l, h: sz.h };
+                });
+                var container = outerBoxConfig.outer;
+                var check = Packing3D.fitItemsInContainer(container, trialItems, true);
+                if (check.fit) {
+                    outerBox.volumeUsed = check.volumeUsed;
+                    outerBox.utilization = check.utilization;
+                    siblings.forEach(function (sib, idx) {
+                        sib.placement = check.placements.filter(function (p) { return p.originalIndex === idx; })[0];
+                    });
+                }
+            }
+        }
+    }
+
+    renderOuterBoxes3D();
+    validatePacking3D();
+}
+
+// ----------------------------------------------------
+// 3D DRAW VISUALIZATION
+// ----------------------------------------------------
+
+function drawPacking3DVisualizer() {
+    // Visualizer removed from UI
+}
+
+// ----------------------------------------------------
+// MANUAL CONTROLS & ADJUSTMENTS
+// ----------------------------------------------------
+
+// -------------------------------------------------------
+// HELPER: Update inner box type when operator changes dropdown
+// -------------------------------------------------------
+function updateInnerBoxType(boxNo, newBoxName) {
+    if (!ACTIVE_PACKING_ORDER) return;
+    var ib = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (b) { return b.boxNo === boxNo; })[0];
+    if (!ib) return;
+
+    var cfg = BOX_SIZES_MASTER.filter(function (b) { return b.name === newBoxName; })[0];
+    if (!cfg) return;
+
+    ib.boxSize = cfg.name;
+    ib.boxCode = cfg.code;
+    ib.cost = cfg.cost || 0;
+    ib.outerDim = { w: cfg.outer.w, l: cfg.outer.l, h: cfg.outer.h };
+    ib.innerDim = cfg.inner ? { w: cfg.inner.w, l: cfg.inner.l, h: cfg.inner.h } : null;
+
+    // Re-validate items still fit in the new box size
+    if (cfg.inner) {
+        ib.items = ib.items.filter(function (itm) {
+            var dims = itm.dimensions || { w: 10, l: 10, h: 2 };
+            return dims.w <= cfg.inner.w && dims.l <= cfg.inner.l && dims.h <= cfg.inner.h;
+        });
+    }
+
+    recalculateInnerBoxUtilization(ib);
+    reevaluateOuterBoxes();
+    renderInnerBoxes3D();
+    validatePacking3D();
+}
+
+// -------------------------------------------------------
+// HELPER: Set item qty in inner box (low-level, no redistribution)
+// -------------------------------------------------------
+function _setBoxItemQty(ib, sku, qty, ordItem) {
+    var itemName = ordItem ? ordItem.itemName : sku;
+    var dims = ordItem ? { w: ordItem.length || 10, l: ordItem.width || 10, h: ordItem.height || 2 } : { w: 10, l: 10, h: 2 };
+    qty = Math.max(0, qty);
+    ib.items = ib.items.filter(function (i) { return i.sku !== sku; });
+    for (var q = 0; q < qty; q++) {
+        ib.items.push({ sku: sku, itemName: itemName, dimensions: dims, placement: null });
+    }
+}
+
+// -------------------------------------------------------
+// HELPER: Set item qty — enforces total = ordered qty
+//   Smart redistribution: if adding to this box would exceed
+//   the order qty, it automatically pulls from other boxes.
+// -------------------------------------------------------
+function updateInnerBoxItemQty(boxNo, sku, requestedQty) {
+    if (!ACTIVE_PACKING_ORDER) return;
+    var ib = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (b) { return b.boxNo === boxNo; })[0];
+    if (!ib) return;
+
+    var ordItem = (ACTIVE_PACKING_ORDER.items || []).filter(function (it) { return it.sku === sku; })[0];
+    var orderedQty = ordItem ? ordItem.qty : 0;
+
+    requestedQty = Math.max(0, Math.min(parseInt(requestedQty) || 0, orderedQty));
+
+    // Total currently in OTHER boxes for this SKU
+    var totalInOthers = ACTIVE_PACKING_ORDER.innerBoxes.reduce(function (sum, b) {
+        if (b.boxNo === boxNo) return sum;
+        return sum + b.items.filter(function (i) { return i.sku === sku; }).length;
+    }, 0);
+
+    // How many can we put in this box without exceeding the order total?
+    var maxForThisBox = orderedQty - totalInOthers;
+    var actualQty = Math.min(requestedQty, maxForThisBox);
+
+    // If requested > what's available (all already in other boxes),
+    // redistribute: move the shortfall from the OTHER boxes (take from the largest donor first)
+    if (requestedQty > maxForThisBox && requestedQty <= orderedQty) {
+        var shortfall = requestedQty - maxForThisBox;
+        var donorBoxes = ACTIVE_PACKING_ORDER.innerBoxes
+            .filter(function (b) {
+                return b.boxNo !== boxNo && b.sku === sku && b.items.length > 0;
+            })
+            .sort(function (a, b) {
+                return b.items.length - a.items.length;
+            });
+
+        for (var d = 0; d < donorBoxes.length && shortfall > 0; d++) {
+            var donor = donorBoxes[d];
+            var donorQty = donor.items.length;
+            var toTake = Math.min(donorQty, shortfall);
+            _setBoxItemQty(donor, sku, donorQty - toTake, ordItem);
+            recalculateInnerBoxUtilization(donor);
+            shortfall -= toTake;
+        }
+        actualQty = requestedQty - shortfall; // whatever we managed to free up
+    }
+
+    _setBoxItemQty(ib, sku, actualQty, ordItem);
+    recalculateInnerBoxUtilization(ib);
+    reevaluateOuterBoxes();
+    renderInnerBoxes3D();
+    validatePacking3D();
+}
+
+function recalculateInnerBoxUtilization(ib) {
+    if (!ib) return;
+    if (ib.items.length === 0) {
+        ib.utilization = 0;
+        ib.fits = true;
+        return;
+    }
+    var cfg = BOX_SIZES_MASTER.filter(function (b) { return b.name === ib.boxSize; })[0];
+    if (!cfg || !cfg.inner) {
+        ib.utilization = 0;
+        ib.fits = true;
+        return;
+    }
+
+    var trialItems = ib.items.map(function (itm) {
+        var dims = itm.dimensions || { w: 10, l: 10, h: 2 };
+        return {
+            w: dims.w,
+            l: dims.l,
+            h: dims.h,
+            allowRotation: true
+        };
+    });
+
+    var check = Packing3D.fitItemsInContainer(cfg.inner, trialItems, true);
+    ib.utilization = check.utilization || 0;
+    ib.fits = check.fit;
+}
+
+function reevaluateOuterBoxes() {
+    if (!ACTIVE_PACKING_ORDER) return;
+
+    ACTIVE_PACKING_ORDER.outerBoxes.forEach(function (ob) {
+        var siblings = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) {
+            return ib.outerBoxNo === ob.outerBoxNo;
+        });
+
+        if (siblings.length === 0) {
+            ob.volumeUsed = 0;
+            ob.utilization = 0;
+            return;
+        }
+
+        var outerBoxConfig = BOX_SIZES_MASTER.filter(function (b) { return b.name === ob.boxName; })[0];
+        if (!outerBoxConfig) return;
+
+        var trialItems = siblings.map(function (ib) {
+            var sz = ib.innerDim ? ib.innerDim : ib.outerDim;
+            return {
+                w: sz.w,
+                l: sz.l,
+                h: sz.h
+            };
+        });
+
+        var container = outerBoxConfig.outer;
+        var check = Packing3D.fitItemsInContainer(container, trialItems, true);
+        if (check.fit) {
+            ob.volumeUsed = check.volumeUsed;
+            ob.utilization = check.utilization;
+            siblings.forEach(function (sib, idx) {
+                sib.placement = check.placements.filter(function (p) { return p.originalIndex === idx; })[0];
+            });
+        } else {
+            // Eject inner boxes that no longer fit
+            siblings.forEach(function (sib) {
+                sib.outerBoxNo = null;
+                sib.placement = null;
+            });
+            ob.volumeUsed = 0;
+            ob.utilization = 0;
+            alert("⚠️ Inner boxes were removed from outer box " + ob.outerBoxNo + " because they no longer fit due to size/quantity changes.");
+        }
+    });
+}
+
+// -------------------------------------------------------
+// HELPER: +/- stepper button for item qty (with redistribution)
+// -------------------------------------------------------
+function stepInnerBoxItemQty(boxNo, sku, delta) {
+    if (!ACTIVE_PACKING_ORDER) return;
+    var ib = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (b) { return b.boxNo === boxNo; })[0];
+    if (!ib) return;
+    var current = ib.items.filter(function (i) { return i.sku === sku; }).length;
+    updateInnerBoxItemQty(boxNo, sku, current + delta);
+}
+
+// -------------------------------------------------------
+// HELPER: Return compatible outer box configs for current inner boxes
+// -------------------------------------------------------
+function getCompatibleOuterBoxes() {
+    if (!ACTIVE_PACKING_ORDER || ACTIVE_PACKING_ORDER.innerBoxes.length === 0) {
+        // No inner boxes yet: all outer boxes are valid candidates
+        return BOX_SIZES_MASTER.filter(function (b) {
+            return b.boxLevel === 'OUTER' || b.boxLevel === 'BOTH';
+        }).map(function (b) { return { cfg: b, fits: true }; });
+    }
+
+    var outerCandidates = BOX_SIZES_MASTER.filter(function (b) {
+        return b.boxLevel === 'OUTER' || b.boxLevel === 'BOTH';
+    });
+
+    // Check compatibility only against unplaced inner boxes
+    var targetInners = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) {
+        return ib.outerBoxNo === null;
+    });
+
+    // If no unplaced inner boxes exist, check against all inner boxes
+    if (targetInners.length === 0) {
+        targetInners = ACTIVE_PACKING_ORDER.innerBoxes;
+    }
+
+    return outerCandidates.map(function (cfg) {
+        var container = cfg.outer;
+        var canFitAny = false;
+        targetInners.forEach(function (ib) {
+            var innerSize = ib.innerDim ? ib.innerDim : ib.outerDim;
+            var check = Packing3D.fitItemsInContainer(container, [{ w: innerSize.w, l: innerSize.l, h: innerSize.h }], true);
+            if (check.fit) {
+                canFitAny = true;
+            }
+        });
+        return { cfg: cfg, fits: canFitAny, utilization: 0 };
+    });
+}
+
+function addInnerBox3D(sku) {
+    if (!ACTIVE_PACKING_ORDER) return;
+
+    var innerBoxTypes = BOX_SIZES_MASTER.filter(function (b) {
+        return (b.boxLevel === 'INNER' || b.boxLevel === 'BOTH') && b.inner !== null;
+    });
+
+    // Build modal HTML
+    var optionsHtml = innerBoxTypes.map(function (b) {
+        var innerDimTxt = b.inner ? (b.inner.l + '×' + b.inner.w + '×' + b.inner.h + ' cm') : '';
+        var cleanName = b.name.split(' ')[0] + ' ' + b.name.split(' ')[1];
+        return '<div class="box-option-item" onclick="_doAddInnerBox(\'' + escapeHtml(b.name) + '\', \'' + escapeHtml(sku) + '\')">'
+            + '<div class="box-option-left" style="display:flex; flex-direction:column; gap:2px;">'
+                + '<span class="box-option-name" style="font-weight:700;">' + escapeHtml(cleanName) + '</span>'
+                + '<span class="box-option-dims" style="font-size:11px; color:var(--text-muted); font-weight:600;">Dimensions: ' + innerDimTxt + '</span>'
+            + '</div>'
+        + '</div>';
+    }).join('');
+
+    var overlay = document.createElement('div');
+    overlay.className = 'box-selector-overlay';
+    overlay.id = 'box-selector-overlay';
+    overlay.innerHTML = '<div class="box-selector-modal">'
+        + '<h3>📦 Select Inner Box Type</h3>'
+        + '<div class="box-option-list">' + optionsHtml + '</div>'
+        + '<button class="box-selector-cancel" onclick="_closeBoxSelectorModal()">Cancel</button>'
+    + '</div>';
+    document.body.appendChild(overlay);
+}
+
+function _doAddInnerBox(boxName, sku) {
+    _closeBoxSelectorModal();
+    if (!ACTIVE_PACKING_ORDER) return;
+    var cfg = BOX_SIZES_MASTER.filter(function (b) { return b.name === boxName; })[0];
+    if (!cfg) return;
+
+    // Dynamically calculate the next available IB number to prevent duplicates
+    var maxInner = 0;
+    ACTIVE_PACKING_ORDER.innerBoxes.forEach(function (ib) {
+        var num = parseInt(ib.boxNo.replace('IB-', ''));
+        if (!isNaN(num) && num > maxInner) maxInner = num;
+    });
+    packingInnerCounter = maxInner + 1;
+
+    var ordItem = (ACTIVE_PACKING_ORDER.items || []).filter(function (it) { return it.sku === sku; })[0];
+    var remaining = 0;
+    var itemsToAdd = [];
+
+    if (ordItem) {
+        var totalAssigned = ACTIVE_PACKING_ORDER.innerBoxes.reduce(function (sum, b) {
+            return sum + b.items.filter(function (i) { return i.sku === sku; }).length;
+        }, 0);
+        remaining = ordItem.qty - totalAssigned;
+
+        if (remaining > 0 && cfg.inner) {
+            var dims = { w: ordItem.length || 10, l: ordItem.width || 10, h: ordItem.height || 2 };
+            var trialItems = [];
+            var actualQty = 0;
+            for (var q = 0; q < remaining; q++) {
+                trialItems.push({ w: dims.w, l: dims.l, h: dims.h, allowRotation: true });
+                var test = Packing3D.fitItemsInContainer(cfg.inner, trialItems, true);
+                if (test.fit) {
+                    actualQty = q + 1;
+                } else {
+                    break;
+                }
+            }
+
+            for (var q = 0; q < actualQty; q++) {
+                itemsToAdd.push({
+                    sku: sku,
+                    itemName: ordItem.itemName,
+                    dimensions: dims,
+                    placement: null
+                });
+            }
+        }
+    }
+
+    var newBox = {
+        boxNo: 'IB-' + String(packingInnerCounter++).padStart(3, '0'),
+        boxSize: cfg.name,
+        boxCode: cfg.code,
+        cost: cfg.cost || 0,
+        sku: sku,
+        outerDim: { w: cfg.outer.w, l: cfg.outer.l, h: cfg.outer.h },
+        innerDim: cfg.inner ? { w: cfg.inner.w, l: cfg.inner.l, h: cfg.inner.h } : null,
+        items: itemsToAdd,
+        outerBoxNo: null,
+        utilization: 0,
+        fits: true
+    };
+
+    recalculateInnerBoxUtilization(newBox);
+    ACTIVE_PACKING_ORDER.innerBoxes.push(newBox);
+
+    renderInnerBoxes3D();
+    validatePacking3D();
+}
+
+function _closeBoxSelectorModal() {
+    var overlay = document.getElementById('box-selector-overlay');
+    if (overlay) overlay.parentNode.removeChild(overlay);
+}
+
+function deleteInnerBox3D(boxNo) {
+    if (!ACTIVE_PACKING_ORDER) return;
+
+    ACTIVE_PACKING_ORDER.innerBoxes = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) {
+        return ib.boxNo !== boxNo;
+    });
+
+    renderInnerBoxes3D();
+    reevaluateOuterBoxes();
+    validatePacking3D();
+}
+
+function addOuterBox3D() {
+    if (!ACTIVE_PACKING_ORDER) return;
+
+    var compatInfo = getCompatibleOuterBoxes();
+
+    // Only display compatible outer boxes (the ones in which the unplaced inner boxes can fit)
+    var activeOptions = compatInfo.filter(function (entry) {
+        return entry.fits;
+    });
+
+    var optionsHtml = '';
+    if (activeOptions.length === 0) {
+        optionsHtml = '<div style="font-size: 12px; padding: 1.5rem; text-align: center; color: var(--text-muted); font-style: italic; grid-column: 1/-1;">' +
+            'No outer box sizes can physically fit the remaining unplaced inner boxes.</div>';
+    } else {
+        optionsHtml = activeOptions.map(function (entry) {
+            var b = entry.cfg;
+            var clickAttr = 'onclick="_doAddOuterBox(\'' + escapeHtml(b.name) + '\')"';
+            return '<div class="box-option-item" ' + clickAttr + '>'
+                + '<div class="box-option-left">'
+                    + '<span class="box-option-name" style="font-weight: 700;">' + escapeHtml(b.name) + '</span>'
+                    + '<span class="box-option-dims" style="font-size: 11px; color: var(--text-muted); font-weight: 600;">Dimensions: ' + b.outer.l + '×' + b.outer.w + '×' + b.outer.h + ' cm</span>'
+                + '</div>'
+                + '<div class="box-option-right"><span class="compatible-badge" style="background: #e6f4ea; color: #137333; padding: 4px 8px; border-radius: 4px; font-weight: 700;">✓ Fits</span></div>'
+            + '</div>';
+        }).join('');
+    }
+
+    var summaryHtml = '<div class="compatible-outer-summary" style="margin-bottom: 12px; padding: 8px 12px; background: #e8f0fe; color: #1a73e8; border-radius: 4px; font-size: 12px; font-weight: 600;">💡 Showing only the outer box sizes that can fit the remaining unplaced inner boxes.</div>';
+
+    var overlay = document.createElement('div');
+    overlay.className = 'box-selector-overlay';
+    overlay.id = 'box-selector-overlay';
+    overlay.innerHTML = '<div class="box-selector-modal">'
+        + '<h3>📦 Add Outer Box</h3>'
+        + summaryHtml
+        + '<div class="box-option-list">' + optionsHtml + '</div>'
+        + '<button class="box-selector-cancel" onclick="_closeBoxSelectorModal()">Cancel</button>'
+    + '</div>';
+    document.body.appendChild(overlay);
+}
+
+function _doAddOuterBox(boxName) {
+    _closeBoxSelectorModal();
+    if (!ACTIVE_PACKING_ORDER) return;
+    var cfg = BOX_SIZES_MASTER.filter(function (b) { return b.name === boxName; })[0];
+    if (!cfg) return;
+
+    // Dynamically calculate the next available OB number to prevent duplicates
+    var maxOuter = 0;
+    ACTIVE_PACKING_ORDER.outerBoxes.forEach(function (ob) {
+        var num = parseInt(ob.outerBoxNo.replace('OB-', ''));
+        if (!isNaN(num) && num > maxOuter) maxOuter = num;
+    });
+    var packingOuterCounter = maxOuter + 1;
+
+    var newOuterNo = 'OB-' + String(packingOuterCounter).padStart(3, '0');
+    ACTIVE_PACKING_ORDER.outerBoxes.push({
+        outerBoxNo: newOuterNo,
+        boxName: cfg.name,
+        boxCode: cfg.code,
+        cost: cfg.cost || 0,
+        dimensions: { w: cfg.outer.w, l: cfg.outer.l, h: cfg.outer.h },
+        volumeUsed: 0,
+        utilization: 0,
+        weight: 0.5
+    });
+
+    if (SELECTED_OUTER_BOX_INDEX === null) {
+        SELECTED_OUTER_BOX_INDEX = ACTIVE_PACKING_ORDER.outerBoxes.length - 1;
+    }
+
+    renderOuterBoxes3D();
+    validatePacking3D();
+}
+
+function deleteOuterBox3D(outerBoxNo) {
+    if (!ACTIVE_PACKING_ORDER) return;
+
+    // Orphan inner boxes inside it
+    ACTIVE_PACKING_ORDER.innerBoxes.forEach(function (ib) {
+        if (ib.outerBoxNo === outerBoxNo) {
+            ib.outerBoxNo = null;
+            ib.placement = null;
+        }
+    });
+
+    ACTIVE_PACKING_ORDER.outerBoxes = ACTIVE_PACKING_ORDER.outerBoxes.filter(function (ob) {
+        return ob.outerBoxNo !== outerBoxNo;
+    });
+
+    SELECTED_OUTER_BOX_INDEX = ACTIVE_PACKING_ORDER.outerBoxes.length > 0 ? 0 : null;
+
+    renderOuterBoxes3D();
+    validatePacking3D();
+}
+
+function validatePacking3D() {
+    var msg = document.getElementById('packing-validation-msg');
+    if (!msg) return;
+
+    if (!ACTIVE_PACKING_ORDER) {
+        msg.innerHTML = '';
+        return;
+    }
+
+    var errors = [];
+
+    // 1. Check if all items are fully allocated
+    var totalPiecesOrdered = ACTIVE_PACKING_ORDER.items.reduce(function (s, it) { return s + it.qty; }, 0);
+    var totalPiecesPacked = 0;
+    ACTIVE_PACKING_ORDER.innerBoxes.forEach(function (ib) {
+        totalPiecesPacked += ib.items.length;
+    });
+
+    if (totalPiecesPacked < totalPiecesOrdered) {
+        errors.push("Shortpack: " + totalPiecesPacked + " / " + totalPiecesOrdered + " pieces allocated to inner boxes.");
+    } else if (totalPiecesPacked > totalPiecesOrdered) {
+        errors.push("Overpack: " + totalPiecesPacked + " / " + totalPiecesOrdered + " pieces allocated.");
+    }
+
+    // 2. Check if all inner boxes are placed in outer boxes
+    var unplacedCount = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) { return ib.outerBoxNo === null; }).length;
+    if (unplacedCount > 0) {
+        errors.push(unplacedCount + " inner box(es) still unplaced in outer boxes.");
+    }
+
+    // Render result
+    if (errors.length === 0) {
+        msg.className = "packing-validation-msg validation-ok";
+        msg.innerHTML = "✅ Verification Passed: Ready to save packing record.";
+        document.getElementById('save-packing-btn').disabled = false;
+    } else {
+        msg.className = "packing-validation-msg validation-error";
+        msg.innerHTML = "⚠️ " + errors.join(" | ");
+        document.getElementById('save-packing-btn').disabled = true;
+    }
+}
+
+// ----------------------------------------------------
+// PRINT & SAVE API INTEGRATION
+// ----------------------------------------------------
+
+function printPackingSlip3D() {
+    if (!ACTIVE_PACKING_ORDER) return;
+
+    var printContainer = document.getElementById('print-layout');
+    if (!printContainer) return;
+
+    var rows = ACTIVE_PACKING_ORDER.outerBoxes.map(function (ob) {
+        var inners = ACTIVE_PACKING_ORDER.innerBoxes.filter(function (ib) { return ib.outerBoxNo === ob.outerBoxNo; });
+        var innerDetails = inners.map(function (ib) {
+            var itemsTxt = ib.items.map(function (it) { return it.sku + " (" + it.dimensions.w + "x" + it.dimensions.l + "x" + it.dimensions.h + " cm)"; }).join(', ');
+            return "<li><strong>" + ib.boxNo + " (" + ib.boxSize + "):</strong> " + itemsTxt + "</li>";
+        }).join('');
+
+        return '<tr>' +
+            '<td><strong>' + ob.outerBoxNo + '</strong> (' + ob.boxName + ')</td>' +
+            '<td><ul style="margin:0; padding-left:15px;">' + innerDetails + '</ul></td>' +
+            '<td>' + ob.utilization + '%</td>' +
+            '<td>' + ob.weight + ' kg</td>' +
+            '</tr>';
+    }).join('');
+
+    printContainer.innerHTML = 
+        '<div class="print-slip-header">' +
+            '<h1>PACKING SLIP</h1>' +
+            '<div><strong>Order:</strong> ' + escapeHtml(ACTIVE_PACKING_ORDER.orderNo) + ' | <strong>Packer:</strong> ' + escapeHtml(SELECTED_PACKER) + '</div>' +
+        '</div>' +
+        '<div><strong>Packing Date:</strong> ' + new Date().toLocaleString() + '</div>' +
+        '<table class="print-table">' +
+            '<thead>' +
+                '<tr>' +
+                    '<th>Outer Box</th>' +
+                    '<th>Contains Inner Boxes & Products</th>' +
+                    '<th>Utilization</th>' +
+                    '<th>Est. Weight</th>' +
+                '</tr>' +
+            '</thead>' +
+            '<tbody>' +
+                rows +
+            '</tbody>' +
+        '</table>';
+
+    window.print();
+}
+
+function savePackingData3D() {
+    if (!ACTIVE_PACKING_ORDER) return;
+
+    // Construct saving payload
+    var itemsPayload = ACTIVE_PACKING_ORDER.items.map(function (itm) {
+        var packedCount = 0;
+        ACTIVE_PACKING_ORDER.innerBoxes.forEach(function (ib) {
+            packedCount += ib.items.filter(function (i) { return i.sku === itm.sku; }).length;
+        });
+
+        return {
+            sku: itm.sku,
+            itemName: itm.itemName,
+            qtyToPack: itm.qty,
+            qtyPacked: packedCount
+        };
+    });
+
+    var innersPayload = ACTIVE_PACKING_ORDER.innerBoxes.map(function (ib) {
+        return {
+            boxNo: ib.boxNo,
+            boxSize: ib.boxSize,
+            sku: ib.items.length > 0 ? ib.items[0].sku : "", // main SKU inside
+            qty: ib.items.length,
+            outerBoxNo: ib.outerBoxNo || ""
+        };
+    });
+
+    var outersPayload = ACTIVE_PACKING_ORDER.outerBoxes.map(function (ob) {
+        return {
+            outerBoxNo: ob.outerBoxNo,
+            volumeUsed: ob.volumeUsed,
+            weight: ob.weight,
+            dimensions: ob.dimensions
+        };
+    });
+
+    var savePayload = {
+        salesOrderId: ACTIVE_PACKING_ORDER.id,
+        staffName: SELECTED_PACKER,
+        items: itemsPayload,
+        innerBoxes: innersPayload,
+        outerBoxes: outersPayload
+    };
+
+    var btn = document.getElementById('save-packing-btn');
+    btn.disabled = true;
+    btn.innerText = "Saving plan...";
+
+    if (!isRunningInCreator()) {
+        console.log("Mock Save Packing Payload:", savePayload);
+        setTimeout(function () {
+            alert("Packing Configuration Saved Successfully (Simulated)!");
+            btn.disabled = false;
+            btn.innerText = "Check & Complete Packing";
+            // Return to empty state
+            ACTIVE_PACKING_ORDER = null;
+            ACTIVE_PACKING_ORDER_ID = null;
+            document.getElementById('packing-editor').classList.add('hidden');
+            document.getElementById('packing-workspace-empty-state').classList.remove('hidden');
+            loadPackingDashboardData();
+        }, 1000);
+        return;
+    }
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'savePackingRecord',
+        http_method: 'POST',
+        payload: {
+            payloadJson: JSON.stringify(savePayload)
+        }
+    }).then(function (response) {
+        var parsed;
+        try {
+            parsed = JSON.parse(response.result);
+        } catch (e) {
+            console.error('savePackingRecord parse error:', e);
+            alert("Error parsing save result.");
+            btn.disabled = false;
+            btn.innerText = "Check & Complete Packing";
+            return;
+        }
+
+        if (parsed.errors && parsed.errors.length > 0) {
+            alert("Save failed: " + parsed.errors.join(', '));
+            btn.disabled = false;
+            btn.innerText = "Check & Complete Packing";
+            return;
+        }
+
+        alert("Packing Plan completed & saved successfully!");
+        
+        // Reset state
+        ACTIVE_PACKING_ORDER = null;
+        ACTIVE_PACKING_ORDER_ID = null;
+        document.getElementById('packing-editor').classList.add('hidden');
+        document.getElementById('packing-workspace-empty-state').classList.remove('hidden');
+        
+        // Refresh queue
+        loadPackingDashboardData();
+    }).catch(function (err) {
+        console.error('savePackingRecord call failed:', err);
+        btn.disabled = false;
+        btn.innerText = "Check & Complete Packing";
+    });
 }

@@ -1,4 +1,3 @@
-
 // Packing form workflow: On User Input of Sales_Order.
 // Builds the Packing_Items subform: one row per line the CUSTOMER ORDERED,
 // quantity = every good piece produced for that line across every QC round.
@@ -54,6 +53,7 @@ input.Packing_Items.clear();
 
 if(salesId != null)
 {
+
 	//----------------------------------------------------------------------
 	// THE QC ROUND BLOCK THAT STOOD HERE IS GONE, along with the form it read.
 	//
@@ -77,169 +77,67 @@ if(salesId != null)
 	// either refuse to delete that form or leave this field dangling at one.
 	//----------------------------------------------------------------------
 
-	//----------------------------------------------------------------------
-	// Every plan on the order. One order produces exactly one plan today -
-	// createProductionPlans inserts one inside its per-order loop - but
-	// collecting them all costs nothing and mirrors what qcAutoPopulate does.
-	//----------------------------------------------------------------------
-	planIds = List();
-	packSup = null;
-	orderPlans = Production_Planning[Sales_Order == salesId] sort by Added_Time;
-	for each  plan in orderPlans
-	{
-		planIds.add(plan.ID);
-
-		//------------------------------------------------------------------
-		// WHO THIS ORDER BELONGS TO, taken straight off the plan.
-		//
-		// This used to go the long way round: read Quality_Check.Assigned_to,
-		// which qcAutoPopulate had filled with the supervisor's NAME, then
-		// find the Employee again with Employee[Employee_Name == thatName].
-		// Three ways to fail silently, and all of them leave the field blank
-		// with no error:
-		//
-		//  - Assigned_to empty on QC records raised before qcAutoPopulate
-		//    wrote it, or under any other link name;
-		//  - the name not matching an Employee exactly - a rename, a double
-		//    space, a change of case;
-		//  - two employees sharing a name, where the last one read wins.
-		//
-		// Production_Planning.Assigned_To is ALREADY an Employee record id, so
-		// there is nothing to match on and no name to get wrong. It is also
-		// the same value qcAutoPopulate started from, so this is the original
-		// source rather than a copy of a copy.
-		//
-		// FIRST plan, not last. One order produces one plan; with more it is
-		// the one that started the order, which is the useful name to put on a
-		// packing slip - and it is the same choice qcAutoPopulate makes.
-		//------------------------------------------------------------------
-		if(packSup == null)
-		{
-			packSup = plan.Assigned_To;
-		}
-	}
-
-	if(packSup != null)
-	{
-		//------------------------------------------------------------------
-		// PICK ONE, depending on how Assigned_To was defined on the form.
-		//
-		// A) Assigned_To is a LOOKUP to Employee. It takes the record id -
-		//    this is the line below.
-		// B) Assigned_To is a Single Line text field. Swap to the commented
-		//    block, which fetches the name.
-		//
-		// Getting this wrong throws, and a form workflow that throws stops
-		// dead - so the subform below would come up empty too. An empty
-		// Assigned_To with a populated subform means this block did not run
-		// at all, NOT that it ran and failed.
-		//------------------------------------------------------------------
-		input.Assigned_To = packSup;
-
-		// for each  empA in Employee[ID == packSup]
-		// {
-		// 	input.Assigned_To = empA.Employee_Name;
-		// }
-	}
-
 	rows = Collection();
 
-	// SKU lookups cached across lines. A remake repeats its original's SKU and
-	// the same item can legitimately appear twice on one order, so without this
-	// the same Item_Master record gets fetched several times per order.
-	skuCache = Map();
-
-	for each  pid in planIds
+	for each so in Sales_Order[ID == salesId]
 	{
-		//------------------------------------------------------------------
-		// PASS 1 - accepted totals, keyed on the ROOT line.
-		//
-		// A root line keys on its own id; a remake keys on its Remake_Of. So
-		// one sweep of the plan's items produces the finished-good count for
-		// every customer line, remakes folded in.
-		//
-		// Two passes over two separate queries rather than one query iterated
-		// twice - two live iterators over the same result do not work - and
-		// still far cheaper than the obvious shape, which is a
-		// Plan_Item[Remake_Of == root.ID] query per line.
-		//------------------------------------------------------------------
-		accByRoot = Map();
-
-		allItems = Plan_Item[Plan == pid];
-		for each  it in allItems
+		// 1. Resolve supervisor from the plan
+		packSup = null;
+		for each plan in Production_Planning[Sales_Order == salesId]
 		{
-			rootKey = it.ID.toString();
-			if(it.Remake_Of != null)
+			if(packSup == null)
 			{
-				rootKey = it.Remake_Of.toString();
+				packSup = plan.Assigned_To;
 			}
-
-			accS = ifnull(it.Qty_Accepted,"0").toString().trim();
-			if(accS == "")
-			{
-				accS = "0";
-			}
-
-			haveS = ifnull(accByRoot.get(rootKey),"0").toString().trim();
-			if(haveS == "")
-			{
-				haveS = "0";
-			}
-
-			accByRoot.put(rootKey,(haveS.toDecimal().toLong() + accS.toDecimal().toLong()).toString());
+		}
+		if(packSup != null)
+		{
+			input.Assigned_To = packSup;
 		}
 
-		//------------------------------------------------------------------
-		// PASS 2 - one row per ORIGINAL line, in Line_No order.
-		//
-		// Is_Remake is filtered in code, not in the query. The field was added
-		// to a form that already had records, and a Creator field never written
-		// is EMPTY rather than false - so Plan_Item[Is_Remake == false] would
-		// silently drop every item planned before the field existed, and those
-		// are precisely the original lines.
-		//------------------------------------------------------------------
-		rootItems = Plan_Item[Plan == pid] sort by Line_No;
-		for each  ri in rootItems
+		// 2. Loop through the Sales Order items directly
+		idx = 0;
+		for each soRow in so.Item_Table
 		{
-			if(ifnull(ri.Is_Remake,false) == false)
+			idx = idx + 1;
+			
+			skuTxt = "";
+			for each im in Item_Master[ID == soRow.SKU]
 			{
-				packQty = ifnull(accByRoot.get(ri.ID.toString()),"0").toString().trim();
-				if(packQty == "")
+				skuTxt = ifnull(im.SKU, "").toString();
+			}
+			
+			// Find finished quantity for this specific line (idx) directly from Plan_Item.Qty_Accepted
+			finQty = 0;
+			for each plan in Production_Planning[Sales_Order == salesId]
+			{
+				// Find the root Plan_Item for this line number
+				rootId = null;
+				for each pi in Plan_Item[Plan == plan.ID && Line_No == idx]
 				{
-					packQty = "0";
-				}
-
-				skuKey = "";
-				skuTxt = "";
-				if(ri.Item_Sku != null)
-				{
-					skuKey = ri.Item_Sku.toString();
-					skuTxt = ifnull(skuCache.get(skuKey),"").toString();
-					if(skuTxt == "")
+					if(ifnull(pi.Is_Remake, false) == false)
 					{
-						for each  im in Item_Master[ID == ri.Item_Sku]
-						{
-							skuTxt = ifnull(im.SKU,"").toString();
-						}
-						skuCache.put(skuKey,skuTxt);
+						rootId = pi.ID;
 					}
 				}
-
-				//----------------------------------------------------------
-				// A line with nothing accepted is still listed, at 0. The
-				// packing list mirrors the sales order line for line - a line
-				// that silently vanished would look packed rather than short,
-				// which is the one reading nobody can recover from.
-				//----------------------------------------------------------
-				row = Packing.Packing_Items();
-				row.Item_Name=ifnull(ri.Item_Name,"").toString();
-				row.SKU=skuTxt;
-				row.Quantity_Packed=packQty.toDecimal().toLong();
-				row.No_Of_Box=0;
-				rows.insert(row);
+				
+				if(rootId != null)
+				{
+					// Find all plan items that belong to this root line (root item + its remakes)
+					for each pi in Plan_Item[Plan == plan.ID && (ID == rootId || Remake_Of == rootId)]
+					{
+						finQty = finQty + ifnull(pi.Qty_Accepted, 0).toLong();
+					}
+				}
 			}
+			
+			row = Packing.Packing_Items();
+			row.Item_Name = ifnull(soRow.Item_Name, "").toString();
+			row.SKU = skuTxt;
+			row.Quantity_Packed = finQty;
+			row.No_of_Boxes = 0;
+			rows.insert(row);
 		}
 	}
-
 	input.Packing_Items.insert(rows);
 }
