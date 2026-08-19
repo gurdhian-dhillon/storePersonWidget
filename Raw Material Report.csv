@@ -1,0 +1,24 @@
+Inventory Item ID,Image,Design Name,Name,SKU,Type,Pattern,Color,Fabric Width (Inches),Unit,Fabric Gsm,Quality,Item Price,Quantity,Wash Quantity,Unwash Quantity,Material Display Name,In Transit Qty ,Disputed Qty,Is Fabric,Last purchase date,Unallocated Qty,In Wash Qty
+3955559000000064107,,Solid,Linen Fabric,RM-00001,Fabric,Solid,Cinnamon Brown,124,Mtr,180,150 GSM,650.00,1200.00,331.10,700.00,Linen Fabric / Solid / Cinnamon Brown,15.00,0.00,true,,,
+3955559000000064116,,Solid,Linen Fabric,RM-00002,Fabric,Solid,Dusty Gold,64,Mtr,180,200 GSM,700.00,300.00,117.48,0.00,Linen Fabric / Solid / Dusty Gold,0.00,0.00,true,,,0.00
+3955559000000064125,,Solid,Linen Fabric,RM-00003,Fabric,Solid,Vanilla Sky,64,Mtr,180,300 GSM,780.00,1600.00,700.00,900.00,Linen Fabric / Solid / Vanilla Sky,,,true,,,
+3955559000000064134,,Solid,Linen Fabric,RM-00004,Fabric,Solid,Sylph Green,124,Mtr,180,350 GSM,850.00,1800.00,764.00,1000.00,Linen Fabric / Solid / Sylph Green,0.00,0.00,true,,,
+3955559000000064143,,Block Print,Linen Fabric,RM-00005,Fabric,Block Print,Wiltshire Green,64,Mtr,180,150 GSM,670.00,1300.00,425.20,800.00,Linen Fabric / Block Print / Wiltshire Green,5.50,,true,,,
+3955559000000064152,,Block Print,Linen Fabric,RM-00006,Fabric,Block Print,Camellia Green,125,Mtr,180,200 GSM,720.00,1500.00,669.75,800.00,Linen Fabric / Block Print / Camellia Green,2.20,,true,,,
+3955559000000064161,,Block Print,Linen Fabric,RM-00007,Fabric,Block Print,Heritage Yellow,64,Mtr,180,300 GSM,800.00,1700.00,1000.00,700.00,Linen Fabric / Block Print / Heritage Yellow,,,true,,,
+3955559000000064170,,Block Print,Linen Fabric,RM-00008,Fabric,Block Print,Donna,64,Mtr,180,350 GSM,860.00,1900.00,643.65,1100.00,Linen Fabric / Block Print / Donna,3.15,0.10,true,,,
+3955559000000064179,,Block Print,Linen Fabric,RM-00009,Fabric,Block Print,Liliana,64,Mtr,180,150 GSM,660.00,1250.00,344.60,750.00,Linen Fabric / Block Print / Liliana,3.15,,true,,,
+3955559000000064188,,Chambray,Linen Fabric,RM-00010,Fabric,Chambray,Olive,124,Mtr,180,200 GSM,710.00,1450.00,32.13,543.81,Linen Fabric / Chambray / Olive,109.60,0.00,true,,,0.00
+3955559000000064197,,Yarn Dyed,Linen Fabric,RM-00011,Fabric,Yarn Dyed,Sylph Green,90,Mtr,180,300 GSM,790.00,961.00,0.00,577.60,Linen Fabric / Yarn Dyed / Sylph Green,67.50,,true,,,0.00
+3955559000000064207,,,Stitching Thread,RM-00012,Thread,NA,Cinnamon Brown,,Cone,0,40 Lea,180.00,730.00,0.00,0.00,Stitching Thread / Cinnamon Brown,100.00,,false,,,
+3955559000000064216,,,Stitching Thread,RM-00013,Thread,NA,Dusty Gold,,Cone,0,40 Lea,180.00,2107.00,0.00,0.00,Stitching Thread / Dusty Gold,0.00,,false,,,
+3955559000000064225,,,Stitching Thread,RM-00014,Thread,NA,Green,,Cone,0,40 Lea,180.00,1008.00,0.00,0.00,Stitching Thread / Green,600.00,0.00,false,,,
+3955559000000064234,,,Stitching Thread,RM-00015,Thread,NA,Olive,,Cone,0,40 Lea,180.00,1020.00,0.00,0.00,Stitching Thread / Olive,480.00,0.00,false,,,
+3955559000000064243,,,DMC Embroidery Thread,RM-00016,Embroidery Thread,NA,Multi,,Cone,0,25 Lea,250.00,60.00,0.00,0.00,DMC Embroidery Thread / Multi,220.00,,false,,,
+3955559000000064252,,,Overlock Thread,RM-00017,Thread,NA,Green,,Cone,0,60 Lea,160.00,46.00,0.00,0.00,Overlock Thread / Green,160.00,0.00,false,,,
+3955559000000064262,,,Wash Care Label 4x5 cm,RM-00018,Label,NA,White,,Pcs,0,Good,2.00,1340.00,0.00,0.00,Wash Care Label 4x5 cm / White,200.00,,false,,,
+3955559000000064271,,,Wash Care Label 5x4 cm,RM-00019,Label,NA,White,,Pcs,0,Good,2.00,1008.00,0.00,0.00,Wash Care Label 5x4 cm / White,600.00,,false,,,
+3955559000000064280,,,Wash Care Label 7x5 cm,RM-00020,Label,NA,White,,Pcs,0,Good,3.00,4517.00,0.00,0.00,Wash Care Label 7x5 cm / White,0.00,,false,,,
+3955559000000064289,,,Fusing,RM-00021,Interlining,NA,White,,Mtr,0,CFC,90.00,260.00,0.00,0.00,Fusing / White,,,false,,,
+3955559000000064299,,,Cotton Filling,RM-00022,Filling,NA,White,,Kg,0,Good,250.00,180.00,0.00,0.00,Cotton Filling / White,,,false,,,
+3955559000000064308,,Plain,Grey Sheeting,RM-00023,Fabric,Plain,Grey,64,Mtr,120,150 GSM,120.00,500.00,195.80,300.00,Grey Sheeting / Plain / Grey,,,true,,,

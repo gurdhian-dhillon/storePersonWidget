@@ -1,0 +1,234 @@
+map syncSingleSalesOrder(string salesOrderId)
+{
+	notifyTo = "gurdhian.helios@gmail.com";
+	orgId = "60076905558";
+	if(salesOrderId == null || salesOrderId.toString().trim() == "")
+	{
+		return {"status":"error","message":"salesOrderId is missing"};
+	}
+	soIdTxt = salesOrderId.toString().trim();
+	dupIds = Sales_Order[Inventory_sales_order_Id == soIdTxt].ID.getAll();
+	if(dupIds.size() > 0)
+	{
+		return {"status":"skipped","message":"Already synced","salesOrderId":soIdTxt,"recordId":dupIds.get(0).toString()};
+	}
+	detailResponse = Map();
+	try
+	{
+		detailResponse = invokeurl
+		[
+			url :"https://www.zohoapis.in/inventory/v1/salesorders/" + soIdTxt + "?organization_id=" + orgId
+			type :GET
+			connection:"inventory_connection"
+		];
+	}
+	catch (eApi)
+	{
+		return {"status":"error","message":"Inventory API call failed","error":eApi.toString(),"salesOrderId":soIdTxt};
+	}
+	respCode = ifnull(detailResponse.get("code"),"0").toString().trim();
+	if(respCode != "0")
+	{
+		return {"status":"error","message":"Inventory API returned an error","code":respCode,"details":ifnull(detailResponse.get("message"),"").toString(),"salesOrderId":soIdTxt};
+	}
+	salesorder = detailResponse.get("salesorder");
+	if(salesorder == null)
+	{
+		return {"status":"error","message":"Sales order not found in Inventory","salesOrderId":soIdTxt};
+	}
+	soNumber = ifnull(salesorder.get("salesorder_number"),"").toString().trim();
+	invStatus = ifnull(salesorder.get("status"),"").toString().trim().toLowerCase();
+	if(invStatus == "draft" || invStatus == "void")
+	{
+		return {"status":"skipped","message":"Inventory order is " + invStatus + " - not synced","salesOrderId":soIdTxt,"salesOrderNumber":soNumber};
+	}
+	custId = null;
+	custMissTxt = "";
+	custName = ifnull(salesorder.get("customer_name"),"").toString().trim();
+	if(custName == "")
+	{
+		custMissTxt = "(no customer name on the Inventory order)";
+	}
+	else
+	{
+		custHits = Customer_Master[Display_Name == custName].ID.getAll();
+		if(custHits.size() > 0)
+		{
+			custId = custHits.get(0);
+		}
+		else
+		{
+			custMissTxt = custName;
+		}
+	}
+	srcRaw = "";
+	cfList = ifnull(salesorder.get("custom_fields"),List());
+	for each  cfRow in cfList
+	{
+		cfLabel = ifnull(cfRow.get("label"),"").toString().trim().toLowerCase();
+		if(cfLabel == "order source" || cfLabel == "source")
+		{
+			srcRaw = ifnull(cfRow.get("value"),"").toString().trim();
+		}
+	}
+	if(srcRaw == "")
+	{
+		srcRaw = ifnull(salesorder.get("source"),"").toString().trim();
+	}
+	srcCmp = srcRaw.toLowerCase();
+	srcNorm = "";
+	if(srcCmp == "shopify")
+	{
+		srcNorm = "Shopify";
+	}
+	else if(srcCmp == "faire")
+	{
+		srcNorm = "Faire";
+	}
+	else if(srcCmp == "custom")
+	{
+		srcNorm = "Custom";
+	}
+	else if(srcCmp == "pr")
+	{
+		srcNorm = "PR";
+	}
+	lineItems = ifnull(salesorder.get("line_items"),List());
+	rowCollection = Collection();
+	noItemTxt = "";
+	noBomTxt = "";
+	multiBomTxt = "";
+	lineCount = 0;
+	for each  liRow in lineItems
+	{
+		lineCount = lineCount + 1;
+		liName = ifnull(liRow.get("name"),"").toString();
+		liSku = ifnull(liRow.get("sku"),"").toString().trim();
+		nameTxt = liName.trim();
+		if(nameTxt == "")
+		{
+			nameTxt = "(unnamed item)";
+		}
+		newRow = Sales_Order.Item_Table();
+		newRow.Item_Name=liName;
+		newRow.Rate=liRow.get("rate");
+		newRow.Amount=liRow.get("item_total");
+		newRow.Quantity=liRow.get("quantity");
+		imId = null;
+		if(liSku != "")
+		{
+			imHits = Item_Master[SKU == liSku].ID.getAll();
+			if(imHits.size() > 0)
+			{
+				imId = imHits.get(0);
+				newRow.SKU=imId;
+			}
+		}
+		if(imId == null)
+		{
+			if(noItemTxt != "")
+			{
+				noItemTxt = noItemTxt + ", ";
+			}
+			noItemTxt = noItemTxt + nameTxt + " (SKU '" + liSku + "')";
+		}
+		else
+		{
+			bomIds = BOM[Item == imId].ID.getAll();
+			if(bomIds.size() == 0)
+			{
+				if(noBomTxt != "")
+				{
+					noBomTxt = noBomTxt + ", ";
+				}
+				noBomTxt = noBomTxt + nameTxt;
+			}
+			else if(bomIds.size() > 1)
+			{
+				if(multiBomTxt != "")
+				{
+					multiBomTxt = multiBomTxt + ", ";
+				}
+				multiBomTxt = multiBomTxt + nameTxt + " (" + bomIds.size() + " BOMs)";
+			}
+		}
+		rowCollection.insert(newRow);
+	}
+	insertResult = null;
+	try
+	{
+		insertResult = insert into Sales_Order
+		[
+			Sales_Order_Date=salesorder.get("date")
+			Reference=salesorder.get("reference_number")
+			Total=salesorder.get("total")
+			Inventory_sales_order_Id=soIdTxt
+			Customer=custId
+			Sales_Order=soNumber
+			Grand_Total=salesorder.get("total")
+			Order_Status="Pending"
+			Order_Source=srcNorm
+			Item_Table=rowCollection
+			Added_User=zoho.loginuser
+		];
+	}
+	catch (eIns)
+	{
+		return {"status":"error","message":"Insert failed","error":eIns.toString(),"salesOrderId":soIdTxt};
+	}
+	if(insertResult == null)
+	{
+		return {"status":"error","message":"Insert returned null - record not created","salesOrderId":soIdTxt};
+	}
+	issueCount = 0;
+	rowsHtml = "";
+	if(srcNorm == "")
+	{
+		issueCount = issueCount + 1;
+		shownSrc = srcRaw.replaceAll("\"","'");
+		if(shownSrc == "")
+		{
+			shownSrc = "(empty)";
+		}
+		rowsHtml = rowsHtml + "<tr><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:600'>Order source</td><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a'>Inventory sent <b>" + shownSrc + "</b>, which is not one of Shopify, Faire, Custom or PR. The order is saved with an empty source and will sort LAST on the store screen.</td></tr>";
+	}
+	if(noItemTxt != "")
+	{
+		issueCount = issueCount + 1;
+		rowsHtml = rowsHtml + "<tr><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:600'>Not in Item Master</td><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a'>" + noItemTxt.replaceAll("\"","'") + "</td></tr>";
+	}
+	if(noBomTxt != "")
+	{
+		issueCount = issueCount + 1;
+		rowsHtml = rowsHtml + "<tr><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:600'>No BOM</td><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a'>" + noBomTxt.replaceAll("\"","'") + "</td></tr>";
+	}
+	if(multiBomTxt != "")
+	{
+		issueCount = issueCount + 1;
+		rowsHtml = rowsHtml + "<tr><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:600'>More than one BOM</td><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a'>" + multiBomTxt.replaceAll("\"","'") + "</td></tr>";
+	}
+	mailNote = "not needed";
+	if(issueCount > 0)
+	{
+		try
+		{
+			innerHtml = "<div style='font-size:14px;color:#0f172a'>Sales order <b>" + soNumber.replaceAll("\"","'") + "</b> arrived from Inventory and has been saved, but <b>" + issueCount + "</b> thing(s) must be fixed before the next planner run or it cannot be planned.</div>";
+			innerHtml = innerHtml + "<table style='width:100%;border-collapse:collapse;margin-top:14px;font-size:13px'>" + rowsHtml + "</table>";
+			innerHtml = innerHtml + "<div style='font-size:12px;color:#64748b;padding-top:14px'>The order is sitting at <b>Pending</b>, so the planner will retry it on every run. Nothing is lost - it simply will not be planned until the rows above are fixed.</div>";
+			mailBody = thisapp.buildNotificationEmail("Sales order needs attention","SO " + soNumber + " - synced from Inventory","#dc2626",innerHtml);
+			sendmail
+			[
+				from :zoho.adminuserid
+				to :notifyTo
+				subject :"Action needed: SO " + soNumber + " cannot be planned yet"
+				message :mailBody
+			]
+			mailNote = "accepted, to " + notifyTo;
+		}
+		catch (eMail)
+		{
+			mailNote = "FAILED - " + eMail.toString();
+		}
+	}
+	return {"status":"success","salesOrderId":soIdTxt,"recordId":insertResult.toString(),"salesOrderNumber":soNumber,"orderSource":srcNorm,"orderStatus":"Pending","lineItems":lineCount,"issues":issueCount,"noBom":noBomTxt,"multiBom":multiBomTxt,"notInItemMaster":noItemTxt,"customerUnmatched":custMissTxt,"mail":mailNote};
+}

@@ -263,6 +263,74 @@ corrupt a ledger.
 > be executed against real data. The residual risk is narrow and worth stating: if a plan's
 > `Priority_Key` changes between the handover and the receipt, the fans diverge again.
 
+## The admin audit
+
+The Calculation check tab showed three things — the plan-time requirement, the live allocation, and
+the waste the cutting will throw off. It now shows **four**, and the second one had to be repaired
+before the lot part could be added to it.
+
+**It was replaying an allocator that no longer exists.** `getAdminCalculation` calls
+`getStoreMaterialRequirements` and treats its `piecesCoveredByWaste`, `freshPieces`, `freshMeters`
+and `wastePicks` as *the* allocation. Those stopped being the allocation when lots arrived: the
+server deliberately no longer picks offcuts, because a remnant carries its lot's shade and picking
+remnants and picking the lot is one decision. So the screen was rendering `wastePicks: []` and zero
+offcut credit under a card promising *"normally lower than the plan"* — column 2 read identical to
+the plan figure it exists to differ from, and the offcut pool showed every remnant as unclaimed.
+
+**One allocator, shared, and that is the whole fix.** `app/js/lot-allocator.js` is the file the
+store page loads; the admin page loads the same file as `../js/lot-allocator.js` and runs it over
+the same payload. The `app/` tree ships as one widget zip, so there is nothing to duplicate and no
+build step. A second implementation that agrees today disagrees the week after next, and the screen
+whose entire job is to be trusted is the worst place for that.
+
+The allocator gained one output for this: **`orderOutcomes`**, the decision per order — lot, why,
+metres, offcut pieces, greige waiting, pieces still short, and any override note. The store screen
+ignores it; the audit is built on it. Recorded during the same run rather than re-derived, so the
+audit cannot drift from the counter.
+
+### What the four steps now are
+
+| | is it a calculation or a record |
+|---|---|
+| 1 Planned requirement | calculation, fixed at plan time |
+| 2 Allocated right now | calculation, live — **leads with the shade and why** |
+| 3 Waste this will throw off | prediction |
+| 4 **What actually went out** | **record** — the only one that cannot move |
+
+Step 2 leads with the shade because that is the decision everything else follows from: which
+offcuts are usable depends on which lot the fresh cloth comes off, so reading the offcut scoring
+first and the shade afterwards is reading it backwards. It names the outcome in one sentence —
+*pinned* / *smallest that covers it today* / *only after washing* / *no lot covers it* — then the
+offcuts of that shade, then the fresh-cloth derivation checked against what the allocator decided.
+
+Step 4 is new and is the one that answers *how are we issuing material*. It reads
+`Material_Issue.Issue_Lines`, where the lot is stamped as the cloth crosses the counter, and holds
+each handover against `Material_Requirement.Issued_Lot`:
+
+- **the pin is the claim, the lines are the evidence.** A line disagreeing with the pin *and*
+  carrying an override note is a recorded human decision. Disagreeing with **no** note is the shape
+  a silent shade switch takes, and it says so.
+- an order cut from more than one shade is **stated outright** — *"cut from 2 different shades
+  (L2, L3). The finished pieces will not match each other, and that cannot be undone."* Not left
+  to be spotted by reading a column.
+- cloth out with **no pin at all** is called out too: nothing can hold a later remake to the right
+  shade.
+
+### Two things dropped from step 2
+
+**The pass-by-pass offcut scoring table.** It was read back from `wastePicks`, so it rendered empty
+— but it was also the wrong question. Scoring only ever ran *within one lot*, so "which piece
+scored best across the rack" is a comparison the allocator never makes.
+
+**The pool's "unclaimed" column.** Accumulated from the picks the server reported, which is now
+none, so it read as unclaimed on every row including pieces another supervisor had already taken. A
+column that is always the same number answers nothing. The pool table stays — a remnant nobody was
+offered is what an admin arrives to explain — and now says plainly that fit is judged on the cut
+while *being offered* also depends on the shade.
+
+Also: the shelf total at the foot of the step is no longer presented as a sufficiency test. It says
+so, because cloth in the wrong shade cannot serve the order however much of it there is.
+
 ## Where the arithmetic lives
 
 **Stays in the widget.** It already has every input the decision needs — the outstanding pieces,
@@ -366,12 +434,20 @@ than dropped.
 
 ## What has and has not been verified
 
-**The widget allocator is tested.** The real functions out of `app/js/main.js` are exercised in a
-stub DOM with `vm`, 30 assertions over twelve scenarios: the today-beats-greige ranking, the
-order-atom refusal, the wash ask reaching the summary, cloth at the washer not becoming a
-purchase, one raisable ticket per lot, skip-don't-block, the two numbers on a no-fit row, the
-pinned top-up, blocked stock named and never allocated, a blocked pin, two orders sharing a lot,
-and the one-line rule on the row.
+**The widget allocator is tested.** `app/js/lot-allocator.js` plus `app/js/main.js` are loaded in a
+stub DOM with `vm`, in page order, and exercised with 35 assertions over fourteen scenarios: the
+today-beats-greige ranking, the order-atom refusal, the wash ask reaching the summary, cloth at the
+washer not becoming a purchase, one raisable ticket per lot, skip-don't-block, the two numbers on a
+no-fit row, the pinned top-up, blocked stock named and never allocated, a blocked pin, two orders
+sharing a lot, the one-line rule on the row, metres on every lot line, and the per-order outcomes
+the audit reads.
+
+**The admin audit is tested the same way** — the allocator plus `app/admin/js/main.js`, 26
+assertions over eleven scenarios: each of the four shade outcomes rendering its own sentence, the
+derivation agreeing with the allocator, a pinned order waiting on a wash **not** being reported as a
+discrepancy, a failed live call saying so instead of looking like a decision, the pin-versus-line
+verdicts, an override with its reason, a shade change with no reason recorded, a two-shade order,
+cloth issued with no pin, and the shade column on the summary row.
 
 **No Deluge has been run, and none of it can be from here.** All four `.dg` changes are
 comment-and-string-aware balance checked and scanned for the loop-variable/scalar clash, which

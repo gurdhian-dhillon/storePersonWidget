@@ -1,0 +1,63 @@
+string queueInventoryPost(string postType, string sourceForm, string sourceRecord, string creatorItemId, string qty)
+{
+	res = "{\"queued\":false,\"reason\":\"Nothing ran\"}";
+	try
+	{
+		pType = ifnull(postType,"").toString().trim();
+		if(pType != "Consumption" && pType != "Write_Off" && pType != "Finished_Goods")
+		{
+			return "{\"queued\":false,\"reason\":\"Unknown Post_Type '" + pType.replaceAll("\"","'") + "'\"}";
+		}
+		qS = ifnull(qty,"0").toString().trim();
+		if(qS == "")
+		{
+			qS = "0";
+		}
+		qVal = qS.toDecimal();
+		if(qVal <= 0)
+		{
+			return "{\"queued\":false,\"reason\":\"Nothing to post\"}";
+		}
+		cItem = ifnull(creatorItemId,"").toString().trim();
+		if(cItem == "")
+		{
+			return "{\"queued\":false,\"reason\":\"No Creator item id given\"}";
+		}
+		invItem = "";
+		if(pType == "Finished_Goods")
+		{
+			for each  imRow in Item_Master[ID == cItem.toLong()]
+			{
+				invItem = ifnull(imRow.Inventory_Item_ID,"").toString().trim();
+			}
+		}
+		else
+		{
+			for each  rmRow in Raw_Material[ID == cItem.toLong()]
+			{
+				invItem = ifnull(rmRow.Inventory_Item_ID,"").toString().trim();
+			}
+		}
+		if(invItem == "")
+		{
+			return "{\"queued\":false,\"reason\":\"No Inventory_Item_ID mapped for Creator id " + cItem + "\"}";
+		}
+		newRow = insert into Inventory_Post_Queue
+		[
+			Post_Type=pType
+			Post_Status="Pending"
+			Source_Form=ifnull(sourceForm,"").toString().trim()
+			Source_Record=ifnull(sourceRecord,"").toString().trim()
+			Inventory_Item_ID=invItem
+			Quantity=qVal
+			Attempts=0
+			Added_User=zoho.loginuser
+		];
+		res = "{\"queued\":true,\"rowId\":\"" + newRow.toString() + "\",\"item\":\"" + invItem + "\",\"qty\":" + qVal + "}";
+	}
+	catch (e)
+	{
+		res = "{\"queued\":false,\"reason\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+	return res;
+}

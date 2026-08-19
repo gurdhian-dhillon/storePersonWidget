@@ -1,0 +1,737 @@
+string sendToPrint(string payloadJson)
+{
+	// Store person cuts full-width pieces off a plain lot and sends them to an
+	// outside printer. The cloth is still ours - it has only moved state.
+	//
+	//   { "plainMaterialId":"123", "plainLotId":"901", "sourceState":"Wash",
+	//     "pattern":"Block Print A",
+	//     "printedMaterialId":"",       // empty => mint from (plain, pattern)
+	//     "printerId":"77",
+	//     "lines":[ {"lengthCm":300,"count":3}, {"lengthCm":275,"count":4} ],
+	//     "remarks":"" }
+	//
+	// PRINTING IS A STORE-SIDE CONVERSION, NOT A PRODUCTION STAGE. It moves
+	// stock between two Raw_Material SKUs before anything is issued, so it does
+	// not go anywhere near sendToThirdParty, Stage_Log or Stage_Assignment.
+	//
+	// THE LOT HOLDS THE TRUTH, Raw_Material HOLDS A MAINTAINED TOTAL. Both are
+	// written here, in one pass, so they cannot disagree. The parent is not a
+	// derived roll-up on purpose: recomputing a sum per material on every screen
+	// load is a query per material, and that is the road to the statement limit -
+	// which is NOT catchable and shows up as a bare 500 with no error card.
+	//
+	// THE SKU TOTAL DOES NOT CHANGE AT SEND. Both moves are mirrored onto the
+	// parent, so the material still owns exactly what it owned - the metres have
+	// only walked from Wash/Unwash into In_Print_Qty. Never reduce the plain lot
+	// without raising In_Print_Qty: the wash flow already learned that one. Skip
+	// the middle counter and the metres stay counted as available, the issue
+	// screen offers cloth that is not in the building, and every shortfall is
+	// measured against it.
+	//
+	// NOTHING POSTS TO ZOHO INVENTORY HERE, by design and not by omission. The
+	// cloth is still ours at send; the Inventory adjustment belongs to the
+	// RECEIPT, where the plain SKU really does go down and the printed one up.
+	//
+	// NO PRINTED LOT AND NO Fabric_Piece ROWS ARE WRITTEN AT SEND. What comes
+	// back is not what went out - cloth shrinks and printers ruin pieces - so
+	// the printed lot is created by receiveFromPrint against what was actually
+	// counted in. Send_Lines is the evidence the return is checked against.
+	//
+	// ONE EXIT, AT THE BOTTOM, and it is not a style choice. Deluge's "all paths
+	// return" check does NOT count a return that lives inside try/catch, so a
+	// function whose every return sat in the try failed to save with
+	// "Missing return statement" reported against line 3 - the first line of the
+	// body, nowhere near anything actually wrong. So nothing returns early:
+	// errTxt is set, every later block is guarded on it being empty, and the one
+	// return is after the catch. Same shape as saveStockInward.
+
+	res = "";
+	errTxt = "";
+
+	try
+	{
+		inp = payloadJson.toMap();
+
+		plainMatId = ifnull(inp.get("plainMaterialId"),"").toString().trim();
+		plainLotId = ifnull(inp.get("plainLotId"),"").toString().trim();
+		printedIdIn = ifnull(inp.get("printedMaterialId"),"").toString().trim();
+		printerId = ifnull(inp.get("printerId"),"").toString().trim();
+		srcState = ifnull(inp.get("sourceState"),"").toString().trim();
+		remarks = ifnull(inp.get("remarks"),"").toString().trim().replaceAll("\"","'");
+
+		// PATTERN IS NOT ESCAPED HERE, and that is deliberate - unlike the lot
+		// number in saveStockInward. It is a Creator Dropdown value, so the
+		// string has to match what is STORED, character for character, or the
+		// (Print_Base, Pattern) pair silently resolves to nothing and a second
+		// SKU gets minted for a pattern that already has one. Escaping happens
+		// once, at the JSON emit at the bottom, where it belongs.
+		patternIn = ifnull(inp.get("pattern"),"").toString().trim();
+
+		// size() is right - linesRaw is a List, not a query result.
+		linesRaw = ifnull(inp.get("lines"),list());
+
+		if(plainMatId == "" || plainMatId.isNumber() == false)
+		{
+			errTxt = "No plain material given";
+		}
+		if(errTxt == "" && (plainLotId == "" || plainLotId.isNumber() == false))
+		{
+			errTxt = "No lot given - printed tone depends on the lot that goes out";
+		}
+		if(errTxt == "" && srcState != "Wash" && srcState != "Unwash")
+		{
+			errTxt = "Source state must be Wash or Unwash";
+		}
+		if(errTxt == "" && patternIn == "")
+		{
+			errTxt = "Choose a pattern - it is half of the printed SKU's identity";
+		}
+		if(errTxt == "" && (printerId == "" || printerId.isNumber() == false))
+		{
+			errTxt = "No printer given";
+		}
+		if(errTxt == "" && linesRaw.size() == 0)
+		{
+			errTxt = "Nothing to send - add at least one piece line";
+		}
+
+		//--------------------------------------------------------------------
+		// THE PLAIN MATERIAL. Everything the minted SKU inherits is read here,
+		// in the one pass that validates it, so a mint later needs no second
+		// fetch of the same record.
+		//--------------------------------------------------------------------
+		// Initialised BEFORE the guarded blocks. A name first assigned inside an
+		// if is not safe to read after it when that branch did not run.
+		plainName = "";
+		plainSku = "";
+		isFab = false;
+		alreadyPrinted = false;
+		inhWidth = "";
+		inhType = "";
+		inhGsm = "";
+		inhQuality = "";
+		inhColor = "";
+		inhUnit = "";
+
+		if(errTxt == "")
+		{
+			// A query result needs .count() - .size() is a List method.
+			plainRecs = Raw_Material[ID == plainMatId.toLong()];
+			if(plainRecs.count() == 0)
+			{
+				errTxt = "Plain material not found";
+			}
+			else
+			{
+				for each  rmChk in plainRecs
+				{
+					plainSku = ifnull(rmChk.SKU,"").toString().trim().replaceAll("\"","'");
+					plainName = ifnull(rmChk.Material_Display_Name,"").toString().trim().replaceAll("\"","'");
+					if(plainName == "")
+					{
+						plainName = ifnull(rmChk.Name,"").toString().trim().replaceAll("\"","'");
+					}
+
+					// Tested AS TEXT. A Decision box gives a boolean, a yes/no
+					// dropdown gives the string "Yes", an untouched field gives
+					// EMPTY - and comparing either of the last two against the
+					// boolean true is silently false, which would refuse to print
+					// cloth that really is fabric.
+					fabTxt = ifnull(rmChk.Is_Fabric,"").toString().trim().toLowerCase();
+					isFab = false;
+					if(fabTxt == "true" || fabTxt == "yes" || fabTxt == "1" || fabTxt == "y")
+					{
+						isFab = true;
+					}
+
+					// A SKU that already has a Print_Base IS the printed cloth.
+					// Printing it again would chain Print_Base and make "what
+					// plain cloth is this?" unanswerable in one hop, which is
+					// the whole reason the field exists.
+					if(ifnull(rmChk.Print_Base,"").toString().trim() != "")
+					{
+						alreadyPrinted = true;
+					}
+
+					// Copied, never referenced. A lookup would let someone edit
+					// the plain SKU's width years later and silently rewrite the
+					// cutting maths for printed cloth already on the rack - the
+					// Phase_Name snapshot argument in a different costume.
+					inhWidth = ifnull(rmChk.Fabric_Width_Inches,"").toString().trim();
+					inhType = ifnull(rmChk.Type_field,"").toString().trim();
+					inhGsm = ifnull(rmChk.GSM,"").toString().trim();
+					inhQuality = ifnull(rmChk.Quality,"").toString().trim();
+					inhColor = ifnull(rmChk.Color,"").toString().trim();
+					inhUnit = ifnull(rmChk.Unit,"").toString().trim();
+				}
+			}
+		}
+
+		if(errTxt == "" && isFab != true)
+		{
+			errTxt = plainSku + " is not a fabric - printing applies to fabric only";
+		}
+		if(errTxt == "" && alreadyPrinted == true)
+		{
+			errTxt = plainSku + " is already a printed material - print from the plain cloth it came from";
+		}
+
+		// Nested rather than joined with && onto the errTxt guard. Deluge is not
+		// dependable about short-circuiting, and .toLong() on an empty printerId
+		// would throw out of a block that had already decided not to run - the
+		// caller then gets "DELUGE: ..." instead of the fault that really stopped
+		// it.
+		if(errTxt == "")
+		{
+			if(Third_Party[ID == printerId.toLong()].count() == 0)
+			{
+				errTxt = "Printer not found";
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// THE PLAIN LOT. It has to belong to THIS material and be Active - a
+		// blocked lot is quarantined and must not quietly leave the building.
+		//
+		// ONE PLAIN LOT PER JOB, enforced by the payload shape. Two lots in one
+		// run come back as one printed lot of mixed tone, which is the exact
+		// defect lots exist to prevent and which nothing downstream could then
+		// separate.
+		//--------------------------------------------------------------------
+		lotWashHave = 0.0;
+		lotUnwashHave = 0.0;
+		lotInPrintHave = 0.0;
+		lotNumOut = "";
+		targetLot = 0;
+
+		if(errTxt == "")
+		{
+			lotRecs = Raw_Material_Lot[ID == plainLotId.toLong()];
+			if(lotRecs.count() == 0)
+			{
+				errTxt = "Lot not found";
+			}
+			else
+			{
+				for each  lchk in lotRecs
+				{
+					if(ifnull(lchk.Material,"").toString().trim() != plainMatId)
+					{
+						errTxt = "That lot belongs to a different material";
+					}
+					else if(ifnull(lchk.Status,"Active").toString().trim() == "Blocked")
+					{
+						errTxt = "That lot is blocked - nothing can be sent off it";
+					}
+					else
+					{
+						targetLot = lchk.ID;
+						lotNumOut = ifnull(lchk.Lot_Number,"").toString().trim().replaceAll("\"","'");
+
+						// Creator fields that were never written are EMPTY, not
+						// null. ifnull() does not catch empty and .toDecimal()
+						// throws on it, so normalise to string, test, convert.
+						lwS = ifnull(lchk.Wash_Quantity,"0").toString().trim();
+						if(lwS == "")
+						{
+							lwS = "0";
+						}
+						luS = ifnull(lchk.Unwash_Quantity,"0").toString().trim();
+						if(luS == "")
+						{
+							luS = "0";
+						}
+						lpS = ifnull(lchk.In_Print_Qty,"0").toString().trim();
+						if(lpS == "")
+						{
+							lpS = "0";
+						}
+
+						lotWashHave = lwS.toDecimal();
+						lotUnwashHave = luS.toDecimal();
+						lotInPrintHave = lpS.toDecimal();
+					}
+				}
+			}
+		}
+
+		if(errTxt == "" && targetLot == 0)
+		{
+			errTxt = "Could not resolve a lot to send off";
+		}
+
+		//--------------------------------------------------------------------
+		// THE PIECE LINES.
+		//
+		// He types the lengths - it is a physical constraint, how the cloth is
+		// cut and what the printer's table takes - so nothing computes them and
+		// nothing rounds them. What IS enforced: a positive length and a WHOLE
+		// positive count. Half a piece does not exist, and a fractional count
+		// would reach the allocator as a piece it can never fetch.
+		//
+		// No break in Deluge, so the loop runs to the end and errTxt carries the
+		// first fault out. Each line's work is guarded so a later good line
+		// cannot overwrite an earlier complaint.
+		//--------------------------------------------------------------------
+		totalCm = 0.0;
+		lineCount = 0;
+
+		if(errTxt == "")
+		{
+			for each  lnRaw in linesRaw
+			{
+				if(errTxt == "")
+				{
+					ln = lnRaw.toMap();
+
+					lStr = ifnull(ln.get("lengthCm"),"0").toString().trim();
+					if(lStr == "")
+					{
+						lStr = "0";
+					}
+					cStr = ifnull(ln.get("count"),"0").toString().trim();
+					if(cStr == "")
+					{
+						cStr = "0";
+					}
+
+					lnLen = lStr.toDecimal();
+					lnCntDec = cStr.toDecimal();
+					lnCnt = lnCntDec.toLong();
+
+					if(lnLen <= 0)
+					{
+						errTxt = "Every send line needs a piece length in cm";
+					}
+					else if(lnCntDec <= 0)
+					{
+						errTxt = "Every send line needs a piece count above zero";
+					}
+					// Decimal compared with decimal - mixed-type comparison
+					// throws, so the whole-number test converts back up rather
+					// than comparing a decimal to a long.
+					else if(lnCnt.toDecimal() != lnCntDec)
+					{
+						errTxt = "Piece count must be a whole number - " + cStr + " is not";
+					}
+					else
+					{
+						totalCm = totalCm + (lnLen * lnCnt);
+						lineCount = lineCount + 1;
+					}
+				}
+			}
+		}
+
+		metresSent = 0.0;
+		if(errTxt == "")
+		{
+			metresSent = totalCm / 100;
+			if(metresSent <= 0)
+			{
+				errTxt = "Nothing to send - the lines add up to zero";
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// THE BUDGET. REJECT, NEVER SILENTLY TRIM.
+		//
+		// Trimming would put a Metres_Sent on the job that does not match the
+		// Send_Lines beside it, and the return is checked against those lines -
+		// so the difference would read as printer loss for ever.
+		//--------------------------------------------------------------------
+		if(errTxt == "")
+		{
+			stateHave = lotUnwashHave;
+			if(srcState == "Wash")
+			{
+				stateHave = lotWashHave;
+			}
+			if(metresSent > stateHave)
+			{
+				errTxt = "Lot " + lotNumOut + " has only " + stateHave + " Mtr " + srcState + " - " + metresSent + " Mtr asked for";
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// RESOLVE THE PRINTED SKU, OR MINT IT.
+		//
+		// A printed material is identified by Print_Base + Pattern, and THAT
+		// PAIR IS UNIQUE. The plain SKU already carries width, colour, GSM and
+		// quality, so "a pattern on a width that does not exist yet" is simply
+		// "this pair has never been printed" - one rule instead of a list of
+		// attributes to compare.
+		//
+		// Guarded server-side and not only on the screen, because a Custom API
+		// is callable from anywhere - the same reasoning that put the Lot_Number
+		// uniqueness check inside saveStockInward. Two records with the same
+		// pair split one material's stock across two SKUs and every screen then
+		// shows half of it.
+		//--------------------------------------------------------------------
+		printedId = 0;
+		printedSku = "";
+		printedName = "";
+		pairCount = 0;
+		minted = false;
+
+		if(errTxt == "")
+		{
+			pairRecs = Raw_Material[Print_Base == plainMatId.toLong() && Pattern == patternIn];
+			pairCount = pairRecs.count();
+
+			if(pairCount > 1)
+			{
+				// Already corrupt. Refusing here is the only honest answer: a
+				// send would pick one of the two arbitrarily and deepen the
+				// split it is complaining about.
+				errTxt = "There is already more than one printed material for " + plainSku + " / " + patternIn + " - fix the duplicates before printing";
+			}
+			else
+			{
+				for each  rmPair in pairRecs
+				{
+					printedId = rmPair.ID;
+					printedSku = ifnull(rmPair.SKU,"").toString().trim().replaceAll("\"","'");
+					printedName = ifnull(rmPair.Material_Display_Name,"").toString().trim().replaceAll("\"","'");
+					if(printedName == "")
+					{
+						printedName = ifnull(rmPair.Name,"").toString().trim().replaceAll("\"","'");
+					}
+				}
+			}
+		}
+
+		// The widget resolves the pair too and sends back what it found. If it
+		// sent something, it has to BE what the pair resolves to here - a stale
+		// screen holding a printed SKU from a different pattern would otherwise
+		// book this run against the wrong cloth, and nothing downstream could
+		// tell.
+		if(errTxt == "" && printedIdIn != "")
+		{
+			if(printedId == 0)
+			{
+				errTxt = "No printed material exists for " + plainSku + " / " + patternIn + " - reload the screen";
+			}
+			else if(printedIdIn != printedId.toString())
+			{
+				errTxt = "The printed material sent does not match " + plainSku + " / " + patternIn + " - reload the screen";
+			}
+		}
+
+		if(errTxt == "" && printedId == 0)
+		{
+			//----------------------------------------------------------------
+			// MINTING. This is permanent master data and the join key Inventory
+			// will use later, so the widget shows the code and the name before
+			// anything is written - a printed SKU is never minted silently.
+			//
+			// THE CODE: next free RM- number. Scan Raw_Material, parse the
+			// digits after the prefix, take the maximum, add one, zero-pad to
+			// the width already in use. Codes that do NOT match the prefix
+			// pattern are SKIPPED rather than guessed at - one hand-typed
+			// oddity must not be allowed to invent a sequence number.
+			//
+			// A fetch-all of Raw_Material is the acceptable kind of scan:
+			// docs/scaling.md records master-data fetch-alls as fine and it is
+			// the transactional forms that get slowly worse. This is tens of
+			// records, not every plan ever created.
+			//----------------------------------------------------------------
+			maxSeq = 0;
+			padLen = 5;
+
+			for each  rmScan in Raw_Material[ID != 0]
+			{
+				skuTxt = ifnull(rmScan.SKU,"").toString().trim().toUpperCase();
+				if(skuTxt.length() > 3 && skuTxt.subString(0,3) == "RM-")
+				{
+					digTxt = skuTxt.subString(3,skuTxt.length());
+					if(digTxt.isNumber())
+					{
+						if(digTxt.length() > padLen)
+						{
+							padLen = digTxt.length();
+						}
+						seqNum = digTxt.toLong();
+						if(seqNum > maxSeq)
+						{
+							maxSeq = seqNum;
+						}
+					}
+				}
+			}
+
+			// Padded from a fixed string of zeros rather than a loop - Deluge
+			// has no dependable while, and a counter list for four characters
+			// would be worse than this.
+			if(padLen > 10)
+			{
+				padLen = 10;
+			}
+			zeroPad = "0000000000";
+			seqTxt = (maxSeq + 1).toString();
+			if(seqTxt.length() < padLen)
+			{
+				seqTxt = zeroPad.subString(0,padLen - seqTxt.length()) + seqTxt;
+			}
+			wantSku = "RM-" + seqTxt;
+
+			// RE-CHECKED AGAINST THE FORM, not against the list just scanned.
+			// The scan and the insert are not atomic and there is no break in
+			// Deluge to make them so; two store people on the Print tab at the
+			// same moment would both compute the same next number.
+			if(Raw_Material[SKU == wantSku].count() > 0)
+			{
+				errTxt = "SKU " + wantSku + " was taken while this was being prepared - press Send again";
+			}
+			else
+			{
+				wantName = plainName + " / " + patternIn;
+
+				// BOTH name fields are written. getRawMaterialsList reads
+				// Material_Display_Name and falls back to Name, and other
+				// screens read the other way round, so leaving one empty makes
+				// the new SKU show blank on whichever screen reads it.
+				//
+				// EVERY QUANTITY FIELD IS ZERO. Stock only ever arrives on a
+				// printed SKU through a print receipt - there is no other door,
+				// and an opening balance here would be cloth nobody counted.
+				newMatId = insert into Raw_Material
+				[
+					Material_Display_Name=wantName
+					SKU=wantSku
+					Is_Fabric=true
+					Pattern=patternIn
+					Type_field=inhType
+					Color=inhColor
+					Unit=inhUnit
+					Fabric_Width_Inches=inhWidth
+					GSM=inhGsm
+					Quality=inhQuality
+					Quantity=0
+					Wash_Quantity=0
+					Unwash_Quantity=0
+					In_Wash_Qty=0
+					In_Print_Qty=0
+					Unallocated_Qty=0
+					Added_User=zoho.loginuser
+				];
+
+				printedId = newMatId.toLong();
+				printedSku = wantSku;
+				printedName = wantName.replaceAll("\"","'");
+				minted = true;
+
+				// The lookup is set AFTER the insert - a lookup in the insert
+				// block fails the whole block if Creator will not take it, and
+				// this record must exist before anything else can point at it.
+				//
+				// Name is set here for the same reason, and it is not paranoia.
+				// Eight functions in this repo read Raw_Material.Name as plain
+				// text, so it is a single line field in practice - but if it is
+				// ever a composite Name type, that assignment inside the insert
+				// block would fail the WHOLE mint and report it against the
+				// insert, nowhere near the field that caused it. Out here the
+				// worst case is a record that exists with only its display name,
+				// which every screen already falls back from.
+				for each  rmNew in Raw_Material[ID == printedId]
+				{
+					rmNew.Print_Base = plainMatId.toLong();
+					rmNew.Name = wantName;
+				}
+
+				info "minted printed SKU " + wantSku + " (" + wantName + ") id=" + printedId;
+			}
+		}
+
+		if(errTxt == "" && printedId == 0)
+		{
+			errTxt = "Could not resolve a printed material to print into";
+		}
+
+		//--------------------------------------------------------------------
+		// MOVE THE LEDGER FIRST, WRITE THE JOB SECOND.
+		//
+		// There is no transaction here, so one of the two orders has to be
+		// chosen for its failure mode. A job written with no move can be
+		// cancelled, and cancelPrintJob credits Metres_Sent back to the counter
+		// it came off - inventing cloth that never left the rack. A move with no
+		// job leaves metres parked in In_Print_Qty: visible to
+		// reconcileRawMaterial, correctable by hand, and it invents nothing.
+		// Stock that is stuck beats stock that is imaginary.
+		//--------------------------------------------------------------------
+		lotWashOut = 0.0;
+		lotUnwashOut = 0.0;
+		lotInPrintOut = 0.0;
+		matInPrintOut = 0.0;
+
+		if(errTxt == "")
+		{
+			for each  lotUpd in Raw_Material_Lot[ID == targetLot]
+			{
+				lotWashOut = lotWashHave;
+				lotUnwashOut = lotUnwashHave;
+				lotInPrintOut = lotInPrintHave + metresSent;
+
+				if(srcState == "Wash")
+				{
+					lotWashOut = lotWashHave - metresSent;
+					lotUpd.Wash_Quantity = lotWashOut;
+				}
+				else
+				{
+					lotUnwashOut = lotUnwashHave - metresSent;
+					lotUpd.Unwash_Quantity = lotUnwashOut;
+				}
+
+				lotUpd.In_Print_Qty = lotInPrintOut;
+			}
+
+			//----------------------------------------------------------------
+			// THE PARENT MIRRORS BOTH MOVES, so the SKU total is unchanged.
+			// Read fresh off the record rather than reusing the lot's figures -
+			// the parent is the sum over every lot, not over this one.
+			//----------------------------------------------------------------
+			for each  rmUpd in Raw_Material[ID == plainMatId.toLong()]
+			{
+				mwS = ifnull(rmUpd.Wash_Quantity,"0").toString().trim();
+				if(mwS == "")
+				{
+					mwS = "0";
+				}
+				muS = ifnull(rmUpd.Unwash_Quantity,"0").toString().trim();
+				if(muS == "")
+				{
+					muS = "0";
+				}
+				mpS = ifnull(rmUpd.In_Print_Qty,"0").toString().trim();
+				if(mpS == "")
+				{
+					mpS = "0";
+				}
+
+				matInPrintOut = mpS.toDecimal() + metresSent;
+
+				if(srcState == "Wash")
+				{
+					rmUpd.Wash_Quantity = mwS.toDecimal() - metresSent;
+				}
+				else
+				{
+					rmUpd.Unwash_Quantity = muS.toDecimal() - metresSent;
+				}
+
+				rmUpd.In_Print_Qty = matInPrintOut;
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// THE JOB. Job_Status, not Status - six forms already share that link
+		// name and a grep for '.Status = "' mixes all of them. Do not add a
+		// seventh.
+		//
+		// Metres_Returned starts at 0 rather than empty so the loss figure on
+		// the screen reads as a real number from the moment the job exists.
+		//--------------------------------------------------------------------
+		jobId = 0;
+
+		if(errTxt == "")
+		{
+			newJobId = insert into Print_Job
+			[
+				Source_State=srcState
+				Metres_Sent=metresSent
+				Metres_Returned=0
+				Sent_On=zoho.currentdate
+				Job_Status="At_Printer"
+				Remarks=remarks
+				Added_User=zoho.loginuser
+			];
+
+			jobId = newJobId.toLong();
+
+			// Lookups are set AFTER the insert - a null one fails the whole
+			// insert block, and the subform rows go in as a Collection in one
+			// call because assigning to the subform directly does not work.
+			for each  pjUpd in Print_Job[ID == jobId]
+			{
+				pjUpd.Plain_Material = plainMatId.toLong();
+				pjUpd.Plain_Lot = targetLot;
+				pjUpd.Printed_Material = printedId;
+				pjUpd.Printer = printerId.toLong();
+
+				sendRows = Collection();
+
+				for each  sndRaw in linesRaw
+				{
+					snd = sndRaw.toMap();
+
+					sLenS = ifnull(snd.get("lengthCm"),"0").toString().trim();
+					if(sLenS == "")
+					{
+						sLenS = "0";
+					}
+					sCntS = ifnull(snd.get("count"),"0").toString().trim();
+					if(sCntS == "")
+					{
+						sCntS = "0";
+					}
+
+					sLen = sLenS.toDecimal();
+					sCnt = sCntS.toDecimal().toLong();
+
+					// Re-tested rather than trusted: the validation pass above
+					// only proved every line was good, and this loop is a second
+					// walk over the same raw list. A zero row here would be a
+					// piece line describing nothing.
+					if(sLen > 0 && sCnt > 0)
+					{
+						sRow = Print_Job.Send_Lines();
+						sRow.Piece_Length_Cm=sLen;
+						sRow.Piece_Count=sCnt;
+						sendRows.insert(sRow);
+					}
+				}
+
+				pjUpd.Send_Lines.insert(sendRows);
+			}
+
+			info "print job " + jobId + " - " + metresSent + " Mtr " + srcState + " off lot " + lotNumOut + " of " + plainSku + " -> " + printedSku + " (" + lineCount + " lines)";
+		}
+
+		if(errTxt == "" && jobId == 0)
+		{
+			errTxt = "The print job could not be created";
+		}
+
+		if(errTxt == "")
+		{
+			// Ids forced to string - 18-digit ids break JSON.parse on the widget.
+			// minted is concatenated unquoted so it lands as a JSON boolean, the
+			// same shape the contract in docs/printing.md states.
+			mintedTxt = "false";
+			if(minted == true)
+			{
+				mintedTxt = "true";
+			}
+
+			res = "{\"success\":true,\"jobId\":\"" + jobId + "\",\"printedMaterialId\":\"" + printedId + "\",\"printedSku\":\"" + printedSku + "\",\"printedName\":\"" + printedName + "\",\"minted\":" + mintedTxt + ",\"metresSent\":" + metresSent + ",\"lotWash\":" + lotWashOut + ",\"lotUnwash\":" + lotUnwashOut + ",\"lotInPrint\":" + lotInPrintOut + ",\"materialInPrint\":" + matInPrintOut + "}";
+		}
+	}
+	catch (e)
+	{
+		// Creator reports every runtime failure to a widget as a generic code 9430,
+		// so the real message has to travel back inside the payload.
+		errTxt = "DELUGE: " + e.toString();
+	}
+
+	if(res == "")
+	{
+		if(errTxt == "")
+		{
+			errTxt = "Nothing was sent";
+		}
+		res = "{\"success\":false,\"error\":\"" + errTxt.replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

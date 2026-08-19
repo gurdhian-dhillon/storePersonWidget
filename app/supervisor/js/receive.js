@@ -521,6 +521,28 @@ function submitReceipt() {
         if (parsed && parsed.errors && parsed.errors.length > 0) {
             alert('Recorded, with discrepancies:\n' + parsed.errors.join('\n'));
         }
+
+        // Push the consumption receiveMaterials just queued straight to
+        // Inventory, rather than waiting for the nightly drain.
+        //
+        // Fired from here, not from inside receiveMaterials, for two reasons:
+        // it is a separate execution so it cannot spend that function's
+        // statement budget, and a widget -> Custom API call is unmetered.
+        //
+        // Deliberately not awaited and never surfaced to the supervisor. The
+        // receipt has already been recorded; if this fails the rows stay
+        // Pending and the scheduled drain retries them. Telling him a stock
+        // post failed would be asking him to act on something he cannot fix.
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'postInventoryQueue',
+            http_method: 'POST',
+            payload: { dryRun: 'false' }
+        }).then(function (drainRes) {
+            console.log('inventory drain:', drainRes && drainRes.result);
+        }).catch(function (drainErr) {
+            console.warn('inventory drain failed, scheduled run will retry:', drainErr);
+        });
+
         EDIT = false;
         loadMaterials();
     }).catch(function (err) {

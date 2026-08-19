@@ -1,0 +1,4 @@
+Date,Status,Reference Number,Reason,Description,New Quantity on Hand,Quantity Adjusted,Cost Price,Item Name,SKU,Item Description,Unit,Account,Branch Name,Warehouse Name
+2016-06-23,draft,REF-001,Stocktaking results,Weekend stock taking,15,,10.00,Bus-Powered USB 3.0,USB03,High quality USB,No,Cost of Goods Sold,Head Office,Zillium
+2016-06-25,adjusted,REF-002,Stocktaking results,Main warehouse stock taking,,30,5.00,USB Cable-Black,USB01,USB Type C,No,Cost of Goods Sold,Head Office,Zylker
+2016-06-25,adjusted,REF-002,Damaged goods,Main warehouse stock taking,,-12,5.00,USB Cable-White,CABLE12,USB Type C,No,Cost of Goods Sold,Head Office,Zylker

@@ -1,0 +1,68 @@
+string resetRawMaterialBaseline(string dryRun)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		writeAllowed = true;
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase();
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			writeAllowed = false;
+		}
+		updated = 0;
+		missing = 0;
+		missTxt = "";
+		rowsJson = "";
+		for each  specTxt in {"RM-00001|1|1045.10|709.50|335.60","RM-00002|1|161.28|0.00|161.28","RM-00003|1|1600.00|900.00|700.00","RM-00004|1|1770.50|1003.68|766.82","RM-00005|1|1236.20|807.18|429.02","RM-00006|1|1474.15|802.39|671.76","RM-00007|1|1700.00|700.00|1000.00","RM-00008|1|1758.45|1109.34|649.11","RM-00009|1|1109.30|760.07|349.23","RM-00010|1|706.09|666.70|39.39","RM-00011|1|645.10|645.10|0.00","RM-00012|0|830.00|0.00|0.00","RM-00013|0|2152.00|0.00|0.00","RM-00014|0|1988.00|0.00|0.00","RM-00015|0|1590.00|0.00|0.00","RM-00016|0|355.00|0.00|0.00","RM-00017|0|316.00|0.00|0.00","RM-00018|0|1540.00|0.00|0.00","RM-00019|0|1988.00|0.00|0.00","RM-00020|0|4562.00|0.00|0.00","RM-00021|0|260.00|0.00|0.00","RM-00022|0|180.00|0.00|0.00","RM-00023|1|495.80|300.00|195.80"}
+		{
+			parts = specTxt.toList("|");
+			sku = parts.get(0).toString().trim();
+			isFab = parts.get(1).toString().trim() == "1";
+			totQ = parts.get(2).toString().toDecimal();
+			unwQ = parts.get(3).toString().toDecimal();
+			wshQ = parts.get(4).toString().toDecimal();
+			found = false;
+			for each  rmRec in Raw_Material[SKU == sku]
+			{
+				found = true;
+				if(writeAllowed == true)
+				{
+					if(isFab == true)
+					{
+						rmRec.Unwash_Quantity = unwQ;
+						rmRec.Wash_Quantity = wshQ;
+					}
+					rmRec.Quantity = totQ;
+					rmRec.In_Transit_Qty = 0;
+					rmRec.Disputed_Qty = 0;
+					rmRec.In_Wash_Qty = 0;
+					rmRec.Unallocated_Qty = 0;
+				}
+				updated = updated + 1;
+			}
+			if(found == false)
+			{
+				missing = missing + 1;
+				if(missTxt != "")
+				{
+					missTxt = missTxt + ", ";
+				}
+				missTxt = missTxt + sku;
+			}
+			else
+			{
+				if(rowsJson != "")
+				{
+					rowsJson = rowsJson + ",";
+				}
+				rowsJson = rowsJson + "{\"sku\":\"" + sku + "\",\"total\":" + totQ + ",\"unwash\":" + unwQ + ",\"wash\":" + wshQ + "}";
+			}
+		}
+		res = "{\"errors\":[],\"dryRun\":" + (!writeAllowed).toString() + ",\"updated\":" + updated + ",\"skuNotFound\":" + missing + ",\"missing\":\"" + missTxt + "\",\"rows\":[" + rowsJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

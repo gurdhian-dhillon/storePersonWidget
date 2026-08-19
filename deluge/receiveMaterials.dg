@@ -346,6 +346,27 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 				}
 			}
 
+			//--------------------------------------------------------------
+			// TELL INVENTORY. Everything that settled off In_Transit minus the
+			// part he says never arrived - only the confirmed metres are
+			// consumed. The disputed part stays on hand in Inventory because it
+			// is still ours until the dispute is answered.
+			//
+			// Queued, not posted: the drain batches every event in the window
+			// into one adjustment. queueInventoryPost never throws, so a queue
+			// failure leaves Inventory one event behind - which reconciliation
+			// catches - rather than failing a receipt that physically happened.
+			//--------------------------------------------------------------
+			consumedQty = settleQty - shortBy;
+			if(consumedQty < 0)
+			{
+				consumedQty = 0;
+			}
+			if(consumedQty > 0)
+			{
+				invQRes = thisapp.queueInventoryPost("Consumption","Raw_Material",matId,matId,consumedQty.toString());
+			}
+
 			if(shortBy > 0)
 			{
 				noteTxt = "";

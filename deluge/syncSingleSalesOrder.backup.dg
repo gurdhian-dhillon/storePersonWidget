@@ -1,0 +1,113 @@
+map syncSingleSalesOrder(string salesOrderId)
+{
+	info "=== FUNCTION START — Received salesOrderId: [" + salesOrderId + "] ===";
+	orgId = "60076905558";
+	if(salesOrderId == null || salesOrderId == "")
+	{
+		return {"status":"error","message":"salesOrderId is missing"};
+	}
+	existing = Sales_Order[Inventory_sales_order_Id == salesOrderId];
+	existingId = existing.get("ID");
+	if(existingId != null)
+	{
+		info "Already synced, skipping: " + salesOrderId;
+		return {"status":"skipped","message":"Already synced","salesOrderId":salesOrderId,"recordId":existingId};
+	}
+	detailResponse = Map();
+	try
+	{
+		detailResponse = invokeurl
+		[
+			url :"https://www.zohoapis.in/inventory/v1/salesorders/" + salesOrderId + "?organization_id=" + orgId
+			type :GET
+			connection:"inventory_connection"
+		];
+	}	catch (e)
+	{
+		info "invokeurl threw an exception: " + e;
+		return {"status":"error","message":"Inventory API call failed","error":e.toString(),"salesOrderId":salesOrderId};
+	}
+	info detailResponse.toMap();
+	responseCode = detailResponse.get("code");
+	if(responseCode != null && responseCode != 0)
+	{
+		return {"status":"error","message":"Inventory API returned an error","code":responseCode,"details":detailResponse.get("message"),"salesOrderId":salesOrderId};
+	}
+	salesorder = detailResponse.get("salesorder");
+	if(salesorder == null)
+	{
+		return {"status":"error","message":"Sales order not found in Inventory","raw":detailResponse.toMap(),"salesOrderId":salesOrderId};
+	}
+	customerLookupId = null;
+	customerId = salesorder.get("customer_name");
+	info "customu" + customerId;
+	salesorderNumber = salesorder.get("salesorder_number");
+	if(customerId != null)
+	{
+		customerRecord = Customer_Master[Display_Name == customerId];
+		info "curtsoner Dta" + customerRecord.toMap();
+		customerRecordId = customerRecord.ID;
+		if(customerRecordId != null)
+		{
+			customerLookupId = customerRecordId;
+		}
+		else
+		{
+			info "No Customer_Master match for: " + customerId;
+		}
+	}
+	lineItems = salesorder.get("line_items");
+	if(lineItems == null)
+	{
+		lineItems = List();
+	}
+	rowCollection = Collection();
+	for each  row2 in lineItems
+	{
+		row = Sales_Order.Item_Table();
+		row.Item_Name=row2.get("name");
+		row.Rate=row2.get("rate");
+		row.Amount=row2.get("item_total");
+		row.Quantity=row2.get("quantity");
+		skuVal = row2.get("sku");
+		if(skuVal != null && skuVal != "")
+		{
+			itemdata = Item_Master[SKU == skuVal];
+			itemdataId = itemdata.get("ID");
+			if(itemdataId != null)
+			{
+				row.SKU=itemdataId;
+			}
+			else
+			{
+				info "No Item_Master match for SKU: " + skuVal;
+			}
+		}
+		rowCollection.insert(row);
+	}
+	insertResult = null;
+	try
+	{
+		insertResult = insert into Sales_Order
+		[
+			Sales_Order_Date=salesorder.get("date")
+			Reference=salesorder.get("reference_number")
+			Total=salesorder.get("total")
+			Inventory_sales_order_Id=salesOrderId
+			Customer=customerRecordId
+			Sales_Order=salesorderNumber
+			Grand_Total=salesorder.get("total")
+			Item_Table=rowCollection
+			Added_User=zoho.loginuser
+		];
+	}	catch (e)
+	{
+		info "Insert into Sales_Order failed: " + e;
+		return {"status":"error","message":"Insert failed","error":e.toString(),"salesOrderId":salesOrderId};
+	}
+	if(insertResult == null)
+	{
+		return {"status":"error","message":"Insert returned null — record not created","salesOrderId":salesOrderId};
+	}
+	return {"status":"success","salesOrderId":salesOrderId,"recordId":insertResult};
+}

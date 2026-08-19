@@ -1,0 +1,107 @@
+string seedOpeningLots(string skuPrefix, string dryRun)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		writeAllowed = true;
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase();
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			writeAllowed = false;
+		}
+		pfx = ifnull(skuPrefix,"").toString().trim();
+		madeLots = 0;
+		didMats = 0;
+		skippedHasLots = 0;
+		skippedZero = 0;
+		rowsJson = "";
+		for each  rmRec in Raw_Material[ID != 0]
+		{
+			rmSku = ifnull(rmRec.SKU,"").toString().trim();
+			isFab = ifnull(rmRec.Is_Fabric,false);
+			wanted = true;
+			if(pfx != "" && rmSku.indexOf(pfx) != 0)
+			{
+				wanted = false;
+			}
+			if(rmSku == "" || isFab != true || wanted == false)
+			{
+				continue;
+			}
+			if(Raw_Material_Lot[Material == rmRec.ID].count() > 0)
+			{
+				skippedHasLots = skippedHasLots + 1;
+				continue;
+			}
+			wS = ifnull(rmRec.Wash_Quantity,"0").toString().trim();
+			if(wS == "")
+			{
+				wS = "0";
+			}
+			uS = ifnull(rmRec.Unwash_Quantity,"0").toString().trim();
+			if(uS == "")
+			{
+				uS = "0";
+			}
+			totQ = wS.toDecimal() + uS.toDecimal();
+			if(totQ <= 0)
+			{
+				skippedZero = skippedZero + 1;
+				continue;
+			}
+			lotA = (totQ / 2).round(2);
+			lotB = totQ - lotA;
+			unwA = (lotA / 3).round(2);
+			wshA = lotA - unwA;
+			unwB = (lotB / 3).round(2);
+			wshB = lotB - unwB;
+			if(writeAllowed == true)
+			{
+				insert into Raw_Material_Lot
+				[
+					Material=rmRec.ID
+					Lot_Number="L1"
+					Unwash_Quantity=unwA
+					Wash_Quantity=wshA
+					In_Wash_Qty=0
+					In_Transit_Qty=0
+					Disputed_Qty=0
+					Status="Active"
+					Added_User=zoho.loginuser
+				];
+				insert into Raw_Material_Lot
+				[
+					Material=rmRec.ID
+					Lot_Number="L2"
+					Unwash_Quantity=unwB
+					Wash_Quantity=wshB
+					In_Wash_Qty=0
+					In_Transit_Qty=0
+					Disputed_Qty=0
+					Status="Active"
+					Added_User=zoho.loginuser
+				];
+				rmRec.Unwash_Quantity = unwA + unwB;
+				rmRec.Wash_Quantity = wshA + wshB;
+				rmRec.Quantity = totQ;
+				rmRec.In_Transit_Qty = 0;
+				rmRec.Disputed_Qty = 0;
+				rmRec.In_Wash_Qty = 0;
+				rmRec.Unallocated_Qty = 0;
+			}
+			madeLots = madeLots + 2;
+			didMats = didMats + 1;
+			if(rowsJson != "")
+			{
+				rowsJson = rowsJson + ",";
+			}
+			rowsJson = rowsJson + "{\"sku\":\"" + rmSku + "\",\"total\":" + totQ + ",\"L1\":{\"unwash\":" + unwA + ",\"wash\":" + wshA + "},\"L2\":{\"unwash\":" + unwB + ",\"wash\":" + wshB + "},\"parentUnwash\":" + (unwA + unwB) + ",\"parentWash\":" + (wshA + wshB) + "}";
+		}
+		res = "{\"errors\":[],\"dryRun\":" + (!writeAllowed).toString() + ",\"materials\":" + didMats + ",\"lotsCreated\":" + madeLots + ",\"skippedAlreadyHasLots\":" + skippedHasLots + ",\"skippedZeroStock\":" + skippedZero + ",\"rows\":[" + rowsJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

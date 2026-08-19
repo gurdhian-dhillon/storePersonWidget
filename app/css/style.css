@@ -1832,6 +1832,73 @@ th.col-num {
     min-width: 7rem;
 }
 
+/* ---- Print ----
+   Same field row as Stock in, reusing .si-field. Kept as its own class because
+   the print form carries five fields to Stock in's three and needs to wrap
+   earlier — the store person is on a tablet at the counter. */
+.print-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    padding: 1rem 1.25rem 0.25rem;
+    align-items: flex-end;
+}
+
+/* The send and receive line tables sit inside an open card, so they need the
+   same inset the form above them has rather than running to the card edge. */
+.print-form + .table-wrapper,
+.item-body .table-wrapper + .raise-btn {
+    margin: 0.5rem 1.25rem;
+}
+
+/* A piece length input is a small number and does not want the wide default. */
+.item-body table .issue-input,
+.item-body table .note-input {
+    min-width: 5.5rem;
+    width: 100%;
+}
+
+/* .issue-input IS DELIBERATELY BORDERLESS. It normally sits inside
+   .issue-input-group, which draws the border around the input and its unit
+   suffix together. Used bare — as the print form, the print line tables and
+   Stock In's quantity box all do — it renders as plain text on the card and
+   there is nothing to say a number can be typed there. The store person reads
+   it as a display value and never touches it.
+   Give those the border the group would have given them. */
+.si-field .issue-input,
+.print-form .issue-input,
+.item-body table .issue-input {
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    background: var(--surface);
+    padding: 0.4rem 0.55rem;
+}
+
+.si-field .issue-input:focus,
+.print-form .issue-input:focus,
+.item-body table .issue-input:focus,
+.item-body table .note-input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+    outline: none;
+}
+
+/* The grey ground for a disabled field normally comes from .issue-input-group,
+   which these bare inputs do not have — so without this the width cell looks
+   exactly like the two beside it that DO take a value. */
+.item-body table .issue-input:disabled {
+    background: #f1f5f9;
+    border-color: var(--border);
+}
+
+/* Metres is a read-only consequence of the length and the count beside it, so it
+   is set apart from the two that are inputs — otherwise the row reads as three
+   boxes of which one mysteriously refuses to accept anything. */
+.print-derived {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
 /* ---- Lots ----
    The picker and the table it grew into are both gone. The allocation is
    computed, so a fabric issue row names its lot in one line instead — see

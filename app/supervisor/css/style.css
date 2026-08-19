@@ -1499,6 +1499,43 @@ th.col-num {
     font-weight: 700;
 }
 
+/* A THIRD PARTY'S SHARE. The same row as an operator's, because it is the same
+   thing — pieces of this stage that somebody has. Marked, not separated: the
+   whole point of the row being here is that the vendor's forty and the cutters'
+   sixty add up to Qty_In in one place he can read. */
+.share-row.is-party {
+    background: #fffbeb;
+}
+
+.share-row.is-party.is-done {
+    background: #f8fafc;
+}
+
+.share-party-tag {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #92400e;
+    background: #fef3c7;
+    border-radius: 3px;
+    padding: 0.1rem 0.3rem;
+    margin-right: 0.35rem;
+    vertical-align: middle;
+}
+
+.share-row.is-party.is-done .share-party-tag {
+    color: var(--text-muted);
+    background: #eef2f6;
+}
+
+.share-row .is-muted {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    font-weight: 400;
+}
+
 /* Correcting a count he has already entered — quiet, because it is a repair,
    not the next thing to do. Live only while the stage is open, which is the
    only time this card is drawn at all. */

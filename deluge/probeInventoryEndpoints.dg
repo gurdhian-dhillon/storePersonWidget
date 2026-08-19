@@ -1,0 +1,46 @@
+string probeInventoryEndpoints()
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		orgId = "60076905558";
+		baseUrl = "https://www.zohoapis.in/inventory/v1/";
+		outJson = "";
+		for each  pathTxt in {"materialissues","materialissue","material_issues","materialrequests","materialreturns","bundles","transferorders","moveorders"}
+		{
+			codeTxt = "";
+			msgTxt = "";
+			try
+			{
+				pResp = invokeurl
+				[
+					url :baseUrl + pathTxt + "?organization_id=" + orgId + "&per_page=1"
+					type :GET
+					connection:"inventory_connection"
+				];
+				codeTxt = ifnull(pResp.get("code"),"none").toString().trim();
+				msgTxt = ifnull(pResp.get("message"),"").toString().trim();
+				if(codeTxt == "none")
+				{
+					msgTxt = "no code key - raw: " + pResp.toString().subString(0,120);
+				}
+			}
+			catch (eP)
+			{
+				codeTxt = "threw";
+				msgTxt = eP.toString();
+			}
+			if(outJson != "")
+			{
+				outJson = outJson + ",";
+			}
+			outJson = outJson + "{\"path\":\"" + pathTxt + "\",\"code\":\"" + codeTxt + "\",\"message\":\"" + msgTxt.replaceAll("\"","'") + "\"}";
+		}
+		res = "{\"errors\":[],\"probes\":[" + outJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

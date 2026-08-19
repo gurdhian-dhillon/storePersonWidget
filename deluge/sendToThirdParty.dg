@@ -1,30 +1,54 @@
 string sendToThirdParty(string payloadJson)
 {
-	// Sends one item out to a third party for a CONTIGUOUS BLOCK of stages, and
-	// opens a Stage_Log for each of them.
+	// Hands a SHARE of a stage to a third party, for a contiguous block of stages.
 	//
 	// Custom API, POST, one argument: payloadJson.
 	//   { "planId":"1", "planItemId":"9", "partyId":"5",
-	//     "sentOn":"2026-08-06", "sentTime":"15:40", "qty":"10",
+	//     "sentOn":"2026-08-06", "sentTime":"15:40", "qty":"10", "qtyIn":"100",
 	//     "sequences":[2,3], "remarks":"" }
+	//
+	// A THIRD PARTY IS AN OPERATOR. That is the whole shape of this function.
+	//
+	// It used to overwrite the stage header - Stage_Log.Qty_In = the sent quantity
+	// - which was only true when the WHOLE stage went out. Send 40 of 100 and the
+	// header then claimed the stage had only ever received 40: the other 60
+	// vanished from every screen and every total, the card locked, and nobody
+	// could be put on them. They were not lost on the floor, they were lost in the
+	// record, which is worse because nothing said so.
+	//
+	// So the party now takes a Stage_Assignment exactly like a man does -
+	// Assigned_Qty pieces of a stage whose Qty_In stays the true figure - and the
+	// remainder is handed out in-house from the same "left to hand out" pool. The
+	// stage closes when every share is in, the party's included, and its Qty_Out
+	// is the sum of them.
 	//
 	// WHY A BLOCK AND NOT A STAGE. He hands over panels once and the vendor runs
 	// several operations before handing them back - one van, one gate, one
 	// return. Recording that as three separate sends would invent three physical
-	// movements that never happened.
+	// movements that never happened. So the block writes one share per stage it
+	// covers, all carrying the same Outsource_Ref, and they come back together.
 	//
-	// CONTIGUOUS, enforced here and not only in the widget. Sending stages 2 and
-	// 4 while 3 stays in-house is two trips however it is entered, and the
-	// quantity chain between them would have a hole in it. A Custom API is
+	// CONTIGUOUS, enforced here and not only in the widget. Sending stages 2 and 4
+	// while 3 stays in-house is two trips however it is entered. A Custom API is
 	// callable from anywhere, so the rule has to hold server-side.
 	//
-	// EVERY STAGE IN THE BLOCK GETS Qty_In = the sent quantity.
+	// ONLY THE FIRST STAGE OF THE BLOCK HAS A KNOWN Qty_In. The later ones receive
+	// what the stage before them produces, and that is not settled until the
+	// in-house shares finish - which happens after the van has left. So their
+	// headers are opened with Qty_In = 0 and filled in later, by whichever comes
+	// first: the first in-house operator put on them (saveStageAssignment), or
+	// receiveFromThirdParty closing the chain when the party did all of it. Both
+	// already write Qty_In exactly once, when it is first known.
 	//
-	// That is not an approximation - it is forced by the loss rule. A vendor who
-	// returns 9 of 10 cannot say which of his three operations dropped one, so
-	// the loss is attributed to the LAST stage of the block and every earlier
-	// stage passes the full quantity through. Which means the whole chain is
-	// known at send time and nothing has to be unwound on return.
+	// The header is opened THROUGH saveProductionPhase and never inserted here.
+	// Starting a stage also moves Plan_Item to In_Production and the plan to In
+	// Progress, and those two fields have exactly one writer each - which is the
+	// only reason the four status levels have stayed in step.
+	//
+	// Is_Outsourced / Third_Party / Sent_On / Outsource_Ref on Stage_Log are NO
+	// LONGER WRITTEN. They stay readable so a block that was already at a vendor
+	// on the day this shipped can still be received; receiveFromThirdParty keeps
+	// that path. Nothing new goes down it.
 	//
 	// Needs a form called Third_Party with these link names:
 	//   Party_Name         Single Line
@@ -34,8 +58,7 @@ string sendToThirdParty(string payloadJson)
 	//   Status             Dropdown      - Active / Inactive
 	//   Remarks            Multi Line
 	//
-	// And these added to Stage_Log:
-	//   Is_Outsourced   Decision box
+	// And these added to Stage_Assignment:
 	//   Third_Party     Lookup -> Third_Party
 	//   Sent_On         Date
 	//   Returned_On     Date
@@ -75,6 +98,16 @@ string sendToThirdParty(string payloadJson)
 	{
 		return "{\"success\":false,\"error\":\"Quantity to send must be more than zero\"}";
 	}
+
+	// What the widget believes the first stage received. Used only when the
+	// header does not exist yet or has never been given a figure - a stored
+	// Qty_In always wins, because it is what every other screen is reading.
+	qInTxt = ifnull(inp.get("qtyIn"),"0").toString().trim();
+	if(qInTxt == "")
+	{
+		qInTxt = "0";
+	}
+	stageInHint = qInTxt.toDecimal().toLong();
 
 	sentOnTxt = ifnull(inp.get("sentOn"),"").toString().trim();
 	sentTimeTxt = ifnull(inp.get("sentTime"),"").toString().trim();
@@ -186,38 +219,56 @@ string sendToThirdParty(string payloadJson)
 		return "{\"success\":false,\"error\":\"Stages sent together must be one after another, with no gaps\"}";
 	}
 
+	firstPhase = phaseBySeq.get(firstSeq.toString()).toString();
+
 	//----------------------------------------------------------------------
-	// Nothing in the block may already be running, finished, or out.
+	// Every stage log this item has, read ONCE into maps.
 	//
-	// Read once into a Map rather than a query per stage - a per-stage query
-	// here is the shape that runs a script into the statement-execution limit,
-	// and that limit is NOT catchable: it kills the script and the widget gets
-	// a bare HTTP 500 with no error card at all.
+	// A per-stage query here is the shape that runs a script into the
+	// statement-execution limit, and that limit is NOT catchable: it kills the
+	// script and the widget gets a bare HTTP 500 with no error card at all.
 	//----------------------------------------------------------------------
 	logIdByPhase = Map();
 	statusByPhase = Map();
-	outByPhase = Map();
+	qtyInByPhase = Map();
+	legacyOutByPhase = Map();
 	doneSeq = Map();
 
-	for each  lg in Stage_Log[Plan_Item == itemId]
+	for each  lgAll in Stage_Log[Plan_Item == itemId]
 	{
-		ph = ifnull(lg.Phase_Name,"").toString();
-		logIdByPhase.put(ph,lg.ID.toString());
-		statusByPhase.put(ph,ifnull(lg.Stage_Status,"").toString());
+		ph = ifnull(lgAll.Phase_Name,"").toString();
+		logIdByPhase.put(ph,lgAll.ID.toString());
+		statusByPhase.put(ph,ifnull(lgAll.Stage_Status,"").toString());
+		qtyInByPhase.put(ph,ifnull(lgAll.Qty_In,0));
 
+		// LEGACY ONLY. Nothing written by this function sets these any more, so
+		// a "yes" here means a block that went out under the old whole-stage
+		// model and has not come back.
 		isOut = "no";
-		if(ifnull(lg.Is_Outsourced,false) == true && lg.Returned_On == null)
+		if(ifnull(lgAll.Is_Outsourced,false) == true && lgAll.Returned_On == null)
 		{
 			isOut = "yes";
 		}
-		outByPhase.put(ph,isOut);
+		legacyOutByPhase.put(ph,isOut);
 
-		if(ifnull(lg.Stage_Status,"").toString() == "Done")
+		if(ifnull(lgAll.Stage_Status,"").toString() == "Done")
 		{
-			doneSeq.put(ifnull(lg.Sequence_No,0).toString(),"1");
+			doneSeq.put(ifnull(lgAll.Sequence_No,0).toString(),"1");
 		}
 	}
 
+	//----------------------------------------------------------------------
+	// What may and may not go out.
+	//
+	// "Already running in-house" is NO LONGER A REFUSAL on the first stage of
+	// the block - that is the entire point of the change. Two men cutting and a
+	// vendor embroidering are three shares of one stage, not a contradiction.
+	//
+	// It stays a refusal on the LATER stages: those have not received anything
+	// yet, so in-house work recorded against them is work on pieces that do not
+	// exist. In practice the widget cannot build that selection - a block starts
+	// at the first unfinished stage - but a Custom API is callable from anywhere.
+	//----------------------------------------------------------------------
 	blocked = "";
 	for each  sq3 in seqList
 	{
@@ -227,13 +278,13 @@ string sendToThirdParty(string payloadJson)
 		{
 			blocked = phName + " is already finished";
 		}
-		else if(ifnull(outByPhase.get(phName),"no").toString() == "yes")
+		else if(ifnull(legacyOutByPhase.get(phName),"no").toString() == "yes")
 		{
 			blocked = phName + " is already out with a third party";
 		}
-		else if(stNow == "In_Progress")
+		else if(stNow == "In_Progress" && phName != firstPhase)
 		{
-			blocked = phName + " is already running in-house";
+			blocked = phName + " is already running, so it cannot be part of a block that starts earlier";
 		}
 	}
 
@@ -257,80 +308,165 @@ string sendToThirdParty(string payloadJson)
 	}
 
 	//----------------------------------------------------------------------
-	// One reference for the whole block. Written on every row, so "which
+	// IS THERE ANYTHING LEFT TO SEND.
+	//
+	// The same test saveStageAssignment applies when a man is added, and for
+	// the same reason: the sum of the shares cannot exceed what the stage
+	// received, or the stage's Qty_Out is larger than its Qty_In and every
+	// figure after it is inflated.
+	//
+	// Only the FIRST stage of the block is measured. The later ones have not
+	// received anything yet - their Qty_In is the output of a stage still
+	// running - so there is nothing to measure against and nothing to protect.
+	//----------------------------------------------------------------------
+	firstLogTxt = ifnull(logIdByPhase.get(firstPhase),"").toString();
+
+	stageIn = 0;
+	if(firstLogTxt != "")
+	{
+		stageIn = ifnull(qtyInByPhase.get(firstPhase),0);
+	}
+	if(stageIn <= 0)
+	{
+		stageIn = stageInHint;
+	}
+	if(stageIn <= 0)
+	{
+		return "{\"success\":false,\"error\":\"Nothing came out of the stage before this one, so there is nothing to send\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// A HEADER THAT EXISTS BUT HAS NEVER BEEN GIVEN A FIGURE.
+	//
+	// It was opened empty by an earlier block passing through - the stage
+	// before it was still running, so its input was not known yet. Now it is,
+	// and it has to be stored: every later guard reads Qty_In off the record,
+	// and one still sitting at zero silently switches all of them off.
+	//
+	// Written ONCE, exactly like saveStageAssignment does when the first man is
+	// put on such a stage. A stored figure is never revised - it is the
+	// previous stage's output, not something this stage decides.
+	//----------------------------------------------------------------------
+	if(firstLogTxt != "" && ifnull(qtyInByPhase.get(firstPhase),0) <= 0 && stageIn > 0)
+	{
+		for each  lgFix in Stage_Log[ID == firstLogTxt.toLong()]
+		{
+			lgFix.Qty_In = stageIn;
+		}
+	}
+
+	alreadyQty = 0;
+	if(firstLogTxt != "")
+	{
+		for each  asC in Stage_Assignment[Stage_Log == firstLogTxt.toLong()]
+		{
+			alreadyQty = alreadyQty + ifnull(asC.Assigned_Qty,0);
+		}
+	}
+
+	if(alreadyQty + sendQty > stageIn)
+	{
+		leftQty = stageIn - alreadyQty;
+		if(leftQty < 0)
+		{
+			leftQty = 0;
+		}
+		return "{\"success\":false,\"code\":\"OVER_ASSIGNED\",\"error\":\"Only " + leftQty + " of the " + stageIn + " pieces are left to hand out.\"}";
+	}
+
+	//----------------------------------------------------------------------
+	// One reference for the whole block. Written on every share, so "which
 	// stages went out together" is a field rather than an inference from item
 	// plus party plus date - which would have merged two sends of the same
 	// item to the same party on the same day into one apparent trip.
 	//----------------------------------------------------------------------
 	osRef = "OS-" + itemId + "-" + zoho.currenttime.toString("yyyyMMddHHmmss");
 
+	failed = "";
+
 	for each  sq4 in seqList
 	{
-		phName2 = phaseBySeq.get(sq4.toString()).toString();
-		existingId = ifnull(logIdByPhase.get(phName2),"").toString();
-
-		if(existingId != "")
+		if(failed == "")
 		{
-			// A stage started and abandoned before ever being ended. Reused
-			// rather than duplicated - Stage_Log is one row per item x phase and
-			// a second row would make every later read ambiguous.
-			for each  lgU in Stage_Log[ID == existingId.toLong()]
+			phName2 = phaseBySeq.get(sq4.toString()).toString();
+			logIdTxt = ifnull(logIdByPhase.get(phName2),"").toString();
+
+			// Only the block's first stage knows what it received. The rest are
+			// opened empty and filled in when their input finally settles.
+			openIn = 0;
+			if(phName2 == firstPhase)
 			{
-				lgU.Qty_In = sendQty;
-				lgU.Stage_Status = "In_Progress";
-				lgU.Is_Outsourced = true;
-				lgU.Third_Party = partyId;
-				lgU.Outsource_Ref = osRef;
-				lgU.Remarks = remarkTxt;
-				if(sentOnTxt != "")
-				{
-					lgU.Sent_On = sentOnTxt.toDate();
-				}
-				if(sentTimeTxt != "")
-				{
-					lgU.Start_Time = sentTimeTxt;
-				}
-				// Cleared in case the row is being reused after an in-house start.
-				lgU.Machine = null;
-				lgU.End_Time = null;
-				lgU.Returned_On = null;
+				openIn = stageIn;
 			}
-		}
-		else
-		{
-			newLogId = insert into Stage_Log
-			[
-				Plan=planId
-				Plan_Item=itemId
-				Sequence_No=sq4
-				Phase_Name=phName2
-				Log_Date=zoho.currentdate
-				Qty_In=sendQty
-				Stage_Status="In_Progress"
-				Is_Outsourced=true
-				Outsource_Ref=osRef
-				Remarks=remarkTxt
-				Added_User=zoho.loginuser
-			];
 
-			// Lookups and dates after the insert - a null lookup fails the whole
-			// insert block, and an empty date string is not a valid Date.
-			for each  lgN in Stage_Log[ID == newLogId.toLong()]
+			if(logIdTxt == "")
 			{
-				lgN.Third_Party = partyId;
-				if(sentOnTxt != "")
+				startJson = "{\"planId\":\"" + planId + "\",\"planItemId\":\"" + itemId + "\",\"phaseName\":\"" + phName2.replaceAll("\"","'") + "\",\"sequence\":\"" + sq4 + "\",\"isLastStage\":\"false\",\"operatorId\":\"\",\"startTime\":\"" + sentTimeTxt + "\",\"endTime\":\"\",\"qtyIn\":\"" + openIn + "\",\"qtyOut\":\"0\",\"remarks\":\"\"}";
+
+				openTxt = thisapp.saveProductionPhase(startJson);
+				logLines.add("opened " + phName2 + " -> " + openTxt);
+
+				for each  lgN2 in Stage_Log[Plan_Item == itemId && Phase_Name == phName2]
 				{
-					lgN.Sent_On = sentOnTxt.toDate();
-				}
-				if(sentTimeTxt != "")
-				{
-					lgN.Start_Time = sentTimeTxt;
+					logIdTxt = lgN2.ID.toString();
 				}
 			}
-		}
 
-		madeCount = madeCount + 1;
-		logLines.add("SENT -> " + phName2 + " | seq " + sq4 + " | qty " + sendQty);
+			if(logIdTxt == "")
+			{
+				failed = phName2 + " could not be opened, so nothing was sent for it";
+			}
+			else
+			{
+				newAsg = insert into Stage_Assignment
+				[
+					Stage_Log=logIdTxt.toLong()
+					Plan=planId
+					Plan_Item=itemId
+					Phase_Name=phName2
+					Sequence_No=sq4
+					Assigned_Qty=sendQty
+					Qty_Out=0
+					Assignment_Status="In_Progress"
+					Log_Date=zoho.currentdate
+					Outsource_Ref=osRef
+					Remarks=remarkTxt
+					Added_User=zoho.loginuser
+				];
+
+				asgNewId = newAsg.toLong();
+
+				// Lookups and dates after the insert - a null lookup fails the whole
+				// insert block, and an empty date string is not a valid Date.
+				for each  asN in Stage_Assignment[ID == asgNewId]
+				{
+					asN.Third_Party = partyId;
+					if(sentOnTxt != "")
+					{
+						asN.Sent_On = sentOnTxt.toDate();
+					}
+					if(sentTimeTxt != "")
+					{
+						asN.Start_Time = sentTimeTxt;
+					}
+				}
+
+				madeCount = madeCount + 1;
+				logLines.add("SENT -> " + phName2 + " | seq " + sq4 + " | qty " + sendQty);
+			}
+		}
+	}
+
+	if(madeCount == 0)
+	{
+		errTxt = failed;
+		if(errTxt == "")
+		{
+			errTxt = "Nothing was sent";
+		}
+		logLines.add(errTxt);
+		info logLines;
+		return "{\"success\":false,\"error\":\"" + errTxt.replaceAll("\"","'") + "\"}";
 	}
 
 	// The item is being worked on, wherever the work is happening. Guarded so a
@@ -346,7 +482,7 @@ string sendToThirdParty(string payloadJson)
 	logLines.add("Done. Stages sent: " + madeCount + " | ref " + osRef);
 	info logLines;
 
-	res = "{\"success\":true,\"outsourceRef\":\"" + osRef + "\",\"stages\":" + madeCount + ",\"item\":\"" + itemName.replaceAll("\"","'") + "\"}";
+	res = "{\"success\":true,\"outsourceRef\":\"" + osRef + "\",\"stages\":" + madeCount + ",\"item\":\"" + itemName.replaceAll("\"","'") + "\",\"assigned\":" + (alreadyQty + sendQty) + ",\"qtyIn\":" + stageIn + "}";
 	}
 	catch (e)
 	{

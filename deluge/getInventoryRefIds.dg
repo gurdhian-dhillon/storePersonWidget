@@ -1,0 +1,62 @@
+string getInventoryRefIds()
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		orgId = "60076905558";
+		wantAcc = List();
+		wantAcc.add("raw materials and consumables");
+		wantAcc.add("other expenses");
+		wantAcc.add("opening balance offset");
+		accJson = "";
+		accResp = invokeurl
+		[
+			url :"https://www.zohoapis.in/inventory/v1/chartofaccounts?organization_id=" + orgId + "&per_page=200"
+			type :GET
+			connection:"inventory_connection"
+		];
+		accCode = ifnull(accResp.get("code"),"0").toString().trim();
+		if(accCode != "0")
+		{
+			return "{\"errors\":[\"chartofaccounts code " + accCode + ": " + ifnull(accResp.get("message"),"").toString().replaceAll("\"","'") + "\"]}";
+		}
+		for each  accRow in ifnull(accResp.get("chartofaccounts"),List())
+		{
+			accName = ifnull(accRow.get("account_name"),"").toString().trim();
+			if(wantAcc.contains(accName.toLowerCase()))
+			{
+				if(accJson != "")
+				{
+					accJson = accJson + ",";
+				}
+				accJson = accJson + "{\"name\":\"" + accName.replaceAll("\"","'") + "\",\"account_id\":\"" + ifnull(accRow.get("account_id"),"").toString() + "\"}";
+			}
+		}
+		locJson = "";
+		locResp = invokeurl
+		[
+			url :"https://www.zohoapis.in/inventory/v1/locations?organization_id=" + orgId
+			type :GET
+			connection:"inventory_connection"
+		];
+		locCode = ifnull(locResp.get("code"),"0").toString().trim();
+		if(locCode != "0")
+		{
+			return "{\"errors\":[\"locations code " + locCode + ": " + ifnull(locResp.get("message"),"").toString().replaceAll("\"","'") + "\"],\"accounts\":[" + accJson + "]}";
+		}
+		for each  locRow in ifnull(locResp.get("locations"),List())
+		{
+			if(locJson != "")
+			{
+				locJson = locJson + ",";
+			}
+			locJson = locJson + "{\"name\":\"" + ifnull(locRow.get("location_name"),"").toString().replaceAll("\"","'") + "\",\"location_id\":\"" + ifnull(locRow.get("location_id"),"").toString() + "\"}";
+		}
+		res = "{\"errors\":[],\"accounts\":[" + accJson + "],\"locations\":[" + locJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

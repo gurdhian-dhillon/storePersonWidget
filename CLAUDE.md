@@ -228,6 +228,46 @@ and the second write would lose the first.
 > Pieces the supervisor never handed to anybody are allowed. They fall out as the ordinary
 > "fewer out than in" shortfall and raise the existing damage prompt.
 
+**A THIRD PARTY IS ONE OF THOSE SHARES.** `sendToThirdParty` writes a `Stage_Assignment` with
+`Third_Party` filled instead of `Operator`, plus `Sent_On` / `Returned_On` / `Outsource_Ref`. A
+vendor doing 40 of a stage and two men doing the other 60 are three rows of one table, the
+"how many are left to hand out" test counts all three, and the stage's `Qty_Out` sums all three.
+The vendor is picked from the stage card's own *who is taking these* dropdown, next to the men.
+
+> **This is what fixed a silent-loss bug, and the shape of it is worth keeping in mind.**
+> The old model put the vendor on the stage **header** and set `Stage_Log.Qty_In` to the sent
+> quantity. That is only true when the whole stage goes out. Send 40 of 100 and the header then
+> claimed the stage had only ever received 40 — the other 60 left every count, every total and
+> every screen, the card locked as outsourced so nobody could be put on them, and nothing
+> anywhere said so. **`Qty_In` belongs to the stage and is never rewritten by who takes a share
+> of it.**
+>
+> **One send covers a contiguous BLOCK of stages** — one van, one gate, one return — so it writes
+> one share per stage under one `Outsource_Ref`. Only the block's **first** stage has a known
+> `Qty_In`; the later ones receive what the stage before them produces, which is not settled
+> until the in-house shares finish, i.e. after the van has left. So their headers are opened with
+> `Qty_In = 0` and filled in exactly once by whichever comes first: the first in-house operator
+> put on them (`saveStageAssignment`), or `receiveFromThirdParty` closing the chain.
+>
+> **`receiveFromThirdParty` closes SHARES, not stages.** The loss still lands on the last stage of
+> the block. It then walks the block forward and closes each stage *only* while two things hold —
+> every share on it is Done, and the shares add up to everything the stage received — stopping at
+> the first stage where they do not, because that stage's output is the next one's input. A
+> whole-stage block therefore closes end to end on the return exactly as it always did, and a
+> partial one leaves the stage for the ordinary **End stage** press.
+>
+> **`saveStageAssignment` refuses to end, re-size or remove a vendor's share.** Those pieces are on
+> a van: the only event that knows what became of them is the return. Removing one would say the
+> van never left and free the pieces to be handed out a second time — the one way that screen can
+> invent stock from nothing.
+>
+> **Legacy blocks still work and nothing new goes down that path.** `Stage_Log.Is_Outsourced`,
+> `.Third_Party`, `.Sent_On`, `.Outsource_Ref` are no longer written. They are still read, by
+> `receiveFromThirdParty` (which branches on where the reference is found, not on a flag), by the
+> locked `is-outsourced` card, and by the `STAGE_OUTSOURCED` guards in `saveProductionPhase` and
+> `saveStageAssignment` — kept so a van already on the road survives the deploy. Those guards now
+> only ever fire on a legacy row.
+
 **Machines are not tracked.** Each operator works a fixed machine, so "which machine" is answered
 by "which operator". `Machine_Master` and `Stage_Log.Machine` still exist in Creator holding what
 they held; nothing in production reads or writes them, `setStageMachine` is retired, and machines

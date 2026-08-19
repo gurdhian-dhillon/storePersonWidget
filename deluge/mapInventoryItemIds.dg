@@ -1,0 +1,174 @@
+string mapInventoryItemIds(string mode, string dryRun, string skuPrefix)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		orgId = "60076905558";
+		baseUrl = "https://www.zohoapis.in/inventory/v1/items";
+		writeAllowed = true;
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase();
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			writeAllowed = false;
+		}
+		md = ifnull(mode,"").toString().trim().toLowerCase();
+		doItems = false;
+		if(md == "item" || md == "items" || md == "finished")
+		{
+			doItems = true;
+		}
+		pfx = ifnull(skuPrefix,"").toString().trim();
+		maxCalls = 60;
+		callsUsed = 0;
+		matched = 0;
+		missed = 0;
+		skipped = 0;
+		remaining = 0;
+		missJson = "";
+		apiError = "";
+		if(doItems == false)
+		{
+			for each  rmRec in Raw_Material[ID != 0]
+			{
+				rmSku = ifnull(rmRec.SKU,"").toString().trim();
+				rmHas = ifnull(rmRec.Inventory_Item_ID,"").toString().trim();
+				rmWanted = true;
+				if(pfx != "" && rmSku.indexOf(pfx) != 0)
+				{
+					rmWanted = false;
+				}
+				if(rmSku == "" || rmHas != "" || rmWanted == false)
+				{
+					skipped = skipped + 1;
+				}
+				else if(callsUsed >= maxCalls || apiError != "")
+				{
+					remaining = remaining + 1;
+				}
+				else
+				{
+					callsUsed = callsUsed + 1;
+					rmResp = invokeurl
+					[
+						url: baseUrl + "?organization_id=" + orgId + "&sku=" + rmSku
+						type: GET
+						connection: "inventory_connection"
+					];
+					rmCode = ifnull(rmResp.get("code"),"0").toString().trim();
+					if(rmCode != "0")
+					{
+						apiError = "Inventory code " + rmCode + " on " + rmSku + ": " + ifnull(rmResp.get("message"),"").toString();
+					}
+					else
+					{
+						rmFound = "";
+						for each  rmHit in ifnull(rmResp.get("items"),List())
+						{
+							if(ifnull(rmHit.get("sku"),"").toString().trim() == rmSku && rmFound == "")
+							{
+								rmFound = ifnull(rmHit.get("item_id"),"").toString().trim();
+							}
+						}
+						if(rmFound != "")
+						{
+							if(writeAllowed == true)
+							{
+								rmRec.Inventory_Item_ID = rmFound;
+								rmRec.Last_Synced = zoho.currenttime;
+							}
+							matched = matched + 1;
+						}
+						else
+						{
+							missed = missed + 1;
+							if(missJson != "")
+							{
+								missJson = missJson + ",";
+							}
+							missJson = missJson + "{\"id\":\"" + rmRec.ID + "\",\"sku\":\"" + rmSku.replaceAll("\"","'") + "\"}";
+						}
+					}
+				}
+			}
+		}
+		else
+		{
+			for each  imRec in Item_Master[ID != 0]
+			{
+				imSku = ifnull(imRec.SKU,"").toString().trim();
+				imHas = ifnull(imRec.Inventory_Item_ID,"").toString().trim();
+				imWanted = true;
+				if(pfx != "" && imSku.indexOf(pfx) != 0)
+				{
+					imWanted = false;
+				}
+				if(imSku == "" || imHas != "" || imWanted == false)
+				{
+					skipped = skipped + 1;
+				}
+				else if(callsUsed >= maxCalls || apiError != "")
+				{
+					remaining = remaining + 1;
+				}
+				else
+				{
+					callsUsed = callsUsed + 1;
+					imResp = invokeurl
+					[
+						url: baseUrl + "?organization_id=" + orgId + "&sku=" + imSku
+						type: GET
+						connection: "inventory_connection"
+					];
+					imCode = ifnull(imResp.get("code"),"0").toString().trim();
+					if(imCode != "0")
+					{
+						apiError = "Inventory code " + imCode + " on " + imSku + ": " + ifnull(imResp.get("message"),"").toString();
+					}
+					else
+					{
+						imFound = "";
+						for each  imHit in ifnull(imResp.get("items"),List())
+						{
+							if(ifnull(imHit.get("sku"),"").toString().trim() == imSku && imFound == "")
+							{
+								imFound = ifnull(imHit.get("item_id"),"").toString().trim();
+							}
+						}
+						if(imFound != "")
+						{
+							if(writeAllowed == true)
+							{
+								imRec.Inventory_Item_ID = imFound;
+							}
+							matched = matched + 1;
+						}
+						else
+						{
+							missed = missed + 1;
+							if(missJson != "")
+							{
+								missJson = missJson + ",";
+							}
+							missJson = missJson + "{\"id\":\"" + imRec.ID + "\",\"sku\":\"" + imSku.replaceAll("\"","'") + "\"}";
+						}
+					}
+				}
+			}
+		}
+		if(apiError != "")
+		{
+			return "{\"errors\":[\"" + apiError.replaceAll("\"","'") + "\"],\"callsUsed\":" + callsUsed + ",\"matched\":" + matched + ",\"unmatched\":" + missed + ",\"remaining\":" + remaining + "}";
+		}
+		modeOut = "raw_material";
+		if(doItems == true)
+		{
+			modeOut = "item_master";
+		}
+		res = "{\"errors\":[],\"mode\":\"" + modeOut + "\",\"dryRun\":" + (!writeAllowed).toString() + ",\"callsUsed\":" + callsUsed + ",\"matched\":" + matched + ",\"unmatched\":" + missed + ",\"prefix\":\"" + pfx.replaceAll("\"","'") + "\",\"skipped\":" + skipped + ",\"remaining\":" + remaining + ",\"missing\":[" + missJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}
