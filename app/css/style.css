@@ -136,6 +136,7 @@ body {
     border-radius: 4px;
     border: 1px solid var(--border);
     overflow: hidden;
+    margin-bottom: 1rem;
 }
 
 @keyframes fadeIn {
@@ -262,6 +263,7 @@ body {
 
 .item-body {
     display: none;
+    padding: 1.5rem 1.5rem 0;
 }
 
 .item-card.open .item-body {
@@ -1935,8 +1937,8 @@ th.col-num {
 
 /* The send and receive line tables sit inside an open card, so they need the
    same inset the form above them has rather than running to the card edge. */
-.print-form + .table-wrapper,
-.item-body .table-wrapper + .raise-btn {
+.print-form+.table-wrapper,
+.item-body .table-wrapper+.raise-btn {
     margin: 0.5rem 1.25rem;
 }
 
@@ -2169,7 +2171,7 @@ th.col-num {
     border-radius: 8px;
     border: 1px solid var(--border);
     margin-top: 1rem;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
 .alloc-title {
@@ -2180,7 +2182,7 @@ th.col-num {
     width: 100%;
 }
 
-.alloc-form .note-input, 
+.alloc-form .note-input,
 .alloc-form .issue-input {
     background: #ffffff;
     border: 1px solid #cbd5e1;
@@ -2209,4 +2211,64 @@ th.col-num {
 .alloc-form .si-field {
     color: var(--text-main);
     font-weight: 500;
+}
+
+/* Professional Search Bar Styling */
+.search-bar-container {
+    padding: 0 0 1.25rem 0;
+}
+
+.search-input-wrapper {
+    position: relative;
+    width: 100%;
+    max-width: 100%;
+    display: flex;
+    align-items: center;
+}
+
+.search-icon {
+    position: absolute;
+    left: 1rem;
+    color: #6b7280;
+    pointer-events: none;
+}
+
+.professional-search {
+    width: 100%;
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 9999px;
+    padding: 0.75rem 1rem 0.75rem 2.75rem;
+    font-family: inherit;
+    font-size: 0.95rem;
+    color: var(--text-main);
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    transition: all 0.2s ease;
+}
+
+.professional-search:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+.professional-search::placeholder {
+    color: #9ca3af;
+}
+
+/* Print Jobs accordion UI */
+#print-jobs .item-card {
+    margin-bottom: 1rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+    background: #ffffff;
+}
+
+#print-jobs .item-body {
+    background-color: #f8fafc;
+    border-top: 1px solid #f1f5f9;
+    padding-bottom: 0.5rem;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
 }

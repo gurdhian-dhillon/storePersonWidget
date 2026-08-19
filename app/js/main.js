@@ -5453,9 +5453,12 @@ function renderPrint() {
     var panel = document.getElementById('panel-print');
     panel.innerHTML =
         '<div id="print-jobs">' + printJobsHtml() + '</div>' +
-        '<div class="stockin-search">' +
-            '<input type="text" id="print-filter" class="note-input" ' +
-                'placeholder="Search plain fabric by SKU or name…" oninput="onPrintFilter()" />' +
+        '<div class="search-bar-container">' +
+            '<div class="search-input-wrapper">' +
+                '<svg class="search-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>' +
+                '<input type="text" id="print-filter" class="professional-search" ' +
+                    'placeholder="Search plain fabric by SKU or name…" oninput="onPrintFilter()" />' +
+            '</div>' +
         '</div>' +
         '<div id="print-list">' + printListHtml() + '</div>';
 }
@@ -5479,34 +5482,37 @@ function onPrintFilter() {
 // Keyed on id, NEVER on list index. The index moves the moment the filter
 // changes, so an open card would silently become a different material's.
 function togglePrintCard(matId) {
-    printOpenId = (printOpenId === matId) ? null : matId;
-    if (printOpenId && !printLines[matId]) printLines[matId] = [{ len: '', count: '' }];
-    renderPrintList();
+    var card = document.getElementById('print-list-card-' + matId);
+    if (!card) return;
+    var opening = !card.classList.contains('open');
+
+    document.querySelectorAll('#print-list .item-card.open').forEach(function (c) {
+        c.classList.remove('open');
+    });
+
+    if (opening) {
+        card.classList.add('open');
+        requestAnimationFrame(function () {
+            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    }
 }
 
 function togglePrintJob(jobId) {
-    printJobOpenId = (printJobOpenId === jobId) ? null : jobId;
-    if (printJobOpenId && !printRecvLines[jobId]) {
-        var job = printJobById(jobId);
-        // ONE ROW PER SIZE THAT WENT OUT, and the rows are fixed — he cannot add
-        // or remove them. A piece comes back the length it left, so the only
-        // thing he decides is HOW MANY of each size arrived; the shortfall is
-        // whole pieces the printer lost or ruined.
-        //
-        // Prefilled with the full sent count, because the usual case is that it
-        // all came back. `sent` is carried alongside so the cap can be enforced
-        // and the loss shown per row.
-        printRecvLines[jobId] = (job && job.lines || []).map(function (l) {
-            return {
-                len: l.lengthCm,
-                sent: Number(l.count) || 0,
-                count: l.count,
-                state: (job && job.sourceState) || 'Wash',
-                carton: ''
-            };
+    var card = document.getElementById('print-job-card-' + jobId);
+    if (!card) return;
+    var opening = !card.classList.contains('open');
+
+    document.querySelectorAll('#print-jobs .item-card.open').forEach(function (c) {
+        c.classList.remove('open');
+    });
+
+    if (opening) {
+        card.classList.add('open');
+        requestAnimationFrame(function () {
+            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
         });
     }
-    renderPrintJobs();
 }
 
 function printJobById(jobId) {
@@ -5533,12 +5539,27 @@ function printJobsHtml() {
         return '<div class="waste-none">Nothing is at the printer.</div>';
     }
 
+    // Initialize all receive lines so we can safely render their bodies
+    jobs.forEach(function (j) {
+        if (!printRecvLines[j.jobId]) {
+            printRecvLines[j.jobId] = (j.lines || []).map(function (l) {
+                return {
+                    len: l.lengthCm,
+                    sent: Number(l.count) || 0,
+                    count: l.count,
+                    state: (j.sourceState) || 'Wash',
+                    carton: ''
+                };
+            });
+        }
+    });
+
     return jobs.map(function (j) {
         var open = String(printJobOpenId) === String(j.jobId);
         var pieces = (j.lines || []).reduce(function (a, l) { return a + (Number(l.count) || 0); }, 0);
 
         return '' +
-            '<div class="item-card' + (open ? ' open' : '') + '">' +
+            '<div class="item-card' + (open ? ' open' : '') + '" id="print-job-card-' + j.jobId + '">' +
                 '<div class="item-header" onclick="togglePrintJob(\'' + j.jobId + '\')">' +
                     '<div class="item-header-info">' +
                         '<h2>' + escapeHtml(j.printedName || j.printedSku || '—') + '</h2>' +
@@ -5549,11 +5570,16 @@ function printJobsHtml() {
                             '<span>from ' + escapeHtml(j.plainName || j.plainSku || '—') +
                                 ' &middot; lot ' + escapeHtml(j.plainLotNumber || '—') +
                                 ' &middot; ' + escapeHtml(j.sourceState === 'Unwash' ? 'unwashed' : 'washed') + '</span>' +
-                            '<span class="status-pill status-warning">Sent ' + escapeHtml(j.sentOn || '') + '</span>' +
                         '</div>' +
                     '</div>' +
+                    '<div class="item-header-right">' +
+                        '<span class="status-pill status-warning">Sent ' + escapeHtml(j.sentOn || '') + '</span>' +
+                        '<span class="chevron" aria-hidden="true">' +
+                            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
+                        '</span>' +
+                    '</div>' +
                 '</div>' +
-                (open ? printReceiveFormHtml(j) : '') +
+                printReceiveFormHtml(j) +
             '</div>';
     }).join('');
 }
@@ -5612,7 +5638,7 @@ function printReceiveFormHtml(job) {
     }).join('');
 
     return '' +
-        '<div class="item-body is-open">' +
+        '<div class="item-body">' +
             '<div class="print-form">' +
                 '<label class="si-field"><span>Lot</span>' +
                     '<select id="pr-lot-' + job.jobId + '" class="note-input" ' +
@@ -5756,6 +5782,11 @@ function printListHtml() {
         return '<div class="waste-none">No plain fabric matches that search.</div>';
     }
 
+    // Initialize all lines so we can safely render their bodies
+    list.forEach(function (m) {
+        if (!printLines[m.id]) printLines[m.id] = [{ len: '', count: '' }];
+    });
+
     return list.map(function (m) {
         var open = String(printOpenId) === String(m.id);
         var lots = m.lots || [];
@@ -5763,8 +5794,10 @@ function printListHtml() {
         var unwash = lots.reduce(function (a, l) { return a + (Number(l.unwash) || 0); }, 0);
         var inPrint = lots.reduce(function (a, l) { return a + (Number(l.inPrint) || 0); }, 0);
 
+        var pillHtml = (inPrint > 0) ? '<span class="status-pill status-warning">' + fmt(inPrint) + ' at the printer</span>' : '';
+
         return '' +
-            '<div class="item-card' + (open ? ' open' : '') + '">' +
+            '<div class="item-card' + (open ? ' open' : '') + '" id="print-list-card-' + m.id + '">' +
                 '<div class="item-header" onclick="togglePrintCard(\'' + m.id + '\')">' +
                     '<div class="item-header-info">' +
                         '<h2>' + escapeHtml(m.name || m.sku || '—') + '</h2>' +
@@ -5772,13 +5805,16 @@ function printListHtml() {
                             '<span>' + escapeHtml(m.sku || '') + '</span>' +
                             '<span>' + fmt(m.widthCm) + ' cm wide</span>' +
                             '<span>' + fmt(wash) + ' washed &middot; ' + fmt(unwash) + ' unwashed</span>' +
-                            (inPrint > 0
-                                ? '<span class="status-pill status-warning">' + fmt(inPrint) + ' at the printer</span>'
-                                : '') +
                         '</div>' +
                     '</div>' +
+                    '<div class="item-header-right">' +
+                        pillHtml +
+                        '<span class="chevron" aria-hidden="true">' +
+                            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
+                        '</span>' +
+                    '</div>' +
                 '</div>' +
-                (open ? printSendFormHtml(m) : '') +
+                printSendFormHtml(m) +
             '</div>';
     }).join('');
 }
@@ -5874,7 +5910,7 @@ function printSendFormHtml(m) {
         }).join('');
 
     return '' +
-        '<div class="item-body is-open">' +
+        '<div class="item-body">' +
             lotTable +
             '<div class="print-form">' +
                 '<label class="si-field"><span>Lot</span>' +
