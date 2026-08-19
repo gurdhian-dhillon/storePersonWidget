@@ -52,6 +52,66 @@ string getSupervisorCounts(string supervisorId)
 	// .count() is right here - this is a query result, not a List.
 	reissueWaiting = Material_Damage[Supervisor == supId && Status == "Open"].count();
 
+	// PLUS the remake batches the checker opened that he has not asked for yet.
+	// Those are the tab's second kind of card, so leaving them out would show him
+	// a badge of 0 over a tab with work on it - which is worse than no badge,
+	// because he stops opening it.
+	//
+	// Counted the same way getReissueDrafts finds them, and it has to STAY the
+	// same way or the two disagree: a Check_Reject batch still at
+	// Awaiting_Material with no Check_Remake requirement against it. The status
+	// is what bounds this - a batch leaves Awaiting_Material the moment its cloth
+	// is received - so it is the open ones, never the year's history of remakes.
+	//
+	// Plan_Item carries no supervisor, so the filter runs through the plan, and
+	// the plan's supervisor is cached: one order's rejections land on several
+	// batches of the same plan.
+	cntSupCache = Map();
+
+	for each  drb in Plan_Item[Remake_Reason == "Check_Reject" && Item_Status == "Awaiting_Material"]
+	{
+		drbPlanKey = "";
+		if(drb.Plan != null)
+		{
+			drbPlanKey = drb.Plan.toString();
+		}
+
+		// No BOM, no card. getReissueDrafts leaves such a batch off the tab
+		// because there is nothing to cost its material from and the card would
+		// be a dead end - so counting it here would put a badge over an empty
+		// tab, which is the one thing this whole block exists to avoid.
+		//
+		// There is no reliable break in a Deluge for-each - the body is guarded.
+		if(drbPlanKey != "" && drb.BOM != null)
+		{
+			cntSupKey = ifnull(cntSupCache.get(drbPlanKey),"").toString();
+			if(cntSupKey == "")
+			{
+				// "-" so a plan with nobody on it caches as an answer rather
+				// than being re-fetched for every batch it owns.
+				cntSupKey = "-";
+				for each  cplQ in Production_Planning[ID == drbPlanKey.toLong()]
+				{
+					if(cplQ.Assigned_To != null)
+					{
+						cntSupKey = cplQ.Assigned_To.toString();
+					}
+				}
+				cntSupCache.put(drbPlanKey,cntSupKey);
+			}
+
+			// Ids compared as text on both sides - a mixed-type comparison
+			// throws rather than returning false.
+			if(cntSupKey == supId.toString())
+			{
+				if(Material_Requirement[Plan_Item == drb.ID && Source == "Check_Remake"].count() == 0)
+				{
+					reissueWaiting = reissueWaiting + 1;
+				}
+			}
+		}
+	}
+
 	// Orders on his plate. Production Complete and anything dispatched are done
 	// with, and a badge counting them would never go down.
 	activePlans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "Material Ready" || Order_Status == "In Progress")].count();

@@ -204,6 +204,31 @@ Written by `receiveMaterials`, `resolveDispute` (both directions) and `saveProdu
 `resolveDispute` only moves items in the two states *before* cutting — dragging a started item
 backwards would deny work that really happened.
 
+**NOBODY ASKS THE STORE FOR MATERIAL EXCEPT THE SUPERVISOR.** Both routes that discover a batch
+needs cloth — he ruined some (`saveMaterialDamage`), or the checker rejected garments
+(`saveItemCheck`) — write the batch and stop there. The demand is raised separately, from his
+**Reissue tab**, by `raiseReissueRequest`. A rejection used to create its `Material_Requirement`
+rows inline, which let an inspector three rooms away commit him to a handover he had not asked for
+and could not see coming.
+
+> **A check-remake draft is DERIVED, and there is no draft record anywhere.** The draft *is* a
+> `Plan_Item` with `Is_Remake` + `Remake_Reason == "Check_Reject"` sitting at `Awaiting_Material`
+> with no `Material_Requirement` of `Source == "Check_Remake"` against it; its lines are rebuilt
+> from the batch's own BOM through the shared `buildItemRequirements`. Those requirement rows are
+> therefore also the only guard against raising twice, and they are enough — no flag exists that
+> can drift out of step with them. `getReissueDrafts`, `getSupervisorCounts` and
+> `raiseReissueRequest` all apply that same test and **must keep applying the same one**, or the
+> badge, the tab and the button disagree about whether there is work.
+>
+> Storing the draft was considered twice and rejected both times. As a `Material_Damage` row it
+> would put a check rejection in the consumption report's **damaged** column — the exact double
+> count `docs/checking.md` forbids. As draft `Material_Requirement` rows it would make every screen
+> that reads that form learn to ignore them, silently and one miss at a time.
+>
+> Legacy batches are untouched by any of this: they already carry their requirements, so the
+> "no `Check_Remake` row" test never sees them, and the strict `Check_Reject` match skips
+> `QC_Reject` and empty reasons for the same reason.
+
 **A stage is split between several operators.** The supervisor hands out shares as people come
 free — `Stage_Assignment`, one record per operator per stage, its own form for the same reason
 `Plan_Item` and `Stage_Log` are: two men finishing minutes apart would both rewrite one parent

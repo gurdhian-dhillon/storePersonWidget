@@ -14,6 +14,13 @@
 // he remembers what went wrong; asking the store is a separate decision he makes
 // when it suits him. Raising on report would have flooded the store with
 // one-line requests all day.
+//
+// THE TAB HAS A SECOND SOURCE and it is the same idea from the other end. When
+// the checker rejects garments, saveItemCheck opens a remake batch and asks the
+// store for nothing; the batch turns up here as a card. It used to raise the
+// material itself, which meant an inspector three rooms away could commit the
+// supervisor to a handover he had not asked for and could not see coming.
+// Nothing reaches the store on this tab until he presses the button.
 
 var reissueItems = [];
 var damageCtx = null;
@@ -541,10 +548,21 @@ function loadReissue() {
     });
 }
 
-// One card per ITEM, not per damage report. He decides per item — "for this
-// order and this item, what do I want back" — and a single item can collect
-// damage from several stages on several days. Three cards for one item would
-// make him raise three requests the store then has to reconcile.
+// TWO KINDS OF CARD, and the difference is whether there is anything to decide.
+//
+//   damage — one card per ITEM, not per damage report. He decides per item —
+//            "for this order and this item, what do I want back" — and a single
+//            item can collect damage from several stages on several days. Three
+//            cards for one item would make him raise three requests the store
+//            then has to reconcile. Every line has a tick, because "3 were
+//            ruined but I have spares" is a real answer.
+//
+//   remake — the checker rejected garments and a batch was opened for them.
+//            The batch needs its whole BOM again; there is no per-material
+//            decision to make, so there are no ticks and no per-line "why" —
+//            one reason covers the card and it sits in the header. The
+//            quantities are the server's, worked out from the BOM, and are shown
+//            rather than offered for editing.
 function renderReissue() {
     var panel = document.getElementById('panel-reissue');
 
@@ -553,62 +571,14 @@ function renderReissue() {
     if (reissueItems.length === 0) {
         panel.innerHTML = '<div class="empty-state">' +
             '<h2>Nothing waiting</h2>' +
-            '<p>Damage you report on the Production tab collects here until you ask the store for it.</p>' +
+            '<p>Damage you report on the Production tab, and batches the checker sends back ' +
+            'for remaking, collect here until you ask the store for the material.</p>' +
             '</div>';
         return;
     }
 
     panel.innerHTML = reissueItems.map(function (it, idx) {
-        var rows = (it.lines || []).map(function (l, li) {
-            var isFab = l.isFab === true;
-            return '<tr>' +
-                '<td class="col-tick">' +
-                '<input type="checkbox" class="ri-pick" data-item="' + idx + '" data-line="' + li + '" checked>' +
-                '</td>' +
-                '<td class="material-name-cell">' +
-                '<div class="mat-name">' + escapeHtml(l.name || '') + '</div>' +
-                (l.sku ? '<div class="mat-sku">' + escapeHtml(l.sku) + '</div>' : '') +
-                '</td>' +
-                '<td class="col-num">' +
-                (isFab && Number(l.pieces) > 0
-                    ? fmt(l.pieces)
-                    : '<span class="is-muted">&mdash;</span>') +
-                '</td>' +
-                '<td class="col-num col-strong">' + fmt(l.qty) + ' ' + escapeHtml(l.unit || '') + '</td>' +
-                // The note is the store's only answer to "why am I issuing this
-                // again". It travels onto the requirement too, so they see it
-                // without opening anything.
-                '<td class="ri-why">' +
-                (l.phase ? '<span class="ri-phase">' + escapeHtml(l.phase) + '</span> ' : '') +
-                escapeHtml(l.note || '') +
-                '<div class="ri-when">' + escapeHtml(l.reportedOn || '') + '</div>' +
-                '</td>' +
-                '</tr>';
-        }).join('');
-
-        return '<div class="item-card ri-card">' +
-            '<div class="ri-head">' +
-            '<div>' +
-            '<h2>' + escapeHtml(it.item || 'Item') + '</h2>' +
-            '<div class="ri-sub">' + escapeHtml(it.salesOrder || '') + '</div>' +
-            '</div>' +
-            '<button type="button" class="primary-btn ri-raise" data-item="' + idx + '">' +
-            'Ask the store' +
-            '</button>' +
-            '</div>' +
-            '<div class="table-wrapper">' +
-            '<table>' +
-            '<thead><tr>' +
-            '<th class="col-tick">Ask</th>' +
-            '<th>Material</th>' +
-            '<th class="col-num">Pieces</th>' +
-            '<th class="col-num">Quantity</th>' +
-            '<th>Why</th>' +
-            '</tr></thead>' +
-            '<tbody>' + rows + '</tbody>' +
-            '</table>' +
-            '</div>' +
-            '</div>';
+        return it.kind === 'remake' ? remakeCardHtml(it, idx) : damageCardHtml(it, idx);
     }).join('');
 
     panel.querySelectorAll('.ri-raise').forEach(function (btn) {
@@ -618,20 +588,142 @@ function renderReissue() {
     });
 }
 
+function damageCardHtml(it, idx) {
+    var rows = (it.lines || []).map(function (l, li) {
+        var isFab = l.isFab === true;
+        return '<tr>' +
+            '<td class="col-tick">' +
+            '<input type="checkbox" class="ri-pick" data-item="' + idx + '" data-line="' + li + '" checked>' +
+            '</td>' +
+            '<td class="material-name-cell">' +
+            '<div class="mat-name">' + escapeHtml(l.name || '') + '</div>' +
+            (l.sku ? '<div class="mat-sku">' + escapeHtml(l.sku) + '</div>' : '') +
+            '</td>' +
+            '<td class="col-num">' +
+            (isFab && Number(l.pieces) > 0
+                ? fmt(l.pieces)
+                : '<span class="is-muted">&mdash;</span>') +
+            '</td>' +
+            '<td class="col-num col-strong">' + fmt(l.qty) + ' ' + escapeHtml(l.unit || '') + '</td>' +
+            // The note is the store's only answer to "why am I issuing this
+            // again". It travels onto the requirement too, so they see it
+            // without opening anything.
+            '<td class="ri-why">' +
+            (l.phase ? '<span class="ri-phase">' + escapeHtml(l.phase) + '</span> ' : '') +
+            escapeHtml(l.note || '') +
+            '<div class="ri-when">' + escapeHtml(l.reportedOn || '') + '</div>' +
+            '</td>' +
+            '</tr>';
+    }).join('');
+
+    return '<div class="item-card ri-card">' +
+        '<div class="ri-head">' +
+        '<div>' +
+        '<h2>' + escapeHtml(it.item || 'Item') + '</h2>' +
+        '<div class="ri-sub">' + escapeHtml(it.salesOrder || '') + '</div>' +
+        '</div>' +
+        '<button type="button" class="primary-btn ri-raise" data-item="' + idx + '">' +
+        'Ask the store' +
+        '</button>' +
+        '</div>' +
+        '<div class="table-wrapper">' +
+        '<table>' +
+        '<thead><tr>' +
+        '<th class="col-tick">Ask</th>' +
+        '<th>Material</th>' +
+        '<th class="col-num">Pieces</th>' +
+        '<th class="col-num">Quantity</th>' +
+        '<th>Why</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>' +
+        '</div>' +
+        '</div>';
+}
+
+function remakeCardHtml(it, idx) {
+    // The date and the round are the same for every line — they came from one
+    // check — so they are said once in the header rather than repeated down a
+    // column that would read identically on every row.
+    var when = ((it.lines || [])[0] || {}).reportedOn || '';
+    var qty = Number(it.qty) || 0;
+
+    var rows = (it.lines || []).map(function (l) {
+        var isFab = l.isFab === true;
+        return '<tr>' +
+            '<td class="material-name-cell">' +
+            '<div class="mat-name">' + escapeHtml(l.name || '') + '</div>' +
+            (l.sku ? '<div class="mat-sku">' + escapeHtml(l.sku) + '</div>' : '') +
+            '</td>' +
+            '<td class="col-num">' +
+            (isFab && Number(l.pieces) > 0
+                ? fmt(l.pieces)
+                : '<span class="is-muted">&mdash;</span>') +
+            '</td>' +
+            '<td class="col-num col-strong">' + fmt(l.qty) + ' ' + escapeHtml(l.unit || '') + '</td>' +
+            '</tr>';
+    }).join('');
+
+    return '<div class="item-card ri-card ri-remake">' +
+        '<div class="ri-head">' +
+        '<div>' +
+        '<h2>' + escapeHtml(it.item || 'Item') + '</h2>' +
+        '<div class="ri-sub">' + escapeHtml(it.salesOrder || '') + '</div>' +
+        '</div>' +
+        '<button type="button" class="primary-btn ri-raise" data-item="' + idx + '">' +
+        'Ask the store' +
+        '</button>' +
+        '</div>' +
+
+        // Says what happened and what it commits him to. Nothing has reached the
+        // store yet and the batch cannot start until it does, which is the one
+        // thing he needs to know before pressing the button.
+        '<div class="ri-remake-why">' +
+        '<b>' + fmt(qty) + '</b> piece' + (qty === 1 ? '' : 's') + ' failed checking' +
+        (it.round ? ' in round ' + escapeHtml(String(it.round)) : '') +
+        (when ? ' on ' + escapeHtml(when) : '') +
+        '. This is the material to make them again &mdash; the store has not been asked for it yet.' +
+        '</div>' +
+
+        '<div class="table-wrapper">' +
+        '<table>' +
+        '<thead><tr>' +
+        '<th>Material</th>' +
+        '<th class="col-num">Pieces</th>' +
+        '<th class="col-num">Quantity</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>' +
+        '</div>' +
+        '</div>';
+}
+
 function raiseReissue(idx, btn) {
     var it = reissueItems[idx];
     if (!it) return;
 
-    var picked = [];
-    document.querySelectorAll('.ri-pick[data-item="' + idx + '"]').forEach(function (cb) {
-        if (!cb.checked) return;
-        var l = (it.lines || [])[Number(cb.getAttribute('data-line'))];
-        if (l) picked.push({ damageId: String(l.damageId), lineId: String(l.lineId) });
-    });
+    // A remake card is raised whole: the batch needs its whole BOM and the
+    // quantities are the server's, so there is nothing to send but which batch.
+    var body = {
+        planItemId: String(it.planItemId),
+        supervisorId: String(currentSupervisorId())
+    };
 
-    if (picked.length === 0) {
-        alert('Tick at least one material to ask for.');
-        return;
+    if (it.kind === 'remake') {
+        body.kind = 'remake';
+    } else {
+        var picked = [];
+        document.querySelectorAll('.ri-pick[data-item="' + idx + '"]').forEach(function (cb) {
+            if (!cb.checked) return;
+            var l = (it.lines || [])[Number(cb.getAttribute('data-line'))];
+            if (l) picked.push({ damageId: String(l.damageId), lineId: String(l.lineId) });
+        });
+
+        if (picked.length === 0) {
+            alert('Tick at least one material to ask for.');
+            return;
+        }
+        body.lines = picked;
     }
 
     btn.disabled = true;
@@ -640,13 +732,7 @@ function raiseReissue(idx, btn) {
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'raiseReissueRequest',
         http_method: 'POST',
-        payload: {
-            payloadJson: JSON.stringify({
-                planItemId: String(it.planItemId),
-                supervisorId: String(currentSupervisorId()),
-                lines: picked
-            })
-        }
+        payload: { payloadJson: JSON.stringify(body) }
     }).then(function (response) {
         var parsed;
         try {

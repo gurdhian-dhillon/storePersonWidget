@@ -591,8 +591,13 @@ function showOutcome(item, approved, rejected, alteration, res) {
     var bits = [];
     if (approved > 0) bits.push('<li><b>' + approved + '</b> approved</li>');
     if (rejected > 0) {
-        bits.push('<li><b>' + rejected + '</b> rejected — a remake batch has been raised ' +
-            'and the store has been asked for material</li>');
+        // NOT "the store has been asked for material", which is what this said
+        // while the check raised the requirements itself. It does not any more:
+        // the batch lands on the supervisor's Reissue tab and he decides when to
+        // ask. Saying otherwise here would have him waiting on cloth nobody has
+        // requested.
+        bits.push('<li><b>' + rejected + '</b> rejected — a remake batch has been raised. ' +
+            'The supervisor asks the store for the material when he is ready</li>');
     }
     if (alteration > 0) {
         bits.push('<li><b>' + alteration + '</b> sent for alteration — back on ' +

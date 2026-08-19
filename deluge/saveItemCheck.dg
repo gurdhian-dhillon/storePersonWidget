@@ -28,11 +28,29 @@ string saveItemCheck(string payloadJson)
 	// WHAT IT WRITES, in order:
 	//   Item_Check + Check_Lines + Alteration_Lines
 	//   the item: Qty_Accepted, Qty_Rejected, Item_Status = Complete, Check_Ref
-	//   rejected > 0  -> remake batch + Material_Requirement rows
+	//   rejected > 0  -> remake batch, NO material (see below)
 	//   alteration > 0 -> alteration batch + Alteration_Stage rows, NO material
 	//   plan and order pulled back to In Progress if a batch was created
 	//   Processed = true
 	//   recheckOrderComplete
+	//
+	// A REJECTION NO LONGER ASKS THE STORE FOR ANYTHING. It used to insert the
+	// remake batch's Material_Requirement rows here, which put cloth on the store
+	// person's issue screen the instant an inspector pressed Save - a third party
+	// to the conversation committing the supervisor to a handover he had not asked
+	// for and could not see coming.
+	//
+	// The batch is still opened here, because the ORDER is short whatever anybody
+	// decides and that fact belongs to the check. What waits is the DEMAND: the
+	// batch sits at Awaiting_Material with no requirements, which is exactly what
+	// the Reissue tab reads as a draft, and the supervisor raises it there. That
+	// is the same shape saveMaterialDamage already had - report now, ask when it
+	// suits - and this makes the two paths one behaviour instead of two.
+	//
+	// Nothing is stored for that draft and nothing needs to be. The material is
+	// rebuilt from the batch's own BOM and Qty_Ordered by the same shared
+	// buildItemRequirements when he raises it, so the server stays the only writer
+	// of a real requirement and the arithmetic cannot drift between the two moments.
 	//
 	// ONE ROUND PER BATCH. An item that already carries an Item_Check is refused
 	// outright, and it is also already "Complete" so the status test refuses it
@@ -182,19 +200,17 @@ string saveItemCheck(string payloadJson)
 	}
 
 	//----------------------------------------------------------------------
-	// The plan and its supervisor. Assigned_To on a requirement is the store's
-	// filter, so a remake requirement without it is invisible on their screen -
-	// it comes off the plan rather than the payload for the same reason the
-	// quantities do.
+	// The plan's status and its order. The plan's SUPERVISOR is deliberately
+	// not read any more - the only thing that wanted him was Assigned_To on a
+	// remake requirement, and requirements are no longer written here.
+	// raiseReissueRequest reads him off the same plan when it raises them.
 	//----------------------------------------------------------------------
 	planStatus = "";
-	planSup = null;
 	orderId = null;
 
 	for each  plRec in Production_Planning[ID == planId]
 	{
 		planStatus = ifnull(plRec.Order_Status,"").toString().trim();
-		planSup = plRec.Assigned_To;
 		if(plRec.Sales_Order != null)
 		{
 			orderId = plRec.Sales_Order.toString().toLong();
@@ -697,81 +713,47 @@ string saveItemCheck(string payloadJson)
 		}
 
 		//--------------------------------------------------------------
-		// Its material. The same shared function createProductionPlans uses,
-		// so the remake is costed by exactly the same arithmetic as the
-		// original - fabric width, cut size, whole marker rows. A second copy
-		// of that maths would drift, and the drift would be silent until the
-		// store came up short.
+		// AND NO MATERIAL. Deliberately.
 		//
-		// SOURCE AND CHECK_REF ARE THE FIX FOR createRemakeItems' DEFECT. It
+		// Awaiting_Material with zero Material_Requirement rows IS the draft.
+		// getReissueDrafts looks for exactly that pair and puts the batch on
+		// the supervisor's Reissue tab; raiseReissueRequest builds the rows
+		// from this batch's own BOM and Qty_Ordered - through the same shared
+		// buildItemRequirements createProductionPlans uses, so the remake is
+		// costed by identical arithmetic - and stamps Source = "Check_Remake"
+		// and Check_Ref there.
+		//
+		// SOURCE AND CHECK_REF STILL MATTER and still get written; only the
+		// moment moved. They are the fix for createRemakeItems' defect, which
 		// set no Source at all, so every remake's material read as "Plan" and
-		// was invisible in any breakdown of where an order's cloth went. A
-		// rejection needs no Material_Damage record - the BOM already says
-		// exactly what one garment takes, so the loss is fully derivable, and
-		// booking it as damage AS WELL would double the reported loss.
-		// Item_Check IS the reason record, reached through Check_Ref.
+		// was invisible in any breakdown of where an order's cloth went.
+		//
+		// A rejection still needs no Material_Damage record - the BOM already
+		// says exactly what one garment takes, so the loss is fully derivable,
+		// and booking it as damage AS WELL would double the reported loss.
+		// Item_Check IS the reason record, reached through Check_Ref. That is
+		// also why the draft is derived rather than stored as a damage row: a
+		// check rejection is not damage, and putting it in Material_Damage
+		// would land it in the consumption report's damaged column.
 		//--------------------------------------------------------------
-		matCount = 0;
-
-		if(srcBom != null)
-		{
-			matsJson = thisapp.buildItemRequirements(srcBom.toString(),rejected.toString(),"check remake of " + itemName + " (check " + checkId + ")");
-			matsList = matsJson.toJSONList();
-
-			for each  mRaw in matsList
-			{
-				mm = mRaw.toMap();
-
-				newReqId = insert into Material_Requirement
-				[
-					Plan=planId
-					Plan_Item=remakeId
-					Material_Name=mm.get("name")
-					Is_Fabric=mm.get("isFab")
-					Unit=mm.get("unit")
-					Required_Qty=mm.get("req")
-					Issued_Qty=0
-					Received_Qty=0
-					Cut_Size_Length=mm.get("cutLen")
-					Cut_Size_Width=mm.get("cutWid")
-					Required_Pieces=mm.get("pcs")
-					Pieces_From_Waste=0
-					Pieces_From_Raw=0
-					Source="Check_Remake"
-					Added_User=zoho.loginuser
-				];
-
-				reqId = newReqId.toLong();
-
-				for each  mrq in Material_Requirement[ID == reqId]
-				{
-					mrq.Material = mm.get("mat").toString().toLong();
-					mrq.Check_Ref = checkId;
-					if(planSup != null)
-					{
-						mrq.Assigned_To = planSup;
-					}
-				}
-
-				matCount = matCount + 1;
-			}
-		}
-		else
+		if(srcBom == null)
 		{
 			// Cannot happen through the front door - createProductionPlans
 			// rejects an order whose item has no BOM - but an item planned
-			// before that rule existed could still reach here.
-			logLines.add("WARN (no BOM on the item, the remake batch has no material) -> " + itemName);
+			// before that rule existed could still reach here. Worth a line in
+			// the log, because such a batch can never be raised on the Reissue
+			// tab: there is no BOM to cost it from.
+			logLines.add("WARN (no BOM on the item, nothing can be asked for this remake batch) -> " + itemName);
 		}
 
-		// Written back once the batch and its material exist.
+		// Written back once the batch exists.
 		for each  icS1 in Item_Check[ID == checkId]
 		{
 			icS1.Remake_Item = remakeId;
 		}
 
 		madeAny = true;
-		logLines.add("REMAKE line " + (nextLineNo - 1) + " -> " + itemName + " | qty " + rejected + " | materials " + matCount);
+		logLines.add("REMAKE line " + (nextLineNo - 1) + " -> " + itemName + " | qty " + rejected + " | material NOT raised, waiting on the supervisor's Reissue tab");
 	}
 
 	//----------------------------------------------------------------------
@@ -889,9 +871,16 @@ string saveItemCheck(string payloadJson)
 	// packed or dispatched is never dragged backwards by a late check, and a
 	// plan already at work owns its own status.
 	//
-	// This is what puts the plan back on the store's issue list and the
-	// supervisor's screen. No new status value anywhere: In Progress is one of
-	// the three getStoreMaterialRequirements and issueMaterials accept.
+	// This is what puts the plan back on the supervisor's screen, and back in
+	// the set the store screen looks at for when he does raise the material. No
+	// new status value anywhere: In Progress is one of the three
+	// getStoreMaterialRequirements and issueMaterials accept.
+	//
+	// Still done HERE and not left to raiseReissueRequest, even though nothing
+	// is owed to the store yet. A plan reading Production Complete while a batch
+	// of it is unmade is wrong the moment the checker presses Save, whether or
+	// not anybody ever asks for cloth - and the supervisor finds the batch
+	// through the plan.
 	//----------------------------------------------------------------------
 	if(madeAny == true)
 	{
