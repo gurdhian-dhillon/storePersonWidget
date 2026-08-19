@@ -20,13 +20,19 @@ string getPackingQueue(string payloadJson)
 				itemCount = itemCount + 1;
 			}
 			
-			// Calculate finished pieces directly from Plan_Item.Qty_Accepted
+			// Calculate finished pieces directly from Item_Check & Finishing_Data (ignoring duplicate finishing logs)
 			totalFinished = 0;
 			for each plan in Production_Planning[Sales_Order == so.ID]
 			{
 				for each pi in Plan_Item[Plan == plan.ID]
 				{
-					totalFinished = totalFinished + ifnull(pi.Qty_Accepted, 0).toLong();
+					for each chk in Item_Check[Plan_Item == pi.ID && Qty_Approved > 0]
+					{
+						if(Finishing_Data[Item_Check == chk.ID].count() > 0)
+						{
+							totalFinished = totalFinished + ifnull(chk.Qty_Approved, 0).toLong();
+						}
+					}
 				}
 			}
 			

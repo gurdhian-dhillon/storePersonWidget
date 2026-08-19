@@ -34,7 +34,7 @@ string getPackingDetails(string payloadJson)
 					skuTxt = ifnull(im.SKU, "").toString();
 				}
 				
-				// Find finished quantity for this specific line (idx) from Plan_Item.Qty_Accepted
+				// Find finished quantity for this specific line (idx) from Item_Check & Finishing_Data (ignoring duplicate finishing logs)
 				finQty = 0;
 				for each plan in Production_Planning[Sales_Order == salesId]
 				{
@@ -51,7 +51,13 @@ string getPackingDetails(string payloadJson)
 					{
 						for each pi in Plan_Item[Plan == plan.ID && (ID == rootId || Remake_Of == rootId)]
 						{
-							finQty = finQty + ifnull(pi.Qty_Accepted, 0).toLong();
+							for each chk in Item_Check[Plan_Item == pi.ID && Qty_Approved > 0]
+							{
+								if(Finishing_Data[Item_Check == chk.ID].count() > 0)
+								{
+									finQty = finQty + ifnull(chk.Qty_Approved, 0).toLong();
+								}
+							}
 						}
 					}
 				}

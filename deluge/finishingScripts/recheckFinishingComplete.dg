@@ -40,21 +40,33 @@ string recheckFinishingComplete(string orderIdTxt)
 				// Or if it's already past finishing (e.g. Dispatched), we skip.
 				verdict = "NO MOVE: order " + orderId + " is '" + statusNow + "'";
 			}
-			else
-			{
-				// 2. Check if every approved Item_Check has a corresponding Finishing_Data record
+				// 2. Sum the total quantity ordered in this Sales Order
+				totalOrderedQty = 0;
+				for each so in Sales_Order[ID == orderId]
+				{
+					for each soRow in so.Item_Table
+					{
+						totalOrderedQty = totalOrderedQty + ifnull(soRow.Quantity, 0).toLong();
+					}
+				}
+
+				// 3. Check if every approved Item_Check has a corresponding Finishing_Data record
+				// and sum the total finished quantity (ignoring duplicates)
 				allFinished = true;
 				checksFound = false;
+				totalFinishedQty = 0;
 				unfinishedBatches = "";
 
 				for each chk in Item_Check[Sales_Order == orderId && Qty_Approved > 0]
 				{
 					checksFound = true;
-					finCount = Finishing_Data[Item_Check == chk.ID].count();
-					if(finCount == 0)
+					if(Finishing_Data[Item_Check == chk.ID].count() > 0)
+					{
+						totalFinishedQty = totalFinishedQty + ifnull(chk.Qty_Approved, 0).toLong();
+					}
+					else
 					{
 						allFinished = false;
-						// Just for the info log
 						if (unfinishedBatches != "") { unfinishedBatches = unfinishedBatches + ", "; }
 						unfinishedBatches = unfinishedBatches + chk.ID.toString();
 					}
@@ -68,16 +80,19 @@ string recheckFinishingComplete(string orderIdTxt)
 				{
 					verdict = "NOT YET: still finishing checks -> " + unfinishedBatches;
 				}
+				else if (totalFinishedQty < totalOrderedQty)
+				{
+					verdict = "NOT YET: total finished quantity (" + totalFinishedQty + ") is less than total ordered quantity (" + totalOrderedQty + ")";
+				}
 				else
 				{
-					// 3. All checks are finished! Update the Sales Order
+					// 4. All checks and total quantities finished! Update the Sales Order
 					for each soSet in Sales_Order[ID == orderId]
 					{
 						soSet.Order_Status = "Finishing Complete";
 					}
-					verdict = "PASSED: order " + orderId + " is now Finishing Complete";
+					verdict = "PASSED: order " + orderId + " is now Finishing Complete (Finished " + totalFinishedQty + " / Ordered " + totalOrderedQty + ")";
 				}
-			}
 		}
 	}
 	catch (e)
