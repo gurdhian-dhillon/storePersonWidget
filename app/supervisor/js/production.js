@@ -1183,7 +1183,31 @@ function renderItemCard(plan, item, index) {
 			// something that happens when the last man happens to finish.
 			//----------------------------------------------------------------
 			const shares = sharesOf(log);
-			const assignedQty = shareTotal(log, "assigned");
+			
+			// A vendor share that is NOT returned and does NOT start on this stage
+			// is operating on pieces that haven't reached this stage's qtyIn yet.
+			// It must not be subtracted from qtyIn, or it will hide pieces that
+			// actually HAVE reached this stage.
+			const assignedQty = shares.reduce((sum, a) => {
+				let include = true;
+				if (isPartyShare(a) && !a.returnedOn && a.osRef) {
+					let firstPhaseIdx = 999;
+					(item.logs || []).forEach(l => {
+						if (sharesOf(l).some(s => s.osRef === a.osRef)) {
+							const pIdx = item.phases.findIndex(p => p.operation === l.phase);
+							if (pIdx >= 0 && pIdx < firstPhaseIdx) {
+								firstPhaseIdx = pIdx;
+							}
+						}
+					});
+					const currentPhaseIdx = item.phases.findIndex(p => p.operation === phase.operation);
+					if (currentPhaseIdx > firstPhaseIdx) {
+						include = false;
+					}
+				}
+				return sum + (include ? (Number(a.assigned) || 0) : 0);
+			}, 0);
+
 			const madeQty = shareTotal(log, "qtyOut");
 			const stillOpen = openShares(log).length;
 			const leftQty = Math.max(0, qtyIn - assignedQty);

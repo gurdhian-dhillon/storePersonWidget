@@ -200,7 +200,27 @@ string saveStageAssignment(string payloadJson)
 			already = 0;
 			for each  asA in Stage_Assignment[Stage_Log == logId]
 			{
-				already = already + ifnull(asA.Assigned_Qty,0);
+				isForwardBlock = false;
+				if(asA.Third_Party != null && asA.Returned_On == null && asA.Outsource_Ref != null)
+				{
+					isFirst = true;
+					for each  earlierAsA in Stage_Assignment[Outsource_Ref == asA.Outsource_Ref]
+					{
+						if(earlierAsA.Sequence_No < asA.Sequence_No)
+						{
+							isFirst = false;
+						}
+					}
+					if(isFirst == false)
+					{
+						isForwardBlock = true;
+					}
+				}
+
+				if(isForwardBlock == false)
+				{
+					already = already + ifnull(asA.Assigned_Qty,0);
+				}
 
 				if (ifnull(asA.Operator,"").toString().trim() == opIdStr)
 				{
@@ -302,7 +322,27 @@ string saveStageAssignment(string payloadJson)
 			{
 				if (asD.ID.toString() != asgIdStr)
 				{
-					othersQ = othersQ + ifnull(asD.Assigned_Qty,0);
+					isForwardBlock2 = false;
+					if(asD.Third_Party != null && asD.Returned_On == null && asD.Outsource_Ref != null)
+					{
+						isFirst2 = true;
+						for each  earlierAsD in Stage_Assignment[Outsource_Ref == asD.Outsource_Ref]
+						{
+							if(earlierAsD.Sequence_No < asD.Sequence_No)
+							{
+								isFirst2 = false;
+							}
+						}
+						if(isFirst2 == false)
+						{
+							isForwardBlock2 = true;
+						}
+					}
+
+					if(isForwardBlock2 == false)
+					{
+						othersQ = othersQ + ifnull(asD.Assigned_Qty,0);
+					}
 				}
 			}
 
