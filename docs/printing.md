@@ -215,12 +215,43 @@ Everything that describes the cloth comes from the plain SKU, unchanged:
 | Field | From |
 |---|---|
 | `Fabric_Width_Inches` | **the plain SKU, copied** — this is the width invariant |
+| `Name` | the plain SKU — the name part alone |
+| `Design_Name` | the plain SKU — **inherited, not replaced** |
 | `Type_field`, `GSM`, `Quality`, `Color`, `Unit` | the plain SKU |
 | `Is_Fabric` | `true` |
-| `Pattern` | the chosen pattern |
+| `Pattern` | the chosen print pattern |
+| `Material_Display_Name` | composed — see below |
 | `Print_Base` | the plain SKU |
 | `SKU` | the next free `RM-` number |
 | every quantity field | `0` — stock only ever arrives through a print receipt |
+
+### The display name is composed, and the print is a part of its own
+
+`Name`, `Design_Name`, `Color` and `Pattern` each hold **one fact and no separator**.
+`Material_Display_Name` is the composition, and it is the only place `" / "` belongs:
+
+```
+<name>         / <design> / <colour> / <pattern>
+Grey Sheeting  / Plain    / Grey                  ← the plain cloth
+Grey Sheeting  / Plain    / Grey     / BP Flower  ← printed off it
+```
+
+A printed SKU reads as its base plus the print, which is what it physically is.
+
+> **Two wrong versions were shipped here, and the second is the instructive one.**
+>
+> The first read `Material_Display_Name` and appended the pattern to it — so the whole composed
+> string landed in `Name`, and `Design_Name` was never written at all.
+>
+> The second **replaced** the design part with the pattern (*Grey Sheeting / BP Flower / Grey*),
+> on the reasoning that the convention had three parts and the print belonged in the design slot.
+> That is wrong because **`Design_Name` is inherited**: the base cloth is still plain, so every
+> print off one base would compose to the same display name and the SKUs could not be told apart on
+> any screen. The print is a **fifth** fact, not a substitute for the third.
+>
+> Compose from the parts, append each only when it is non-empty, and a material missing one of them
+> still reads cleanly instead of carrying a dangling separator. `Name` falls back to the first
+> segment of the display name only when the field was never filled.
 
 **The width is copied, not referenced.** A lookup would let someone edit the plain SKU's width years
 later and silently rewrite the cutting maths for printed cloth already on the rack, which is the
@@ -326,8 +357,26 @@ to record at send.
 
 ## Receiving
 
-The send lines come back pre-filled as the receive lines — the usual case is that they are right —
-and he corrects the length, the count and **whether each is washed or greige**.
+**The length is not an input.** A piece comes back the length it left — printing does not shorten
+cloth — so the receive screen shows one **fixed** row per size that went out, and the only thing he
+decides is **how many of that size came back**, plus whether each is washed or greige and which
+carton it went into. He cannot add a size, remove a row, or edit a length.
+
+That single decision makes the whole thing safe:
+
+- **The shortfall is whole pieces** — the counts on `Send_Lines` against those on `Receive_Lines`. The
+  screen says it in pieces first, *"1 piece short — 3 Mtr written off"*, because *3 metres* is not
+  something you can take to a vendor and *one piece* is.
+- **Over-return is impossible by construction, not by a check.** `receiveFromPrint` takes the length
+  from its own `Send_Lines` and ignores the payload's copy, and caps the count at what that row sent.
+  A Custom API is callable from anywhere; a payload naming its own lengths could otherwise book
+  printed cloth that no plain cloth ever paid for. The payload's length is still sent and still
+  compared — a mismatch means a stale screen and is refused with that message.
+- **A zero row is a record, not a blank.** A size that came back as nothing still writes a
+  `Receive_Lines` row at zero, so the two subforms line up and the missing piece reads as a size that
+  was checked rather than one nobody looked for. It writes **no** `Fabric_Piece` — an `Available` row
+  holding zero pieces is the phantom `Waste_Master` had to grow a `Disputed` status to avoid — and it
+  needs no carton, because it sits on no shelf.
 
 - Create or top up the printed lot — `Form = Pieces`, `Source_Lot` = the plain lot, `Lot_Number`
   **typed by the store person**, exactly as any other lot. Not derived from the job: the number has
@@ -345,9 +394,35 @@ can. This is the second half of *while issue, plain and printed must be the same
 copies it, receipt stamps it, and by the time the issue screen reads it there is nothing left to
 check.
 
-`Metres_Sent − Metres_Returned` is real loss — shrinkage and pieces the printer ruined. It stays
-visible on the job. It is **not** a `Stock_Dispute` in this pass: that model is store↔supervisor and
-has no vendor direction.
+### Recording the loss
+
+`Metres_Sent − Metres_Returned` is real loss, and because the length cannot change it is **whole
+pieces** — ones the printer lost or ruined. It is written off against the plain SKU: the plain lot's
+`In_Print_Qty` clears by the full amount sent, the printed lot rises by what came back, and the
+difference simply ceases to exist. That is correct — the cloth is gone — but it happens silently, so
+the screen makes him confirm it before the receipt is saved.
+
+**Nothing derived is stored on the job header.** Metres lost is `Metres_Sent − Metres_Returned`, both
+already on the record. Pieces sent and pieces returned are sums over `Send_Lines` and `Receive_Lines`.
+Every one of them is a second copy of a fact that already exists, and every one goes stale the moment
+somebody edits a subform row in Creator — with nothing on the record to say the header and its lines
+now disagree.
+
+> **`Pieces_Sent` / `Pieces_Returned` header fields were written and then removed.** The argument for
+> keeping them was that a Creator report cannot total a subform. It does not hold up: the loss in
+> **metres** is already reportable off the two header fields, no code anywhere read the piece-count
+> ones, and `receiveFromPrint` walks `Send_Lines` for the figure regardless. Add them back only if a
+> report genuinely needs pieces — and populate them *from* the lines rather than in parallel with
+> them.
+
+It is **not** a `Stock_Dispute`: that model is store↔supervisor and has no vendor direction, so there
+is nobody for it to be raised against.
+
+> **A run that comes back with nothing at all cannot be received.** Every line at zero is refused,
+> because there is no lot to create and no piece to book. **Cancel** is not the answer either — that
+> puts the metres back on the plain lot, and cloth the printer lost is not cloth on the rack.
+> Unbuilt: it needs a `Written_Off` job status that clears `In_Print_Qty` without crediting anything.
+> Rare enough to leave, common enough to name.
 
 ### Cancelling a job
 
@@ -506,8 +581,14 @@ becomes a top-up for a choice no material carries yet, rather than the only sour
 `plain` carries its own `pattern` so the send form can drop it from the options: offering to print
 *Grey Sheeting / Plain / Grey* in **Plain** would mint a nonsense SKU.
 
-The widget sorts the union of its three sources, so nothing is sorted on this end — `List.sort()` is
-used nowhere else in this repo and its signature is unproven.
+The widget sorts the union of its three sources, so nothing is sorted on this end.
+
+> Two Deluge collection calls worth knowing, both learned by Creator refusing to save:
+> **`List.set(i,v)` does not exist** — *"Not able to find 'set' function"*, reported against the
+> assignment. Append keys to a list and test with `.contains()` instead, which is what
+> `receiveFromPrint` does to stop one send row being answered twice.
+> **`.sort(true)` is the proven form**, used by `saveItemCheck` and `sendToThirdParty`; the bare
+> `.sort()` is not. `List.get(index)` is fine — `sendToThirdParty` reads `seqList.get(0)`.
 
 > **No demand figure, deliberately.** The run-size context would need outstanding pieces per printed
 > SKU, and `docs/scaling.md` records that **nothing ever scans `Material_Requirement`** as a property

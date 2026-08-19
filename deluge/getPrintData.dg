@@ -324,10 +324,14 @@ string getPrintData()
 		// [] and would not quote the entries, so the array is assembled by hand
 		// like every other one in this file.
 		//
-		// NOT SORTED HERE. List.sort() is used nowhere else in this repo, so its
-		// exact signature is unproven, and it would be a runtime failure for a
-		// cosmetic gain - the widget sorts the union of its three pattern
-		// sources anyway, so a sort on this end is thrown away.
+		// NOT SORTED HERE, and it is redundancy rather than risk. The widget
+		// sorts the union of its three pattern sources, so any order this end
+		// produces is thrown away.
+		//
+		// If it ever does need sorting, the call is sort(TRUE) - saveItemCheck
+		// and sendToThirdParty both use that form and both run. The bare sort()
+		// is the one to avoid, like List.set(), which fails at SAVE time with
+		// "Not able to find 'set' function" against the assignment.
 		patternsJson = "";
 
 		for each  pv in patSeen

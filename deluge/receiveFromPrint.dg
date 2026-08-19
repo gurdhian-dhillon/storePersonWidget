@@ -83,6 +83,31 @@ string receiveFromPrint(string payloadJson)
 		printedMatTxt = "";
 		metresSent = 0.0;
 
+		// WHAT WENT OUT, read off the job's own Send_Lines and held as two
+		// parallel lists indexed together.
+		//
+		// THE RECEIVE LENGTH IS NOT AN INPUT. A piece comes back the length it
+		// left - printing does not shorten it - so the only thing he decides is
+		// HOW MANY of each size came back, and the shortfall is whole pieces the
+		// printer lost or ruined. Taking the length from here rather than from
+		// the payload is what makes an over-return impossible by construction
+		// instead of by a check that could be got round: a Custom API is callable
+		// from anywhere, and a payload naming its own lengths could book more
+		// printed cloth than any plain cloth ever paid for.
+		sentLenList = List();
+		sentCntList = List();
+		piecesSent = 0;
+
+		// WHICH SEND ROWS HAVE ALREADY BEEN ANSWERED, held as a list of index
+		// KEYS that gets appended to - not as a parallel list of flags that gets
+		// written into. Deluge's List has no set(): it fails with "Not able to
+		// find 'set' function", at save time, against the assignment. add() and
+		// contains() are both used elsewhere in this repo and are safe.
+		//
+		// Keys are strings, built the same way every map key in this codebase is,
+		// so no numeric coercion can make 0 and "0" miss each other.
+		takenIdx = List();
+
 		if(errTxt == "")
 		{
 			// A query result needs .count() - .size() is a List method.
@@ -115,9 +140,38 @@ string receiveFromPrint(string payloadJson)
 							msS = "0";
 						}
 						metresSent = msS.toDecimal();
+
+						// Walked in subform order, which is the order the widget
+						// was given them in by getPrintData - so a receive line's
+						// lineIndex addresses the same row on both sides. The
+						// length is checked against the payload's copy below, so
+						// a stale screen fails loudly rather than booking a
+						// receipt against the wrong size.
+						for each  slChk in jchk.Send_Lines
+						{
+							slLenS = ifnull(slChk.Piece_Length_Cm,"0").toString().trim();
+							if(slLenS == "")
+							{
+								slLenS = "0";
+							}
+							slCntS = ifnull(slChk.Piece_Count,"0").toString().trim();
+							if(slCntS == "")
+							{
+								slCntS = "0";
+							}
+
+							sentLenList.add(slLenS.toDecimal());
+							sentCntList.add(slCntS.toDecimal());
+							piecesSent = piecesSent + slCntS.toDecimal();
+						}
 					}
 				}
 			}
+		}
+
+		if(errTxt == "" && sentLenList.size() == 0)
+		{
+			errTxt = "That job has no send lines - nothing to check the return against";
 		}
 
 		if(errTxt == "" && printedMatTxt == "")
@@ -138,72 +192,120 @@ string receiveFromPrint(string payloadJson)
 		washMetres = 0.0;
 		unwashMetres = 0.0;
 		pieceRows = 0;
+		piecesReturned = 0;
 
 		if(errTxt == "")
 		{
 			for each  lnRaw in linesRaw
 			{
-				ln = lnRaw.toMap();
+				if(errTxt == "")
+				{
+					ln = lnRaw.toMap();
 
-				lenS = ifnull(ln.get("lengthCm"),"0").toString().trim();
-				if(lenS == "")
-				{
-					lenS = "0";
-				}
-				cntS = ifnull(ln.get("count"),"0").toString().trim();
-				if(cntS == "")
-				{
-					cntS = "0";
-				}
-				stTxt = ifnull(ln.get("state"),"").toString().trim();
-
-				lenCm = lenS.toDecimal();
-				cntQty = cntS.toDecimal();
-
-				// Whole pieces only. A piece is a physical thing and half of one
-				// is not a smaller piece, it is two pieces of some other length.
-				// Compared through toLong() rather than floor() so both sides of
-				// the test are decimals - mixed-type comparison throws.
-				cntWhole = cntQty.toLong() * 1.0;
-
-				if(lenCm <= 0)
-				{
-					errTxt = "Every line needs a piece length above zero";
-				}
-				else if(cntQty <= 0)
-				{
-					errTxt = "Every line needs a piece count above zero";
-				}
-				else if(cntWhole != cntQty)
-				{
-					errTxt = "Piece count must be a whole number - got " + cntS;
-				}
-				else if(stTxt != "Wash" && stTxt != "Unwash")
-				{
-					errTxt = "Every line must say Wash or Unwash - got '" + stTxt + "'";
-				}
-				else
-				{
-					// 100.0, not 100 - integer division truncates before anything
-					// else sees it.
-					lnMtr = (lenCm * cntQty) / 100.0;
-					metresReturned = metresReturned + lnMtr;
-					if(stTxt == "Wash")
+					idxS = ifnull(ln.get("lineIndex"),"").toString().trim();
+					cntS = ifnull(ln.get("count"),"0").toString().trim();
+					if(cntS == "")
 					{
-						washMetres = washMetres + lnMtr;
+						cntS = "0";
+					}
+					stTxt = ifnull(ln.get("state"),"").toString().trim();
+
+					// The payload's length is EVIDENCE, never the source. It is
+					// held against the send line below so a stale screen is
+					// caught; the figure actually used is the sent one.
+					lenEchoS = ifnull(ln.get("lengthCm"),"").toString().trim();
+
+					cntQty = cntS.toDecimal();
+
+					// Whole pieces only. A piece is a physical thing and half of
+					// one is not a smaller piece, it is two pieces of some other
+					// length. Compared through toLong() rather than floor() so
+					// both sides of the test are decimals - mixed-type comparison
+					// throws.
+					cntWhole = cntQty.toLong() * 1.0;
+
+					if(idxS == "" || idxS.isNumber() == false)
+					{
+						errTxt = "This receipt was sent by an older screen - reload the page and try again";
 					}
 					else
 					{
-						unwashMetres = unwashMetres + lnMtr;
+						lnIdx = idxS.toLong();
+
+						if(lnIdx < 0 || lnIdx >= sentLenList.size())
+						{
+							errTxt = "A returned line does not match anything that was sent - reload the screen";
+						}
+						else if(takenIdx.contains(lnIdx + ""))
+						{
+							// Two lines addressing one send row would each be
+							// capped on their own and together exceed it.
+							errTxt = "The same sent size was returned twice in one receipt - reload the screen";
+						}
+						else if(cntQty < 0)
+						{
+							errTxt = "A returned piece count cannot be negative";
+						}
+						else if(cntWhole != cntQty)
+						{
+							errTxt = "Returned piece count must be a whole number - got " + cntS;
+						}
+						else if(cntQty > sentCntList.get(lnIdx))
+						{
+							// MORE BACK THAN WENT OUT IS REFUSED, never trimmed.
+							// It is the one direction that invents stock: printed
+							// cloth that no plain cloth ever paid for.
+							errTxt = "Only " + sentCntList.get(lnIdx) + " pieces of " + sentLenList.get(lnIdx) + " cm went out - " + cntS + " cannot come back";
+						}
+						else if(cntQty > 0 && stTxt != "Wash" && stTxt != "Unwash")
+						{
+							errTxt = "Every returned line must say Wash or Unwash - got '" + stTxt + "'";
+						}
+						else if(lenEchoS != "" && lenEchoS.toDecimal() != sentLenList.get(lnIdx))
+						{
+							errTxt = "A returned line's length does not match what was sent - reload the screen";
+						}
+						else
+						{
+							takenIdx.add(lnIdx + "");
+
+							// THE SENT LENGTH, not the payload's. This is the
+							// whole point: metres back can never exceed metres
+							// out, because the length is fixed and the count is
+							// capped at what left.
+							//
+							// 100.0, not 100 - integer division truncates before
+							// anything else sees it.
+							lnMtr = (sentLenList.get(lnIdx) * cntQty) / 100.0;
+							metresReturned = metresReturned + lnMtr;
+							piecesReturned = piecesReturned + cntQty;
+
+							if(cntQty > 0)
+							{
+								if(stTxt == "Wash")
+								{
+									washMetres = washMetres + lnMtr;
+								}
+								else
+								{
+									unwashMetres = unwashMetres + lnMtr;
+								}
+								pieceRows = pieceRows + 1;
+							}
+						}
 					}
-					pieceRows = pieceRows + 1;
 				}
 			}
 		}
 
+		// A line whose count is zero is legitimate - that size did not come back
+		// at all - but a receipt where EVERY line is zero means the whole run was
+		// lost, and that is not something to record by pressing Receive. It has
+		// no lot to create and no pieces to book; say so rather than writing an
+		// empty lot.
 		if(errTxt == "" && metresReturned <= 0)
 		{
-			errTxt = "Nothing to receive - the lines add up to zero";
+			errTxt = "Nothing came back on any size - if the whole run is lost, say so on the job rather than receiving it";
 		}
 
 		//--------------------------------------------------------------------
@@ -395,11 +497,7 @@ string receiveFromPrint(string payloadJson)
 			{
 				pc = pcRaw.toMap();
 
-				pLenS = ifnull(pc.get("lengthCm"),"0").toString().trim();
-				if(pLenS == "")
-				{
-					pLenS = "0";
-				}
+				pIdx = ifnull(pc.get("lineIndex"),"0").toString().trim().toLong();
 				pCntS = ifnull(pc.get("count"),"0").toString().trim();
 				if(pCntS == "")
 				{
@@ -408,26 +506,33 @@ string receiveFromPrint(string payloadJson)
 				pState = ifnull(pc.get("state"),"").toString().trim();
 				pCarton = ifnull(pc.get("carton"),"").toString().trim().replaceAll("\"","'");
 
-				newPieceId = insert into Fabric_Piece
-				[
-					Material=printedMatTxt.toLong()
-					Lot=targetLot
-					Piece_Length_Cm=pLenS.toDecimal()
-					Piece_Width_Cm=widthCm
-					Piece_Count=pCntS.toDecimal()
-					State=pState
-					Piece_Status="Available"
-					Print_Job=jobIdTxt.toLong()
-				];
-
-				// The carton is written only when one was given, so re-running
-				// against a row that already names a box cannot blank it. Where
-				// to walk to is knowledge nobody can reconstruct.
-				if(pCarton != "")
+				// A size that did not come back at all writes NO piece row. An
+				// Available row holding zero pieces is a phantom the allocator
+				// would have to be taught to ignore, which is the fault
+				// Waste_Master already had to grow a Disputed status for.
+				if(pCntS.toDecimal() > 0)
 				{
-					for each  fpUpd in Fabric_Piece[ID == newPieceId.toLong()]
+					newPieceId = insert into Fabric_Piece
+					[
+						Material=printedMatTxt.toLong()
+						Lot=targetLot
+						Piece_Length_Cm=sentLenList.get(pIdx)
+						Piece_Width_Cm=widthCm
+						Piece_Count=pCntS.toDecimal()
+						State=pState
+						Piece_Status="Available"
+						Print_Job=jobIdTxt.toLong()
+					];
+
+					// The carton is written only when one was given, so re-running
+					// against a row that already names a box cannot blank it.
+					// Where to walk to is knowledge nobody can reconstruct.
+					if(pCarton != "")
 					{
-						fpUpd.Carton_Number = pCarton;
+						for each  fpUpd in Fabric_Piece[ID == newPieceId.toLong()]
+						{
+							fpUpd.Carton_Number = pCarton;
+						}
 					}
 				}
 			}
@@ -550,19 +655,20 @@ string receiveFromPrint(string payloadJson)
 				{
 					rl = rlRaw.toMap();
 
-					rLenS = ifnull(rl.get("lengthCm"),"0").toString().trim();
-					if(rLenS == "")
-					{
-						rLenS = "0";
-					}
+					rIdx = ifnull(rl.get("lineIndex"),"0").toString().trim().toLong();
 					rCntS = ifnull(rl.get("count"),"0").toString().trim();
 					if(rCntS == "")
 					{
 						rCntS = "0";
 					}
 
+					// EVERY sent size gets a receive row, including the ones
+					// that came back as nothing. A zero row is the record that
+					// this size was checked and none of it arrived - drop it and
+					// the two subforms no longer line up, and the piece that went
+					// missing looks like a size nobody looked for.
 					rRow = Print_Job.Receive_Lines();
-					rRow.Piece_Length_Cm=rLenS.toDecimal();
+					rRow.Piece_Length_Cm=sentLenList.get(rIdx);
 					rRow.Piece_Count=rCntS.toDecimal();
 					rRow.State=ifnull(rl.get("state"),"").toString().trim();
 					rows.insert(rRow);
@@ -577,6 +683,24 @@ string receiveFromPrint(string payloadJson)
 				jUpd.Printed_Lot = targetLot;
 				jUpd.Job_Status = "Received";
 
+				// NOTHING DERIVED IS STORED ON THE HEADER.
+				//
+				// Pieces sent and pieces returned are sums over Send_Lines and
+				// Receive_Lines, and metres lost is Metres_Sent minus
+				// Metres_Returned. Every one of them is a second copy of a fact
+				// that already exists, and every one goes stale the moment
+				// somebody edits a subform row in Creator - with nothing on the
+				// record to say the header and its lines now disagree.
+				//
+				// Header fields for them were written and removed. The argument
+				// for keeping them was that a Creator report cannot total a
+				// subform; the argument against is that the loss in METRES is
+				// already reportable off Metres_Sent and Metres_Returned, no code
+				// anywhere reads a piece-count header field, and this function
+				// walks Send_Lines for the figure regardless. Add them back only
+				// if a report genuinely needs pieces, and populate them from the
+				// lines rather than in parallel with them.
+
 				if(remarks != "")
 				{
 					oldR = ifnull(jUpd.Remarks,"").toString();
@@ -589,13 +713,21 @@ string receiveFromPrint(string payloadJson)
 				}
 			}
 
-			// Real loss - shrinkage and pieces the printer ruined. Reported, not
-			// disputed: Stock_Dispute is store<->supervisor and has no vendor
-			// direction, so there is nobody for it to be raised against.
+			// REAL LOSS, AND IT IS WHOLE PIECES. The length cannot change - it is
+			// taken from the send line, not typed - so every missing metre is a
+			// piece the printer lost or ruined. Reported, not disputed:
+			// Stock_Dispute is store<->supervisor and has no vendor direction,
+			// so there is nobody for it to be raised against.
 			lossQty = metresSent - metresReturned;
+			piecesLost = piecesSent - piecesReturned;
+
+			if(piecesLost > 0)
+			{
+				info "print job " + jobIdTxt + " short by " + piecesLost + " pieces (" + lossQty + " Mtr) - written off against the plain SKU";
+			}
 
 			// Ids forced to string - 18-digit ids break JSON.parse on the widget.
-			res = "{\"success\":true,\"printedLotId\":\"" + targetLot + "\",\"lotNumber\":\"" + lotNumOut + "\",\"metresSent\":" + metresSent + ",\"metresReturned\":" + metresReturned + ",\"loss\":" + lossQty + ",\"lotWash\":" + lotWashOut + ",\"lotUnwash\":" + lotUnwashOut + ",\"pieceRows\":" + pieceRows + "}";
+			res = "{\"success\":true,\"printedLotId\":\"" + targetLot + "\",\"lotNumber\":\"" + lotNumOut + "\",\"metresSent\":" + metresSent + ",\"metresReturned\":" + metresReturned + ",\"loss\":" + lossQty + ",\"piecesSent\":" + piecesSent + ",\"piecesReturned\":" + piecesReturned + ",\"piecesLost\":" + piecesLost + ",\"lotWash\":" + lotWashOut + ",\"lotUnwash\":" + lotUnwashOut + ",\"pieceRows\":" + pieceRows + "}";
 		}
 	}
 	catch (e)

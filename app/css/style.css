@@ -1980,6 +1980,14 @@ th.col-num {
     border-color: var(--border);
 }
 
+/* Pieces that did not come back. Loud, because it is a write-off against the
+   plain SKU that cannot be undone once the receipt is saved. */
+.recv-short {
+    color: var(--status-danger);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
 /* Metres is a read-only consequence of the length and the count beside it, so it
    is set apart from the two that are inputs — otherwise the row reads as three
    boxes of which one mysteriously refuses to accept anything. */

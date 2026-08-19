@@ -5488,15 +5488,23 @@ function togglePrintJob(jobId) {
     printJobOpenId = (printJobOpenId === jobId) ? null : jobId;
     if (printJobOpenId && !printRecvLines[jobId]) {
         var job = printJobById(jobId);
-        // Prefilled from what went out, because the usual case is that it is
-        // right. He corrects the length (cloth shrinks), the count (the printer
-        // ruins pieces) and the state.
+        // ONE ROW PER SIZE THAT WENT OUT, and the rows are fixed — he cannot add
+        // or remove them. A piece comes back the length it left, so the only
+        // thing he decides is HOW MANY of each size arrived; the shortfall is
+        // whole pieces the printer lost or ruined.
+        //
+        // Prefilled with the full sent count, because the usual case is that it
+        // all came back. `sent` is carried alongside so the cap can be enforced
+        // and the loss shown per row.
         printRecvLines[jobId] = (job && job.lines || []).map(function (l) {
-            return { len: l.lengthCm, count: l.count, state: (job && job.sourceState) || 'Wash', carton: '' };
+            return {
+                len: l.lengthCm,
+                sent: Number(l.count) || 0,
+                count: l.count,
+                state: (job && job.sourceState) || 'Wash',
+                carton: ''
+            };
         });
-        if (!printRecvLines[jobId].length) {
-            printRecvLines[jobId] = [{ len: '', count: '', state: 'Wash', carton: '' }];
-        }
     }
     renderPrintJobs();
 }
@@ -5572,16 +5580,26 @@ function printReceiveFormHtml(job) {
     var rwCell = '<td><input type="number" class="issue-input" disabled ' +
                  'value="' + escapeHtml(fmt(rWidth)) + '" /></td>';
 
+    // THE ROWS ARE THE SEND LINES, FIXED. Length and width are both disabled —
+    // a piece comes back the length it left, so the only decision is how many of
+    // each size arrived. The gap is whole pieces the printer lost or ruined, and
+    // it is stated on the row rather than left to be worked out from two numbers.
     var rows = (printRecvLines[job.jobId] || []).map(function (r, i) {
+        var sent = Number(r.sent) || 0;
+        var got = Number(r.count) || 0;
+        var short = sent - got;
+
         return '' +
             '<tr>' +
-                '<td><input type="number" step="1" min="1" class="issue-input" ' +
-                    'id="pr-len-' + job.jobId + '-' + i + '" value="' + escapeHtml(r.len) + '" ' +
-                    'oninput="onRecvLineChange(\'' + job.jobId + '\')" /></td>' +
+                '<td><input type="number" class="issue-input" disabled ' +
+                    'value="' + escapeHtml(r.len) + '" /></td>' +
                 rwCell +
-                '<td><input type="number" step="1" min="0" class="issue-input" ' +
+                '<td class="col-num print-derived">' + sent + '</td>' +
+                '<td><input type="number" step="1" min="0" max="' + sent + '" class="issue-input" ' +
                     'id="pr-cnt-' + job.jobId + '-' + i + '" value="' + escapeHtml(r.count) + '" ' +
                     'oninput="onRecvLineChange(\'' + job.jobId + '\')" /></td>' +
+                '<td class="col-num' + (short > 0 ? ' recv-short' : ' print-derived') + '">' +
+                    (short > 0 ? short : '—') + '</td>' +
                 '<td><select class="note-input" id="pr-st-' + job.jobId + '-' + i + '" ' +
                         'onchange="onRecvLineChange(\'' + job.jobId + '\')">' +
                         '<option value="Wash"' + (r.state === 'Wash' ? ' selected' : '') + '>Washed</option>' +
@@ -5590,8 +5608,6 @@ function printReceiveFormHtml(job) {
                 '<td><input type="text" class="note-input" id="pr-car-' + job.jobId + '-' + i + '" ' +
                     'value="' + escapeHtml(r.carton) + '" placeholder="C-12" ' +
                     'oninput="onRecvLineChange(\'' + job.jobId + '\')" /></td>' +
-                '<td><button type="button" class="raise-btn is-stale" ' +
-                    'onclick="removeRecvLine(\'' + job.jobId + '\',' + i + ')">Remove</button></td>' +
             '</tr>';
     }).join('');
 
@@ -5611,25 +5627,35 @@ function printReceiveFormHtml(job) {
                 '<thead><tr>' +
                     '<th class="col-num">Piece length (cm)</th>' +
                     '<th class="col-num">Width (cm)</th>' +
-                    '<th class="col-num">How many</th>' +
+                    '<th class="col-num">Sent</th>' +
+                    '<th class="col-num">Came back</th>' +
+                    '<th class="col-num">Lost</th>' +
                     '<th>State</th>' +
                     '<th>Carton</th>' +
-                    '<th></th>' +
                 '</tr></thead>' +
                 '<tbody>' + rows + '</tbody>' +
             '</table></div>' +
-            '<button type="button" class="raise-btn" onclick="addRecvLine(\'' + job.jobId + '\')">+ Another size</button>' +
+            // No "+ Another size" and no Remove. The sizes are whatever went to
+            // the printer; nothing can come back that did not go out.
             '<div class="card-footer" id="pr-foot-' + job.jobId + '">' + recvFooterHtml(job) + '</div>' +
         '</div>';
 }
 
+// THE LOSS IS WHOLE PIECES, and it is said in pieces first. The length cannot
+// change — it is not an input — so every missing metre is a piece that did not
+// come back, and "3 pieces short" is what he can take to the printer. The metres
+// follow as the consequence.
 function recvFooterHtml(job) {
     var returned = recvMetres(job.jobId);
     var loss = Math.round(((Number(job.metresSent) || 0) - returned) * 100) / 100;
+    var lost = recvPiecesLost(job.jobId);
+
     return '' +
-        '<span class="sel-count' + (loss > 0 ? ' is-short' : '') + '">' +
-            fmt(returned) + ' Mtr back of ' + fmt(job.metresSent) + ' sent' +
-            (loss > 0 ? ' &mdash; <b>' + fmt(loss) + ' Mtr lost</b> to shrinkage or ruined pieces' : '') +
+        '<span class="sel-count' + (lost > 0 ? ' is-short' : '') + '">' +
+            (lost > 0
+                ? '<b>' + lost + (lost === 1 ? ' piece' : ' pieces') + ' short</b> &mdash; ' +
+                  fmt(loss) + ' Mtr written off'
+                : 'All ' + recvPiecesBack(job.jobId) + ' pieces back &middot; ' + fmt(returned) + ' Mtr') +
         '</span>' +
         '<button type="button" class="primary-btn is-danger" id="pr-cancel-' + job.jobId + '" ' +
             'onclick="submitCancelJob(\'' + job.jobId + '\')">Came back unprinted</button>' +
@@ -5637,21 +5663,38 @@ function recvFooterHtml(job) {
             'onclick="submitReceivePrint(\'' + job.jobId + '\')">Receive</button>';
 }
 
+// The length is no longer read back from the DOM — it is not an input. It stays
+// on the state object exactly as the job sent it, which is what makes the
+// returned metres impossible to inflate from this screen.
 function readRecvLines(jobId) {
     var out = [];
     (printRecvLines[jobId] || []).forEach(function (r, i) {
-        var l = document.getElementById('pr-len-' + jobId + '-' + i);
         var c = document.getElementById('pr-cnt-' + jobId + '-' + i);
         var s = document.getElementById('pr-st-' + jobId + '-' + i);
         var k = document.getElementById('pr-car-' + jobId + '-' + i);
         out.push({
-            len: l ? l.value : r.len,
+            len: r.len,
+            sent: r.sent,
             count: c ? c.value : r.count,
             state: s ? s.value : r.state,
             carton: k ? k.value : r.carton
         });
     });
     return out;
+}
+
+function recvPiecesBack(jobId) {
+    var t = 0;
+    (printRecvLines[jobId] || []).forEach(function (r) { t += Number(r.count) || 0; });
+    return t;
+}
+
+function recvPiecesLost(jobId) {
+    var t = 0;
+    (printRecvLines[jobId] || []).forEach(function (r) {
+        t += Math.max(0, (Number(r.sent) || 0) - (Number(r.count) || 0));
+    });
+    return t;
 }
 
 // Same trap as the send form: re-rendering the job cards on every keystroke
@@ -5666,19 +5709,9 @@ function onRecvLineChange(jobId) {
     if (foot) foot.innerHTML = recvFooterHtml(job);
 }
 
-function addRecvLine(jobId) {
-    printRecvLines[jobId] = readRecvLines(jobId);
-    printRecvLines[jobId].push({ len: '', count: '', state: 'Wash', carton: '' });
-    renderPrintJobs();
-}
-
-function removeRecvLine(jobId, idx) {
-    var rows = readRecvLines(jobId);
-    rows.splice(idx, 1);
-    if (!rows.length) rows.push({ len: '', count: '', state: 'Wash', carton: '' });
-    printRecvLines[jobId] = rows;
-    renderPrintJobs();
-}
+// addRecvLine and removeRecvLine are gone. The rows ARE the send lines and
+// nothing can come back that did not go out — adding a size would be claiming
+// cloth the printer was never given.
 
 function onRecvLotChange(jobId) {
     var sel = document.getElementById('pr-lot-' + jobId);
@@ -6200,25 +6233,52 @@ function submitReceivePrint(jobId) {
         if (taken) { alert('That material already has a lot ' + lotNum + '.'); return; }
     }
 
+    // EVERY SENT LINE IS SENT BACK, including the ones that came back as
+    // nothing — a zero is the record that the size was checked and none of it
+    // arrived. `lineIndex` is what the server matches on; it takes the LENGTH
+    // from its own Send_Lines, so nothing this screen sends can inflate the
+    // metres received.
     var lines = [];
     var bad = '';
-    readRecvLines(jobId).forEach(function (r) {
-        var len = Number(r.len) || 0, c = Number(r.count) || 0;
-        if (!r.len && !r.count) return;
-        if (len <= 0) { bad = 'Every line needs a piece length in cm.'; return; }
-        if (c <= 0 || c !== Math.floor(c)) { bad = 'Every line needs a whole number of pieces.'; return; }
-        if (!String(r.carton || '').trim()) {
-            // A remnant nobody can find is worth the same as one that never came
-            // back, so this is a block rather than a nudge — the same rule the
-            // waste receipt applies.
-            bad = 'Every line needs a carton — which box it went into.';
+    readRecvLines(jobId).forEach(function (r, i) {
+        var sent = Number(r.sent) || 0;
+        var c = Number(r.count) || 0;
+
+        if (c !== Math.floor(c) || c < 0) {
+            bad = 'Pieces back must be a whole number, or zero.';
             return;
         }
-        lines.push({ lengthCm: len, count: c, state: r.state, carton: String(r.carton).trim() });
+        if (c > sent) {
+            bad = 'Only ' + sent + ' pieces of ' + r.len + ' cm went out — ' + c + ' cannot come back.';
+            return;
+        }
+        // The carton is required only where pieces actually arrived. A size that
+        // came back as nothing sits on no shelf, and stamping it with a box would
+        // send the next person to an empty one — the same rule the waste receipt
+        // applies to a row the store found none of.
+        if (c > 0 && !String(r.carton || '').trim()) {
+            bad = 'Every size that came back needs a carton — which box it went into.';
+            return;
+        }
+        lines.push({
+            lineIndex: i,
+            lengthCm: Number(r.len) || 0,
+            count: c,
+            state: r.state,
+            carton: String(r.carton || '').trim()
+        });
     });
     if (bad) { alert(bad); return; }
     if (!lines.length) {
         alert('Nothing to receive. If it came back unprinted, use "Came back unprinted".');
+        return;
+    }
+
+    var lostPieces = recvPiecesLost(jobId);
+    if (lostPieces > 0 &&
+        !confirm(lostPieces + (lostPieces === 1 ? ' piece' : ' pieces') +
+                 ' did not come back.\n\nThat cloth is written off against ' +
+                 (job.plainName || 'the plain material') + ' and cannot be put back. Continue?')) {
         return;
     }
 
@@ -6249,8 +6309,9 @@ function submitReceivePrint(jobId) {
             return;
         }
 
-        if ((Number(parsed.loss) || 0) > 0) {
-            alert(fmt(parsed.loss) + ' Mtr did not come back. It is recorded on the job.');
+        if ((Number(parsed.piecesLost) || 0) > 0) {
+            alert(parsed.piecesLost + ' of ' + parsed.piecesSent + ' pieces did not come back — ' +
+                  fmt(parsed.loss) + ' Mtr. Recorded on the job.');
         }
 
         delete printRecvLines[jobId];

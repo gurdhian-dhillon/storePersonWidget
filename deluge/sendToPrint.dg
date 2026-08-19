@@ -104,6 +104,7 @@ string sendToPrint(string payloadJson)
 		// if is not safe to read after it when that branch did not run.
 		plainName = "";
 		plainSku = "";
+		inhName = "";
 		isFab = false;
 		alreadyPrinted = false;
 		inhWidth = "";
@@ -112,6 +113,7 @@ string sendToPrint(string payloadJson)
 		inhQuality = "";
 		inhColor = "";
 		inhUnit = "";
+		inhDesign = "";
 
 		if(errTxt == "")
 		{
@@ -130,6 +132,42 @@ string sendToPrint(string payloadJson)
 					if(plainName == "")
 					{
 						plainName = ifnull(rmChk.Name,"").toString().trim().replaceAll("\"","'");
+					}
+
+					// THE PARTS ON THEIR OWN, which is not the display name.
+					//
+					// Material_Display_Name is COMPOSED from separate fields -
+					// "<name> / <design> / <colour>", e.g. "Grey Sheeting / Plain
+					// / Grey" - and Name, Design_Name and Color each hold one of
+					// them. Reading the composed string and appending to it put
+					// the whole of it into Name and left Design_Name empty.
+					//
+					// A PRINTED SKU KEEPS THE BASE DESIGN AND ADDS THE PATTERN.
+					// Design_Name stays "Plain" because the base cloth still is
+					// plain; the print is a fifth fact and gets its own part. So
+					// the printed display name is four parts, not three:
+					// "Grey Sheeting / Plain / Grey / BP Flower".
+					//
+					// Replacing the design part with the pattern was tried and is
+					// wrong: Design_Name is inherited, so every print off one base
+					// would compose to the same display name and the SKUs could
+					// not be told apart on any screen.
+					inhName = ifnull(rmChk.Name,"").toString().trim().replaceAll("\"","'");
+					inhDesign = ifnull(rmChk.Design_Name,"").toString().trim().replaceAll("\"","'");
+					if(inhName == "")
+					{
+						// Only when Name was never filled. Everything before the
+						// first separator is the name part by that convention;
+						// with no separator the whole string is the name.
+						cutAt = plainName.indexOf(" / ");
+						if(cutAt > 0)
+						{
+							inhName = plainName.subString(0,cutAt);
+						}
+						else
+						{
+							inhName = plainName;
+						}
 					}
 
 					// Tested AS TEXT. A Decision box gives a boolean, a yes/no
@@ -159,7 +197,7 @@ string sendToPrint(string payloadJson)
 					// Phase_Name snapshot argument in a different costume.
 					inhWidth = ifnull(rmChk.Fabric_Width_Inches,"").toString().trim();
 					inhType = ifnull(rmChk.Type_field,"").toString().trim();
-					inhGsm = ifnull(rmChk.GSM,"").toString().trim();
+					inhGsm = ifnull(rmChk.Fabric_Gsm,"").toString().trim();
 					inhQuality = ifnull(rmChk.Quality,"").toString().trim();
 					inhColor = ifnull(rmChk.Color,"").toString().trim();
 					inhUnit = ifnull(rmChk.Unit,"").toString().trim();
@@ -275,6 +313,12 @@ string sendToPrint(string payloadJson)
 		//--------------------------------------------------------------------
 		totalCm = 0.0;
 		lineCount = 0;
+		// Totalled for the info line only. It is NOT written to the job: the
+		// piece count already lives in Send_Lines, and a header copy is a second
+		// figure that goes stale the moment anybody edits a subform row - the
+		// same reason Metres_Sent minus Metres_Returned is derived rather than
+		// stored as a loss field.
+		piecesSent = 0;
 
 		if(errTxt == "")
 		{
@@ -317,6 +361,7 @@ string sendToPrint(string payloadJson)
 					else
 					{
 						totalCm = totalCm + (lnLen * lnCnt);
+						piecesSent = piecesSent + lnCnt;
 						lineCount = lineCount + 1;
 					}
 				}
@@ -485,18 +530,51 @@ string sendToPrint(string payloadJson)
 			}
 			else
 			{
-				wantName = plainName + " / " + patternIn;
-
-				// BOTH name fields are written. getRawMaterialsList reads
-				// Material_Display_Name and falls back to Name, and other
-				// screens read the other way round, so leaving one empty makes
-				// the new SKU show blank on whichever screen reads it.
+				// THE PARTS, KEPT APART, AND COMPOSED IN ONE PLACE.
 				//
+				// Name, Design_Name, Color and Pattern each hold one fact and
+				// none of them holds a separator. Material_Display_Name is the
+				// composition, and it is the ONLY place " / " belongs:
+				//
+				//   <name> / <design> / <colour> / <pattern>
+				//   Grey Sheeting / Plain / Grey / BP Flower
+				//
+				// The plain cloth is the same string without the last part, so a
+				// printed SKU reads as its base plus the print - which is what it
+				// physically is.
+				//
+				// Appended part by part rather than joined from a list, so a
+				// material missing any of them composes cleanly instead of
+				// leaving a dangling separator where the blank was.
+				wantName = inhName;
+				if(inhDesign != "")
+				{
+					wantName = wantName + " / " + inhDesign;
+				}
+				if(inhColor != "")
+				{
+					wantName = wantName + " / " + inhColor;
+				}
+				if(patternIn != "")
+				{
+					wantName = wantName + " / " + patternIn;
+				}
+
 				// EVERY QUANTITY FIELD IS ZERO. Stock only ever arrives on a
 				// printed SKU through a print receipt - there is no other door,
 				// and an opening balance here would be cloth nobody counted.
+				//
+				// Name IS MANDATORY on Raw_Material, so it belongs in the insert
+				// block and nowhere else. It was briefly set after the insert
+				// instead, on the theory that a composite Name field type would
+				// fail the whole block - Creator answered that with "The
+				// following mandatory field should not be left blank [Name]",
+				// reported against a line thirty lines above the insert. It is a
+				// single line text field and this is where it goes.
 				newMatId = insert into Raw_Material
 				[
+					Name=inhName
+					Design_Name=inhDesign
 					Material_Display_Name=wantName
 					SKU=wantSku
 					Is_Fabric=true
@@ -505,7 +583,7 @@ string sendToPrint(string payloadJson)
 					Color=inhColor
 					Unit=inhUnit
 					Fabric_Width_Inches=inhWidth
-					GSM=inhGsm
+					Fabric_Gsm=inhGsm
 					Quality=inhQuality
 					Quantity=0
 					Wash_Quantity=0
@@ -524,19 +602,9 @@ string sendToPrint(string payloadJson)
 				// The lookup is set AFTER the insert - a lookup in the insert
 				// block fails the whole block if Creator will not take it, and
 				// this record must exist before anything else can point at it.
-				//
-				// Name is set here for the same reason, and it is not paranoia.
-				// Eight functions in this repo read Raw_Material.Name as plain
-				// text, so it is a single line field in practice - but if it is
-				// ever a composite Name type, that assignment inside the insert
-				// block would fail the WHOLE mint and report it against the
-				// insert, nowhere near the field that caused it. Out here the
-				// worst case is a record that exists with only its display name,
-				// which every screen already falls back from.
 				for each  rmNew in Raw_Material[ID == printedId]
 				{
 					rmNew.Print_Base = plainMatId.toLong();
-					rmNew.Name = wantName;
 				}
 
 				info "minted printed SKU " + wantSku + " (" + wantName + ") id=" + printedId;
@@ -695,7 +763,7 @@ string sendToPrint(string payloadJson)
 				pjUpd.Send_Lines.insert(sendRows);
 			}
 
-			info "print job " + jobId + " - " + metresSent + " Mtr " + srcState + " off lot " + lotNumOut + " of " + plainSku + " -> " + printedSku + " (" + lineCount + " lines)";
+			info "print job " + jobId + " - " + metresSent + " Mtr " + srcState + " off lot " + lotNumOut + " of " + plainSku + " -> " + printedSku + " (" + piecesSent + " pieces over " + lineCount + " lines)";
 		}
 
 		if(errTxt == "" && jobId == 0)
