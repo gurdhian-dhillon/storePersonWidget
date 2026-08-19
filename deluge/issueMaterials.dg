@@ -475,6 +475,10 @@ string issueMaterials(string supervisorId, string issuesJson)
 			fromOf = Map();
 			lotHave = Map();
 			lotName = Map();
+			// Pass key -> "pieceId:count,pieceId:count". Empty for every roll
+			// lot, so the whole piece path below is unreachable on the flow that
+			// existed before printing.
+			passPieces = Map();
 			// ONE ORDER, ONE LOT - checked here rather than trusted.
 			//
 			// The widget allocates per order and cannot produce a straddling
@@ -606,6 +610,53 @@ string issueMaterials(string supervisorId, string issuesJson)
 							fromOf.put(passKey,ifnull(la.get("overrideFrom"),"").toString().trim());
 						}
 						lotWant.put(passKey,prevPass.toDecimal() + laQ);
+
+						//--------------------------------------------------
+						// THE PHYSICAL PIECES, on a lot held as pieces.
+						//
+						// COLLECTED, NEVER DERIVED. Three 3.00 m pieces are
+						// 9.00 m, and 9.00 m against a 55 cm cut divides to
+						// floor(900/55) = 16 marker rows - but each piece is
+						// cut on its own and yields floor(300/55) = 5, so the
+						// truth is 15. Crediting the 16th is a piece nobody can
+						// cut: the requirement closes early, the item never
+						// leaves Awaiting_Material, and pressing Issue again
+						// does nothing because the "nothing outstanding" test
+						// needs both metres and pieces spent. That is the same
+						// silent-loss shape CLAUDE.md already records four of.
+						//
+						// Held as two parallel lists per pass, flattened into
+						// "id:count" strings - Deluge has no nested collection
+						// that survives a Map value cleanly, and this is read
+						// back exactly once, in the pass loop.
+						pcRaw = ifnull(la.get("pieces"),"[]").toString().toJSONList();
+
+						if(pcRaw.size() > 0)
+						{
+							prevPc = ifnull(passPieces.get(passKey),"").toString();
+
+							for each  pcOne in pcRaw
+							{
+								pcM = pcOne.toMap();
+								pcIdTxt = ifnull(pcM.get("pieceId"),"").toString().trim();
+								pcCntS = ifnull(pcM.get("count"),"0").toString().trim();
+								if(pcCntS == "")
+								{
+									pcCntS = "0";
+								}
+
+								if(pcIdTxt != "" && pcCntS.toDecimal() > 0)
+								{
+									if(prevPc != "")
+									{
+										prevPc = prevPc + ",";
+									}
+									prevPc = prevPc + pcIdTxt + ":" + pcCntS.toDecimal();
+								}
+							}
+
+							passPieces.put(passKey,prevPc);
+						}
 
 						lotTotal = lotTotal + laQ;
 					}
@@ -978,6 +1029,115 @@ string issueMaterials(string supervisorId, string issuesJson)
 					// Required_Qty is a pre-waste estimate and rounds up once,
 					// while every separate cut rounds up again.
 					//------------------------------------------------------
+					//----------------------------------------------------------
+					// IS THIS PASS A STACK OF PIECES RATHER THAN A ROLL?
+					//
+					// Printed cloth comes back as discrete full-width pieces and
+					// its yield is NOT its metres. Each piece is cut on its own,
+					// so it gives floor(len/cutL) rows and strands the tail below
+					// one cut length - on EVERY piece. Three 3.00 m pieces are
+					// 9.00 m and yield 15 rows of a 55 cm cut, where 9.00
+					// continuous metres would give 16. Crediting that 16th row is
+					// a piece nobody can cut: the requirement closes early, the
+					// item never leaves Awaiting_Material, and pressing Issue
+					// again does nothing because the "nothing outstanding" test
+					// needs both metres and pieces spent.
+					//
+					// So for a pieces pass NOTHING comes off the metres. The
+					// metres come from the pieces, and so does the yield.
+					//
+					// RE-READ OFF THE FORM, never trusted from the payload. A
+					// Custom API is callable from anywhere, and a payload naming
+					// its own lengths could book cloth that does not exist.
+					//
+					// pcSpec is empty for every roll lot, so all of this is
+					// unreachable on the flow that existed before printing.
+					//----------------------------------------------------------
+					passIsPieces = false;
+					pcYield = 0;
+					pcMetres = 0.0;
+					pcSpec = ifnull(passPieces.get(passId),"").toString().trim();
+
+					if(isFab == true && pcSpec != "" && cutW > 0 && cutL > 0)
+					{
+						for each  pcTok in pcSpec.toList(",")
+						{
+							pcBits = pcTok.toString().trim().toList(":");
+							if(pcBits.size() == 2)
+							{
+								pcWantId = pcBits.get(0).toString().trim();
+								pcWantN = pcBits.get(1).toString().trim().toDecimal();
+
+								if(pcWantId != "" && pcWantN > 0)
+								{
+									for each  fpChk in Fabric_Piece[ID == pcWantId.toLong()]
+									{
+										fpLotTxt = ifnull(fpChk.Lot,"").toString().trim();
+										fpStat = ifnull(fpChk.Piece_Status,"").toString().trim();
+										fpStateTxt = ifnull(fpChk.State,"").toString().trim();
+
+										fpcS = ifnull(fpChk.Piece_Count,"0").toString().trim();
+										if(fpcS == "")
+										{
+											fpcS = "0";
+										}
+										fplS = ifnull(fpChk.Piece_Length_Cm,"0").toString().trim();
+										if(fplS == "")
+										{
+											fplS = "0";
+										}
+										fpwS = ifnull(fpChk.Piece_Width_Cm,"0").toString().trim();
+										if(fpwS == "")
+										{
+											fpwS = "0";
+										}
+
+										// EVERY ONE OF THESE IS A REFUSAL, NOT A TRIM.
+										// Silently taking less is what produced handovers
+										// that looked complete and were not.
+										if(fpLotTxt != passLot)
+										{
+											lotErr = matName + ": a piece in this handover is not on the lot it names";
+										}
+										else if(fpStat != "Available")
+										{
+											lotErr = matName + ": a piece in this handover is no longer available";
+										}
+										else if(fpStateTxt != "Wash")
+										{
+											lotErr = matName + ": a greige piece cannot be issued - it has to be washed first";
+										}
+										else if(pcWantN > fpcS.toDecimal())
+										{
+											lotErr = matName + ": only " + fpcS.toDecimal() + " of that piece are on the rack";
+										}
+										else
+										{
+											// floor(W/cutW) * floor(L/cutL) - the same
+											// arithmetic an offcut uses, and correct for a
+											// full-width piece because grain is fixed and a
+											// piece is never rotated.
+											pcAcross = (fpwS.toDecimal() / cutW).floor();
+											pcAlong = (fplS.toDecimal() / cutL).floor();
+
+											if(pcAcross > 0 && pcAlong > 0)
+											{
+												pcYield = pcYield + (pcAcross * pcAlong * pcWantN);
+											}
+
+											// A PIECE GOES OUT WHOLE. Its metres leave the
+											// lot even where this cut cannot use all of it -
+											// he cannot hand over half a piece, and the
+											// remainder comes back as an offcut.
+											pcMetres = pcMetres + ((fplS.toDecimal() * pcWantN) / 100);
+											passIsPieces = true;
+										}
+									}
+								}
+							}
+						}
+					}
+
 					thisQty = 0.0;
 					if(isFab == true)
 					{
@@ -1050,6 +1210,23 @@ string issueMaterials(string supervisorId, string issuesJson)
 							rowsFit = ((thisQty * 100) / cutL).floor();
 							thisQty = (rowsFit * cutL) / 100;
 						}
+
+						// A PIECES PASS OVERRIDES ALL OF THAT.
+						//
+						// The metres are the pieces' own metres - not the
+						// payload's figure, not a budget, and NOT snapped to
+						// whole marker rows. A piece is issued whole: snapping
+						// 9.00 m of three 3.00 m pieces down to 8.80 would send
+						// out cloth the lot never lost, and there is no such
+						// thing as 0.20 m of a piece to leave behind.
+						//
+						// The budget still did its job above - it is what the
+						// widget sized the piece pick against - but it cannot
+						// trim a physical object.
+						if(passIsPieces == true)
+						{
+							thisQty = pcMetres;
+						}
 					}
 					else
 					{
@@ -1082,6 +1259,18 @@ string issueMaterials(string supervisorId, string issuesJson)
 						perRow = perRowP;
 						rowsIssued = ((thisQty * 100) / cutL).floor();
 						piecesFromRaw = perRow * rowsIssued;
+
+						// THE ONE LINE THIS WHOLE FEATURE EXISTS FOR.
+						//
+						// On a stack of pieces the division above is WRONG and
+						// wrong in the dangerous direction - it credits more
+						// pieces than the cloth can yield, because it treats the
+						// tails as if they joined up. pcYield was summed per
+						// piece from the pieces themselves, so it is the truth.
+						if(passIsPieces == true)
+						{
+							piecesFromRaw = pcYield;
+						}
 						stillNeeded = outPieces - piecesFromWaste - piecesFromRawTotal;
 						if(passPin != "")
 						{
@@ -1461,6 +1650,58 @@ string issueMaterials(string supervisorId, string issuesJson)
 							}
 							lotMv.Wash_Quantity = lmwS.toDecimal() - thisQty;
 							lotMv.In_Transit_Qty = lmtS.toDecimal() + thisQty;
+						}
+
+						//--------------------------------------------------
+						// AND THE PIECES THEMSELVES COME OFF THE RACK.
+						//
+						// The lot's metres moved above; on a Pieces lot those
+						// metres are the MAINTAINED SUM of these rows, so
+						// leaving the rows alone would make the header and its
+						// pieces disagree - the lot claiming it had given cloth
+						// away while every piece still sat there to be offered
+						// again on the next render.
+						//
+						// Decremented, never deleted: the row is the provenance
+						// of the cloth and of the print job it came from. A row
+						// reaching zero simply stops being Available stock,
+						// which is what getStoreMaterialRequirements filters on.
+						if(passIsPieces == true)
+						{
+							for each  pcMvTok in pcSpec.toList(",")
+							{
+								pcMvBits = pcMvTok.toString().trim().toList(":");
+								if(pcMvBits.size() == 2)
+								{
+									pcMvId = pcMvBits.get(0).toString().trim();
+									pcMvN = pcMvBits.get(1).toString().trim().toDecimal();
+
+									if(pcMvId != "" && pcMvN > 0)
+									{
+										for each  fpMv in Fabric_Piece[ID == pcMvId.toLong()]
+										{
+											fpMvS = ifnull(fpMv.Piece_Count,"0").toString().trim();
+											if(fpMvS == "")
+											{
+												fpMvS = "0";
+											}
+											fpMvLeft = fpMvS.toDecimal() - pcMvN;
+											if(fpMvLeft < 0)
+											{
+												// Cannot happen - the validation
+												// above refuses it - but a count
+												// below zero would be a phantom
+												// the allocator could never
+												// reconcile, so it is clamped and
+												// said out loud rather than left.
+												info "issueMaterials: piece " + pcMvId + " would go negative - clamped";
+												fpMvLeft = 0;
+											}
+											fpMv.Piece_Count = fpMvLeft;
+										}
+									}
+								}
+							}
 						}
 					}
 

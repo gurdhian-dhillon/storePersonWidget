@@ -137,10 +137,16 @@ function stageIsOut(item, phaseName) {
 
 // ---- Send ----
 
-// `seed` comes from the stage card's share picker: {partyId, qty, max, qtyIn,
-// phaseName}. It is always present in normal use — this dialog is no longer
-// reachable any other way — but it is read defensively so a direct call still
-// opens something sensible.
+// `seed` comes from the stage card's share picker: {qty, max, qtyIn, phaseName}.
+// It is always present in normal use — this dialog is no longer reachable any
+// other way — but it is read defensively so a direct call still opens something
+// sensible.
+//
+// NO PARTY COMES IN THE SEED. The picker offers "Send to a third party…" and
+// nothing more, because WHICH vendor may take the work is decided by the stages,
+// and the stages are chosen here. Naming one on the card would be answering that
+// a step early: he picks a vendor for Stitching, ticks Embroidery too, and finds
+// his choice was never valid for the block he built.
 function openSendDialog(plan, item, seed) {
     seed = seed || {};
     var phases = (item.phases || []).slice().sort(function (a, b) { return a.sequence - b.sequence; });
@@ -409,10 +415,10 @@ function syncSendDialog() {
         });
     });
 
-    // The party he picked on the stage card, until he changes it here. It can
-    // drop out of the list by growing the block onto a stage that vendor does not
-    // do, and the hint below then says which stage is the problem.
-    var keep = sel.value || String((outsourceCtx.seed || {}).partyId || '');
+    // What he has already chosen here survives a change to the ticked stages —
+    // unless growing the block onto a stage that vendor does not do drops him out
+    // of the list, and the hint below then says which stage is the problem.
+    var keep = sel.value;
     sel.innerHTML = '<option value="">&mdash; Pick a party &mdash;</option>' +
         able.map(function (p) {
             return '<option value="' + p.id + '">' + escapeHtml(p.name) +

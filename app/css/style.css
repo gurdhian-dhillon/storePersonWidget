@@ -2070,6 +2070,20 @@ th.col-num {
     font-weight: 700;
 }
 
+/* Which physical pieces to fetch, under the lot line that names them. Only ever
+   on a Pieces lot — printed cloth is a stack, not a roll he can measure off, so
+   "9 Mtr off P1" is not an instruction anyone can follow. Indented under its lot
+   because it belongs to that line and not to the row. */
+.lot-pieces {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-align: left;
+    padding: 0.1rem 0.5rem 0.25rem 1.1rem;
+    white-space: nowrap;
+    background: #f1f5f9;
+    border-left: 2px solid var(--primary);
+}
+
 /* Only when a split was forced, so it is worth a colour. */
 .lot-split {
     font-size: 0.72rem;

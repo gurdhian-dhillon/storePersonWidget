@@ -200,6 +200,64 @@ function openPartyBlocks(item) {
 	return out;
 }
 
+// ---- Where a block ends, and what that means for the stages before it ----
+//
+// THE VAN COMES BACK ONCE, AFTER THE LAST OPERATION. Everything below follows
+// from that one physical fact.
+//
+// **Take it back belongs on the block's FINAL stage and nowhere else.** Offering
+// it on the first invites him to receive pieces the vendor has not started on,
+// and the count he would be asked for is the count after every operation.
+//
+// **An EARLIER stage of the block is not waiting for that van.** Those pieces
+// left it the moment they were loaded — it is finished with them. The rule that
+// the loss lands on the block's last stage says so exactly: every earlier stage
+// passes its full quantity through, which is what `receiveFromThirdParty` writes
+// on the return. So an earlier stage can close while the van is still out, and it
+// has to be able to: the in-house half of a split stage is otherwise held up for
+// days by pieces that are not even in the building.
+//
+// `item.logs` arrives sorted by Sequence_No, so the last stage seen for a
+// reference is that block's final one.
+function osBlockLastPhase(item) {
+	const last = {};
+	(item.logs || []).forEach((log) => {
+		sharesOf(log).forEach((a) => {
+			if (isPartyShare(a) && a.osRef) last[a.osRef] = log.phase;
+		});
+	});
+	return last;
+}
+
+// This share is at a vendor, on a stage the vendor has already carried it past.
+// Its pieces are spent as far as THIS stage is concerned.
+function isPassThrough(a, phaseName, osLast) {
+	return (
+		isPartyShare(a) &&
+		a.status !== "Done" &&
+		!!a.osRef &&
+		osLast[a.osRef] !== phaseName
+	);
+}
+
+// What a share has contributed to this stage's output. Reading Qty_Out on a
+// pass-through share would report its pieces as zero and make a closed stage look
+// like it lost every one of them.
+function shareOutFor(a, passThrough) {
+	return Number(passThrough ? a.assigned : a.qtyOut) || 0;
+}
+
+// Who holds a share — a man, or a vendor. One helper because the running card and
+// the finished-stage summary both print it, and the summary was naming a vendor
+// "Not recorded" because it only ever looked at Operator.
+function shareWho(a) {
+	if (isPartyShare(a)) {
+		const p = typeof partyById === "function" ? partyById(a.party) : null;
+		return p ? p.name : "Third party";
+	}
+	return operatorName(a.operator) || "Not recorded";
+}
+
 // A stage started under the OLD single-operator code: it is running, it has an
 // operator on the header, and nobody has been assigned a share.
 //
@@ -1014,11 +1072,44 @@ function renderItemCard(plan, item, index) {
 		});
 		phHtml += `</div></div>`;
 
+		// Which stage each outsourced block ends on. Worked out once for the whole
+		// item — every stage card needs it, and it is a fact about the trips, not
+		// about any one stage.
+		const osLast = osBlockLastPhase(item);
+
 		phHtml += `<div class="stage-stack">`;
 		item.phases.forEach((phase, idx) => {
-			if (idx > currentPhaseIndex) return; // One stage at a time
-
 			const log = (item.logs || []).find((l) => l.phase === phase.operation);
+
+			//----------------------------------------------------------------
+			// ONE STAGE AT A TIME — EXCEPT WHERE A VAN HAS ALREADY BEEN.
+			//
+			// One send covers a block of stages, so pieces can be at a vendor for
+			// step 4 while step 2 is still being cut. Those stages have a share on
+			// them already; hiding them until their turn came meant the supervisor
+			// could see five pieces leave and then not find them anywhere, which is
+			// the same complaint as losing them.
+			//
+			// So a later stage is drawn as soon as it is holding a share. It is a
+			// LOOK-AHEAD card: it says what has gone out and nothing else, because
+			// what it received is the previous stage's output and that is not
+			// settled yet. It cannot be handed out from and it cannot be ended.
+			//----------------------------------------------------------------
+			const aheadShares = idx > currentPhaseIndex ? sharesOf(log) : [];
+			if (idx > currentPhaseIndex && aheadShares.length === 0) return;
+
+			// Its input is unknown until the stage before it closes, so every
+			// figure on the card that derives from Qty_In has to say so instead of
+			// printing the zero that stands in for it.
+			const prevLog =
+				idx > 0
+					? (item.logs || []).find(
+						(l) => l.phase === item.phases[idx - 1].operation,
+					)
+					: null;
+			const awaitingPrev = idx > 0 && !(prevLog && prevLog.end);
+			const prevName = idx > 0 ? item.phases[idx - 1].operation : "";
+
 			const state = phaseState(log);
 			const qtyIn = stageQtyIn(item, item.phases, idx);
 
@@ -1034,13 +1125,19 @@ function renderItemCard(plan, item, index) {
 				// A stage with no shares falls back to the header's own operator
 				// — that is every stage logged before the split existed, and
 				// every outsourced one.
+				// A vendor is named here too. It was reading "Not recorded",
+				// because this only ever looked at Operator — and a stage that
+				// closed while its block was still out showed the vendor's pieces
+				// as zero, which is the closed-stage version of losing them.
 				const doneShares = sharesOf(log);
 				const whoHtml = doneShares.length
 					? `<span class="stage-who">${doneShares
-						.map(
-							(a) =>
-								`<span class="stage-who-one">${operatorName(a.operator) || "Not recorded"} <b>${Number(isAlt ? a.assigned : a.qtyOut) || 0}</b> <span class="unit">pcs</span></span>`,
-						)
+						.map((a) => {
+							const n = isAlt
+								? Number(a.assigned) || 0
+								: shareOutFor(a, isPassThrough(a, phase.operation, osLast));
+							return `<span class="stage-who-one">${shareWho(a)} <b>${n}</b> <span class="unit">pcs</span></span>`;
+						})
 						.join("")}</span>`
 					: operatorName(log.operator)
 						? `<span>by <b>${operatorName(log.operator)}</b></span>`
@@ -1183,35 +1280,35 @@ function renderItemCard(plan, item, index) {
 			// something that happens when the last man happens to finish.
 			//----------------------------------------------------------------
 			const shares = sharesOf(log);
-			
-			// A vendor share that is NOT returned and does NOT start on this stage
-			// is operating on pieces that haven't reached this stage's qtyIn yet.
-			// It must not be subtracted from qtyIn, or it will hide pieces that
-			// actually HAVE reached this stage.
-			const assignedQty = shares.reduce((sum, a) => {
-				let include = true;
-				if (isPartyShare(a) && !a.returnedOn && a.osRef) {
-					let firstPhaseIdx = 999;
-					(item.logs || []).forEach(l => {
-						if (sharesOf(l).some(s => s.osRef === a.osRef)) {
-							const pIdx = item.phases.findIndex(p => p.operation === l.phase);
-							if (pIdx >= 0 && pIdx < firstPhaseIdx) {
-								firstPhaseIdx = pIdx;
-							}
-						}
-					});
-					const currentPhaseIdx = item.phases.findIndex(p => p.operation === phase.operation);
-					if (currentPhaseIdx > firstPhaseIdx) {
-						include = false;
-					}
-				}
-				return sum + (include ? (Number(a.assigned) || 0) : 0);
-			}, 0);
+			const assignedQty = shareTotal(log, "assigned");
+			const leftQty = awaitingPrev ? 0 : Math.max(0, qtyIn - assignedQty);
 
-			const madeQty = shareTotal(log, "qtyOut");
-			const stillOpen = openShares(log).length;
-			const leftQty = Math.max(0, qtyIn - assignedQty);
-			const canEnd = shares.length > 0 && stillOpen === 0;
+			// What this stage has produced, counting a vendor's pass-through
+			// pieces as spent. Without that a stage reads as having lost
+			// everything that is on a van, and the End button would open the
+			// damage dialog asking what happened to cloth that is fine.
+			const madeQty = shares.reduce(
+				(s, a) =>
+					s + shareOutFor(a, isPassThrough(a, phase.operation, osLast)),
+				0,
+			);
+
+			// WHO IS ACTUALLY HOLDING THIS STAGE OPEN.
+			//
+			// Not every open share is. A vendor's share on a stage he has already
+			// carried the pieces past is finished with THIS stage — the van is
+			// only owed at the block's last one. Counting it here kept a cutting
+			// stage shut for the days a vendor had the panels, with the in-house
+			// half of it stranded behind pieces that were not in the building.
+			//
+			// A LOOK-AHEAD STAGE still cannot be ended whatever its shares say:
+			// its Qty_Out would go forward as the next stage's input while the
+			// stage before it is still producing what it has not received yet.
+			const blockingOpen = openShares(log).filter(
+				(a) => !isPassThrough(a, phase.operation, osLast),
+			);
+			const stillOpen = blockingOpen.length;
+			const canEnd = shares.length > 0 && stillOpen === 0 && !awaitingPrev;
 
 			// Nobody can be on the same stage twice — the server refuses it, and
 			// offering the name is only an invitation to find out.
@@ -1235,27 +1332,39 @@ function renderItemCard(plan, item, index) {
 					// left — which frees those pieces to be handed out a second
 					// time while they are still in someone else's workshop.
 					//
-					// The one action is the return, and it closes every stage of
-					// the block at once because they all came back in one van.
+					// The one action is the return, and it belongs on the LAST
+					// stage of the block — one van, one gate, one arrival. On
+					// every earlier stage the vendor is carrying the pieces
+					// onward, so the row says where they come back instead of
+					// offering a button that would receive work not yet done.
 					//------------------------------------------------------------
 					if (isPartyShare(a)) {
-						const party =
-							typeof partyById === "function" ? partyById(a.party) : null;
-						const pWho = party ? party.name : "Third party";
 						const pGiven = Number(a.assigned) || 0;
 						const isBack = !!a.returnedOn;
+						const blockEnd = !a.osRef || osLast[a.osRef] === phase.operation;
+						const backAt = a.osRef ? osLast[a.osRef] : "";
+						const through = isPassThrough(a, phase.operation, osLast);
 
 						return `
                     <tr class="share-row is-party${isBack ? " is-done" : ""}" data-asgid="${a.id}" data-given="${pGiven}" data-osref="${a.osRef || ""}">
-                        <td class="share-who"><span class="share-party-tag">out</span> ${pWho}</td>
+                        <!-- The tag is the pieces' whereabouts, so it has to stop
+                             saying "out" once they are back — a returned row was
+                             carrying a tag that contradicted its own date and
+                             tick. Same slot, two words, always true. -->
+                        <td class="share-who"><span class="share-party-tag">${isBack ? "back" : "out"}</span> ${shareWho(a)}</td>
                         <td class="col-num">${pGiven}</td>
                         <td class="share-time">${a.sentOn ? `sent ${a.sentOn}` : "sent"}${isBack ? ` &ndash; back ${a.returnedOn}` : ""}</td>
-                        <td class="col-num">${isBack ? Number(a.qtyOut) || 0 : '<span class="is-muted">at vendor</span>'}</td>
+                        <td class="col-num">${isBack || through
+								? shareOutFor(a, through)
+								: '<span class="is-muted">at vendor</span>'
+							}</td>
                         <td class="share-act">
                             <div class="share-act-in">
                                 ${isBack
 								? '<span class="share-tick" title="Came back">&#10003;</span>'
-								: '<button type="button" class="btn btn-stage btn-share-back">Take it back</button>'
+								: blockEnd
+									? '<button type="button" class="btn btn-stage btn-share-back">Take it back</button>'
+									: `<span class="share-back-at">back at ${backAt}</span>`
 							}
                             </div>
                         </td>
@@ -1318,19 +1427,27 @@ function renderItemCard(plan, item, index) {
 			// needs, so the button ended up under a heading it had nothing to do
 			// with. The table now lists who is on the stage; this is the control
 			// that puts them there.
-			// THIRD PARTIES SIT IN THE SAME PICKER AS THE MEN, under their own
-			// heading. Sending work out is the same decision as handing it to
-			// somebody — "who is taking these forty pieces" — and it used to be a
-			// separate button at the top of the card, which is why it was possible
-			// to send out a quantity the stage had already handed out.
+			// THIRD PARTIES SIT IN THE SAME PICKER AS THE MEN. Sending work out is
+			// the same decision as handing it to somebody — "who is taking these
+			// forty pieces" — and it used to be a separate button at the top of
+			// the card, which is why it was possible to send out a quantity the
+			// stage had already handed out.
 			//
-			// Only parties that do this stage, matched on exact string equality.
-			// "Machine Embroidery" sits inside "Manual Machine Embroidery", so a
-			// substring test offers the wrong vendors.
-			const partyAddable =
-				typeof partiesForStage === "function"
-					? partiesForStage(phase.operation)
-					: [];
+			// ONE OPTION, NOT A LIST OF VENDORS. Which party can take the work is
+			// decided by the STAGES, and the stages are not chosen until the
+			// dialog: one send covers a contiguous block, and only a vendor who
+			// does every stage in it may be offered. Naming vendors here would be
+			// answering that question a step too early — he would pick one for
+			// Stitching, tick Embroidery as well, and find his choice was never
+			// valid. So the picker offers the action and the dialog names the
+			// vendors, once it knows what it is asking about.
+			//
+			// Offered whenever any party exists at all, not filtered by this
+			// stage. If none covers the block he ends up ticking, the dialog says
+			// exactly which stage nobody does — a real answer, where a missing
+			// option would just be a dead end.
+			const anyParties =
+				typeof parties !== "undefined" && parties.length > 0;
 
 			const assignRow =
 				leftQty > 0
@@ -1342,10 +1459,7 @@ function renderItemCard(plan, item, index) {
 						? `<optgroup label="Operators">${addable.map((o) => `<option value="${o.id}">${o.name}</option>`).join("")}</optgroup>`
 						: ""
 					}
-                            ${partyAddable.length
-						? `<optgroup label="Third parties">${partyAddable.map((p) => `<option value="tp:${p.id}">${p.name}</option>`).join("")}</optgroup>`
-						: ""
-					}
+                            ${anyParties ? `<option value="tp:">Send to a third party…</option>` : ""}
                         </select>
                         <div class="share-assign-qty">
                             <input type="number" class="share-add-qty" min="1" max="${leftQty}" value="${leftQty}" aria-label="Pieces">
@@ -1369,7 +1483,16 @@ function renderItemCard(plan, item, index) {
 						: `<span class="stage-meter-left">${leftQty} still to hand out</span>`
 					: `<span class="stage-meter-all">all handed out</span>`;
 
-			const meter = `<div class="stage-meter">
+			// "Qty in 0 · all handed out" is a lie on a look-ahead stage — it has
+			// not received anything yet, and the vendor's five are not the whole of
+			// it. The dash is the honest figure until the stage before it closes.
+			const meter = awaitingPrev
+				? `<div class="stage-meter">
+                        <span>Qty in <b>&mdash;</b></span>
+                        <span>Already out <b>${assignedQty}</b></span>
+                        <span class="stage-meter-left">waiting on ${prevName}</span>
+                    </div>`
+				: `<div class="stage-meter">
                         <span>Qty in <b>${qtyIn}</b></span>
                         <span>Handed out <b>${assignedQty}</b></span>
                         <span>${meterLeft}</span>
@@ -1384,13 +1507,19 @@ function renderItemCard(plan, item, index) {
 			// yet", and this one says "you are about to write off pieces".
 			let endNote = "";
 			let endWarn = false;
-			if (shares.length === 0) {
+			if (awaitingPrev) {
+				// Said as a fact about the stage, not as a refusal. Nothing is
+				// wrong here — the pieces genuinely have not arrived.
+				endNote = `${prevName} has to finish before the rest of this stage can be handed out.`;
+			} else if (shares.length === 0) {
 				endNote = "Put someone on this stage first.";
 			} else if (stillOpen > 0) {
-				// A batch at a vendor holds the stage open exactly as a man does,
-				// but "1 operator is still working" is the wrong sentence for it —
-				// he would go looking for somebody on the floor.
-				const openArr = openShares(log);
+				// A batch at a vendor holds the stage open exactly as a man does —
+				// but only on the block's LAST stage, which is what blockingOpen
+				// already filtered to. "1 operator is still working" is the wrong
+				// sentence for it either way; he would go looking for somebody on
+				// the floor.
+				const openArr = blockingOpen;
 				const atVendor = openArr.filter(isPartyShare).length;
 				const men = openArr.length - atVendor;
 				const bits = [];
@@ -1409,11 +1538,11 @@ function renderItemCard(plan, item, index) {
 			}
 
 			phHtml += `
-                <div class="stage-card ${isActive ? "is-running" : "is-todo"}" data-phase="${phase.operation}" data-qtyin="${qtyIn}" data-qtyout="${madeQty}" data-left="${leftQty}" data-logid="${logId}">
+                <div class="stage-card ${awaitingPrev ? "is-ahead" : isActive ? "is-running" : "is-todo"}" data-phase="${phase.operation}" data-qtyin="${qtyIn}" data-qtyout="${madeQty}" data-left="${leftQty}" data-logid="${logId}">
                     <div class="stage-card-head">
                         <span>${stepLabel}</span>
                         <div style="display:flex; align-items:center; gap:0.5rem;">
-                            <span class="stage-status">${isActive ? "In progress" : "Not started"}</span>
+                            <span class="stage-status">${awaitingPrev ? "Not its turn yet" : isActive ? "In progress" : "Not started"}</span>
                         </div>
                     </div>
                     <div class="stage-card-body">
@@ -1423,7 +1552,11 @@ function renderItemCard(plan, item, index) {
                             <table class="share-table">
                                 <thead>
                                     <tr>
-                                        <th>Operator</th>
+                                        <!-- NOT "Operator". This column holds men
+                                             and vendors alike now, and it was the
+                                             one heading that contradicted its own
+                                             rows. -->
+                                        <th>Who</th>
                                         <th class="col-num">Pieces</th>
                                         <th>Start &ndash; end</th>
                                         <th class="col-num">Finished</th>
@@ -1599,6 +1732,9 @@ function renderItemCard(plan, item, index) {
 				//
 				// The quantity and the stage travel with it, so the dialog opens
 				// on the answers he has already given rather than asking twice.
+				// WHICH VENDOR does not, and cannot: the dialog derives that list
+				// from the stages he is about to tick, so partyId leaves here
+				// empty and the dialog fills it in.
 				//--------------------------------------------------------------
 				if (opId.indexOf("tp:") === 0) {
 					if (typeof openSendDialog !== "function") {
@@ -1608,7 +1744,6 @@ function renderItemCard(plan, item, index) {
 						return;
 					}
 					openSendDialog(plan, item, {
-						partyId: opId.slice(3),
 						qty: qty,
 						max: cardLeft,
 						qtyIn: cardQtyIn,

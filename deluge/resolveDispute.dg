@@ -110,11 +110,30 @@ string resolveDispute(string payloadJson)
 	// the loop below, so the whole else-chain that follows can stay as it is. One
 	// extra fetch of a record this function is about to open anyway.
 	dirTxt = "";
+	// Is the cloth this dispute is about held as PIECES rather than as a roll?
+	// Read in the same pass, for the guard further down.
+	dspIsPieces = false;
+	dspLotNo = "";
 	if(dispId != "" && dispId.isNumber() == true)
 	{
 		for each  dq in Stock_Dispute[ID == dispId.toLong()]
 		{
 			dirTxt = ifnull(dq.Direction,"").toString().trim();
+
+			dqLotTxt = ifnull(dq.Lot,"").toString().trim();
+			if(dqLotTxt != "")
+			{
+				for each  dqLot in Raw_Material_Lot[ID == dqLotTxt.toLong()]
+				{
+					// Blank Form means Roll - every lot that existed before
+					// printing has it empty.
+					if(ifnull(dqLot.Form,"").toString().trim() == "Pieces")
+					{
+						dspIsPieces = true;
+						dspLotNo = ifnull(dqLot.Lot_Number,dqLotTxt).toString().replaceAll("\"","'");
+					}
+				}
+			}
 		}
 	}
 	if(dirTxt == "")
@@ -210,6 +229,30 @@ string resolveDispute(string payloadJson)
 	else if(resType != "Denied" && q <= 0)
 	{
 		res = "{\"success\":false,\"error\":\"Quantity must be greater than zero\"}";
+	}
+	//------------------------------------------------------------------------
+	// A PIECES LOT CANNOT TAKE METRES BACK.
+	//
+	// Store_Correction means the cloth never left the shelf, so it is restored
+	// to the lot it came off. On a ROLL that is simply metres going back onto
+	// the roll. On a PIECES lot the metres are the MAINTAINED SUM of its
+	// Fabric_Piece rows - adding to Wash_Quantity without a piece row behind it
+	// leaves the lot claiming cloth that no piece backs, and the allocator, which
+	// reads the pieces and not the header, could never find it. The header and
+	// its pieces disagreeing is the one fault this whole design is built around.
+	//
+	// REFUSED RATHER THAN GUESSED AT. Restoring properly means naming which
+	// physical pieces came back, and this record does not know - a dispute
+	// carries metres. Inventing a piece of some assumed length would put cloth
+	// on the rack that nobody ever cut, which is worse than a dead end that says
+	// what it needs.
+	//
+	// Every other outcome is unaffected: Found, Denied and the write-off only
+	// ever REDUCE Disputed_Qty, and reducing needs no piece to back it.
+	//------------------------------------------------------------------------
+	else if(resType == "Store_Correction" && dspIsPieces == true)
+	{
+		res = "{\"success\":false,\"error\":\"Lot " + dspLotNo + " is printed cloth held as pieces, and pieces cannot be put back by metres. Record which pieces came back on the lot first, then resolve this as Found.\"}";
 	}
 	else
 	{
