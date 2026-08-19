@@ -8,6 +8,8 @@ var STAGE_NAMES = ['folding', 'pressing', 'branding'];
 var STAGE_LABELS = ['Folding', 'Pressing', 'Branding'];
 
 var SELECTED_STAFF = 'Abhijay'; // Default staff
+var SELECTED_OPERATOR = ''; // Default operator
+var OPERATORS_LIST = [];
 
 // Queue of items that have passed the checking stage
 var JOBS_QUEUE = [];
@@ -151,8 +153,16 @@ function renderQueue() {
             '</div>';
 
         if (isActive) {
+            var opSelectorHtml = '<div class="operator-selector-container" style="display: flex; flex-direction: column; gap: 6px; max-width: 320px; margin-bottom: 0.5rem;">' +
+                '<span style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em;">Assign Operator for Work</span>' +
+                '<select class="staff-select" id="active-operator-select-el" style="width: 100%; font-weight: 600;" onchange="onOperatorChanged()">' +
+                    getOperatorsOptionsHtml() +
+                '</select>' +
+                '</div>';
+
             // Expand the active tracker panel inside this card
             html += '<div class="active-tracker-inline" style="border-top: 1px solid var(--border); margin-top: 0.75rem; padding-top: 1.25rem; display: flex; flex-direction: column; gap: 1.25rem;" onclick="event.stopPropagation();">' +
+                opSelectorHtml +
                 getStepperHtml(job) +
                 '<div class="stages-list-container" style="display: flex; flex-direction: column; gap: 0.75rem;">' +
                     getStagesHtml(job) +
@@ -352,6 +362,9 @@ function selectJob(jobId) {
 
     if (!job) return;
     ACTIVE_JOB = job;
+    if (!ACTIVE_JOB.selectedOperator && OPERATORS_LIST.length > 0) {
+        ACTIVE_JOB.selectedOperator = OPERATORS_LIST[0].name;
+    }
     
     // Find where the operator left off in the stages
     ACTIVE_STAGE = 0;
@@ -403,7 +416,7 @@ function completeStage(stageName) {
             planNo: ACTIVE_JOB.planNo,
             itemName: ACTIVE_JOB.itemName,
             qty: ACTIVE_JOB.qty,
-            staff: SELECTED_STAFF,
+            staff: ACTIVE_JOB.selectedOperator || SELECTED_STAFF,
             completedOn: completedTimestamp,
             stages: {
                 folding: { ...ACTIVE_JOB.stages.folding },
@@ -433,7 +446,7 @@ function completeStage(stageName) {
                         planItemId: ACTIVE_JOB.planItemId,
                         itemCheckId: ACTIVE_JOB.checkIds.join(','),
                         qty: ACTIVE_JOB.qty,
-                        staffName: SELECTED_STAFF,
+                        staffName: ACTIVE_JOB.selectedOperator || SELECTED_STAFF,
                         foldingDuration: ACTIVE_JOB.stages.folding.duration,
                         pressingDuration: ACTIVE_JOB.stages.pressing.duration,
                         brandingDuration: ACTIVE_JOB.stages.branding.duration,
@@ -494,10 +507,24 @@ function isRunningInCreator() {
 function loadStaffDropdown() {
     if (!isRunningInCreator()) {
         console.log("Running outside Zoho Creator.");
+        OPERATORS_LIST = [
+            { id: "op1", name: "Operator A" },
+            { id: "op2", name: "Operator B" },
+            { id: "op3", name: "Operator C" }
+        ];
+        var select = document.getElementById('staff-select-el');
+        if (select) {
+            select.innerHTML = '<option value="Supervisor X">Supervisor X</option>' +
+                               '<option value="Supervisor Y">Supervisor Y</option>';
+            SELECTED_STAFF = select.value;
+        }
         return;
     }
 
     var select = document.getElementById('staff-select-el');
+    if (!select) return;
+
+    select.innerHTML = '<option value="">Loading supervisors...</option>';
 
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getStorePackingStaff',
@@ -511,34 +538,36 @@ function loadStaffDropdown() {
             parsed = JSON.parse(response.result);
         } catch (e) {
             console.error('getStorePackingStaff parse failed:', e, response.result);
-            if (select) select.innerHTML = '<option value="">Err: Parse failed</option>';
+            select.innerHTML = '<option value="">Err: Parse failed</option>';
             return;
         }
 
         if (parsed.errors && parsed.errors.length > 0) {
             console.error('getStorePackingStaff error:', parsed.errors);
-            if (select) select.innerHTML = '<option value="">Err: ' + escapeHtml(parsed.errors.join(', ')) + '</option>';
+            select.innerHTML = '<option value="">Err: ' + escapeHtml(parsed.errors.join(', ')) + '</option>';
             return;
         }
 
-        var staff = parsed.staff || [];
-        console.log('Successfully fetched packing staff from Employee Master:', staff);
-        if (staff.length > 0) {
-            if (select) {
-                // Populate options dynamically
-                var optionsHtml = staff.map(function (emp) {
-                    return '<option value="' + escapeHtml(emp.name) + '">' + escapeHtml(emp.name) + '</option>';
-                }).join('');
-                select.innerHTML = optionsHtml;
-                SELECTED_STAFF = select.value;
-            }
+        // Store operators globally
+        OPERATORS_LIST = parsed.staff || [];
+        console.log('Successfully fetched operators:', OPERATORS_LIST);
+
+        // Populate supervisors dropdown
+        var supervisors = parsed.supervisors || [];
+        console.log('Successfully fetched supervisors:', supervisors);
+        if (supervisors.length > 0) {
+            var optionsHtml = supervisors.map(function (emp) {
+                return '<option value="' + escapeHtml(emp.name) + '">' + escapeHtml(emp.name) + '</option>';
+            }).join('');
+            select.innerHTML = optionsHtml;
+            SELECTED_STAFF = select.value;
         } else {
-            if (select) select.innerHTML = '<option value="">No packing staff found</option>';
+            select.innerHTML = '<option value="">No supervisors found</option>';
         }
     }).catch(function (err) {
-        console.error('Failed to load dynamic staff list:', err);
+        console.error('Failed to load dynamic supervisor list:', err);
         var errStr = String(err && err.message ? err.message : err);
-        if (select) select.innerHTML = '<option value="">Err: ' + escapeHtml(errStr) + '</option>';
+        select.innerHTML = '<option value="">Err: ' + escapeHtml(errStr) + '</option>';
     });
 }
 
@@ -813,7 +842,7 @@ function loadFinishingHistory() {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
-    // Setup staff selection listener
+    // Setup staff selection listener (Supervisor)
     var select = document.getElementById('staff-select-el');
     if (select) {
         SELECTED_STAFF = select.value;
@@ -821,6 +850,8 @@ document.addEventListener('DOMContentLoaded', function () {
             SELECTED_STAFF = select.value;
         });
     }
+
+
 
     // Call load functions with a small delay to allow SDK handshake to finish
     setTimeout(function () {
@@ -901,4 +932,35 @@ function renderPlanSummary() {
                 '<strong style="font-size: 1.1rem; color: var(--primary); font-weight: 700;">' + qtyToFinish + ' pcs</strong>' +
             '</div>' +
         '</div>';
+}
+
+function getOperatorsOptionsHtml() {
+    if (DEMO_MODE || !isRunningInCreator()) {
+        var mockOps = ['Operator A', 'Operator B', 'Operator C'];
+        return mockOps.map(function (op) {
+            var selected = (ACTIVE_JOB && ACTIVE_JOB.selectedOperator === op) ? ' selected' : '';
+            return '<option value="' + escapeHtml(op) + '"' + selected + '>' + escapeHtml(op) + '</option>';
+        }).join('');
+    }
+    if (OPERATORS_LIST.length === 0) {
+        return '<option value="">No operators found</option>';
+    }
+    return OPERATORS_LIST.map(function (op) {
+        var selected = (ACTIVE_JOB && ACTIVE_JOB.selectedOperator === op.name) ? ' selected' : '';
+        return '<option value="' + escapeHtml(op.name) + '"' + selected + '>' + escapeHtml(op.name) + '</option>';
+    }).join('');
+}
+
+function onOperatorChanged() {
+    var select = document.getElementById('active-operator-select-el');
+    if (select && ACTIVE_JOB) {
+        ACTIVE_JOB.selectedOperator = select.value;
+    }
+}
+
+function onSupervisorChanged() {
+    var select = document.getElementById('staff-select-el');
+    if (select) {
+        SELECTED_STAFF = select.value;
+    }
 }
