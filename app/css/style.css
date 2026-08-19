@@ -2061,3 +2061,77 @@ th.col-num {
     border-color: #b45309;
     color: #b45309;
 }
+
+.unalloc-badge {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #e0e7ff;
+    border: 1px solid #c7d2fe;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+}
+
+.unalloc-val {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #3730a3;
+}
+
+.unalloc-lbl {
+    font-size: 0.65rem;
+    color: #4338ca;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+}
+
+/* Professional styling for allocation form */
+.alloc-form {
+    background: #f8fafc;
+    padding: 1.25rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    margin-top: 1rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.alloc-title {
+    margin: 0 0 0.75rem 0;
+    color: var(--text-main);
+    font-size: 0.95rem;
+    font-weight: 600;
+    width: 100%;
+}
+
+.alloc-form .note-input, 
+.alloc-form .issue-input {
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+    color: var(--text-main);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.alloc-form .note-input:focus,
+.alloc-form .issue-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.alloc-form .issue-input[readonly] {
+    background: #f1f5f9;
+    color: #64748b;
+    cursor: not-allowed;
+    border-color: #cbd5e1;
+}
+
+.alloc-form .si-field {
+    color: var(--text-main);
+    font-weight: 500;
+}

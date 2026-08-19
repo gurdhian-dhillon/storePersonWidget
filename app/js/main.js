@@ -4904,8 +4904,9 @@ function onStockFilter() {
 }
 
 function stockInMatches() {
-    if (!stockFilter) return stockMats;
-    return stockMats.filter(function (m) {
+    var allocMats = stockMats.filter(function (m) { return m.unallocated > 0; });
+    if (!stockFilter) return allocMats;
+    return allocMats.filter(function (m) {
         return (m.sku || '').toLowerCase().indexOf(stockFilter) !== -1 ||
             (m.material || '').toLowerCase().indexOf(stockFilter) !== -1;
     });
@@ -4914,8 +4915,11 @@ function stockInMatches() {
 // Keyed on materialId, NEVER on list index. The index moves the moment the
 // filter changes, so an open card would silently become a different material's.
 function toggleStockCard(matId) {
-    stockOpenId = (stockOpenId === matId) ? null : matId;
-    renderStockInList();
+    var card = document.getElementById('si-card-' + matId);
+    if (card) {
+        card.classList.toggle('open');
+        stockOpenId = card.classList.contains('open') ? matId : null;
+    }
 }
 
 function onStockLotChange(matId) {
@@ -4937,14 +4941,13 @@ function stockInListHtml() {
     return list.map(function (m) {
         var open = stockOpenId === m.materialId;
 
-        // Only shown once the sync exists — cloth Inventory knows about that has
-        // not been given a tone yet. Until then it is always zero.
-        var unalloc = m.unallocated > 0
-            ? '<span class="status-pill status-warning">' + fmt(m.unallocated) + ' awaiting a lot</span>'
-            : '';
+        var unallocBadge = '<div class="unalloc-badge">' + 
+            '<span class="unalloc-val">' + fmt(m.unallocated) + '</span>' + 
+            '<span class="unalloc-lbl">Unallocated</span>' +
+            '</div>';
 
         return '' +
-            '<div class="item-card' + (open ? ' open' : '') + '">' +
+            '<div class="item-card' + (open ? ' open' : '') + '" id="si-card-' + m.materialId + '">' +
             '<div class="item-header" onclick="toggleStockCard(\'' + m.materialId + '\')">' +
             '<div class="item-header-info">' +
             '<h2>' + escapeHtml(m.material || m.sku || '—') + '</h2>' +
@@ -4954,11 +4957,17 @@ function stockInListHtml() {
             '<span>' + fmt(m.wash) + ' washed &middot; ' + fmt(m.unwash) + ' unwashed' +
             ((Number(m.inWash) || 0) > 0
                 ? ' &middot; ' + fmt(m.inWash) + ' at wash' : '') + '</span>' +
-            unalloc +
             '</div>' +
             '</div>' +
+            '<div class="item-header-right">' +
+            unallocBadge +
+            '<span class="chevron" aria-hidden="true">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
+            'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
+            '</span>' +
             '</div>' +
-            (open ? stockCardBodyHtml(m) : '') +
+            '</div>' +
+            stockCardBodyHtml(m) +
             '</div>';
     }).join('');
 }
@@ -5010,28 +5019,28 @@ function stockCardBodyHtml(m) {
             }).join('');
 
     return '' +
-        '<div class="item-body is-open">' +
+        '<div class="item-body">' +
+        '<div class="tables-container">' +
         lotTable +
-        '<div class="stockin-form">' +
-        '<label class="si-field"><span>Lot</span>' +
+        '<div class="stockin-form alloc-form">' +
+        '<h3 class="alloc-title">Allocate Unallocated Quantity</h3>' +
+        '<label class="si-field"><span>Select Existing Lot</span>' +
         '<select id="si-lot-' + m.materialId + '" class="note-input" ' +
         'onchange="onStockLotChange(\'' + m.materialId + '\')">' + opts + '</select>' +
         '</label>' +
-        '<label class="si-field" id="si-num-wrap-' + m.materialId + '"><span>Lot number</span>' +
+        '<label class="si-field" id="si-num-wrap-' + m.materialId + '"><span>Or New Lot Number</span>' +
         '<input type="text" id="si-num-' + m.materialId + '" class="note-input" ' +
-        'placeholder="as written on the roll" />' +
+        'placeholder="Enter new lot number..." />' +
         '</label>' +
-        '<label class="si-field"><span>Quantity</span>' +
-        '<input type="number" step="0.01" min="0" id="si-qty-' + m.materialId + '" class="issue-input" />' +
+        '<label class="si-field"><span>Quantity to Allocate</span>' +
+        '<input type="number" step="0.01" min="0" value="' + m.unallocated + '" id="si-qty-' + m.materialId + '" class="issue-input" readonly />' +
         '</label>' +
-        // No state to choose. Cloth arrives greige and is washed
-        // in-house, so everything booked here lands in unwashed; the
-        // wash flow is the only way into washed stock.
         '</div>' +
         '<div class="card-footer">' +
         '<span class="sel-count">Goes in as <b>unwashed</b>. Match it against the rack first &mdash; a new lot cannot be merged back later.</span>' +
         '<button type="button" class="primary-btn" id="si-btn-' + m.materialId + '" ' +
         'onclick="submitStockIn(\'' + m.materialId + '\')">Add to stock</button>' +
+        '</div>' +
         '</div>' +
         '</div>';
 }
