@@ -1,9 +1,28 @@
 string getReissueDrafts(string supervisorId)
 {
-	// Everything this supervisor has reported damaged and not yet asked the store
-	// to replace. Feeds the Reissue tab.
+	// Everything this supervisor could ask the store for and has not. Feeds the
+	// Reissue tab.
 	//
 	// Custom API, POST, one argument: supervisorId.
+	//
+	// TWO SOURCES, ONE TAB, and every card carries a "kind" saying which:
+	//
+	//   "damage" - he ruined material and ticked it for reissue when he reported
+	//              it. Lines are Damage_Lines rows still Reissue_Status Pending,
+	//              and he picks which of them to raise.
+	//   "remake" - the checker rejected garments, so saveItemCheck opened a
+	//              remake batch. The batch needs its whole BOM again and nobody
+	//              is choosing anything, so the card is all-or-nothing.
+	//
+	// A REMAKE DRAFT IS DERIVED, NOT STORED. There is no draft record anywhere:
+	// the draft IS a Check_Reject batch sitting at Awaiting_Material with no
+	// Check_Remake requirement against it, and the lines are rebuilt from its own
+	// BOM through the shared buildItemRequirements. Storing them would need either
+	// a Material_Damage row - which would put a check rejection in the consumption
+	// report's DAMAGED column, where it does not belong - or draft requirement
+	// rows, which every screen that reads Material_Requirement would then have to
+	// learn to ignore. Deriving costs a BOM walk per waiting batch and cannot go
+	// stale.
 	//
 	// GROUPED BY PLAN_ITEM, because that is the unit he decides in - "for this
 	// order and this item, what do I want back". A single item can collect damage
@@ -77,7 +96,7 @@ string getReissueDrafts(string supervisorId)
 					planTxt = dmg.Plan.toString();
 				}
 
-				itemMeta.put(itemKey,"{\"planItemId\":\"" + itemKey + "\",\"planId\":\"" + planTxt + "\",\"item\":\"" + ifnull(dmg.Item_Name,"").toString().replaceAll("\"","'") + "\",\"salesOrder\":\"" + ifnull(dmg.Sales_Order_No,"").toString().replaceAll("\"","'") + "\"}");
+				itemMeta.put(itemKey,"{\"kind\":\"damage\",\"planItemId\":\"" + itemKey + "\",\"planId\":\"" + planTxt + "\",\"item\":\"" + ifnull(dmg.Item_Name,"").toString().replaceAll("\"","'") + "\",\"salesOrder\":\"" + ifnull(dmg.Sales_Order_No,"").toString().replaceAll("\"","'") + "\"}");
 			}
 
 			reportedTxt = ifnull(dmg.Reported_On,"").toString();
@@ -132,6 +151,204 @@ string getReissueDrafts(string supervisorId)
 	}
 
 	//----------------------------------------------------------------------
+	// REMAKE BATCHES THE CHECKER OPENED AND NOBODY HAS ASKED FOR.
+	//
+	// WIP-BOUNDED BY THE STATUS, which is what makes this affordable. A batch
+	// leaves Awaiting_Material the moment receiveMaterials confirms its cloth
+	// arrived, so this query returns the ones still waiting - never the year's
+	// history of remakes. The statement-execution limit is NOT catchable: it
+	// kills the script and the widget gets a bare 500 with no error card at all,
+	// so an unbounded scan here would take the whole tab down with nothing to
+	// say why.
+	//
+	// Remake_Reason == "Check_Reject" is what separates these from the batches
+	// saveMaterialDamage opens ("Production_Loss"), whose material comes through
+	// the damage lines above and would otherwise be asked for twice. Alteration
+	// batches carry "Alteration" and need no cloth at all.
+	//
+	// It is also the WHOLE test - Is_Remake is deliberately NOT in the query.
+	// Only saveItemCheck writes that reason and it always writes Is_Remake beside
+	// it, so the flag adds nothing; and Is_Remake reads EMPTY rather than false on
+	// anything planned before the field existed, which is a shape no filter in
+	// this app has ever had to trust. Every other reader ifnull()s it instead.
+	//
+	// Filtered to this supervisor through the PLAN, because Plan_Item carries no
+	// supervisor of its own. Cached per plan - one order's rejections land on
+	// several batches of the same plan.
+	//----------------------------------------------------------------------
+	remakeJson = "";
+	remakeCount = 0;
+
+	// Newest first, same as the damage cards. "sort by" must sit on its own
+	// assignment; inline in a for-each header it does not reliably parse.
+	draftBatches = Plan_Item[Remake_Reason == "Check_Reject" && Item_Status == "Awaiting_Material"] sort by Added_Time desc;
+
+	planSupCache = Map();
+	planOrderCache = Map();
+
+	for each  rb in draftBatches
+	{
+		rbPlanKey = "";
+		if(rb.Plan != null)
+		{
+			rbPlanKey = rb.Plan.toString();
+		}
+
+		// A batch with no plan cannot be raised against anything. There is no
+		// reliable break in a Deluge for-each - the body is guarded instead.
+		if(rbPlanKey != "")
+		{
+			supKey = ifnull(planSupCache.get(rbPlanKey),"").toString();
+
+			if(supKey == "")
+			{
+				// "-" rather than "" for a plan with nobody on it, so an
+				// unassigned plan is cached as an answer instead of being
+				// re-fetched on every batch it owns.
+				supKey = "-";
+				soName = "";
+
+				for each  plQ in Production_Planning[ID == rbPlanKey.toLong()]
+				{
+					if(plQ.Assigned_To != null)
+					{
+						supKey = plQ.Assigned_To.toString();
+					}
+					if(plQ.Sales_Order != null)
+					{
+						for each  soQ in Sales_Order[ID == plQ.Sales_Order]
+						{
+							soName = ifnull(soQ.Sales_Order,"").toString().replaceAll("\"","'");
+						}
+					}
+				}
+
+				planSupCache.put(rbPlanKey,supKey);
+				planOrderCache.put(rbPlanKey,soName);
+			}
+
+			// Ids compared as text on both sides - a mixed-type comparison
+			// throws rather than returning false.
+			if(supKey == supId.toString())
+			{
+				//----------------------------------------------------
+				// ALREADY RAISED? The requirement rows themselves are the
+				// record of that - there is no flag to go stale. Filtered on
+				// Source so a reissue raised against this same batch from a
+				// damage report cannot hide its BOM material.
+				//
+				// count(), not size() - this is a query result, not a List.
+				//----------------------------------------------------
+				if(Material_Requirement[Plan_Item == rb.ID && Source == "Check_Remake"].count() == 0)
+				{
+					bomKey = "";
+					if(rb.BOM != null)
+					{
+						bomKey = rb.BOM.toString();
+					}
+
+					// A Creator numeric that was never written is an EMPTY
+					// STRING, not null, and toDecimal() throws on it.
+					qtyOrdS = ifnull(rb.Qty_Ordered,"0").toString().trim();
+					if(qtyOrdS == "")
+					{
+						qtyOrdS = "0";
+					}
+
+					// The why, off the check that created the batch. Round is
+					// what he is told on the card - "round 2" answers "have we
+					// been here before" without opening anything.
+					roundTxt = "";
+					chkDateTxt = "";
+					if(rb.Check_Ref != null)
+					{
+						for each  icQ in Item_Check[ID == rb.Check_Ref]
+						{
+							roundTxt = ifnull(icQ.Round,"").toString();
+							chkDateTxt = ifnull(icQ.Check_Date,"").toString();
+						}
+					}
+
+					whyTxt = "Rejected at checking";
+					if(roundTxt != "")
+					{
+						whyTxt = whyTxt + " - round " + roundTxt;
+					}
+
+					//----------------------------------------------------
+					// The lines, rebuilt from the batch's own BOM. Same shared
+					// function createProductionPlans uses, so a remake is costed
+					// by exactly the same arithmetic as the original - fabric
+					// width, cut size, whole marker rows. What is shown here and
+					// what raiseReissueRequest writes therefore cannot disagree:
+					// both ask the same function the same question.
+					//----------------------------------------------------
+					lnJson = "";
+
+					if(bomKey != "")
+					{
+						matsTxt = thisapp.buildItemRequirements(bomKey,qtyOrdS,"reissue draft for " + ifnull(rb.Item_Name,"").toString());
+						matsList = matsTxt.toJSONList();
+
+						for each  mRaw in matsList
+						{
+							mm = mRaw.toMap();
+							mKeyTxt = ifnull(mm.get("mat"),"").toString();
+
+							// Same cache the damage lines above filled. The
+							// same material shows up on most items, and without
+							// it the same Raw_Material record is fetched again
+							// and again.
+							skuTxt2 = "";
+							if(mKeyTxt != "")
+							{
+								skuTxt2 = ifnull(skuCache.get(mKeyTxt),"").toString();
+								if(skuTxt2 == "")
+								{
+									for each  rm2 in Raw_Material[ID == mKeyTxt.toLong()]
+									{
+										skuTxt2 = ifnull(rm2.SKU,"").toString().replaceAll("\"","'");
+									}
+									skuCache.put(mKeyTxt,skuTxt2);
+								}
+							}
+
+							if(lnJson != "")
+							{
+								lnJson = lnJson + ",";
+							}
+
+							// No lineId and no damageId: there is no row to
+							// mark. The whole card is raised at once, so the
+							// widget sends the batch and nothing else.
+							//
+							// Ids forced to string; an 18-digit id breaks
+							// JSON.parse.
+							lnJson = lnJson + "{\"matId\":\"" + mKeyTxt + "\",\"name\":\"" + ifnull(mm.get("name"),"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + skuTxt2 + "\",\"unit\":\"" + ifnull(mm.get("unit"),"").toString().replaceAll("\"","'") + "\",\"isFab\":" + ifnull(mm.get("isFab"),false) + ",\"qty\":" + ifnull(mm.get("req"),0) + ",\"pieces\":" + ifnull(mm.get("pcs"),0) + ",\"cutLen\":" + ifnull(mm.get("cutLen"),0) + ",\"cutWid\":" + ifnull(mm.get("cutWid"),0) + ",\"reportedOn\":\"" + chkDateTxt + "\",\"phase\":\"Checking\",\"note\":\"" + whyTxt + "\"}";
+						}
+					}
+
+					// A batch whose BOM has no material - or none at all - can
+					// never be asked for, and a card with an empty table is a
+					// dead end he cannot act on. Left off the tab; the WARN
+					// saveItemCheck logged is where that is explained.
+					if(lnJson != "")
+					{
+						if(remakeJson != "")
+						{
+							remakeJson = remakeJson + ",";
+						}
+
+						remakeJson = remakeJson + "{\"kind\":\"remake\",\"planItemId\":\"" + rb.ID + "\",\"planId\":\"" + rbPlanKey + "\",\"item\":\"" + ifnull(rb.Item_Name,"").toString().replaceAll("\"","'") + "\",\"salesOrder\":\"" + ifnull(planOrderCache.get(rbPlanKey),"").toString() + "\",\"qty\":" + qtyOrdS + ",\"round\":\"" + roundTxt + "\",\"why\":\"" + whyTxt + "\",\"lines\":[" + lnJson + "]}";
+
+						remakeCount = remakeCount + 1;
+					}
+				}
+			}
+		}
+	}
+
+	//----------------------------------------------------------------------
 	// Assemble. An item whose every line turned out to be Not_Needed has a
 	// header but no lines, and a card with nothing in it is noise - so the
 	// emptiness is tested here rather than guessed at above.
@@ -161,7 +378,20 @@ string getReissueDrafts(string supervisorId)
 		}
 	}
 
-	res = "{\"errors\":[],\"items\":[" + itemsJson + "],\"itemCount\":" + pendingLines + "}";
+	//----------------------------------------------------------------------
+	// REMAKE CARDS FIRST. A remake batch cannot start at all until its cloth is
+	// asked for, issued and received - days - whereas a damage reissue is
+	// usually replacing something the work is carrying on without. The one that
+	// blocks a batch outright goes at the top.
+	//----------------------------------------------------------------------
+	allJson = remakeJson;
+	if(allJson != "" && itemsJson != "")
+	{
+		allJson = allJson + ",";
+	}
+	allJson = allJson + itemsJson;
+
+	res = "{\"errors\":[],\"items\":[" + allJson + "],\"itemCount\":" + (pendingLines + remakeCount) + "}";
 	}
 	catch (e)
 	{

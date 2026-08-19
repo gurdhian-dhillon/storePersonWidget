@@ -28,8 +28,17 @@ production made three ways:
 | | goes to | becomes |
 |---|---|---|
 | **Approved** | packing | `Plan_Item.Qty_Accepted` |
-| **Rejected** | remade from scratch | new `Plan_Item`, full BOM, fresh material |
+| **Rejected** | remade from scratch | new `Plan_Item`, **no material yet** — see below |
 | **Alteration** | back to named stages | new `Plan_Item`, `Alteration_Stage` rows, no material |
+
+> **A rejection does not ask the store for anything.** `saveItemCheck` used to insert the remake
+> batch's `Material_Requirement` rows itself, which put cloth on the store person's issue screen
+> the instant an inspector pressed Save — a third party committing the supervisor to a handover he
+> had not asked for and could not see coming. The batch is still opened here, because the order is
+> short whatever anybody decides; what waits is the **demand**. The batch sits at
+> `Awaiting_Material` with no requirements, the supervisor's **Reissue tab** reads exactly that
+> pair as a draft, and `raiseReissueRequest` builds the rows when he presses *Ask the store*.
+> Same shape `saveMaterialDamage` always had — report now, ask when it suits.
 
 Finishing is a separate process, tracked on its own form, and is **out of scope here** — it is
 not a production stage and gets no `Stage_Log`. It slots in later between `Awaiting_Check` and
@@ -432,7 +441,7 @@ What is needed is *which bucket, and why*. That is `Source` plus a reason record
 |---|---|---|---|
 | `Plan` | BOM at plan time | — | what it should have taken |
 | `Reissue` | supervisor declares | `Material_Damage` | spoiled during production |
-| `Check_Remake` | BOM × rejected qty | **`Item_Check`** | lost with rejected garments |
+| `Check_Remake` | BOM × rejected qty, **raised by the supervisor** | **`Item_Check`** | lost with rejected garments |
 | `Alteration` | supervisor declares | `Material_Damage` | spent on rework |
 
 Every row has a source, and every non-`Plan` source points at a record that explains itself.
@@ -455,6 +464,21 @@ requirement would double the reported loss.
 
 Responsibility stays traceable without it: the five check rows say *what* failed, and that item's
 `Stage_Log` for that stage says *who* did it.
+
+> **This is also why the Reissue-tab draft is derived rather than stored.** The obvious way to get
+> a remake onto that tab is to write it as a `Material_Damage` record, which the tab already reads
+> — and it would land a check rejection in the consumption report's **damaged** column, which is
+> exactly the double count this section exists to prevent. The other obvious way is draft
+> `Material_Requirement` rows, which every screen that reads that form would then have to learn to
+> ignore, silently and one miss at a time. So nothing is stored: the draft **is** a `Check_Reject`
+> batch at `Awaiting_Material` with no `Check_Remake` requirement against it, and its lines are
+> rebuilt from the batch's own BOM through the shared `buildItemRequirements`. It costs a BOM walk
+> per waiting batch and cannot go stale.
+>
+> The requirement rows are also the only guard against raising twice, and they are enough —
+> there is no flag that can drift out of step with them. `getReissueDrafts`, `getSupervisorCounts`
+> and `raiseReissueRequest` all apply the same test and **must keep applying the same one**, or the
+> badge, the tab and the button disagree about whether there is work.
 
 ### An alteration material request DOES
 

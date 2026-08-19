@@ -1,11 +1,31 @@
 string raiseReissueRequest(string payloadJson)
 {
-	// Turns picked damage lines into real demand: ONE Material_Requirement row
-	// per damage line, which is what puts them on the store's issue screen.
+	// The one thing on the Reissue tab that creates real demand. Everything else
+	// there is a draft; this is what puts material on the store's issue screen.
 	//
-	// Custom API, POST, one argument: payloadJson.
-	//   { "planItemId":"9", "supervisorId":"5",
-	//     "lines":[ {"damageId":"31","lineId":"77"} ] }
+	// Custom API, POST, one argument: payloadJson. TWO SHAPES, one per card kind:
+	//
+	//   damage  { "planItemId":"9", "supervisorId":"5",
+	//             "lines":[ {"damageId":"31","lineId":"77"} ] }
+	//   remake  { "planItemId":"9", "supervisorId":"5", "kind":"remake" }
+	//
+	// An absent "kind" means damage - every call made before the remake card
+	// existed was one, and the widget still sends none for those.
+	//
+	// WHY BOTH LIVE HERE rather than in a second function. They differ only in
+	// where the numbers come from; everything after the insert is identical, and
+	// it is the part that is easy to get wrong - Assigned_To off the plan, the
+	// plan pulled out of "Material Ready", the sales order pulled back from
+	// "Production Complete". Split in two, one copy quietly loses a step and a
+	// requirement nobody can see is worse than no requirement at all, because the
+	// supervisor is standing there waiting on it. A second function would also
+	// need its own Custom API wrapper in Creator; this needs none - the argument
+	// list does not change.
+	//
+	// THE REMAKE SHAPE PICKS NOTHING, and that is deliberate. A rejected garment
+	// needs its whole BOM again; there is no per-material decision to make, so
+	// there are no ticks and the card is raised whole. The damage shape has ticks
+	// because "3 were ruined but I have spares" is a real answer.
 	//
 	// ONE ROW PER LINE, NEVER SUMMED. He ruined 1.2m on Monday and 0.8m on
 	// Wednesday; the store sees two rows, each carrying its own date and its own
@@ -51,36 +71,55 @@ string raiseReissueRequest(string payloadJson)
 	}
 	itemId = itemIdTxt.toLong();
 
-	picked = ifnull(inp.get("lines"),list());
-	// size() is right - picked is a List, not a query result.
-	if(picked.size() == 0)
+	// Absent means damage - see the header. Normalised once, here, so every test
+	// below compares the same two words.
+	kindTxt = ifnull(inp.get("kind"),"").toString().trim();
+	if(kindTxt == "")
 	{
-		return "{\"success\":false,\"error\":\"No lines were selected\"}";
+		kindTxt = "damage";
+	}
+	if(kindTxt != "damage" && kindTxt != "remake")
+	{
+		return "{\"success\":false,\"error\":\"'" + kindTxt.replaceAll("\"","'") + "' is not a kind of request\"}";
 	}
 
 	// The damage records to look through, and the exact subform rows wanted out
 	// of them. Keyed as text so ids compare like with like - a mixed-type
 	// comparison throws rather than returning false.
+	//
+	// Left EMPTY on the remake path, which is what makes the damage loop further
+	// down a no-op there rather than something that has to be branched around.
 	wantLine = Map();
 	dmgIds = List();
-	for each  pRaw in picked
+
+	if(kindTxt == "damage")
 	{
-		pm = pRaw.toMap();
-		dIdTxt = ifnull(pm.get("damageId"),"").toString().trim();
-		lIdTxt = ifnull(pm.get("lineId"),"").toString().trim();
-		if(dIdTxt != "" && lIdTxt != "")
+		picked = ifnull(inp.get("lines"),list());
+		// size() is right - picked is a List, not a query result.
+		if(picked.size() == 0)
 		{
-			wantLine.put(lIdTxt,"1");
-			if(dmgIds.contains(dIdTxt) == false)
+			return "{\"success\":false,\"error\":\"No lines were selected\"}";
+		}
+
+		for each  pRaw in picked
+		{
+			pm = pRaw.toMap();
+			dIdTxt = ifnull(pm.get("damageId"),"").toString().trim();
+			lIdTxt = ifnull(pm.get("lineId"),"").toString().trim();
+			if(dIdTxt != "" && lIdTxt != "")
 			{
-				dmgIds.add(dIdTxt);
+				wantLine.put(lIdTxt,"1");
+				if(dmgIds.contains(dIdTxt) == false)
+				{
+					dmgIds.add(dIdTxt);
+				}
 			}
 		}
-	}
 
-	if(dmgIds.size() == 0)
-	{
-		return "{\"success\":false,\"error\":\"Selected lines carried no ids\"}";
+		if(dmgIds.size() == 0)
+		{
+			return "{\"success\":false,\"error\":\"Selected lines carried no ids\"}";
+		}
 	}
 
 	//----------------------------------------------------------------------
@@ -88,8 +127,18 @@ string raiseReissueRequest(string payloadJson)
 	// filter, so a row without it is invisible on their screen - it comes off
 	// the plan rather than the payload for the same reason the quantities do.
 	//----------------------------------------------------------------------
+	//
+	// The remake path also needs the batch itself - what it is, how many, and
+	// what BOM to cost it from - so all of it comes off this one read rather
+	// than a second query per field.
 	planId = 0;
 	itemName = "";
+	remakeReason = "";
+	itemStatusNow = "";
+	bomKey = "";
+	qtyOrdS = "0";
+	checkRefId = null;
+
 	for each  pi in Plan_Item[ID == itemId]
 	{
 		itemName = ifnull(pi.Item_Name,"").toString();
@@ -97,6 +146,20 @@ string raiseReissueRequest(string payloadJson)
 		{
 			planId = pi.Plan;
 		}
+		remakeReason = ifnull(pi.Remake_Reason,"").toString().trim();
+		itemStatusNow = ifnull(pi.Item_Status,"").toString().trim();
+		if(pi.BOM != null)
+		{
+			bomKey = pi.BOM.toString();
+		}
+		// A Creator numeric that was never written is an EMPTY STRING, not
+		// null, and toDecimal() throws on it.
+		qtyOrdS = ifnull(pi.Qty_Ordered,"0").toString().trim();
+		if(qtyOrdS == "")
+		{
+			qtyOrdS = "0";
+		}
+		checkRefId = pi.Check_Ref;
 	}
 
 	if(planId == 0)
@@ -113,10 +176,160 @@ string raiseReissueRequest(string payloadJson)
 	}
 
 	//----------------------------------------------------------------------
-	// One pass. Each picked line becomes its own requirement, and is marked the
-	// moment that requirement exists - so a failure part-way through leaves the
-	// lines it did not reach still Pending and retryable, rather than marked
-	// with nothing behind them.
+	// THE REMAKE PATH. The checker rejected garments, saveItemCheck opened a
+	// batch for them and deliberately asked the store for nothing; this is the
+	// supervisor saying he wants the cloth now.
+	//
+	// THE MATERIAL IS REBUILT FROM THE BATCH'S OWN BOM, not sent by the widget.
+	// Same shared function createProductionPlans uses, so the remake is costed by
+	// exactly the same arithmetic as the original - fabric width, cut size, whole
+	// marker rows - and what the tab showed him cannot disagree with what gets
+	// written, because both asked this function the same question. A second copy
+	// of that maths would drift, and the drift would be silent until the store
+	// came up short.
+	//
+	// THE EXISTING REQUIREMENT ROWS ARE THE ONLY GUARD against raising twice, and
+	// they are enough: there is no draft record to mark, so there is no flag to
+	// go out of step with them. Filtered on Source so a reissue raised against
+	// this same batch from a damage report cannot make it look already asked for.
+	//----------------------------------------------------------------------
+	if(kindTxt == "remake")
+	{
+		// Remake_Reason IS the whole test. Is_Remake is deliberately not consulted:
+		// only saveItemCheck writes this reason and it always sets Is_Remake beside
+		// it, so the flag adds nothing - and a Creator field that was never written
+		// reads EMPTY rather than false, which makes "== false" a mixed-type
+		// comparison, and those THROW rather than returning false.
+		if(remakeReason != "Check_Reject")
+		{
+			return "{\"success\":false,\"error\":\"" + itemName.replaceAll("\"","'") + " is not a batch the checker rejected\"}";
+		}
+
+		// count(), not size() - this is a query result, not a List.
+		if(Material_Requirement[Plan_Item == itemId && Source == "Check_Remake"].count() > 0)
+		{
+			return "{\"success\":false,\"error\":\"The store has already been asked for " + itemName.replaceAll("\"","'") + ". It is on their issue screen.\"}";
+		}
+
+		if(bomKey == "")
+		{
+			return "{\"success\":false,\"error\":\"" + itemName.replaceAll("\"","'") + " has no BOM, so there is nothing to cost the material from\"}";
+		}
+
+		//------------------------------------------------------------------
+		// The one-line why that travels onto every row, so the store can see it
+		// on their own screen without opening anything. Same three-part shape
+		// the damage path builds - date, where, what happened.
+		//------------------------------------------------------------------
+		whyRemakeTxt = "Rejected at checking";
+		chkDateVal = null;
+
+		if(checkRefId != null)
+		{
+			for each  icQ in Item_Check[ID == checkRefId]
+			{
+				cDt = ifnull(icQ.Check_Date,"").toString().trim();
+				rNo = ifnull(icQ.Round,"").toString().trim();
+
+				// Held only when there is really a date. A Creator field that was
+				// never written is EMPTY, not null, so the null test below would
+				// pass an empty string straight into a Date field.
+				if(cDt != "")
+				{
+					chkDateVal = icQ.Check_Date;
+				}
+
+				whyRemakeTxt = "Checking - rejected, remake";
+				if(rNo != "")
+				{
+					whyRemakeTxt = "Checking - rejected in round " + rNo + ", remake";
+				}
+				if(cDt != "")
+				{
+					whyRemakeTxt = cDt + " - " + whyRemakeTxt;
+				}
+			}
+		}
+
+		matsTxt = thisapp.buildItemRequirements(bomKey,qtyOrdS,"check remake of " + itemName + " (item " + itemId + ")");
+		matsList = matsTxt.toJSONList();
+
+		for each  mRaw in matsList
+		{
+			mm = mRaw.toMap();
+
+			newRmId = insert into Material_Requirement
+			[
+				Plan=planId
+				Plan_Item=itemId
+				Material_Name=mm.get("name")
+				Is_Fabric=mm.get("isFab")
+				Unit=mm.get("unit")
+				Required_Qty=mm.get("req")
+				Issued_Qty=0
+				Received_Qty=0
+				Cut_Size_Length=mm.get("cutLen")
+				Cut_Size_Width=mm.get("cutWid")
+				Required_Pieces=mm.get("pcs")
+				Pieces_From_Waste=0
+				Pieces_From_Raw=0
+				Source="Check_Remake"
+				Reason=whyRemakeTxt
+				Added_User=zoho.loginuser
+			];
+
+			rmReqId = newRmId.toLong();
+
+			// Lookups after the insert - a null one fails the WHOLE block.
+			//
+			// Check_Ref is what the consumption report follows to answer "why was
+			// there extra cloth on this order"; Source alone says a remake, this
+			// says which check caused it.
+			for each  rmq in Material_Requirement[ID == rmReqId]
+			{
+				rmq.Material = mm.get("mat").toString().toLong();
+				if(checkRefId != null)
+				{
+					rmq.Check_Ref = checkRefId;
+				}
+				if(chkDateVal != null)
+				{
+					rmq.Reported_On = chkDateVal;
+				}
+				if(planSup != null)
+				{
+					rmq.Assigned_To = planSup;
+				}
+			}
+
+			madeCount = madeCount + 1;
+			logLines.add("CHECK REMAKE -> " + ifnull(mm.get("name"),"").toString() + " | qty " + ifnull(mm.get("req"),0) + " | pieces " + ifnull(mm.get("pcs"),0));
+		}
+
+		//------------------------------------------------------------------
+		// It owes material again. The batch is already Awaiting_Material on
+		// every route the tab offers - this is here for a call that came from
+		// anywhere else, because a Custom API is callable from anywhere. Only
+		// ever moved BACKWARDS from Ready, never from a batch already in
+		// production: denying work that has started is worse than a status that
+		// reads slightly ahead of itself.
+		//------------------------------------------------------------------
+		if(madeCount > 0 && itemStatusNow == "Ready_For_Production")
+		{
+			for each  tgtR in Plan_Item[ID == itemId]
+			{
+				tgtR.Item_Status = "Awaiting_Material";
+			}
+		}
+	}
+
+	//----------------------------------------------------------------------
+	// THE DAMAGE PATH. One pass. Each picked line becomes its own requirement,
+	// and is marked the moment that requirement exists - so a failure part-way
+	// through leaves the lines it did not reach still Pending and retryable,
+	// rather than marked with nothing behind them.
+	//
+	// dmgIds is empty on the remake path, so this loop simply does not run.
 	//----------------------------------------------------------------------
 	for each  dIdTxt2 in dmgIds
 	{
@@ -293,6 +506,12 @@ string raiseReissueRequest(string payloadJson)
 
 	if(madeCount == 0)
 	{
+		if(kindTxt == "remake")
+		{
+			// The already-raised and no-BOM cases returned further up, so the
+			// only way to arrive here is a BOM that lists no material at all.
+			return "{\"success\":false,\"error\":\"" + itemName.replaceAll("\"","'") + "'s BOM lists no material, so there is nothing to ask for\"}";
+		}
 		return "{\"success\":false,\"error\":\"Those lines were already raised, or no longer exist\"}";
 	}
 

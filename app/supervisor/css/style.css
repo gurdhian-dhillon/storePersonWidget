@@ -2766,6 +2766,26 @@ th.col-num {
     opacity: 0.75;
 }
 
+/* A batch the checker sent back. Amber, matching .remake-tag wherever a remake
+   appears, so the two kinds of card on this tab are told apart at a glance
+   without a label saying so. */
+.ri-remake {
+    border-left: 3px solid #f59e0b;
+}
+
+/* The reason, said ONCE for the whole card. Every line of a remake came from
+   one check on one day, so a per-row "why" column would repeat the same
+   sentence down the table. */
+.ri-remake-why {
+    margin-bottom: 0.75rem;
+    padding: 0.55rem 0.7rem;
+    border-radius: 4px;
+    background: #fffbeb;
+    color: #92400e;
+    font-size: 0.8rem;
+    line-height: 1.45;
+}
+
 /* A material line that is partly (or wholly) replacing something ruined in
    production.
 

@@ -26,6 +26,26 @@ function isAlterationItem(item) {
 	return !!item && item.isAlteration === true;
 }
 
+// A batch the checker rejected that nobody has asked the store for yet.
+//
+// The distinction matters because every "waiting for material" message on this
+// screen names the STORE as who to chase, and here that is wrong: saveItemCheck
+// deliberately asks them for nothing, so the batch waits on HIM until he raises
+// it on the Reissue tab. Told to wait on the store he would wait for ever, and
+// the store would have nothing to find when he asked why.
+//
+// The test is the same one the server uses — a Check_Reject batch with no
+// requirements against it. Its own requirements are the only record of whether
+// it has been raised, so an empty list IS the answer, not a loading state.
+function isUnraisedRemake(item) {
+	return (
+		!!item &&
+		item.remakeReason === "Check_Reject" &&
+		item.status === "Awaiting_Material" &&
+		(item.materials || []).length === 0
+	);
+}
+
 // What a stage is working on.
 //
 // An ordinary stage receives what the stage before it produced. An alteration
@@ -709,15 +729,19 @@ function renderItemCard(plan, item, index) {
 	let statusColor = "var(--text-muted)";
 
 	if (item.status === "Awaiting_Material") {
-		// "Waiting on store" named who to chase, not what is missing. The two
-		// cases below are what he actually needs to tell apart: nothing has
-		// arrived at all, or some has and he is short the rest.
+		// "Waiting on store" named who to chase, not what is missing. The cases
+		// below are what he actually needs to tell apart: nobody has asked for it
+		// yet, nothing has arrived at all, or some has and he is short the rest.
 		const anyReceived = (item.materials || []).some(
 			(m) => Number(m.received) > 0,
 		);
-		statusText = anyReceived
-			? "Material partially received"
-			: "No material yet";
+		if (isUnraisedRemake(item)) {
+			statusText = "Not asked for yet";
+		} else {
+			statusText = anyReceived
+				? "Material partially received"
+				: "No material yet";
+		}
 		statusColor = "#d97706"; // Amber
 	} else if (item.status === "Ready_For_Production") {
 		statusText = "Ready to start";
@@ -945,6 +969,11 @@ function renderItemCard(plan, item, index) {
                 </tr>
             `;
 		});
+	} else if (isUnraisedRemake(item)) {
+		// An empty table on a rejected batch is not a gap in the record — it is
+		// the batch's own state, and saying "no materials logged" would read as
+		// something having gone missing.
+		matHtml += `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Nothing asked for yet. Raise it on the <b>Reissue</b> tab and the store will see it.</td></tr>`;
 	} else {
 		matHtml += `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No materials logged against this item.</td></tr>`;
 	}
@@ -1019,10 +1048,17 @@ function renderItemCard(plan, item, index) {
 		// Nothing to log until he actually begins, so the flow stays out of the
 		// way and the card is just "here is your material, ready when you are".
 		if (item.status === "Awaiting_Material") {
+			// Two different waits, and naming the wrong one costs days. A batch
+			// the checker rejected is waiting on HIM — nothing has been asked
+			// for — so it is sent to the Reissue tab rather than told to expect
+			// a delivery that nobody has requested.
+			const note = isUnraisedRemake(item)
+				? `The store has not been asked for this yet — raise it on the Reissue tab · ${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"}`
+				: `Nothing to cut until the store issues the material · ${item.phases.length} stages · ${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"}`;
 			phHtml += `
                 <div class="start-prod-row" style="background:#f8fafc; border-color:#e2e8f0; opacity: 0.8;">
                     <button type="button" class="primary-btn" disabled style="background:var(--text-muted); cursor:not-allowed;">Cannot start yet</button>
-                    <span class="start-prod-note">Nothing to cut until the store issues the material · ${item.phases.length} stages · ${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"}</span>
+                    <span class="start-prod-note">${note}</span>
                     ${reqMatBtn}
                 </div>
             `;
