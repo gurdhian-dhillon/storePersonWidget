@@ -212,7 +212,16 @@ string getEmployeeReport(string dateTxt)
 			agRow.put("status",ifnull(agD.Assignment_Status,"").toString().trim());
 			agRow.put("start",ifnull(agD.Start_Time,"").toString());
 			agRow.put("end",ifnull(agD.End_Time,"").toString());
-			agRow.put("outsourced","false");
+			// A THIRD PARTY'S SHARE. It has no Operator, so it falls into the "0"
+			// bucket below with the other unattributed work - which is right, it
+			// is nobody in this company's output. The flag is what stops it
+			// reading there as a stage nobody was put on.
+			agOutTxt = "false";
+			if(agD.Third_Party != null)
+			{
+				agOutTxt = "true";
+			}
+			agRow.put("outsourced",agOutTxt);
 			agRow.put("remarks",ifnull(agD.Remarks,"").toString());
 
 			workRows.add(agRow);

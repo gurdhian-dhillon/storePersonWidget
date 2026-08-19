@@ -1439,12 +1439,17 @@ th.col-num {
 }
 
 /* Fixed columns, so the rows do not re-flow every time somebody's name is
-   longer than the last one's. */
-.share-table th:nth-child(1) { width: 30%; }
+   longer than the last one's.
+
+   Re-balanced when vendors joined the table: 4% moved off Who, which only ever
+   holds a name, onto the two columns that grew. Start-end now has to fit a
+   returned vendor's "sent <date> - back <date>", and the last column a
+   "back at <stage>" note where it used to hold only a button. */
+.share-table th:nth-child(1) { width: 26%; }
 .share-table th:nth-child(2) { width: 14%; }
-.share-table th:nth-child(3) { width: 22%; }
+.share-table th:nth-child(3) { width: 24%; }
 .share-table th:nth-child(4) { width: 16%; }
-.share-table th:nth-child(5) { width: 18%; }
+.share-table th:nth-child(5) { width: 20%; }
 
 .share-table th {
     font-size: 0.7rem;
@@ -1472,16 +1477,27 @@ th.col-num {
     border-bottom: none;
 }
 
+/* NEITHER OF THESE MAY BE nowrap, and both were.
+   The columns are already pinned by table-layout:fixed above, so nowrap buys no
+   stability — it only decides whether content that does not fit WRAPS or SPILLS
+   over the next column. Both of these outgrew their share:
+
+     Who      a vendor's name now carries an OUT/BACK tag in front of it
+     Start-end  a returned vendor row reads "sent 19-Aug-2026 - back 19-Aug-2026",
+                which is roughly half again the width of the 22% it is given
+
+   The spill is invisible until the neighbouring cell has something in it, and
+   then the two print on top of each other. */
 .share-who {
     font-weight: 600;
     color: var(--text-main);
-    white-space: nowrap;
+    overflow-wrap: anywhere;
 }
 
 .share-time {
     font-size: 0.8rem;
     color: var(--text-muted);
-    white-space: nowrap;
+    overflow-wrap: anywhere;
 }
 
 /* A finished share is quieter than a live one. The rows he can still act on are
@@ -1497,6 +1513,43 @@ th.col-num {
 .share-tick {
     color: #16a34a;
     font-weight: 700;
+}
+
+/* A THIRD PARTY'S SHARE. The same row as an operator's, because it is the same
+   thing — pieces of this stage that somebody has. Marked, not separated: the
+   whole point of the row being here is that the vendor's forty and the cutters'
+   sixty add up to Qty_In in one place he can read. */
+.share-row.is-party {
+    background: #fffbeb;
+}
+
+.share-row.is-party.is-done {
+    background: #f8fafc;
+}
+
+.share-party-tag {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #92400e;
+    background: #fef3c7;
+    border-radius: 3px;
+    padding: 0.1rem 0.3rem;
+    margin-right: 0.35rem;
+    vertical-align: middle;
+}
+
+.share-row.is-party.is-done .share-party-tag {
+    color: var(--text-muted);
+    background: #eef2f6;
+}
+
+.share-row .is-muted {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    font-weight: 400;
 }
 
 /* Correcting a count he has already entered — quiet, because it is a repair,
@@ -1519,8 +1572,12 @@ th.col-num {
     background: #f1f5f9;
 }
 
+/* max-width, because the 5rem is a fixed size inside a percentage column. On a
+   narrow screen the column gets smaller and the input does not, so it spills
+   into the one beside it — the same way the text cells above used to. */
 .share-table input[type="number"] {
     width: 5rem;
+    max-width: 100%;
     padding: 0.35rem 0.4rem;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -1554,6 +1611,24 @@ th.col-num {
     align-items: center;
     gap: 0.4rem;
     justify-content: flex-end;
+}
+
+/* "back at <stage>" — a note saying why this row has no button, not a control.
+   Stage names run long ("Stitching (+ Accessories)") and this cell is 18% of a
+   fixed-layout table, so it MUST be allowed to wrap.
+
+   min-width:0 is the load-bearing line. A flex item defaults to min-width:auto
+   and will not shrink below its content, so the note kept its full width and —
+   because the row is justified to flex-end — overflowed LEFT, printing on top of
+   the Finished number two columns over. */
+.share-back-at {
+    min-width: 0;
+    font-size: 0.75rem;
+    line-height: 1.3;
+    color: var(--text-muted);
+    text-align: right;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .share-act .btn-stage {
@@ -2796,6 +2871,30 @@ th.col-num {
 .stage-card.is-outsourced .stage-status {
     color: var(--primary);
     font-weight: 600;
+}
+
+/* A LOOK-AHEAD STAGE. One send covers a block, so pieces can be at a vendor for
+   step 4 while step 2 is still being cut — and the supervisor has to be able to
+   see where they went the moment they leave. It shows what is already out and
+   nothing else: what it RECEIVED is the previous stage's output, which has not
+   happened yet, so it cannot be handed out from and cannot be ended.
+
+   Held back visually on purpose. It sits below the stage he is actually working
+   and must not compete with it. */
+.stage-card.is-ahead {
+    border-left: 3px dashed #cbd5e1;
+    background: #fcfcfd;
+    opacity: 0.92;
+}
+
+.stage-card.is-ahead .stage-status {
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.stage-card.is-ahead .stage-meter-left {
+    color: var(--text-muted);
+    font-style: italic;
 }
 
 /* Quantity, date and time on one line — they are one fact about one handover

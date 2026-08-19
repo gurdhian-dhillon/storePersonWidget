@@ -19,6 +19,14 @@ string saveStageAssignment(string payloadJson)
 	// finishing minutes apart both rewrite the parent, and the second write
 	// silently loses the first.
 	//
+	// A THIRD PARTY IS ONE OF THOSE SHARES. sendToThirdParty writes it - the same
+	// form, Third_Party filled instead of Operator - so a vendor doing 40 of a
+	// stage and two men doing the remaining 60 are three rows of one table, and
+	// the "how many are left to hand out" test below counts all three. This
+	// function never creates one, and it refuses to end, re-size or remove one:
+	// those pieces are on a van, and the only event that knows what became of
+	// them is the return.
+	//
 	// payload:
 	// {
 	//   "action": "add" | "end" | "update" | "remove",
@@ -257,10 +265,12 @@ string saveStageAssignment(string payloadJson)
 
 			uLog = 0;
 			uDone = false;
+			uParty = false;
 			for each  asC in Stage_Assignment[ID == asgId]
 			{
 				if (asC.Stage_Log != null) { uLog = asC.Stage_Log; }
 				if (ifnull(asC.Assignment_Status,"").toString().trim() == "Done") { uDone = true; }
+				if (asC.Third_Party != null) { uParty = true; }
 			}
 
 			if (uLog == 0)
@@ -270,6 +280,14 @@ string saveStageAssignment(string payloadJson)
 			if (uDone == true)
 			{
 				return "{\"success\":false,\"error\":\"His work is already finished, so his share cannot be re-sized.\"}";
+			}
+			// A THIRD PARTY'S SHARE IS PIECES ON A VAN. Re-sizing it would change
+			// how many are believed to be in someone else's workshop without
+			// anything physical having moved, and the return - which is the only
+			// event that knows the real number - is measured against it.
+			if (uParty == true)
+			{
+				return "{\"success\":false,\"code\":\"IS_THIRD_PARTY\",\"error\":\"Those pieces are with a third party. Take them back to record how many came in.\"}";
 			}
 
 			uIn = 0;
@@ -318,15 +336,26 @@ string saveStageAssignment(string payloadJson)
 
 			eLog = 0;
 			eAsg = 0;
+			eParty = false;
 			for each  asF in Stage_Assignment[ID == asgId]
 			{
 				if (asF.Stage_Log != null) { eLog = asF.Stage_Log; }
 				eAsg = ifnull(asF.Assigned_Qty,0);
+				if (asF.Third_Party != null) { eParty = true; }
 			}
 
 			if (eLog == 0)
 			{
 				return "{\"success\":false,\"error\":\"That share no longer exists. Refresh the screen.\"}";
+			}
+			// A THIRD PARTY'S SHARE CLOSES ON THE RETURN, not here.
+			// receiveFromThirdParty closes every stage of the block together and
+			// puts the loss on the last one; ending one of them by hand would
+			// break that chain silently, and there would be no returned date, no
+			// note, and nothing to say the van ever came back.
+			if (eParty == true)
+			{
+				return "{\"success\":false,\"code\":\"IS_THIRD_PARTY\",\"error\":\"Use Take it back to close what a third party did - it closes every stage they had.\"}";
 			}
 
 			// Re-ending an open stage's share is allowed - a mistyped count has
@@ -387,17 +416,27 @@ string saveStageAssignment(string payloadJson)
 			rFound = false;
 			rDone = false;
 			rLog = 0;
+			rParty = false;
 			for each  asI in Stage_Assignment[ID == asgId]
 			{
 				rFound = true;
 				if (asI.Stage_Log != null) { rLog = asI.Stage_Log; }
 				if (ifnull(asI.Assignment_Status,"").toString().trim() == "Done") { rDone = true; }
+				if (asI.Third_Party != null) { rParty = true; }
 			}
 
 			// Already gone is the outcome he asked for, not a failure.
 			if (rFound == false)
 			{
 				res = "{\"success\":true,\"assignmentId\":\"" + asgIdStr + "\",\"removed\":false}";
+			}
+			// A THIRD PARTY'S SHARE IS A PHYSICAL MOVEMENT. Deleting it says the
+			// van never left, which frees pieces to be handed out a second time
+			// while they are still in someone else's workshop - the one way this
+			// screen can invent stock out of nothing.
+			else if (rParty == true)
+			{
+				res = "{\"success\":false,\"code\":\"IS_THIRD_PARTY\",\"error\":\"Those pieces have gone out. Take them back instead - record 0 returned if none of them are coming.\"}";
 			}
 			else if (rDone == true)
 			{

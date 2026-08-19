@@ -28,8 +28,8 @@
             <button type="button" class="tab-btn is-active" data-tab="issue">
                 Issue<span class="tab-count" id="count-issue"></span>
             </button>
-            <button type="button" class="tab-btn" data-tab="stockin">
-                Stock in
+            <button type="button" class="tab-btn" data-tab="print">
+                Print
             </button>
             <button type="button" class="tab-btn" data-tab="history">
                 History
@@ -46,6 +46,9 @@
             <button type="button" class="tab-btn" data-tab="materials">
                 Raw materials
             </button>
+            <button type="button" class="tab-btn" data-tab="stockin">
+                Unallocated quantity
+            </button>
         </nav>
 
         <main class="tab-body">
@@ -58,18 +61,20 @@
                 <div id="dynamic-content"></div>
             </section>
 
-            <section class="tab-panel" id="panel-stockin"></section>
+            <section class="tab-panel" id="panel-print"></section>
             <section class="tab-panel" id="panel-history"></section>
             <section class="tab-panel" id="panel-waste"></section>
             <section class="tab-panel" id="panel-disputes"></section>
             <section class="tab-panel" id="panel-requests"></section>
             <section class="tab-panel" id="panel-materials"></section>
+            <section class="tab-panel" id="panel-stockin"></section>
 
         </main>
 
     </div>
 
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <script src="js/lot-allocator.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

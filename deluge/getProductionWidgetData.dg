@@ -645,8 +645,28 @@ string getProductionWidgetData(string supervisorId, string planId)
 						agOp = "";
 						if(ag.Operator != null) { agOp = ag.Operator; }
 
+						//----------------------------------------------------
+						// A THIRD PARTY IS A SHARE LIKE ANY OTHER.
+						//
+						// Its row carries a party instead of an operator, and the
+						// dates the pieces left and came back. The widget draws it
+						// in the same table as the men - which is the point: a
+						// stage split 40 to a vendor and 60 across two operators
+						// has one place that says where all 100 are.
+						//
+						// `party` empty is an ordinary operator share. Nothing is
+						// inferred from the operator being empty instead, because
+						// a stage opened before anyone was put on it has neither.
+						//----------------------------------------------------
+						agParty = "";
+						if(ag.Third_Party != null) { agParty = ag.Third_Party; }
+						agSent = "";
+						if(ag.Sent_On != null) { agSent = ag.Sent_On.toString("dd-MMM-yyyy"); }
+						agBack = "";
+						if(ag.Returned_On != null) { agBack = ag.Returned_On.toString("dd-MMM-yyyy"); }
+
 						if(asgJson != "") { asgJson = asgJson + ","; }
-						asgJson = asgJson + "{\"id\":\"" + ag.ID + "\",\"operator\":\"" + agOp + "\",\"assigned\":" + ifnull(ag.Assigned_Qty,0) + ",\"qtyOut\":" + ifnull(ag.Qty_Out,0) + ",\"start\":\"" + ifnull(ag.Start_Time,"") + "\",\"end\":\"" + ifnull(ag.End_Time,"") + "\",\"status\":\"" + ifnull(ag.Assignment_Status,"") + "\",\"remarks\":\"" + ifnull(ag.Remarks,"").toString().replaceAll("\"","'") + "\"}";
+						asgJson = asgJson + "{\"id\":\"" + ag.ID + "\",\"operator\":\"" + agOp + "\",\"party\":\"" + agParty + "\",\"osRef\":\"" + ifnull(ag.Outsource_Ref,"").toString().replaceAll("\"","'") + "\",\"sentOn\":\"" + agSent + "\",\"returnedOn\":\"" + agBack + "\",\"assigned\":" + ifnull(ag.Assigned_Qty,0) + ",\"qtyOut\":" + ifnull(ag.Qty_Out,0) + ",\"start\":\"" + ifnull(ag.Start_Time,"") + "\",\"end\":\"" + ifnull(ag.End_Time,"") + "\",\"status\":\"" + ifnull(ag.Assignment_Status,"") + "\",\"remarks\":\"" + ifnull(ag.Remarks,"").toString().replaceAll("\"","'") + "\"}";
 					}
 
 					// Outsourcing rides on the SAME stage row. A stage sent out is

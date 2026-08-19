@@ -96,7 +96,9 @@ body {
     text-align: center;
 }
 
-.empty-state.hidden { display: none; }
+.empty-state.hidden {
+    display: none;
+}
 
 .empty-state .icon {
     font-size: 3rem;
@@ -134,11 +136,19 @@ body {
     border-radius: 4px;
     border: 1px solid var(--border);
     overflow: hidden;
+    margin-bottom: 1rem;
 }
 
 @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 .item-header {
@@ -253,6 +263,7 @@ body {
 
 .item-body {
     display: none;
+    padding: 1.5rem 1.5rem 0;
 }
 
 .item-card.open .item-body {
@@ -264,27 +275,15 @@ body {
     padding: 1rem 1.25rem;
 }
 
-.section-title {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 1rem;
-    margin-top: 1.5rem;
-}
-.section-title:first-child {
-    margin-top: 0;
-}
-
 .table-wrapper {
     overflow: auto;
     /* Long material lists scroll inside the card instead of pushing the
        Issue button off-screen. */
     max-height: 60vh;
     border-radius: var(--radius);
-    border: 1px solid var(--border);
+    border: 1px solid #dbe3ec;
     background: var(--surface);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
 }
 
 table {
@@ -295,8 +294,9 @@ table {
     white-space: nowrap;
 }
 
-th, td {
-    padding: 0.55rem 0.875rem;
+th,
+td {
+    padding: 0.625rem 1rem;
     font-size: 0.875rem;
     border-bottom: 1px solid var(--border);
 }
@@ -307,11 +307,12 @@ th {
     z-index: 2;
     background-color: #f1f5f9;
     font-weight: 600;
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
-    color: var(--text-muted);
-    border-bottom: 1px solid #cbd5e1;
+    letter-spacing: 0.06em;
+    color: #475569;
+    border-bottom: 2px solid #cbd5e1;
+    padding: 0.7rem 1rem;
 }
 
 tr:last-child td {
@@ -319,8 +320,9 @@ tr:last-child td {
 }
 
 tbody tr {
-    transition: background-color 0.15s ease;
+    transition: background-color 0.15s ease, box-shadow 0.15s ease;
 }
+
 tbody tr:hover {
     background-color: #f8fafc;
 }
@@ -330,11 +332,17 @@ tbody tr:hover {
 tbody tr.row-selected {
     background-color: #eff6ff;
 }
+
 tbody tr.row-selected:hover {
     background-color: #e0ecfe;
 }
+
 tbody tr.row-selected td:first-child {
     box-shadow: inset 3px 0 0 var(--primary);
+}
+
+tbody tr.row-selected td {
+    border-bottom-color: #d6e0f0;
 }
 
 .material-name-cell .mat-name {
@@ -342,13 +350,17 @@ tbody tr.row-selected td:first-child {
     display: flex;
     align-items: center;
     gap: 0.4rem;
+    white-space: normal;
+    word-break: break-word;
 }
+
 .material-name-cell .mat-sku {
     color: var(--text-muted);
     font-size: 0.7rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     letter-spacing: 0.02em;
-    margin-top: 0.1rem;
+    margin-top: 0.15rem;
+    opacity: 0.8;
 }
 
 /* Units sit next to the number but stay visually secondary so the
@@ -363,6 +375,7 @@ tbody tr.row-selected td:first-child {
 .is-zero {
     color: #94a3b8;
 }
+
 .is-zero .unit {
     color: #cbd5e1;
 }
@@ -407,7 +420,7 @@ tbody tr.row-selected td:first-child {
 }
 
 /* Two sections per card: fabric and everything else. */
-.mat-section + .mat-section {
+.mat-section+.mat-section {
     margin-top: 1.5rem;
 }
 
@@ -416,12 +429,14 @@ tbody tr.row-selected td:first-child {
     align-items: baseline;
     gap: 0.5rem;
     flex-wrap: wrap;
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-muted);
-    margin-bottom: 0.5rem;
+    letter-spacing: 0.06em;
+    color: #475569;
+    margin-bottom: 0.6rem;
+    padding-bottom: 0.35rem;
+    border-bottom: 1px solid #e8ecf1;
 }
 
 .section-note {
@@ -454,12 +469,15 @@ tbody tr.row-selected td:first-child {
 tbody tr.row-issued {
     background-color: #f6fdf9;
 }
+
 tbody tr.row-issued:hover {
     background-color: #eefaf3;
 }
+
 tbody tr.row-issued td:first-child {
     box-shadow: inset 3px 0 0 var(--status-success);
 }
+
 tbody tr.row-issued .mat-name,
 tbody tr.row-issued .col-strong {
     color: var(--text-muted);
@@ -534,7 +552,9 @@ tbody tr.row-issued .col-strong {
 .col-num {
     text-align: right;
     font-variant-numeric: tabular-nums;
+    width: 10rem;
 }
+
 th.col-num {
     text-align: right;
 }
@@ -577,7 +597,13 @@ th.col-num {
 }
 
 .col-issue {
-    width: 1%;
+    width: 10rem;
+    min-width: 9rem;
+}
+
+.issue-cell-waste {
+    height: 3rem;
+    box-sizing: border-box;
 }
 
 .issue-checkbox {
@@ -669,6 +695,7 @@ th.col-num {
     -webkit-appearance: none;
     margin: 0;
 }
+
 .issue-input {
     -moz-appearance: textfield;
     appearance: textfield;
@@ -718,12 +745,23 @@ th.col-num {
     animation: shimmer 1.4s ease infinite;
 }
 
-.skeleton-line.w-40 { width: 40%; height: 1.15rem; }
-.skeleton-line.w-70 { width: 70%; }
+.skeleton-line.w-40 {
+    width: 40%;
+    height: 1.15rem;
+}
+
+.skeleton-line.w-70 {
+    width: 70%;
+}
 
 @keyframes shimmer {
-    0% { background-position: 100% 50%; }
-    100% { background-position: 0 50%; }
+    0% {
+        background-position: 100% 50%;
+    }
+
+    100% {
+        background-position: 0 50%;
+    }
 }
 
 .issued-locked-pill {
@@ -1128,7 +1166,7 @@ th.col-num {
 .issue-stack {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: 0.35rem;
     align-items: flex-end;
 }
 
@@ -1183,7 +1221,9 @@ th.col-num {
 .col-num,
 .col-issue,
 .col-note {
-    vertical-align: middle;
+    vertical-align: top;
+    padding-top: 0.75rem;
+    white-space: normal;
 }
 
 /* Sits under the input, so it must not push the row taller as it appears and
@@ -1214,11 +1254,13 @@ th.col-num {
     width: 8rem;
     vertical-align: middle;
 }
+
 .col-lot {
     width: 6rem;
     vertical-align: middle;
     white-space: nowrap;
 }
+
 .col-lot .w-lot-none {
     font-size: 0.75rem;
     color: var(--text-muted);
@@ -1232,10 +1274,13 @@ th.col-num {
    lines and took the row to 400px tall, pushing the next fabric row off screen.
    The material column beside it is the greedy one and can spare this. */
 .col-lot-issue {
-    width: 15rem;
-    min-width: 12rem;
-    vertical-align: middle;
+    width: 16rem;
+    min-width: 13rem;
+    vertical-align: top;
+    padding-top: 0.75rem;
+    white-space: normal;
 }
+
 .carton-input {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8rem;
@@ -1245,6 +1290,7 @@ th.col-num {
     width: 100%;
     text-transform: uppercase;
 }
+
 .carton-input:focus {
     outline: none;
     border-color: var(--primary);
@@ -1255,15 +1301,36 @@ th.col-num {
 .waste-where {
     color: var(--text-muted);
 }
+
 .waste-where b {
     color: var(--text-main);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-weight: 600;
 }
+
 /* Booked in before cartons existed. Said out loud, because a blank space here
    reads as a rendering fault rather than as missing information. */
 .waste-nocarton {
     color: #b45309;
+}
+
+/* When waste-where lines appear in the LOT column, give them a clean card-like
+   appearance so they visually belong to the lot info beside the fresh-fabric
+   lot lines. */
+.col-lot-issue .waste-where {
+    margin-top: 0.35rem;
+    padding: 0.3rem 0.5rem;
+    background: #f8fafb;
+    border-left: 2px solid #047857;
+    border-radius: 0 4px 4px 0;
+    font-size: 0.72rem;
+    line-height: 1.3;
+    white-space: normal;
+    height: 3rem;
+    box-sizing: border-box;
+    display: flex;
+    gap: 0.25rem;
+    align-items: center;
 }
 
 /* Closed until the line is actually short - the server only keeps a remark
@@ -1299,7 +1366,8 @@ th.col-num {
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--text-muted);
-    white-space: nowrap;
+    white-space: normal;
+    word-break: break-word;
 }
 
 /* ---- Waste, picked out within the combined fabric row ---- */
@@ -1311,15 +1379,32 @@ th.col-num {
    to fetch, and inline they read as one sentence. block + fit-content keeps the
    pill hugging its text while staying right-aligned in the numeric column. */
 .qty-sub-waste {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-end;
+    text-align: right;
     width: fit-content;
-    margin-top: 0.3rem;
+    max-width: 100%;
+    margin-top: 0.35rem;
     margin-left: auto;
-    padding: 0.15rem 0.5rem;
+    padding: 0.2rem 0.55rem;
     border-radius: 6px;
     background: #ecfdf5;
     color: #047857;
     font-weight: 600;
+    font-size: 0.72rem;
+    white-space: normal;
+    word-break: break-word;
+    height: 3rem;
+    box-sizing: border-box;
+}
+
+.qty-sub-waste .waste-dim {
+    font-size: 0.65rem;
+    font-weight: 500;
+    opacity: 0.9;
+    margin-top: 0.1rem;
 }
 
 /* ============================================================
@@ -1684,6 +1769,7 @@ th.col-num {
 .exc-lines .exc-who {
     font-weight: 600;
 }
+
 .exc-lines .exc-item {
     color: var(--text-muted);
     font-size: 0.75rem;
@@ -1786,6 +1872,7 @@ th.col-num {
 .prio-tag {
     color: var(--text-muted);
 }
+
 .prio-tag.is-top {
     color: var(--primary);
     font-weight: 700;
@@ -1798,6 +1885,7 @@ th.col-num {
 .stockin-search {
     padding: 0 0 0.75rem 0;
 }
+
 .stockin-search .note-input {
     width: 100%;
     max-width: 26rem;
@@ -1812,6 +1900,7 @@ th.col-num {
     padding: 1rem 1.25rem 0.25rem;
     align-items: flex-end;
 }
+
 .si-field {
     display: flex;
     flex-direction: column;
@@ -1822,14 +1911,91 @@ th.col-num {
     color: var(--text-muted);
     font-weight: 600;
 }
+
 .si-field .note-input,
 .si-field .issue-input {
     min-width: 10rem;
     text-transform: none;
     letter-spacing: normal;
 }
+
 .si-field .issue-input {
     min-width: 7rem;
+}
+
+/* ---- Print ----
+   Same field row as Stock in, reusing .si-field. Kept as its own class because
+   the print form carries five fields to Stock in's three and needs to wrap
+   earlier — the store person is on a tablet at the counter. */
+.print-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    padding: 1rem 1.25rem 0.25rem;
+    align-items: flex-end;
+}
+
+/* The send and receive line tables sit inside an open card, so they need the
+   same inset the form above them has rather than running to the card edge. */
+.print-form+.table-wrapper,
+.item-body .table-wrapper+.raise-btn {
+    margin: 0.5rem 1.25rem;
+}
+
+/* A piece length input is a small number and does not want the wide default. */
+.item-body table .issue-input,
+.item-body table .note-input {
+    min-width: 5.5rem;
+    width: 100%;
+}
+
+/* .issue-input IS DELIBERATELY BORDERLESS. It normally sits inside
+   .issue-input-group, which draws the border around the input and its unit
+   suffix together. Used bare — as the print form, the print line tables and
+   Stock In's quantity box all do — it renders as plain text on the card and
+   there is nothing to say a number can be typed there. The store person reads
+   it as a display value and never touches it.
+   Give those the border the group would have given them. */
+.si-field .issue-input,
+.print-form .issue-input,
+.item-body table .issue-input {
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    background: var(--surface);
+    padding: 0.4rem 0.55rem;
+}
+
+.si-field .issue-input:focus,
+.print-form .issue-input:focus,
+.item-body table .issue-input:focus,
+.item-body table .note-input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+    outline: none;
+}
+
+/* The grey ground for a disabled field normally comes from .issue-input-group,
+   which these bare inputs do not have — so without this the width cell looks
+   exactly like the two beside it that DO take a value. */
+.item-body table .issue-input:disabled {
+    background: #f1f5f9;
+    border-color: var(--border);
+}
+
+/* Pieces that did not come back. Loud, because it is a write-off against the
+   plain SKU that cannot be undone once the receipt is saved. */
+.recv-short {
+    color: var(--status-danger);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Metres is a read-only consequence of the length and the count beside it, so it
+   is set apart from the two that are inputs — otherwise the row reads as three
+   boxes of which one mysteriously refuses to accept anything. */
+.print-derived {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
 }
 
 /* ---- Lots ----
@@ -1856,6 +2022,7 @@ th.col-num {
     color: var(--text-muted);
     padding-top: 0.35rem;
 }
+
 .exc-nolot {
     font-size: 0.85rem;
     color: #b45309;
@@ -1866,9 +2033,11 @@ th.col-num {
 .sum-lot {
     white-space: nowrap;
 }
+
 .sum-lot .lot-id {
     font-weight: 600;
 }
+
 .sum-lot-note {
     font-size: 0.72rem;
     color: #b45309;
@@ -1885,15 +2054,34 @@ th.col-num {
    under the metres box that it explains. The table this replaced carried a
    single row of data in four columns and read as clutter. */
 .lot-from {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-align: left;
+    padding: 0.25rem 0.5rem;
+    margin-top: 0.2rem;
+    white-space: nowrap;
+    background: #f1f5f9;
+    border-left: 2px solid var(--primary);
+    border-radius: 0 4px 4px 0;
+}
+
+.lot-from b {
+    color: var(--text-main);
+    font-weight: 700;
+}
+
+/* Which physical pieces to fetch, under the lot line that names them. Only ever
+   on a Pieces lot — printed cloth is a stack, not a roll he can measure off, so
+   "9 Mtr off P1" is not an instruction anyone can follow. Indented under its lot
+   because it belongs to that line and not to the row. */
+.lot-pieces {
     font-size: 0.72rem;
     color: var(--text-muted);
     text-align: left;
-    padding-top: 0.15rem;
+    padding: 0.1rem 0.5rem 0.25rem 1.1rem;
     white-space: nowrap;
-}
-.lot-from b {
-    color: var(--text);
-    font-weight: 600;
+    background: #f1f5f9;
+    border-left: 2px solid var(--primary);
 }
 
 /* Only when a split was forced, so it is worth a colour. */
@@ -1959,7 +2147,142 @@ th.col-num {
     border-radius: 0.35rem;
     cursor: pointer;
 }
+
 .lot-override-btn:hover {
     border-color: #b45309;
     color: #b45309;
+}
+
+.unalloc-badge {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #e0e7ff;
+    border: 1px solid #c7d2fe;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+}
+
+.unalloc-val {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #3730a3;
+}
+
+.unalloc-lbl {
+    font-size: 0.65rem;
+    color: #4338ca;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+}
+
+/* Professional styling for allocation form */
+.alloc-form {
+    background: #f8fafc;
+    padding: 1.25rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    margin-top: 1rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.alloc-title {
+    margin: 0 0 0.75rem 0;
+    color: var(--text-main);
+    font-size: 0.95rem;
+    font-weight: 600;
+    width: 100%;
+}
+
+.alloc-form .note-input,
+.alloc-form .issue-input {
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+    color: var(--text-main);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.alloc-form .note-input:focus,
+.alloc-form .issue-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.alloc-form .issue-input[readonly] {
+    background: #f1f5f9;
+    color: #64748b;
+    cursor: not-allowed;
+    border-color: #cbd5e1;
+}
+
+.alloc-form .si-field {
+    color: var(--text-main);
+    font-weight: 500;
+}
+
+/* Professional Search Bar Styling */
+.search-bar-container {
+    padding: 0 0 1.25rem 0;
+}
+
+.search-input-wrapper {
+    position: relative;
+    width: 100%;
+    max-width: 100%;
+    display: flex;
+    align-items: center;
+}
+
+.search-icon {
+    position: absolute;
+    left: 1rem;
+    color: #6b7280;
+    pointer-events: none;
+}
+
+.professional-search {
+    width: 100%;
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 9999px;
+    padding: 0.75rem 1rem 0.75rem 2.75rem;
+    font-family: inherit;
+    font-size: 0.95rem;
+    color: var(--text-main);
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    transition: all 0.2s ease;
+}
+
+.professional-search:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+.professional-search::placeholder {
+    color: #9ca3af;
+}
+
+/* Print Jobs accordion UI */
+#print-jobs .item-card {
+    margin-bottom: 1rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+    background: #ffffff;
+}
+
+#print-jobs .item-body {
+    background-color: #f8fafc;
+    border-top: 1px solid #f1f5f9;
+    padding-bottom: 0.5rem;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
 }

@@ -57,7 +57,7 @@
                 <span class="legend-dot dot-issue"></span>
                 <div>
                     <b>Allocated right now</b>
-                    <span>Re-decided every time this screen loads, before anything is issued. Offcuts first, fresh cloth for the rest — so it is normally lower than the plan.</span>
+                    <span>Re-decided every time this screen loads, before anything is issued. One shade per order, its own offcuts first — so it is normally lower than the plan, and it moves with the rack.</span>
                 </div>
             </div>
             <div class="legend-item">
@@ -65,6 +65,17 @@
                 <div>
                     <b>Waste this will throw off</b>
                     <span>Predicted, not recorded. The side strip, part row and tail the cutting is expected to leave.</span>
+                </div>
+            </div>
+            <!-- The only one of the four that is a RECORD rather than a
+                 calculation. The three above answer "what should happen"; this
+                 answers "what did", and it is the only place a shade that was
+                 overridden by hand can be seen at all. -->
+            <div class="legend-item">
+                <span class="legend-dot dot-issued"></span>
+                <div>
+                    <b>What actually went out</b>
+                    <span>Recorded at the counter, shade by shade. Does not move, and says whether every handover matched the shade the order started in.</span>
                 </div>
             </div>
         </div>
@@ -88,6 +99,7 @@
     </div>
 
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <script src="../js/lot-allocator.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

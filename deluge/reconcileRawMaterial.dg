@@ -1,0 +1,192 @@
+string reconcileRawMaterial(string skuPrefix)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		orgId = "60076905558";
+		itemUrl = "https://www.zohoapis.in/inventory/v1/items/";
+		maxCalls = 60;
+		pfx = ifnull(skuPrefix,"").toString().trim();
+		callsUsed = 0;
+		checked = 0;
+		agreed = 0;
+		differs = 0;
+		unmapped = 0;
+		remaining = 0;
+		apiError = "";
+		diffJson = "";
+		lotJson = "";
+		lotBroken = 0;
+		netDiff = 0.0;
+		for each  rmRec in Raw_Material[ID != 0]
+		{
+			rmSku = ifnull(rmRec.SKU,"").toString().trim();
+			invItem = ifnull(rmRec.Inventory_Item_ID,"").toString().trim();
+			wanted = true;
+			if(pfx != "" && rmSku.indexOf(pfx) != 0)
+			{
+				wanted = false;
+			}
+			if(rmSku == "" || wanted == false)
+			{
+				continue;
+			}
+			if(invItem == "")
+			{
+				unmapped = unmapped + 1;
+				continue;
+			}
+			if(callsUsed >= maxCalls || apiError != "")
+			{
+				remaining = remaining + 1;
+				continue;
+			}
+			isFab = ifnull(rmRec.Is_Fabric,false);
+			wS = ifnull(rmRec.Wash_Quantity,"0").toString().trim();
+			if(wS == "")
+			{
+				wS = "0";
+			}
+			uS = ifnull(rmRec.Unwash_Quantity,"0").toString().trim();
+			if(uS == "")
+			{
+				uS = "0";
+			}
+			qS = ifnull(rmRec.Quantity,"0").toString().trim();
+			if(qS == "")
+			{
+				qS = "0";
+			}
+			tS = ifnull(rmRec.In_Transit_Qty,"0").toString().trim();
+			if(tS == "")
+			{
+				tS = "0";
+			}
+			dS = ifnull(rmRec.Disputed_Qty,"0").toString().trim();
+			if(dS == "")
+			{
+				dS = "0";
+			}
+			iwS = ifnull(rmRec.In_Wash_Qty,"0").toString().trim();
+			if(iwS == "")
+			{
+				iwS = "0";
+			}
+			unS = ifnull(rmRec.Unallocated_Qty,"0").toString().trim();
+			if(unS == "")
+			{
+				unS = "0";
+			}
+			baseQty = qS.toDecimal();
+			if(isFab == true)
+			{
+				baseQty = wS.toDecimal() + uS.toDecimal();
+			}
+			creatorQty = baseQty + tS.toDecimal() + dS.toDecimal() + iwS.toDecimal() + unS.toDecimal();
+			lotOn = 0.0;
+			lotTr = 0.0;
+			lotDs = 0.0;
+			lotIw = 0.0;
+			lotCount = 0;
+			for each  ltRec in Raw_Material_Lot[Material == rmRec.ID]
+			{
+				lotCount = lotCount + 1;
+				lwS = ifnull(ltRec.Wash_Quantity,"0").toString().trim();
+				if(lwS == "")
+				{
+					lwS = "0";
+				}
+				luS = ifnull(ltRec.Unwash_Quantity,"0").toString().trim();
+				if(luS == "")
+				{
+					luS = "0";
+				}
+				ltS = ifnull(ltRec.In_Transit_Qty,"0").toString().trim();
+				if(ltS == "")
+				{
+					ltS = "0";
+				}
+				ldS = ifnull(ltRec.Disputed_Qty,"0").toString().trim();
+				if(ldS == "")
+				{
+					ldS = "0";
+				}
+				liS = ifnull(ltRec.In_Wash_Qty,"0").toString().trim();
+				if(liS == "")
+				{
+					liS = "0";
+				}
+				lotOn = lotOn + lwS.toDecimal() + luS.toDecimal();
+				lotTr = lotTr + ltS.toDecimal();
+				lotDs = lotDs + ldS.toDecimal();
+				lotIw = lotIw + liS.toDecimal();
+			}
+			lotGap = 0.0;
+			if(isFab == true && lotCount > 0)
+			{
+				lotGap = (baseQty - lotOn) + (tS.toDecimal() - lotTr) + (dS.toDecimal() - lotDs) + (iwS.toDecimal() - lotIw);
+			}
+			if(lotGap > 0.005 || lotGap < -0.005)
+			{
+				lotBroken = lotBroken + 1;
+				if(lotJson != "")
+				{
+					lotJson = lotJson + ",";
+				}
+				lotJson = lotJson + "{\"sku\":\"" + rmSku.replaceAll("\"","'") + "\",\"lots\":" + lotCount + ",\"parentOnHand\":" + baseQty + ",\"lotOnHand\":" + lotOn + ",\"parentTransit\":" + tS.toDecimal() + ",\"lotTransit\":" + lotTr + ",\"parentDisputed\":" + dS.toDecimal() + ",\"lotDisputed\":" + lotDs + "}";
+			}
+			callsUsed = callsUsed + 1;
+			itmResp = invokeurl
+			[
+				url :itemUrl + invItem + "?organization_id=" + orgId
+				type :GET
+				connection:"inventory_connection"
+			];
+			iCode = ifnull(itmResp.get("code"),"-1").toString().trim();
+			if(iCode != "0")
+			{
+				apiError = "code " + iCode + " on " + rmSku + ": " + ifnull(itmResp.get("message"),"").toString();
+				continue;
+			}
+			invQty = 0.0;
+			itmBlock = itmResp.get("item");
+			if(itmBlock != null)
+			{
+				sS = ifnull(itmBlock.get("stock_on_hand"),"0").toString().trim();
+				if(sS == "")
+				{
+					sS = "0";
+				}
+				invQty = sS.toDecimal();
+			}
+			checked = checked + 1;
+			gap = creatorQty - invQty;
+			if(gap > -0.005 && gap < 0.005)
+			{
+				agreed = agreed + 1;
+			}
+			else
+			{
+				differs = differs + 1;
+				netDiff = netDiff + gap;
+				if(diffJson != "")
+				{
+					diffJson = diffJson + ",";
+				}
+				nameTxt = ifnull(rmRec.Material_Display_Name,"").toString().trim().replaceAll("\"","'");
+				diffJson = diffJson + "{\"sku\":\"" + rmSku.replaceAll("\"","'") + "\",\"name\":\"" + nameTxt + "\",\"itemId\":\"" + invItem + "\",\"creator\":" + creatorQty + ",\"inventory\":" + invQty + ",\"applyToInventory\":" + gap + "}";
+			}
+		}
+		errJson = "";
+		if(apiError != "")
+		{
+			errJson = "\"" + apiError.replaceAll("\"","'") + "\"";
+		}
+		res = "{\"errors\":[" + errJson + "],\"callsUsed\":" + callsUsed + ",\"checked\":" + checked + ",\"agreed\":" + agreed + ",\"differs\":" + differs + ",\"unmapped\":" + unmapped + ",\"remaining\":" + remaining + ",\"lotMismatches\":" + lotBroken + ",\"lotRows\":[" + lotJson + "],\"netDifference\":" + netDiff + ",\"rows\":[" + diffJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

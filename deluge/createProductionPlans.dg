@@ -60,6 +60,8 @@ string createProductionPlans()
 	// are columns now, so a new reason is one more string.
 	failedList = list();
 	createdList = list();
+	supervisorList = list();
+	storeList = list();
 	logLines = list();
 	// Oldest first - an order that has been waiting longest gets planned first,
 	// and that ordering carries through to the store's issue screen, where it is
@@ -138,6 +140,7 @@ string createProductionPlans()
 		planItems = list();
 		itemLineCount = 0;
 		matLineCount = 0;
+		totalProduceQty = 0;
 		// Item names, not ids. A mail naming 474519000000014002 is a mail nobody
 		// can act on.
 		noBomTxt = "";
@@ -146,6 +149,7 @@ string createProductionPlans()
 		{
 			finishedItemId = soRow.SKU;
 			produceQty = ifnull(soRow.Quantity,0);
+			totalProduceQty = totalProduceQty + produceQty;
 			itemName = soRow.Item_Name;
 
 			//------------------------------------------------------------
@@ -464,6 +468,8 @@ string createProductionPlans()
 		// is either created or it is not, and how many requirement rows it grew
 		// is a question for the plan itself. Still logged, just not mailed.
 		createdList.add("<tr><td style='" + mTd + ";white-space:nowrap'><b style='color:#2563eb'>" + planNo + "</b></td><td style='" + mTd + ";white-space:nowrap'>" + so.Sales_Order + "</td><td style='" + mTd + "'>" + supName + "</td><td style='" + mTdR + "'>" + itemLineCount + "</td></tr>");
+		supervisorList.add("<tr><td style='" + mTd + ";white-space:nowrap'><b>" + so.Sales_Order + "</b></td><td style='" + mTdR + "'>" + totalProduceQty + "</td></tr>");
+		storeList.add("<tr><td style='" + mTd + "'><b>" + supName + "</b></td><td style='" + mTdR + "'>" + matLineCount + " materials</td></tr>");
 	}
 	//------------------------------------------------------------------------
 	// ONE MAIL PER RUN, covering both halves of what happened: the plans that
@@ -627,6 +633,58 @@ string createProductionPlans()
 		]
 		mailNote = "accepted, to " + notifyTo + ", subject '" + subjTxt + "'";
 		logLines.add("MAIL " + mailNote);
+
+		// Store Person Email
+		storeRowsHtml = "";
+		for each sr in storeList
+		{
+			storeRowsHtml = storeRowsHtml + sr;
+		}
+		storeSubject = "Materials Ready to Issue: " + createdCount + " new " + planWord;
+		storeBody = "<div style='background:#f0fdf4;padding:24px 12px;font-family:" + mFont + "'>";
+		storeBody = storeBody + "<table role='presentation' width='640' cellpadding='0' cellspacing='0' border='0' style='width:640px;max-width:100%;background:#ffffff;border:1px solid #bbf7d0;border-radius:10px;margin:0 auto;overflow:hidden;'>";
+		storeBody = storeBody + "<tr><td style='background:#16a34a;padding:18px 24px;'>";
+		storeBody = storeBody + "<div style='font-size:18px;font-weight:700;color:#ffffff'>Materials Ready to Issue</div>";
+		storeBody = storeBody + "</td></tr>";
+		storeBody = storeBody + "<tr><td style='padding:24px;'>";
+		storeBody = storeBody + "<div style='font-size:14px;color:#334155;margin-bottom:20px'>" + createdCount + " new production " + planWord + " have been created. The following supervisors require materials:</div>";
+		storeBody = storeBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;'>";
+		storeBody = storeBody + "<tr><th style='" + mTh + "'>Supervisor</th><th style='" + mThR + "'>Materials to Issue</th></tr>";
+		storeBody = storeBody + storeRowsHtml;
+		storeBody = storeBody + "</table></td></tr></table></div>";
+		sendmail
+		[
+			from :zoho.adminuserid
+			to :notifyTo
+			subject :storeSubject
+			message :storeBody
+		]
+
+		// Supervisor Email
+		supRowsHtml = "";
+		for each  sr in supervisorList
+		{
+			supRowsHtml = supRowsHtml + sr;
+		}
+		supSubject = "New Order Assigns: " + createdCount + " " + planWord;
+		supBody = "<div style='background:#f0f9ff;padding:24px 12px;font-family:" + mFont + "'>";
+		supBody = supBody + "<table role='presentation' width='640' cellpadding='0' cellspacing='0' border='0' style='width:640px;max-width:100%;background:#ffffff;border:1px solid #bae6fd;border-radius:10px;margin:0 auto;overflow:hidden;'>";
+		supBody = supBody + "<tr><td style='background:#0ea5e9;padding:18px 24px;'>";
+		supBody = supBody + "<div style='font-size:18px;font-weight:700;color:#ffffff'>New Order Assigns</div>";
+		supBody = supBody + "</td></tr>";
+		supBody = supBody + "<tr><td style='padding:24px;'>";
+		supBody = supBody + "<div style='font-size:14px;color:#334155;margin-bottom:20px'>" + createdCount + " new production " + planWord + " have been created and assigned to you.</div>";
+		supBody = supBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;'>";
+		supBody = supBody + "<tr><th style='" + mTh + "'>Sales Order No.</th><th style='" + mThR + "'>Total Pieces</th></tr>";
+		supBody = supBody + supRowsHtml;
+		supBody = supBody + "</table></td></tr></table></div>";
+		sendmail
+		[
+			from :zoho.adminuserid
+			to :notifyTo
+			subject :supSubject
+			message :supBody
+		]
 		}
 	}
 	catch (eMail)

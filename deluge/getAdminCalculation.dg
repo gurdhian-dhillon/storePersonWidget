@@ -537,6 +537,21 @@ string getAdminCalculation(string salesOrderId)
 	//====================================================================
 	orderPlans = Production_Planning[Sales_Order == soId] sort by Added_Time;
 
+	//--------------------------------------------------------------------
+	// WHICH SHADE EACH ROLL IS, once, for every lot in the system.
+	//
+	// A lookup holds a record id, so every lot reference below - the pin, the
+	// handover line, the override - comes back as an 18-digit number that is
+	// unreadable on screen. One query resolves all of them; the alternative is a
+	// fetch per reference inside a loop, which is the shape that blows the
+	// statement-execution limit, and that limit is not catchable.
+	//--------------------------------------------------------------------
+	lotNoById = Map();
+	for each  lotRow in Raw_Material_Lot[ID != 0]
+	{
+		lotNoById.put(lotRow.ID + "",ifnull(lotRow.Lot_Number,"").toString().trim().replaceAll("\"","'"));
+	}
+
 	for each  plan in orderPlans
 	{
 		supName2 = "Unknown";
@@ -546,6 +561,98 @@ string getAdminCalculation(string salesOrderId)
 			for each  emp2 in Employee[ID == supId2]
 			{
 				supName2 = ifnull(emp2.Employee_Name,"").toString().replaceAll("\"","'");
+			}
+		}
+
+		//----------------------------------------------------------------
+		// WHAT ACTUALLY CROSSED THE COUNTER, lot by lot.
+		//
+		// Everything above this point is what the machine WOULD do. This is the
+		// only record of what a person actually did, and it is the only thing
+		// that can answer the question the audit exists for: which shade was
+		// this order cut in, and if it went out in two, who decided that.
+		//
+		// Read from Material_Issue.Issue_Lines, which is where the lot is
+		// stamped as the cloth leaves. Not from the requirement: that records
+		// metres and has never recorded which cloth they were.
+		//
+		// VIA THE SUPERVISOR, not the plan. Material_Issue.Plan holds the FIRST
+		// plan a handover touched, so a handover spanning two plans is stamped
+		// with one of them and filtering on it would miss the other's lines
+		// entirely. The line's own Plan_Item is exact. Same reasoning
+		// saveWasteFromCutting already relies on.
+		//
+		// Bounded by one supervisor's handovers and hoisted out of the item loop,
+		// so this is one query per plan rather than one per material line.
+		//----------------------------------------------------------------
+		issuedByKey = Map();
+		if(supId2 != null)
+		{
+			// sort by on its own assignment, never inline in the for each header.
+			supHandovers = Material_Issue[Issued_To == supId2] sort by Added_Time;
+
+			for each  mi in supHandovers
+			{
+				for each  miL in mi.Issue_Lines
+				{
+					liItem = ifnull(miL.Plan_Item,"").toString().trim();
+					liMat = ifnull(miL.Material,"").toString().trim();
+
+					if(liItem != "" && liMat != "")
+					{
+						lqS = ifnull(miL.Qty,"0").toString().trim();
+						if(lqS == "")
+						{
+							lqS = "0";
+						}
+						lsS = ifnull(miL.Settled_Qty,"0").toString().trim();
+						if(lsS == "")
+						{
+							lsS = "0";
+						}
+
+						liLot = ifnull(miL.Lot,"").toString().trim();
+						liLotNo = ifnull(lotNoById.get(liLot),"").toString();
+						if(liLotNo == "")
+						{
+							// A handover from before lots existed. Says so rather
+							// than showing a blank, which reads as a fault.
+							liLotNo = "not recorded";
+						}
+
+						// The override, and it is the whole point of keeping this.
+						// Issued_Lot holds the ORIGINAL shade; the line holds what
+						// actually left the shelf. The disagreement between them is
+						// the evidence a person chose it, and the note is the only
+						// place the reason survives.
+						liFrom = ifnull(miL.Lot_Override_From,"").toString().trim();
+						liFromNo = "";
+						if(liFrom != "")
+						{
+							liFromNo = ifnull(lotNoById.get(liFrom),"").toString();
+						}
+
+						// Issue_Date, which is what issueMaterials writes. Formatted
+						// rather than dumped: a bare Date renders with a time
+						// component nobody put there, and this column is read
+						// beside handovers days apart.
+						liOn = "";
+						if(mi.Issue_Date != null)
+						{
+							liOn = mi.Issue_Date.toString("dd-MMM-yyyy");
+						}
+
+						oneIss = "{\"lot\":\"" + liLotNo + "\",\"qty\":" + lqS.toDecimal() + ",\"settled\":" + lsS.toDecimal() + ",\"on\":\"" + liOn + "\",\"overrideFrom\":\"" + liFromNo + "\",\"note\":\"" + ifnull(miL.Lot_Override_Note,"").toString().replaceAll("\"","'") + "\"}";
+
+						issKey = liItem + "|" + liMat;
+						prevIss = ifnull(issuedByKey.get(issKey),"").toString();
+						if(prevIss != "")
+						{
+							prevIss = prevIss + ",";
+						}
+						issuedByKey.put(issKey,prevIss + oneIss);
+					}
+				}
 			}
 		}
 
@@ -680,11 +787,24 @@ string getAdminCalculation(string salesOrderId)
 						mBomCutL = 0;
 					}
 
+					// THE PIN - the shade this order was first cut in, and the one
+					// every later handover on it has to match. Stamped by
+					// issueMaterials on the first issue and never overwritten, so
+					// it is the claim the handover lines are checked against.
+					mPinLot = "";
+					mPinId = ifnull(mr2.Issued_Lot,"").toString().trim();
+					if(mPinId != "")
+					{
+						mPinLot = ifnull(lotNoById.get(mPinId),"").toString();
+					}
+
+					mIssLots = ifnull(issuedByKey.get(pi.ID + "|" + mMat.toString()),"").toString();
+
 					if(matJson != "")
 					{
 						matJson = matJson + ",";
 					}
-					matJson = matJson + "{\"reqId\":\"" + mr2.ID + "\",\"materialId\":\"" + mMat + "\",\"material\":\"" + mName + "\",\"sku\":\"" + mSku + "\",\"unit\":\"" + ifnull(mr2.Unit,"").toString() + "\",\"isFabric\":" + mIsFab + ",\"cutWidth\":" + mCutW + ",\"cutLength\":" + mCutL + ",\"bomCutWidth\":" + mBomCutW + ",\"bomCutLength\":" + mBomCutL + ",\"fabricWidthInches\":\"" + mWidthIn + "\",\"fabricWidthCm\":" + mWidthCm + ",\"perUnit\":" + mPerUnit + ",\"requiredPieces\":" + ifnull(mr2.Required_Pieces,0) + ",\"piecesFromRaw\":" + ifnull(mr2.Pieces_From_Raw,0) + ",\"piecesFromWaste\":" + ifnull(mr2.Pieces_From_Waste,0) + ",\"isReissue\":" + mIsReissue + ",\"storedRequiredQty\":" + mReqStr.toDecimal() + ",\"issuedQty\":" + mIssStr.toDecimal() + ",\"receivedQty\":" + mRcvStr.toDecimal() + ",\"bucketKey\":\"" + mBucket + "\"}";
+					matJson = matJson + "{\"reqId\":\"" + mr2.ID + "\",\"materialId\":\"" + mMat + "\",\"material\":\"" + mName + "\",\"sku\":\"" + mSku + "\",\"unit\":\"" + ifnull(mr2.Unit,"").toString() + "\",\"isFabric\":" + mIsFab + ",\"cutWidth\":" + mCutW + ",\"cutLength\":" + mCutL + ",\"bomCutWidth\":" + mBomCutW + ",\"bomCutLength\":" + mBomCutL + ",\"fabricWidthInches\":\"" + mWidthIn + "\",\"fabricWidthCm\":" + mWidthCm + ",\"perUnit\":" + mPerUnit + ",\"requiredPieces\":" + ifnull(mr2.Required_Pieces,0) + ",\"piecesFromRaw\":" + ifnull(mr2.Pieces_From_Raw,0) + ",\"piecesFromWaste\":" + ifnull(mr2.Pieces_From_Waste,0) + ",\"isReissue\":" + mIsReissue + ",\"storedRequiredQty\":" + mReqStr.toDecimal() + ",\"issuedQty\":" + mIssStr.toDecimal() + ",\"receivedQty\":" + mRcvStr.toDecimal() + ",\"bucketKey\":\"" + mBucket + "\",\"pinLot\":\"" + mPinLot + "\",\"issuedLots\":[" + mIssLots + "]}";
 				}
 			}
 

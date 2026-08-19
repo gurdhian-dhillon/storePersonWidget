@@ -1,18 +1,31 @@
-// Sending an item out to a third party, and taking it back.
+// Sending part of a stage out to a third party, and taking it back.
 //
-// Loaded after production.js — reads `parties`, `plans`, `qtyInFor`, `nowHHMM`
-// and `fetchAllData` from it, and production.js looks these functions up by name
-// when it renders an item card.
+// Loaded after production.js — reads `parties`, `plans`, `qtyInFor`,
+// `openPartyBlocks`, `nowHHMM` and `fetchAllData` from it, and production.js
+// looks these functions up by name when it renders an item card.
+//
+// A VENDOR IS AN OPERATOR. He takes a SHARE of the stage — a Stage_Assignment
+// with a party on it instead of a man — and whatever he does not take stays in
+// the pool for the operators. That is the whole difference from the model this
+// replaced, which overwrote the stage's Qty_In with the sent quantity: send 40 of
+// 100 and the other 60 vanished from every count with nothing to say where.
+//
+// So this dialog is not the place a stage is chosen or a quantity is decided —
+// both arrive from the share picker on the stage card, capped at what is left to
+// hand out. What it adds is the two things a van needs and a man does not: the
+// date it left, and the stages it is carrying the panels through.
 //
 // ONE ITEM, A CONTIGUOUS BLOCK OF STAGES, ONE TRIP. He hands over panels once
 // and the vendor runs several operations before handing them back — one van, one
 // gate, one return. Recording that as three separate sends would invent three
-// physical movements that never happened.
+// physical movements that never happened. The block writes one share per stage,
+// all under one Outsource_Ref, and they close together.
 //
 // NO PARTIAL RETURNS. A partial return is only worth anything if he can carry on
-// producing with what came back, and he cannot — the next stage would take its
-// Qty_In from a figure still due to change. So the return is all-or-nothing, and
-// closing short is what tells the system the rest are lost.
+// producing with what came back, and he cannot — the share is the stage's output
+// and re-opening one after the stage closed has nowhere to put the late pieces.
+// So the return is all-or-nothing, and closing short is what tells the system the
+// rest are lost.
 
 var outsourceCtx = null;
 
@@ -54,11 +67,38 @@ function partyById(id) {
     return list.find(function (p) { return String(p.id) === String(id); }) || null;
 }
 
-// ---- The block currently out, if any ----
+// ---- A block currently out ----
 //
 // Grouped on Outsource_Ref rather than inferred from item + party + date, which
 // would have merged two sends of the same item to the same party on one day into
 // a single apparent trip.
+//
+// TWO SHAPES, and the reference is what tells them apart rather than a flag.
+// A block sent as SHARES is found on the assignments (openPartyBlocks, in
+// production.js). A block sent under the old whole-stage model is on the stage
+// logs, and openOsBlock below still finds it — kept only so a van that was
+// already on the road the day this shipped can be received.
+function shareBlockFor(item, ref) {
+	var blocks =
+		typeof openPartyBlocks === 'function' ? openPartyBlocks(item) : [];
+	if (blocks.length === 0) return null;
+
+	// A REFERENCE THAT MATCHES NOTHING HERE IS NOT A NEAR MISS — it is a legacy
+	// block, and the caller falls through to openOsBlock. Handing back "the only
+	// share block" instead would close a different vendor's trip at this one's
+	// count, which is the single mistake this dialog must never make.
+	if (ref) {
+		var hit = blocks.filter(function (b) {
+			return String(b.ref) === String(ref);
+		});
+		return hit.length > 0 ? hit[0] : null;
+	}
+
+	// No reference given: only unambiguous when there is exactly one trip out.
+	// Two vendors holding batches of the same item is possible now.
+	return blocks.length === 1 ? blocks[0] : null;
+}
+
 function openOsBlock(item) {
     var out = (item.logs || []).filter(function (l) {
         return l.outsourced === true && !l.returnedOn;
@@ -85,8 +125,10 @@ function openOsBlock(item) {
     };
 }
 
-// Used by production.js to lock a stage card. The server refuses too — this is
-// only so he never gets as far as pressing the button.
+// LEGACY. Whether a whole-stage block still covers this stage, which is what
+// used to lock the card. Nothing calls it now that a vendor is a share and the
+// card stays workable — kept beside openOsBlock so the two legacy readers live
+// or die together.
 function stageIsOut(item, phaseName) {
     var b = openOsBlock(item);
     if (!b) return false;
@@ -95,27 +137,55 @@ function stageIsOut(item, phaseName) {
 
 // ---- Send ----
 
-function openSendDialog(plan, item) {
+// `seed` comes from the stage card's share picker: {qty, max, qtyIn, phaseName}.
+// It is always present in normal use — this dialog is no longer reachable any
+// other way — but it is read defensively so a direct call still opens something
+// sensible.
+//
+// NO PARTY COMES IN THE SEED. The picker offers "Send to a third party…" and
+// nothing more, because WHICH vendor may take the work is decided by the stages,
+// and the stages are chosen here. Naming one on the card would be answering that
+// a step early: he picks a vendor for Stitching, ticks Embroidery too, and finds
+// his choice was never valid for the block he built.
+function openSendDialog(plan, item, seed) {
+    seed = seed || {};
     var phases = (item.phases || []).slice().sort(function (a, b) { return a.sequence - b.sequence; });
     var logs = item.logs || [];
 
-    // A stage can go out if it is not finished, not already out, and not
-    // running in-house. Kept in BOM order so contiguity is a question about
+    // A stage can go out if it is not finished and not already out under the old
+    // whole-stage model. Kept in BOM order so contiguity is a question about
     // adjacent list positions.
+    //
+    // "RUNNING IN-HOUSE" IS NO LONGER A REASON TO REFUSE THE FIRST STAGE — it is
+    // the ordinary case now. Two men cutting and a vendor embroidering are three
+    // shares of one stage, and the block simply starts where the work is.
+    //
+    // It stays a refusal further along the block: a stage after the first has not
+    // received anything yet, so anything recorded as running on it is work on
+    // pieces that do not exist.
     var rows = phases.map(function (p, i) {
         var lg = logs.find(function (l) { return l.phase === p.operation; });
         var done = lg && lg.end;
-        var running = lg && lg.start && !lg.end && lg.outsourced !== true;
         var out = lg && lg.outsourced === true && !lg.returnedOn;
+        var running = lg && lg.start && !lg.end && !out;
         var covered = partiesForStage(p.operation).length > 0;
         return {
             seq: p.sequence, name: p.operation, idx: i,
             done: !!done, running: !!running, out: !!out, covered: covered,
-            eligible: !done && !running && !out
+            eligible: false
         };
     });
 
-    outsourceCtx = { plan: plan, item: item, phases: phases, rows: rows };
+    // Where a block has to begin, and eligibility measured from it.
+    var firstIdx = -1;
+    rows.forEach(function (r, i) {
+        if (firstIdx < 0 && !r.done && !r.out) firstIdx = i;
+    });
+    rows.forEach(function (r, i) {
+        r.eligible = !r.done && !r.out && (i === firstIdx || !r.running);
+    });
+
+    outsourceCtx = { plan: plan, item: item, phases: phases, rows: rows, seed: seed };
 
     var el = osModalEl();
     el.classList.remove('hidden');
@@ -137,7 +207,13 @@ function openSendDialog(plan, item) {
                 'your last tick can be added.</p>' +
             '<div class="os-stages">' +
                 rows.map(function (r) {
-                    var why = r.done ? 'finished' : r.running ? 'running in-house' : r.out ? 'already out' : '';
+                    // The first stage may well be running in-house — that is the
+                    // point — so the reason is only shown where it is actually a
+                    // reason the stage cannot go.
+                    var why = r.done ? 'finished'
+                        : r.out ? 'already out'
+                        : (r.running && !r.eligible) ? 'running in-house'
+                        : '';
                     // STEP NUMBER, not Sequence_No. The sequences are 10/20/30 —
                     // spaced so a stage can be inserted between two others later
                     // — and "30." reads as a step number when this is step 3 of
@@ -170,8 +246,16 @@ function openSendDialog(plan, item) {
             '</div>' +
 
             '<div class="os-grid">' +
+                // CAPPED AT WHAT IS LEFT TO HAND OUT, not at what the stage
+                // received. Pieces already with a cutter are not his to send, and
+                // the server refuses it — this is only so he finds out before the
+                // round trip.
                 '<div><label for="os-qty">Pieces going out</label>' +
-                    '<input type="number" id="os-qty" min="0" step="1" value="0"></div>' +
+                    '<input type="number" id="os-qty" min="1" step="1"' +
+                    (seed.max > 0 ? ' max="' + seed.max + '"' : '') +
+                    ' value="' + (Number(seed.qty) || 0) + '">' +
+                    (seed.max > 0 ? '<p class="exc-hint">' + seed.max + ' left to hand out</p>' : '') +
+                '</div>' +
                 '<div><label for="os-date">Sent on</label>' +
                     '<input type="date" id="os-date"></div>' +
                 '<div><label for="os-time">Time</label>' +
@@ -195,7 +279,16 @@ function openSendDialog(plan, item) {
         String(d.getDate()).padStart(2, '0');
     document.getElementById('os-time').value = nowHHMM();
 
+    // The quantity arrived from the share picker, so syncSendDialog must not
+    // overwrite it with the stage's full input — which is the number this whole
+    // change exists to stop being assumed.
+    document.getElementById('os-qty').dataset.touched = '1';
+
+    // The block opens on the stage he pressed from, already ticked. He came here
+    // to send THAT stage; making him tick it again is a step that can only be
+    // got wrong.
     document.querySelectorAll('#os-modal .os-stage').forEach(function (cb) {
+        if (Number(cb.getAttribute('data-i')) === firstIdx) cb.checked = true;
         cb.addEventListener('change', syncSendDialog);
     });
     document.getElementById('os-send').addEventListener('click', doSend);
@@ -297,9 +390,10 @@ function syncSendDialog() {
     // selection impossible to build rather than catching it afterwards.
     warn.innerHTML = '';
 
-    // How many pieces exist to send: whatever the stage before the block
-    // produced. Never typed from nothing — but left editable, because he is the
-    // one counting them onto the van.
+    // How many pieces go out came from the share picker, capped there at what is
+    // left to hand out. Left editable, because he is the one counting them onto
+    // the van — but never re-derived here from the stage's own input, which is
+    // the assumption that used to swallow everything he kept back.
     var qtyEl = document.getElementById('os-qty');
     if (!qtyEl.dataset.touched) {
         qtyEl.value = qtyInFor(outsourceCtx.item, outsourceCtx.phases, picked[0]);
@@ -321,6 +415,9 @@ function syncSendDialog() {
         });
     });
 
+    // What he has already chosen here survives a change to the ticked stages —
+    // unless growing the block onto a stage that vendor does not do drops him out
+    // of the list, and the hint below then says which stage is the problem.
     var keep = sel.value;
     sel.innerHTML = '<option value="">&mdash; Pick a party &mdash;</option>' +
         able.map(function (p) {
@@ -363,8 +460,15 @@ function doSend() {
 
     var partyId = document.getElementById('os-party').value;
     var qty = Number(document.getElementById('os-qty').value) || 0;
+    var seed = outsourceCtx.seed || {};
     if (qty <= 0) {
         alert('How many pieces are going out?');
+        return;
+    }
+    // The server refuses this too. Here only so he finds out before the round
+    // trip, and so the number he is told is the one the stage card showed him.
+    if (seed.max > 0 && qty > seed.max) {
+        alert('Only ' + seed.max + ' piece(s) are left to hand out on this stage.');
         return;
     }
 
@@ -381,6 +485,11 @@ function doSend() {
                 planItemId: String(outsourceCtx.item.id),
                 partyId: String(partyId),
                 qty: String(qty),
+                // What the FIRST stage of the block received. Used only when its
+                // Stage_Log has no figure yet — a stage nobody has been put on
+                // has not been opened, so the server has nothing to measure the
+                // send against and would otherwise refuse it.
+                qtyIn: String(seed.qtyIn || 0),
                 sentOn: document.getElementById('os-date').value,
                 sentTime: document.getElementById('os-time').value,
                 sequences: picked,
@@ -413,14 +522,19 @@ function doSend() {
 
 // ---- Receive ----
 
-function openReceiveDialog(plan, item) {
-    var block = openOsBlock(item);
+// `ref` names which trip is coming back. It is passed from the vendor's own row
+// in the stage's share table — an item can have two vendors holding batches at
+// once now, and guessing between them would close the wrong one at the wrong
+// count. Omitted only by the legacy card, which can only ever have one.
+function openReceiveDialog(plan, item, ref) {
+    var block = shareBlockFor(item, ref) || openOsBlock(item);
     if (!block) return;
 
     outsourceCtx = { plan: plan, item: item, block: block };
 
     var party = partyById(block.partyId);
-    var names = block.rows.map(function (r) { return r.phase; });
+    // A share block carries its stage names; the legacy one carries stage rows.
+    var names = block.names || (block.rows || []).map(function (r) { return r.phase; });
 
     var el = osModalEl();
     el.classList.remove('hidden');

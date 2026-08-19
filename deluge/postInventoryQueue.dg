@@ -1,0 +1,222 @@
+string postInventoryQueue(string dryRun)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		orgId = "60076905558";
+		adjUrl = "https://www.zohoapis.in/inventory/v1/inventoryadjustments";
+		accConsumption = "3955559000000032057";
+		accWriteOff = "3955559000000000558";
+		locRawMaterial = "3955559000000212001";
+		locFinished = "3955559000000227307";
+		maxAttempts = 5;
+		maxBatches = 6;
+		writeAllowed = true;
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase();
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			writeAllowed = false;
+		}
+		purged = 0;
+		recovered = 0;
+		rolledBack = 0;
+		batchesDone = 0;
+		postedRows = 0;
+		failedRows = 0;
+		abandoned = 0;
+		reportJson = "";
+		if(writeAllowed == true)
+		{
+			delete from Inventory_Post_Queue[Post_Status == "Posted"];
+			purged = 1;
+			flightRefs = List();
+			for each  fl in Inventory_Post_Queue[Post_Status == "Posting"]
+			{
+				flRef = ifnull(fl.Reference_No,"").toString().trim();
+				if(flRef != "" && !flightRefs.contains(flRef))
+				{
+					flightRefs.add(flRef);
+				}
+			}
+			for each  chkRef in flightRefs
+			{
+				landed = false;
+				chkResp = invokeurl
+				[
+					url :adjUrl + "?organization_id=" + orgId + "&reference_number=" + chkRef
+					type :GET
+					connection:"inventory_connection"
+				];
+				if(ifnull(chkResp.get("code"),"-1").toString().trim() == "0")
+				{
+					for each  chkRow in ifnull(chkResp.get("inventory_adjustments"),List())
+					{
+						if(ifnull(chkRow.get("reference_number"),"").toString().trim() == chkRef)
+						{
+							landed = true;
+						}
+					}
+					for each  updRow in Inventory_Post_Queue[Post_Status == "Posting" && Reference_No == chkRef]
+					{
+						if(landed == true)
+						{
+							updRow.Post_Status = "Posted";
+							recovered = recovered + 1;
+						}
+						else
+						{
+							updRow.Post_Status = "Pending";
+							rolledBack = rolledBack + 1;
+						}
+					}
+				}
+			}
+		}
+		stampTxt = zoho.currenttime.toString("yyyyMMddHHmmss");
+		for each  typeKey in {"Consumption","Write_Off","Finished_Goods"}
+		{
+			reasonTxt = "Consumed in production";
+			accId = accConsumption;
+			locId = locRawMaterial;
+			signMul = -1;
+			if(typeKey == "Write_Off")
+			{
+				reasonTxt = "Stock Written off";
+				accId = accWriteOff;
+			}
+			else if(typeKey == "Finished_Goods")
+			{
+				reasonTxt = "Production output";
+				locId = locFinished;
+				signMul = 1;
+			}
+			itemKeys = List();
+			itemQty = Map();
+			rowIds = List();
+			badRows = 0;
+			for each  qRow in Inventory_Post_Queue[Post_Status == "Pending" && Post_Type == typeKey]
+			{
+				attS = ifnull(qRow.Attempts,"0").toString().trim();
+				if(attS == "")
+				{
+					attS = "0";
+				}
+				itmId = ifnull(qRow.Inventory_Item_ID,"").toString().trim();
+				qtyS = ifnull(qRow.Quantity,"0").toString().trim();
+				if(qtyS == "")
+				{
+					qtyS = "0";
+				}
+				qtyVal = qtyS.toDecimal();
+				if(attS.toLong() >= maxAttempts)
+				{
+					qRow.Post_Status = "Abandoned";
+					abandoned = abandoned + 1;
+				}
+				else if(itmId == "" || qtyVal <= 0)
+				{
+					qRow.Post_Status = "Failed";
+					qRow.Last_Error = "Missing Inventory_Item_ID or non-positive Quantity";
+					badRows = badRows + 1;
+				}
+				else if(rowIds.size() < 40)
+				{
+					if(itemQty.get(itmId) == null)
+					{
+						itemKeys.add(itmId);
+						itemQty.put(itmId,0.0);
+					}
+					itemQty.put(itmId,itemQty.get(itmId) + qtyVal);
+					rowIds.add(qRow.ID.toString());
+				}
+			}
+			if(rowIds.size() > 0 && batchesDone < maxBatches)
+			{
+				linesJson = "";
+				for each  ik in itemKeys
+				{
+					if(linesJson != "")
+					{
+						linesJson = linesJson + ",";
+					}
+					adjQty = itemQty.get(ik) * signMul;
+					linesJson = linesJson + "{\"item_id\":\"" + ik + "\",\"quantity_adjusted\":" + adjQty + ",\"location_id\":\"" + locId + "\"}";
+				}
+				refNo = "CR-" + typeKey + "-" + stampTxt;
+				bodyJson = "{\"date\":\"" + zoho.currentdate.toString("yyyy-MM-dd") + "\",\"reason\":\"" + reasonTxt + "\",\"description\":\"Creator " + typeKey + ", " + rowIds.size() + " event(s)\",\"adjustment_type\":\"quantity\",\"reference_number\":\"" + refNo + "\",\"account_id\":\"" + accId + "\",\"line_items\":[" + linesJson + "]}";
+				if(reportJson != "")
+				{
+					reportJson = reportJson + ",";
+				}
+				reportJson = reportJson + "{\"type\":\"" + typeKey + "\",\"events\":" + rowIds.size() + ",\"lines\":" + itemKeys.size() + ",\"ref\":\"" + refNo + "\",\"badRows\":" + badRows + "}";
+				if(writeAllowed == true)
+				{
+					batchesDone = batchesDone + 1;
+					for each  mkId in rowIds
+					{
+						for each  mkRow in Inventory_Post_Queue[ID == mkId.toLong()]
+						{
+							mkRow.Post_Status = "Posting";
+							mkRow.Reference_No = refNo;
+						}
+					}
+					errTxt = "";
+					try
+					{
+						hdrMap = Map();
+						hdrMap.put("content-type","application/json");
+						postResp = invokeurl
+						[
+							url :adjUrl + "?organization_id=" + orgId
+							type :POST
+							parameters:bodyJson
+							headers:hdrMap
+							connection:"inventory_connection"
+						];
+						pCode = ifnull(postResp.get("code"),"-1").toString().trim();
+						if(pCode != "0")
+						{
+							errTxt = "code " + pCode + ": " + ifnull(postResp.get("message"),"").toString();
+						}
+					}
+					catch (ePost)
+					{
+						errTxt = "invokeurl threw: " + ePost.toString();
+					}
+					for each  endId in rowIds
+					{
+						for each  endRow in Inventory_Post_Queue[ID == endId.toLong()]
+						{
+							if(errTxt == "")
+							{
+								endRow.Post_Status = "Posted";
+								postedRows = postedRows + 1;
+							}
+							else
+							{
+								prevAtt = ifnull(endRow.Attempts,"0").toString().trim();
+								if(prevAtt == "")
+								{
+									prevAtt = "0";
+								}
+								endRow.Attempts = prevAtt.toLong() + 1;
+								endRow.Last_Error = errTxt.replaceAll("\"","'");
+								endRow.Post_Status = "Pending";
+								failedRows = failedRows + 1;
+							}
+						}
+					}
+				}
+			}
+		}
+		stuck = Inventory_Post_Queue[Post_Status == "Failed" || Post_Status == "Abandoned"].count();
+		waiting = Inventory_Post_Queue[Post_Status == "Pending"].count();
+		inFlight = Inventory_Post_Queue[Post_Status == "Posting"].count();
+		res = "{\"errors\":[],\"dryRun\":" + (!writeAllowed).toString() + ",\"purgedPosted\":" + purged + ",\"recovered\":" + recovered + ",\"rolledBack\":" + rolledBack + ",\"batches\":" + batchesDone + ",\"posted\":" + postedRows + ",\"retryLater\":" + failedRows + ",\"abandoned\":" + abandoned + ",\"needsHuman\":" + stuck + ",\"stillPending\":" + waiting + ",\"stuckInFlight\":" + inFlight + ",\"detail\":[" + reportJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

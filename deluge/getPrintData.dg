@@ -1,0 +1,357 @@
+string getPrintData()
+{
+	// Feeds the store widget's Print tab: the plain fabric that can be sent, the
+	// printed SKUs that already exist, the printers, and what is out right now.
+	//
+	// FOUR QUERIES TOTAL, every one of them grouped into a Map before anything
+	// reads it. The obvious shape - loop the jobs and query the material, the lot
+	// and the party inside the loop - is three queries per job, which is exactly
+	// what blew the statement-execution limit in getStoreMaterialRequirements.
+	// That limit is NOT catchable: it kills the script, so the try/catch below
+	// never runs and the widget gets a bare 500 with no error card.
+	//
+	// Nothing here touches Material_Requirement. docs/scaling.md records that as a
+	// property that is already correct, and docs/printing.md deliberately leaves
+	// the demand figure out of this payload for that reason.
+
+	res = "{\"errors\":[\"Nothing ran\"]}";
+
+	try
+	{
+		// ---- 1. lots, grouped by material as JSON fragments -----------------
+		// Oldest first, which is the order the store person walks the rack in -
+		// and sort by has to be its own assignment, never inline in a for each
+		// header.
+		allLots = Raw_Material_Lot[ID != 0] sort by Added_Time;
+
+		lotJsonByMat = Map();
+		lotNumById = Map();
+
+		for each  lt in allLots
+		{
+			// A lookup holds a record id, so this is the Raw_Material id as text.
+			ltMat = ifnull(lt.Material,"").toString().trim();
+
+			// A Creator numeric that was never written is EMPTY, not null.
+			// ifnull() does not catch empty and toDecimal() throws on it, so
+			// normalise to string, test, then convert - three times, because
+			// Deluge has no local functions to put this behind.
+			lwS = ifnull(lt.Wash_Quantity,"0").toString().trim();
+			if(lwS == "")
+			{
+				lwS = "0";
+			}
+			luS = ifnull(lt.Unwash_Quantity,"0").toString().trim();
+			if(luS == "")
+			{
+				luS = "0";
+			}
+			// Cloth at the printer. Off the rack but still ours, so it belongs on
+			// this screen - a lot that looks empty because its cloth is out being
+			// printed has to be able to say so.
+			lpS = ifnull(lt.In_Print_Qty,"0").toString().trim();
+			if(lpS == "")
+			{
+				lpS = "0";
+			}
+
+			ltNum = ifnull(lt.Lot_Number,"").toString().trim().replaceAll("\"","'");
+			ltLab = ifnull(lt.Lot_Label,"").toString().trim().replaceAll("\"","'");
+
+			// Six forms share the link name Status, so attribute by the variable
+			// in front of the dot: this is Raw_Material_Lot's Active/Blocked.
+			ltSt = ifnull(lt.Status,"").toString().trim();
+			if(ltSt == "")
+			{
+				ltSt = "Active";
+			}
+			// A blocked lot is FLAGGED, never dropped. docs/lots-issue-redesign.md
+			// records that dropping it makes the screen say "nothing on the rack"
+			// while the store person is standing in front of the cloth. Unusable
+			// for sending, but nameable.
+			ltBlk = "false";
+			if(ltSt == "Blocked")
+			{
+				ltBlk = "true";
+			}
+
+			// Ids forced to string - an 18-digit id breaks JSON.parse on the
+			// widget side.
+			lotNumById.put(lt.ID + "",ltNum);
+
+			if(ltMat != "")
+			{
+				oneLot = "{\"lotId\":\"" + lt.ID + "\",\"lotNumber\":\"" + ltNum + "\",\"label\":\"" + ltLab + "\",\"wash\":" + lwS.toDecimal() + ",\"unwash\":" + luS.toDecimal() + ",\"inPrint\":" + lpS.toDecimal() + ",\"blocked\":" + ltBlk + "}";
+
+				prevLotJson = ifnull(lotJsonByMat.get(ltMat),"").toString();
+				if(prevLotJson != "")
+				{
+					prevLotJson = prevLotJson + ",";
+				}
+				lotJsonByMat.put(ltMat,prevLotJson + oneLot);
+			}
+		}
+
+		// ---- 2. materials, split plain / printed -----------------------------
+		allMats = Raw_Material[ID != 0] sort by Material_Display_Name;
+
+		plainJson = "";
+		printedJson = "";
+		matNameById = Map();
+		matSkuById = Map();
+
+		// EVERY PATTERN VALUE ACTUALLY IN USE, deduped case-insensitively.
+		//
+		// Deluge cannot read a Dropdown's CHOICES - there is no API for it - so
+		// the widget carries a PRINT_PATTERNS constant mirroring the Creator
+		// field. That constant is hand-maintained and therefore always one step
+		// behind, and while it is empty the pattern select is empty and nothing
+		// can be sent at all.
+		//
+		// What Deluge CAN read is the values sitting on records, and this loop is
+		// already walking every material. So the choices in use come back for
+		// free and the constant becomes a top-up for a pattern nothing carries
+		// yet, rather than the only source.
+		//
+		// A List is used rather than a Map because the order matters on screen
+		// and a case-insensitive key would lose the spelling he actually typed.
+		patSeen = List();
+		patKeys = List();
+
+		for each  rm in allMats
+		{
+			rmKey = rm.ID + "";
+
+			// Display name where one is set, else the plain name, else the SKU.
+			// Same fallback chain issueMaterials uses when it stamps a handover.
+			mDisp = ifnull(rm.Material_Display_Name,"").toString().trim();
+			if(mDisp == "")
+			{
+				mDisp = ifnull(rm.Name,"").toString().trim();
+			}
+			if(mDisp == "")
+			{
+				mDisp = ifnull(rm.SKU,"").toString().trim();
+			}
+			mDisp = mDisp.replaceAll("\"","'");
+
+			// Watch the name SKU: on Raw_Material it is TEXT holding the code, on
+			// Waste_Master and friends it is a Lookup. This one is the text.
+			mSku = ifnull(rm.SKU,"").toString().trim().replaceAll("\"","'");
+
+			// Hoisted for the job loop below, so resolving a job's lookups costs
+			// no query at all.
+			matNameById.put(rmKey,mDisp);
+			matSkuById.put(rmKey,mSku);
+
+			// Is_Fabric is tested in code, not filtered in the query - a checkbox
+			// that was never ticked is EMPTY, not false, and a query filtering on
+			// == true drops those rows silently with no way to notice.
+			//
+			// AND AS TEXT, not against the boolean true. What a Creator field
+			// hands back depends on how it was built: a Decision box gives a
+			// boolean, a yes/no dropdown gives the STRING "Yes", an untouched
+			// field gives EMPTY. `ifnull(x,false) == true` only matches the first
+			// and silently drops real fabric otherwise - which is how a whole SKU
+			// range went missing from the Stock In screen.
+			fabTxt = ifnull(rm.Is_Fabric,"").toString().trim().toLowerCase();
+			if(fabTxt == "true" || fabTxt == "yes" || fabTxt == "1" || fabTxt == "y")
+			{
+				// Fabric_Width_Inches is stored as TEXT and in INCHES. The
+				// conversion to cm happens at this boundary and nowhere else, so
+				// nothing downstream has to remember which unit it is holding.
+				wIn = ifnull(rm.Fabric_Width_Inches,"").toString().trim();
+				if(wIn == "")
+				{
+					wIn = "0";
+				}
+				widthCm = (wIn.toDecimal() * 2.54).round(2);
+
+				// Print_Base is a lookup, so this is the plain SKU's record id as
+				// text. Empty means this material is plain cloth; filled means it
+				// is a printed SKU printed off that one. This is what lets the
+				// widget tell "this pattern already exists" from "this will mint a
+				// new SKU".
+				pbId = ifnull(rm.Print_Base,"").toString().trim();
+
+				// Built once and used by both branches. Plain and printed carry
+				// their lots in exactly the same shape: the send form needs the
+				// plain lots, and the receive form needs the printed ones so a
+				// second run of the same tone tops an existing lot up instead of
+				// minting a new one per job. Two near-identical loops here would
+				// drift the moment a lot field is added.
+				myLots = ifnull(lotJsonByMat.get(rmKey),"").toString();
+
+				// Pattern is the other half of a printed SKU's identity - the
+				// pair (Print_Base, Pattern) is what the send form resolves. It
+				// is read for BOTH branches: a printed SKU needs it to be
+				// identified, and a plain one needs it so the send form can drop
+				// the material's own pattern from its options. Offering to print
+				// Grey Sheeting / Plain in "Plain" is meaningless.
+				mPat = ifnull(rm.Pattern,"").toString().trim().replaceAll("\"","'");
+
+				if(mPat != "")
+				{
+					patLc = mPat.toLowerCase();
+					if(!patKeys.contains(patLc))
+					{
+						patKeys.add(patLc);
+						patSeen.add(mPat);
+					}
+				}
+
+				if(pbId == "")
+				{
+					if(plainJson != "")
+					{
+						plainJson = plainJson + ",";
+					}
+					plainJson = plainJson + "{\"id\":\"" + rmKey + "\",\"name\":\"" + mDisp + "\",\"sku\":\"" + mSku + "\",\"pattern\":\"" + mPat + "\",\"widthCm\":" + widthCm + ",\"lots\":[" + myLots + "]}";
+				}
+				else
+				{
+
+					if(printedJson != "")
+					{
+						printedJson = printedJson + ",";
+					}
+					printedJson = printedJson + "{\"id\":\"" + rmKey + "\",\"name\":\"" + mDisp + "\",\"sku\":\"" + mSku + "\",\"baseId\":\"" + pbId + "\",\"pattern\":\"" + mPat + "\",\"widthCm\":" + widthCm + ",\"lots\":[" + myLots + "]}";
+				}
+			}
+		}
+
+		// ---- 3. printers -----------------------------------------------------
+		// Master data and a fetch-all of it is the acceptable kind of scan - it is
+		// the transactional forms that get slowly worse.
+		allParties = Third_Party[ID != 0] sort by Party_Name;
+
+		printersJson = "";
+		partyNameById = Map();
+
+		for each  tp in allParties
+		{
+			tpKey = tp.ID + "";
+			tpName = ifnull(tp.Party_Name,"").toString().trim().replaceAll("\"","'");
+			partyNameById.put(tpKey,tpName);
+
+			if(printersJson != "")
+			{
+				printersJson = printersJson + ",";
+			}
+			printersJson = printersJson + "{\"id\":\"" + tpKey + "\",\"name\":\"" + tpName + "\"}";
+		}
+
+		// ---- 4. jobs that are still out --------------------------------------
+		// At_Printer ONLY. Received and cancelled jobs are history and do not
+		// belong on a screen whose job is what is out. It is also what keeps this
+		// query bounded by WIP rather than by every run ever made.
+		openJobs = Print_Job[Job_Status == "At_Printer"] sort by Added_Time desc;
+
+		jobsJson = "";
+
+		for each  pj in openJobs
+		{
+			// Every one of these is a lookup, so the raw field is a record id and
+			// .toString() on it gives the id, not the label. Resolving through the
+			// maps built above is what stops 18-digit ids reaching the UI - that
+			// has shipped twice already.
+			//
+			// pjPrintedId is the one id that IS carried out, stringified: the
+			// receive form uses it to find that material's existing lots in
+			// printed[] so a second run of the same tone can top one up.
+			pjPlainId = ifnull(pj.Plain_Material,"").toString().trim();
+			pjPlainLotId = ifnull(pj.Plain_Lot,"").toString().trim();
+			pjPrintedId = ifnull(pj.Printed_Material,"").toString().trim();
+			pjPrinterId = ifnull(pj.Printer,"").toString().trim();
+
+			pjPlainName = ifnull(matNameById.get(pjPlainId),"").toString();
+			pjPlainSku = ifnull(matSkuById.get(pjPlainId),"").toString();
+			pjPlainLotNum = ifnull(lotNumById.get(pjPlainLotId),"").toString();
+			pjPrintedName = ifnull(matNameById.get(pjPrintedId),"").toString();
+			pjPrintedSku = ifnull(matSkuById.get(pjPrintedId),"").toString();
+			pjPrinterName = ifnull(partyNameById.get(pjPrinterId),"").toString();
+
+			pjState = ifnull(pj.Source_State,"").toString().trim().replaceAll("\"","'");
+			pjStatus = ifnull(pj.Job_Status,"").toString().trim().replaceAll("\"","'");
+
+			msS = ifnull(pj.Metres_Sent,"0").toString().trim();
+			if(msS == "")
+			{
+				msS = "0";
+			}
+
+			pjSent = "";
+			if(pj.Sent_On != null)
+			{
+				pjSent = pj.Sent_On.toString("dd-MMM-yyyy");
+			}
+
+			// Send_Lines is a subform on the record already in hand, so walking it
+			// costs no query. It is what the return gets checked against, which is
+			// why the screen needs it next to the job.
+			sendJson = "";
+			for each  sl in pj.Send_Lines
+			{
+				slLenS = ifnull(sl.Piece_Length_Cm,"0").toString().trim();
+				if(slLenS == "")
+				{
+					slLenS = "0";
+				}
+				slCntS = ifnull(sl.Piece_Count,"0").toString().trim();
+				if(slCntS == "")
+				{
+					slCntS = "0";
+				}
+
+				if(sendJson != "")
+				{
+					sendJson = sendJson + ",";
+				}
+				sendJson = sendJson + "{\"lengthCm\":" + slLenS.toDecimal() + ",\"count\":" + slCntS.toDecimal() + "}";
+			}
+
+			if(jobsJson != "")
+			{
+				jobsJson = jobsJson + ",";
+			}
+			jobsJson = jobsJson + "{\"jobId\":\"" + pj.ID + "\",\"plainName\":\"" + pjPlainName + "\",\"plainSku\":\"" + pjPlainSku + "\",\"plainLotNumber\":\"" + pjPlainLotNum + "\",\"printedMaterialId\":\"" + pjPrintedId + "\",\"printedName\":\"" + pjPrintedName + "\",\"printedSku\":\"" + pjPrintedSku + "\",\"printerName\":\"" + pjPrinterName + "\",\"sourceState\":\"" + pjState + "\",\"metresSent\":" + msS.toDecimal() + ",\"sentOn\":\"" + pjSent + "\",\"status\":\"" + pjStatus + "\",\"lines\":[" + sendJson + "]}";
+		}
+
+		// Built by hand - Map.toString() does not emit valid JSON once the
+		// structure nests (Map -> List -> Map), and List.toString() does not wrap
+		// in []. This one nests three deep on both the plain and the jobs side.
+		// Built here rather than in the loop: List.toString() does not wrap in
+		// [] and would not quote the entries, so the array is assembled by hand
+		// like every other one in this file.
+		//
+		// NOT SORTED HERE, and it is redundancy rather than risk. The widget
+		// sorts the union of its three pattern sources, so any order this end
+		// produces is thrown away.
+		//
+		// If it ever does need sorting, the call is sort(TRUE) - saveItemCheck
+		// and sendToThirdParty both use that form and both run. The bare sort()
+		// is the one to avoid, like List.set(), which fails at SAVE time with
+		// "Not able to find 'set' function" against the assignment.
+		patternsJson = "";
+
+		for each  pv in patSeen
+		{
+			if(patternsJson != "")
+			{
+				patternsJson = patternsJson + ",";
+			}
+			patternsJson = patternsJson + "\"" + pv + "\"";
+		}
+
+		res = "{\"errors\":[],\"plain\":[" + plainJson + "],\"printed\":[" + printedJson + "],\"printers\":[" + printersJson + "],\"patterns\":[" + patternsJson + "],\"jobs\":[" + jobsJson + "]}";
+	}
+	catch (e)
+	{
+		// Creator reports every runtime failure to a widget as a generic code
+		// 9430. Returning the real message is the only way to debug this from the
+		// widget.
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+
+	return res;
+}

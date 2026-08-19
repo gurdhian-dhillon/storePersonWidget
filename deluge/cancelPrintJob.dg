@@ -1,0 +1,274 @@
+string cancelPrintJob(string payloadJson)
+{
+	// The cloth went out and came back unprinted. This puts it back.
+	//
+	//   { "jobId":"555", "reason":"printer returned it unprinted" }
+	//
+	// WITHOUT THIS THE CLOTH IS STUCK. Metres sitting in In_Print_Qty for ever
+	// keep the SKU total right while nothing can be issued off them - the ledger
+	// balances and the rack is unusable, which is the worst kind of wrong because
+	// no report shows it.
+	//
+	// IT REVERSES THE SEND EXACTLY: In_Print_Qty comes down by Metres_Sent and
+	// the same metres go back to THE COUNTER THEY CAME OFF. That is the only
+	// thing Source_State is stored for. Putting greige cloth back into
+	// Wash_Quantity would claim a wash that never happened - and it is washing
+	// that shifts the tone, which is the whole reason lots exist.
+	//
+	// AT_PRINTER ONLY, and forward-only for the same reason the plan-to-order
+	// status mirror is: a Received job has already moved the cloth into another
+	// material, so there is nothing left to give back and reversing it would
+	// invent plain cloth out of printed. A Cancelled job would double-credit.
+	//
+	// No printed lot is created and no Fabric_Piece row is written - nothing came
+	// back printed, so there is nothing of the printed SKU to record.
+	//
+	// ONE EXIT, AT THE BOTTOM, and it is not a style choice. Deluge's "all paths
+	// return" check does NOT count a return that lives inside try/catch, so a
+	// function whose every return sat in the try failed to save with
+	// "Missing return statement" reported against the first line of the body,
+	// nowhere near anything actually wrong. So nothing returns early: errTxt is
+	// set, every later block is guarded on it being empty, and the one return is
+	// after the catch. Same shape as saveStockInward.
+
+	res = "";
+	errTxt = "";
+
+	try
+	{
+		inp = payloadJson.toMap();
+
+		jobIdTxt = ifnull(inp.get("jobId"),"").toString().trim();
+		// Escaped once, here, because it is free text and it ends up inside
+		// hand-built JSON as well as in the record.
+		reason = ifnull(inp.get("reason"),"").toString().trim().replaceAll("\"","'");
+
+		if(jobIdTxt == "" || jobIdTxt.isNumber() == false)
+		{
+			errTxt = "No print job given";
+		}
+
+		//--------------------------------------------------------------------
+		// THE JOB. Initialised BEFORE the guarded blocks: a name first assigned
+		// inside an if is not safe to read after it when that branch did not run.
+		//
+		// Lookup fields hold RECORD IDS, so .toString() on one gives the id and
+		// not the label. They are kept as text and converted at the point of use.
+		//--------------------------------------------------------------------
+		plainMatTxt = "";
+		plainLotTxt = "";
+		srcState = "";
+		metresSent = 0.0;
+
+		if(errTxt == "")
+		{
+			// A query result needs .count() - .size() is a List method.
+			jobRecs = Print_Job[ID == jobIdTxt.toLong()];
+			if(jobRecs.count() == 0)
+			{
+				errTxt = "Print job not found";
+			}
+			else
+			{
+				for each  jchk in jobRecs
+				{
+					jStat = ifnull(jchk.Job_Status,"").toString().trim();
+					if(jStat != "At_Printer")
+					{
+						errTxt = "That job is " + jStat + " - only a job still at the printer can be cancelled";
+					}
+					else
+					{
+						plainMatTxt = ifnull(jchk.Plain_Material,"").toString().trim();
+						plainLotTxt = ifnull(jchk.Plain_Lot,"").toString().trim();
+						srcState = ifnull(jchk.Source_State,"").toString().trim();
+
+						// Creator fields that were never written are EMPTY, not
+						// null. ifnull() does not catch empty and toDecimal()
+						// throws on it, so normalise to string, test, convert.
+						msS = ifnull(jchk.Metres_Sent,"0").toString().trim();
+						if(msS == "")
+						{
+							msS = "0";
+						}
+						metresSent = msS.toDecimal();
+					}
+				}
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// SOURCE_STATE IS REFUSED WHEN BLANK RATHER THAN GUESSED.
+		//
+		// sendToPrint always writes it, so a blank one means the record has been
+		// damaged. Neither default is safe: guessing Wash books greige cloth as
+		// washed, which is exactly the claim saveStockInward refuses to let anyone
+		// make, and guessing Unwash sends washed cloth back through the wash. Both
+		// are silent. Setting the one field on the job by hand is a smaller job
+		// than finding either of those later.
+		//--------------------------------------------------------------------
+		if(errTxt == "" && srcState != "Wash" && srcState != "Unwash")
+		{
+			errTxt = "That job does not say which counter the cloth came off - set Source_State on it before cancelling";
+		}
+
+		if(errTxt == "" && metresSent <= 0)
+		{
+			errTxt = "That job has no metres against it - nothing to put back";
+		}
+
+		//--------------------------------------------------------------------
+		// THE LEDGER. Lot AND parent, in the same pass, so the lot and the
+		// maintained parent total cannot disagree. The parent is not a derived
+		// roll-up on purpose: recomputing a sum per material on every screen load
+		// is a query per material, and that is the road to the statement limit.
+		//
+		// The SKU total does not change - the cloth was always ours, it only
+		// moves back out of In_Print_Qty and onto the shelf it left.
+		//
+		// A job raised without a plain lot still settles its parent. Older cloth
+		// with no lot behind it behaves exactly as it always did, and
+		// reconcileRawMaterial reports the gap.
+		//--------------------------------------------------------------------
+		lotWashOut = 0.0;
+		lotInPrintOut = 0.0;
+
+		if(errTxt == "")
+		{
+			if(plainLotTxt != "")
+			{
+				for each  plotUpd in Raw_Material_Lot[ID == plainLotTxt.toLong()]
+				{
+					lipS = ifnull(plotUpd.In_Print_Qty,"0").toString().trim();
+					if(lipS == "")
+					{
+						lipS = "0";
+					}
+					lwS = ifnull(plotUpd.Wash_Quantity,"0").toString().trim();
+					if(lwS == "")
+					{
+						lwS = "0";
+					}
+					luS = ifnull(plotUpd.Unwash_Quantity,"0").toString().trim();
+					if(luS == "")
+					{
+						luS = "0";
+					}
+
+					// Clamped at zero rather than refused. The cloth is physically
+					// back on the rack either way, and driving a counter negative
+					// leaves the ledger further from the truth than a clamped
+					// figure does - the info line says it happened.
+					lipNow = lipS.toDecimal() - metresSent;
+					if(lipNow < 0)
+					{
+						info "cancelPrintJob: lot " + plainLotTxt + " In_Print_Qty would go negative - clamped";
+						lipNow = 0;
+					}
+					plotUpd.In_Print_Qty = lipNow;
+					lotInPrintOut = lipNow;
+
+					if(srcState == "Wash")
+					{
+						lotWashOut = lwS.toDecimal() + metresSent;
+						plotUpd.Wash_Quantity = lotWashOut;
+					}
+					else
+					{
+						plotUpd.Unwash_Quantity = luS.toDecimal() + metresSent;
+						lotWashOut = lwS.toDecimal();
+					}
+				}
+			}
+
+			if(plainMatTxt != "")
+			{
+				for each  pmatUpd in Raw_Material[ID == plainMatTxt.toLong()]
+				{
+					mipS = ifnull(pmatUpd.In_Print_Qty,"0").toString().trim();
+					if(mipS == "")
+					{
+						mipS = "0";
+					}
+					mwS = ifnull(pmatUpd.Wash_Quantity,"0").toString().trim();
+					if(mwS == "")
+					{
+						mwS = "0";
+					}
+					muS = ifnull(pmatUpd.Unwash_Quantity,"0").toString().trim();
+					if(muS == "")
+					{
+						muS = "0";
+					}
+
+					mipNow = mipS.toDecimal() - metresSent;
+					if(mipNow < 0)
+					{
+						info "cancelPrintJob: material " + plainMatTxt + " In_Print_Qty would go negative - clamped";
+						mipNow = 0;
+					}
+					pmatUpd.In_Print_Qty = mipNow;
+
+					if(srcState == "Wash")
+					{
+						pmatUpd.Wash_Quantity = mwS.toDecimal() + metresSent;
+					}
+					else
+					{
+						pmatUpd.Unwash_Quantity = muS.toDecimal() + metresSent;
+					}
+				}
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// STAMP THE JOB, last, so a failure anywhere above leaves it At_Printer
+		// and the cancel can simply be done again.
+		//
+		// The reason is APPENDED to Remarks, never written over them: whatever was
+		// noted when the job was sent is the context that makes the cancel
+		// readable a month later.
+		//--------------------------------------------------------------------
+		if(errTxt == "")
+		{
+			for each  jUpd in Print_Job[ID == jobIdTxt.toLong()]
+			{
+				jUpd.Job_Status = "Cancelled";
+
+				addR = zoho.currentdate.toString("dd-MMM HH:mm") + " - cancelled";
+				if(reason != "")
+				{
+					addR = addR + ": " + reason;
+				}
+				oldR = ifnull(jUpd.Remarks,"").toString();
+				if(oldR != "")
+				{
+					addR = oldR + "\n" + addR;
+				}
+				jUpd.Remarks = addR;
+			}
+
+			info "cancelPrintJob: job " + jobIdTxt + " cancelled, " + metresSent + " back to " + srcState;
+
+			// Ids forced to string - 18-digit ids break JSON.parse on the widget.
+			res = "{\"success\":true,\"restoredTo\":\"" + srcState + "\",\"metres\":" + metresSent + ",\"lotWash\":" + lotWashOut + ",\"lotInPrint\":" + lotInPrintOut + "}";
+		}
+	}
+	catch (e)
+	{
+		// Creator reports every runtime failure to a widget as a generic code 9430,
+		// so the real message has to travel back inside the payload.
+		errTxt = "DELUGE: " + e.toString();
+	}
+
+	if(res == "")
+	{
+		if(errTxt == "")
+		{
+			errTxt = "Nothing was cancelled";
+		}
+		res = "{\"success\":false,\"error\":\"" + errTxt.replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

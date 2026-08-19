@@ -27,6 +27,10 @@
     --issue: #0891b2;
     --issue-bg: #ecfeff;
     --waste: #d97706;
+    /* Step 4 - what was RECORDED, not what the machine would do. Green because it
+       is the only figure on this screen that cannot move. */
+    --issued: #059669;
+    --issued-bg: #ecfdf5;
     --waste-bg: #fffbeb;
 
     --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
@@ -151,6 +155,7 @@ body {
 .dot-plan { background: var(--plan); }
 .dot-issue { background: var(--issue); }
 .dot-waste { background: var(--waste); }
+.dot-issued { background: var(--issued); }
 
 .legend-item b { display: block; font-size: 13px; }
 .legend-item span { color: var(--text-muted); font-size: 12px; }
@@ -310,6 +315,7 @@ body {
 .step-plan { border-left: 3px solid var(--plan); }
 .step-issue { border-left: 3px solid var(--issue); }
 .step-waste { border-left: 3px solid var(--waste); }
+.step-issued { border-left: 3px solid var(--issued); }
 
 .step-head {
     display: flex;
@@ -336,6 +342,7 @@ body {
 .tag-plan { background: var(--plan); }
 .tag-issue { background: var(--issue); }
 .tag-waste { background: var(--waste); }
+.tag-issued { background: var(--issued); }
 
 .sub {
     margin: 16px 0 8px;
@@ -730,3 +737,10 @@ tr.mine { background: #eff6ff; box-shadow: inset 3px 0 0 var(--primary); }
 .reason-tag.is-cutting { background: #ffedd5; color: #b45309; }
 .reason-tag.is-fact { background: #e8f0ff; color: var(--primary); }
 .reason-looked { font-style: italic; }
+
+/* The lot an order is committed to. Narrow: it holds a short lot number and
+   at most one qualifying word, and it must not push the numbers off screen. */
+.shade-cell {
+    font-size: 12px;
+    white-space: nowrap;
+}
