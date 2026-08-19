@@ -206,16 +206,80 @@ string saveProductionPhase(string payloadJson)
 		asgOpen = 0;
 		asgOut = 0;
 
+		// What the stage is RECORDED as having received, which is not the same as
+		// what the payload claims. Read here because the close guard below has to
+		// settle before the row is touched.
+		stageInNow = 0;
+		for each  lgIn in existing
+		{
+			stageInNow = ifnull(lgIn.Qty_In,0);
+		}
+
+		//------------------------------------------------------------------
+		// A VENDOR'S SHARE ON A STAGE HE HAS ALREADY CARRIED THE PIECES PAST
+		// IS NOT HOLDING THAT STAGE OPEN.
+		//
+		// One send covers a contiguous BLOCK of stages - one van, one gate, one
+		// return - and the return only happens after the LAST of them. So an
+		// earlier stage in the block is finished with those pieces the moment
+		// the van leaves: they are not coming back to it.
+		//
+		// That is not a convenience, it is the same rule receiveFromThirdParty
+		// already writes on the return. The loss lands on the block's last
+		// stage and every earlier share is credited its full Assigned_Qty,
+		// because a vendor who returns 9 of 10 after three operations cannot
+		// say which one dropped it. So crediting it here, early, records
+		// exactly the figure the return would - it is only recorded sooner.
+		//
+		// Without this, Cutting stayed shut for the days a vendor held the
+		// panels, and the in-house half of that same stage - men who had
+		// finished hours ago - was stranded behind pieces that were not even
+		// in the building.
+		//
+		// The BLOCK'S LAST STAGE still waits, and must: that is where the van
+		// arrives and where the count is finally known.
+		//------------------------------------------------------------------
 		if (logId > 0)
 		{
 			for each  agRoll in Stage_Assignment[Stage_Log == logId]
 			{
 				asgCount = asgCount + 1;
-				asgOut = asgOut + ifnull(agRoll.Qty_Out,0);
 
-				if (ifnull(agRoll.Assignment_Status,"").toString().trim() != "Done")
+				if (ifnull(agRoll.Assignment_Status,"").toString().trim() == "Done")
 				{
-					asgOpen = asgOpen + 1;
+					asgOut = asgOut + ifnull(agRoll.Qty_Out,0);
+				}
+				else
+				{
+					agRef = ifnull(agRoll.Outsource_Ref,"").toString().trim();
+					agPass = false;
+
+					// Queried only for an open share that is actually out with a
+					// vendor - which is at most one or two rows on a stage. A
+					// query per share regardless would be the shape that runs
+					// this script into the statement-execution limit, and that
+					// limit is NOT catchable: it kills the script and the widget
+					// gets a bare HTTP 500 with no error card at all.
+					if (agRoll.Third_Party != null && agRef != "")
+					{
+						agMaxSeq = 0;
+						for each  agBlk in Stage_Assignment[Outsource_Ref == agRef]
+						{
+							agSq = ifnull(agBlk.Sequence_No,0);
+							if (agSq > agMaxSeq) { agMaxSeq = agSq; }
+						}
+						if (ifnull(agRoll.Sequence_No,0) < agMaxSeq) { agPass = true; }
+					}
+
+					if (agPass == true)
+					{
+						asgOut = asgOut + ifnull(agRoll.Assigned_Qty,0);
+					}
+					else
+					{
+						asgOpen = asgOpen + 1;
+						asgOut = asgOut + ifnull(agRoll.Qty_Out,0);
+					}
 				}
 			}
 		}
@@ -230,11 +294,34 @@ string saveProductionPhase(string payloadJson)
 			// in his hands would arrive at Stitching already lost, with a
 			// damage prompt asking what happened to cloth that is fine.
 			//----------------------------------------------------------
+			// asgOpen has already discounted a vendor who is carrying the pieces
+			// on to a later stage of his block - he is not one of the people
+			// this stage is waiting for.
 			if (asgOpen > 0)
 			{
-				shareWord = "operators have";
-				if (asgOpen == 1) { shareWord = "operator has"; }
-				return "{\"success\":false,\"code\":\"SHARES_OPEN\",\"error\":\"" + asgOpen + " " + shareWord + " not finished their share of " + phaseName.replaceAll("\"","'") + " yet. Close their work first.\"}";
+				shareWord = "shares of";
+				if (asgOpen == 1) { shareWord = "share of"; }
+				return "{\"success\":false,\"code\":\"SHARES_OPEN\",\"error\":\"" + asgOpen + " " + shareWord + " " + phaseName.replaceAll("\"","'") + " has not been finished yet. Close that work first.\"}";
+			}
+
+			//----------------------------------------------------------
+			// A STAGE THAT HAS NOT RECEIVED ANYTHING CANNOT BE CLOSED.
+			//
+			// One send to a third party covers a BLOCK of stages, so a stage
+			// several steps ahead can already be holding the vendor's share
+			// while the stage before it is still being cut. Its Qty_In is
+			// that stage's output and is not settled yet.
+			//
+			// Closing here would publish a Qty_Out built from the one share
+			// that happens to exist and hand it to the next stage as fact -
+			// and every piece still to come through would arrive already
+			// lost. The widget disables the button; this is the same rule
+			// where it cannot be got round, because a Custom API is callable
+			// from anywhere.
+			//----------------------------------------------------------
+			if (stageInNow <= 0 && qtyIn <= 0)
+			{
+				return "{\"success\":false,\"code\":\"STAGE_NOT_REACHED\",\"error\":\"" + phaseName.replaceAll("\"","'") + " has not received anything yet - the stage before it is still running.\"}";
 			}
 
 			// The stage produced what its people produced. The payload's figure

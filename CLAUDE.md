@@ -232,7 +232,16 @@ and the second write would lose the first.
 `Third_Party` filled instead of `Operator`, plus `Sent_On` / `Returned_On` / `Outsource_Ref`. A
 vendor doing 40 of a stage and two men doing the other 60 are three rows of one table, the
 "how many are left to hand out" test counts all three, and the stage's `Qty_Out` sums all three.
-The vendor is picked from the stage card's own *who is taking these* dropdown, next to the men.
+Sending starts from the stage card's own *who is taking these* dropdown, next to the men.
+
+> **That dropdown offers ONE option — "Send to a third party…" — never vendor names.** Which
+> vendor may take the work is decided by the *stages*, and the stages are not chosen until the
+> dialog: a send covers a contiguous block and only a party covering **every** stage in it is
+> eligible. Naming vendors on the card answers that a step early — he picks one for Stitching,
+> ticks Embroidery too, and finds the choice was never valid. The card offers the action; the
+> dialog names the parties once it knows what it is asking about. The option shows whenever any
+> party exists, *not* filtered by this stage: if none covers the block he builds, the dialog names
+> the stage nobody does, which is an answer where a missing option is a dead end.
 
 > **This is what fixed a silent-loss bug, and the shape of it is worth keeping in mind.**
 > The old model put the vendor on the stage **header** and set `Stage_Log.Qty_In` to the sent
@@ -249,12 +258,38 @@ The vendor is picked from the stage card's own *who is taking these* dropdown, n
 > `Qty_In = 0` and filled in exactly once by whichever comes first: the first in-house operator
 > put on them (`saveStageAssignment`), or `receiveFromThirdParty` closing the chain.
 >
+> **The screen therefore draws MORE THAN ONE STAGE.** "One stage at a time" still holds for
+> everything else, but a later stage of a block is rendered as soon as it is holding a share —
+> otherwise the supervisor watches five pieces leave and cannot find them anywhere, which reads
+> exactly like losing them. Those cards are look-ahead only (`.stage-card.is-ahead`): `Qty_In`
+> prints as a dash, nothing can be handed out from them, and **End stage is disabled**. Closing
+> one early would publish a `Qty_Out` built from the single share that happens to exist and hand
+> it to the next stage as fact. `saveProductionPhase` refuses it too — `STAGE_NOT_REACHED`, when
+> a stage with shares has no stored `Qty_In` and the payload offers none.
+>
+> **THE VAN ARRIVES ONCE, AT THE BLOCK'S LAST STAGE, and everything else follows from that.**
+> *Take it back* is offered on that stage's vendor row only; every earlier row reads
+> "back at `<last stage>`". And an earlier stage is **not waiting for the van** — those pieces
+> left it when the van did. So `saveProductionPhase` treats an open vendor share whose
+> `Sequence_No` is below its block's maximum as **passing through**: it credits `Assigned_Qty` to
+> the stage's output and does not count it as an open share. That is not a shortcut — it records
+> exactly the figure the return would write, only sooner, because the loss lands on the block's
+> last stage and every earlier share is credited in full regardless. Without it a cutting stage
+> stayed shut for the days a vendor held the panels, stranding the in-house half of that same
+> stage behind pieces that were not in the building. The widget mirrors the rule (`isPassThrough`,
+> `shareOutFor`) so the meter, the End button and the damage prompt all agree — reading `Qty_Out`
+> on a pass-through share would report those pieces as lost and ask what happened to cloth that
+> is fine.
+>
 > **`receiveFromThirdParty` closes SHARES, not stages.** The loss still lands on the last stage of
 > the block. It then walks the block forward and closes each stage *only* while two things hold —
 > every share on it is Done, and the shares add up to everything the stage received — stopping at
 > the first stage where they do not, because that stage's output is the next one's input. A
 > whole-stage block therefore closes end to end on the return exactly as it always did, and a
-> partial one leaves the stage for the ordinary **End stage** press.
+> partial one leaves the stage for the ordinary **End stage** press. That walk keeps the strict
+> `Assignment_Status != "Done"` test rather than the pass-through rule above: it is a
+> *pre-test* for a convenience, and the stage it declines to auto-close is one the supervisor can
+> now close himself.
 >
 > **`saveStageAssignment` refuses to end, re-size or remove a vendor's share.** Those pieces are on
 > a van: the only event that knows what became of them is the return. Removing one would say the

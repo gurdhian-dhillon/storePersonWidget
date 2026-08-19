@@ -465,20 +465,51 @@ anything new.
 
 ### The allocator
 
-`lotFill` ([lot-allocator.js:104](../app/js/lot-allocator.js#L104)) keeps step 1 — remnants, least
-waste per cut — unchanged; a printed lot has offcuts of its own like any other. Step 2 branches:
+`lotFill` keeps step 1 — remnants, least waste per cut — unchanged; a printed lot has offcuts of its
+own like any other. Step 2 branches on **`lot.form`, where anything other than `Pieces` — including
+blank — is a `Roll`**:
 
 | `lot.form` | fresh cloth comes from |
 |---|---|
-| `Roll` | `floor(metres × 100 / cutLength)` rows, exactly as today |
-| `Pieces` | the same least-waste loop over `pieces[]`, scored with `remnantYield` |
+| `Roll` | `floor(metres × 100 / cutLength)` rows, the existing code moved verbatim |
+| `Pieces` | the same least-waste loop over `pieces[]`, scored with `remnantYield`, and **`metres` is zeroed** so there is no budget left for anything to spend twice |
 
 Pieces are credited to `fromFresh` and `metresPer`, **not** to `fromWaste`: this is raw material, it
 must land in `Pieces_From_Raw`, and it must never appear on a waste screen or in the scrap report.
+Each lot line carries the pieces it took, so the server is *told* rather than left to re-derive.
 
-`lotFill(greige = true)` means *include the `Unwash` pieces* rather than *add `unwash` metres*.
-`chooseLotForOrder` and `orderMetres` need no change at all — the first ranks on the lot's
-maintained totals, the second is lot-blind by design.
+A per-card **`pieceLeft`** ledger sits beside `wasteLeft` / `lotLeft` / `greigeLeft`, seeded and spent
+the same way — one Issue press serves a whole card, so two orders on it must not be offered the same
+physical piece.
+
+`chooseLotForOrder` and `orderMetres` need no change at all — the first ranks on the lot's maintained
+totals, the second is lot-blind by design.
+
+> **Greige pieces are excluded even from the after-washing simulation**, which is deliberately not
+> what a roll does. There is no way to wash a piece yet: a `Wash_Request` moves a lot's metres between
+> two columns and would leave `Fabric_Piece.State` saying `Unwash` while the lot claimed washed
+> metres — the header and its pieces disagreeing. Offering a wash the store cannot perform is worse
+> than saying the row is short. `lotGreigePieces` exists so the row can name them rather than hide
+> them. Take the greige flag in `lotPieces` when phase 3 lands.
+
+### `issueMaterials` — the one line the feature exists for
+
+```
+rowsIssued    = floor(thisQty * 100 / cutL)
+piecesFromRaw = perRow * rowsIssued          ← WRONG on a stack of pieces
+```
+
+Three 3.00 m pieces are 9.00 m; against a 55 cm cut that divides to 16 marker rows where the pieces
+yield 15. So for a pieces pass, **both** figures are replaced by ones summed per piece:
+
+- `thisQty` becomes the pieces' own metres, and is **not** snapped down to whole marker rows — a
+  piece goes out whole, and there is no such thing as 0.20 m of one to leave behind
+- `piecesFromRaw` becomes `Σ floor(W/cutW) × floor(L/cutL) × count`
+
+Every piece named in the payload is **re-read off `Fabric_Piece`** and refused — never trimmed — if it
+is on another lot, not `Available`, greige, or short of the count claimed. Then the rows are
+decremented, because on a `Pieces` lot the metres that just moved are the maintained sum of exactly
+those rows.
 
 ### On the row
 
@@ -516,6 +547,40 @@ allocator promising a marker row that will not fit.
 
 Until this lands, greige printed pieces are visible and are correctly refused by the allocator —
 which is the existing rule working, not a bug.
+
+### Receipt needs no change, and the reason is worth stating
+
+The supervisor confirms **metres**, exactly as he does for a roll, and that is exact rather than
+approximate: whole pieces at a fixed length give a figure with nothing rounded in it.
+`receiveMaterials` settles the lot's `In_Transit_Qty` by the same metres that were raised, so nothing
+about the pieces path reaches it.
+
+### A dispute on a pieces lot — refused, not guessed at
+
+`Store_Correction` means *the cloth never left the shelf*, so the metres go back onto the lot. On a
+roll that is just metres returning to the roll. On a **`Pieces`** lot the metres are the maintained
+sum of its `Fabric_Piece` rows, so adding to `Wash_Quantity` alone would leave the lot claiming cloth
+that no piece backs — and the allocator reads the **pieces**, not the header, so it could never find
+it. The header and its pieces disagreeing is the fault this whole design is built around.
+
+`resolveDispute` therefore **refuses** `Store_Correction` on a pieces lot, before anything is written,
+and says what to do instead:
+
+> Lot P1 is printed cloth held as pieces, and pieces cannot be put back by metres. Record which pieces
+> came back on the lot first, then resolve this as **Found**.
+
+Restoring properly means naming which physical pieces came back, and the dispute record cannot know —
+it carries metres. Inventing a piece of some assumed length would put cloth on the rack nobody ever
+cut, which is worse than a dead end that states its own remedy.
+
+**Every other outcome is unaffected.** `Found`, `Denied` and the `Lost` write-off only ever *reduce*
+`Disputed_Qty`, and reducing needs no piece to back it.
+
+> **The proper fix is a design decision, not a coding one**, which is why it is a refusal today. It
+> needs the handover to record which pieces crossed the counter, and a single `Issue_Lines.Fabric_Piece`
+> lookup cannot hold a pass that took two different piece rows. The honest shapes are a
+> `Piece_Movement` form mirroring `Waste_Movement`, or one issue line per piece. Decide that before
+> printed cloth is issued to somebody who might come back short.
 
 ## What NOT to do
 
@@ -645,7 +710,7 @@ Each phase is useful on its own and nothing breaks between them.
 | | | Leaves you with |
 |---|---|---|
 | 1 | Forms, printed-SKU minting, `sendToPrint`, `receiveFromPrint`, `cancelPrintJob`, `getPrintData`, the Print tab | printed stock exists in Creator, is correct and is visible — not yet issuable |
-| 2 | `getStoreMaterialRequirements` emits `pieces[]`; the `lotFill` piece path; `issueMaterials` piece lines; `receiveMaterials` settlement; the two `Issue_Lines` fields | printed fabric is issued and settled |
+| 2 | `getStoreMaterialRequirements` emits `form` + `pieces[]`; the `lotFill` piece path and its `pieceLeft` ledger; `issueMaterials` consuming named pieces; the store row naming which pieces to fetch | printed fabric is issued |
 | 3 | `Wash_Request` on a `Pieces` lot | greige printed pieces become usable |
 | 4 | the full-width remainder after cutting goes back into the printed lot as a shorter piece — `getExpectedWaste`, `saveWasteFromCutting` | reuse closes, per `waste-master.md`'s own *width unchanged = raw material* rule |
 | — | the two Inventory adjustments | **deferred with the rest of the sync** |

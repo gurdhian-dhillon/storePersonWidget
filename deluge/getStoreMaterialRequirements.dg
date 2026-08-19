@@ -362,6 +362,79 @@ string getStoreMaterialRequirements()
 	// run dry still has to be able to say which lot it came from.
 	lotNameById = Map();
 
+	//------------------------------------------------------------------------
+	// PRINTED PIECES, GROUPED BY LOT.
+	//
+	// A lot whose Form is Pieces holds no continuous cloth: its metres are a
+	// MAINTAINED SUM of these rows, kept for valuation and for the lot ranking,
+	// and NOTHING PLANS A CUT OFF THEM. Five 3.00 m pieces are not 15 m of usable
+	// cloth - against a 55 cm cut each piece yields floor(300/55) = 5 rows and
+	// strands 25 cm, so 25 rows where a continuous 15 m roll gives 27. The
+	// allocator has to simulate per piece, so it has to be sent the pieces.
+	//
+	// One query for the whole form, grouped into a map, exactly like the waste
+	// pass above and for the same reason: a query per lot is the road to the
+	// statement-execution limit, which is not catchable and reaches the widget as
+	// a bare 500 with no error card.
+	//
+	// Bounded the same way Waste_Master is - only Available rows with something
+	// on them, which is printed cloth physically on the rack today, not every
+	// piece ever received.
+	//
+	// Added_Time order, so a tie in the allocator's scoring falls to the oldest
+	// piece and printed cloth does not age on the rack.
+	//------------------------------------------------------------------------
+	pieceJsonByLot = Map();
+
+	// sort by on its OWN assignment, never inline in the for each header.
+	availablePieces = Fabric_Piece[Piece_Status == "Available"] sort by Added_Time;
+
+	for each  fp in availablePieces
+	{
+		fpLot = ifnull(fp.Lot,"").toString().trim();
+
+		// Creator fields never written are EMPTY, not null, and toDecimal()
+		// throws on empty - normalise to string, test, then convert.
+		fpcS = ifnull(fp.Piece_Count,"0").toString().trim();
+		if(fpcS == "")
+		{
+			fpcS = "0";
+		}
+		fplS = ifnull(fp.Piece_Length_Cm,"0").toString().trim();
+		if(fplS == "")
+		{
+			fplS = "0";
+		}
+		fpwS = ifnull(fp.Piece_Width_Cm,"0").toString().trim();
+		if(fpwS == "")
+		{
+			fpwS = "0";
+		}
+
+		// GREIGE PIECES ARE SENT, NOT DROPPED, and the allocator refuses them.
+		// Same rule as an unwashed roll: greige never counts as available today.
+		// Dropping them would make a lot holding nothing but unwashed cloth read
+		// as empty, which is the "nothing on the rack" lie the blocked-lot note
+		// above exists to prevent.
+		fpSt = ifnull(fp.State,"").toString().trim();
+		if(fpSt == "")
+		{
+			fpSt = "Wash";
+		}
+
+		if(fpLot != "" && fpcS.toDecimal() > 0 && fplS.toDecimal() > 0)
+		{
+			fpFrag = "{\"pieceId\":\"" + fp.ID + "\",\"lengthCm\":" + fplS.toDecimal() + ",\"widthCm\":" + fpwS.toDecimal() + ",\"count\":" + fpcS.toDecimal() + ",\"state\":\"" + fpSt + "\",\"carton\":\"" + ifnull(fp.Carton_Number,"").toString().trim().replaceAll("\"","'") + "\"}";
+
+			prevPieces = ifnull(pieceJsonByLot.get(fpLot),"").toString();
+			if(prevPieces != "")
+			{
+				prevPieces = prevPieces + ",";
+			}
+			pieceJsonByLot.put(fpLot,prevPieces + fpFrag);
+		}
+	}
+
 	allLotRows = Raw_Material_Lot[ID != 0] sort by Added_Time;
 
 	for each  lotR in allLotRows
@@ -437,8 +510,26 @@ string getStoreMaterialRequirements()
 			lrNum = ifnull(lotR.Lot_Number,"").toString().replaceAll("\"","'");
 			lrLab = ifnull(lotR.Lot_Label,"").toString().replaceAll("\"","'");
 
+			// FORM DECIDES HOW THE ALLOCATOR READS THE METRES, and an EMPTY one
+			// means Roll. Every lot that existed before printing has it blank,
+			// and reading blank as anything else would put the whole rack down
+			// the piece path with no pieces - every roll suddenly uncuttable.
+			lrForm = ifnull(lotR.Form,"").toString().trim();
+			if(lrForm != "Pieces")
+			{
+				lrForm = "Roll";
+			}
+
+			// A Roll lot sends an empty array, so the widget has one shape to
+			// read and the piece path simply never has anything to pick.
+			lrPieces = "";
+			if(lrForm == "Pieces")
+			{
+				lrPieces = ifnull(pieceJsonByLot.get(lotR.ID + ""),"").toString();
+			}
+
 			// Ids as strings - an 18-digit id breaks JSON.parse on the widget.
-			lotFrag = "{\"lotId\":\"" + lotR.ID + "\",\"lotNumber\":\"" + lrNum + "\",\"label\":\"" + lrLab + "\",\"blocked\":" + lrBlocked + ",\"wash\":" + lrWash + ",\"unwash\":" + lrUnwash + ",\"inWash\":" + lriS.toDecimal() + "}";
+			lotFrag = "{\"lotId\":\"" + lotR.ID + "\",\"lotNumber\":\"" + lrNum + "\",\"label\":\"" + lrLab + "\",\"blocked\":" + lrBlocked + ",\"wash\":" + lrWash + ",\"unwash\":" + lrUnwash + ",\"inWash\":" + lriS.toDecimal() + ",\"form\":\"" + lrForm + "\",\"pieces\":[" + lrPieces + "]}";
 
 			prevLots = ifnull(lotJsonByMat.get(lrMat),"").toString();
 			if(prevLots != "")
