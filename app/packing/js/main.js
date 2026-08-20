@@ -56,6 +56,29 @@ var PackingScreen = (function () {
     var BOOTED = false;
 
     // ----------------------------------------------------
+    // TABS
+    //
+    // Two: the job, and what was already done. Same split and the same shared
+    // classes as the store screen.
+    //
+    // HISTORY IS LAZY and stays loaded once fetched. Arriving at the queue must
+    // not pay for a list nobody has asked for, and re-fetching on every switch
+    // would make a tab that is mostly read feel slower than the one that is
+    // worked in. Refresh re-fetches whichever tabs have been opened.
+    //
+    // FILTERED IN THE WIDGET, not the query. getPackingHistory cannot filter on
+    // the supervisor server-side either - it is not on the Packing record, it
+    // comes off the plan - so it stamps every row with one and both ends apply
+    // the same test. Changing the picker re-renders; it does not re-fetch.
+    // ----------------------------------------------------
+    var ACTIVE_TAB = 'queue';
+    var HISTORY = [];
+    var HISTORY_LOADED = false;
+    var HISTORY_LOADING = false;
+    var HISTORY_ERROR = '';
+    var OPEN_PACKING_ID = null;
+
+    // ----------------------------------------------------
     // HELPERS
     // ----------------------------------------------------
 
@@ -123,8 +146,46 @@ var PackingScreen = (function () {
         if (!BOOTED) {
             BOOTED = true;
             loadPeople();
+            wireTabs();
         }
         loadQueue();
+    }
+
+    // Wired once. Keyed off data-packtab so the buttons, the panels and showTab
+    // all agree without any of them holding a list - moving a button in the HTML
+    // moves the tab and nothing here has to know.
+    function wireTabs() {
+        var strip = el('tab-strip');
+        if (!strip) return;
+
+        var btns = strip.querySelectorAll('.tab-btn');
+        Array.prototype.forEach.call(btns, function (btn) {
+            btn.addEventListener('click', function () {
+                showTab(btn.getAttribute('data-packtab'));
+            });
+        });
+    }
+
+    function showTab(name) {
+        if (!name) return;
+        ACTIVE_TAB = name;
+
+        var strip = el('tab-strip');
+        if (strip) {
+            Array.prototype.forEach.call(strip.querySelectorAll('.tab-btn'), function (b) {
+                b.classList.toggle('is-active', b.getAttribute('data-packtab') === name);
+            });
+        }
+
+        ['queue', 'history'].forEach(function (t) {
+            var panel = el('panel-' + t);
+            if (panel) panel.classList.toggle('is-active', t === name);
+        });
+
+        // Fetched on first open, then kept. See the note on ACTIVE_TAB.
+        if (name === 'history' && !HISTORY_LOADED && !HISTORY_LOADING) {
+            loadHistory();
+        }
     }
 
     function loadPeople() {
@@ -173,7 +234,11 @@ var PackingScreen = (function () {
             SELECTED_SUP = sel.value;
             ACTIVE_ORDER_ID = null;
             ACTIVE_ORDER = null;
+            // Both lists are his. Re-rendered, not re-fetched - every row already
+            // carries the supervisor it belongs to, so the filter is free.
+            OPEN_PACKING_ID = null;
             renderQueue();
+            renderHistory();
         };
     }
 
@@ -223,6 +288,13 @@ var PackingScreen = (function () {
 
         if (countEl) {
             countEl.innerText = orders.length ? plural(orders.length, 'order') + ' to pack' : '';
+        }
+        // The tab badge, from the list already in hand - a badge is not worth a
+        // round trip of its own, which is the same rule the store strip follows.
+        var qBadge = el('count-queue');
+        if (qBadge) {
+            qBadge.innerText = orders.length ? String(orders.length) : '';
+            qBadge.classList.toggle('hidden', orders.length === 0);
         }
         if (!container) return;
 
@@ -690,8 +762,11 @@ var PackingScreen = (function () {
 
         callApi('savePackingRecord', payload).then(function (parsed) {
             if (!parsed.success) throw new Error(parsed.error || 'Unknown server error.');
+            // Same two figures the history card shows, and in the same order, so
+            // the confirmation and the record he opens afterwards agree. The
+            // server still returns chargeableWeight; it is simply not quoted.
             alert(parsed.message + '\n\nGross ' + parsed.grossWeight + ' kg, volumetric ' +
-                parsed.volumetricWeight + ' kg, chargeable ' + parsed.chargeableWeight + ' kg.');
+                parsed.volumetricWeight + ' kg.');
             done();
             closeAndRefresh();
         }).catch(function (err) {
@@ -705,12 +780,197 @@ var PackingScreen = (function () {
         ACTIVE_ORDER_ID = null;
         ACTIVE_ORDER = null;
         loadQueue();
+        // The order that just left the queue is the newest thing in the history,
+        // so a stale copy would be missing the one row he most expects to see.
+        // Only if he has already opened that tab - otherwise it loads on first
+        // open with the new row already in it.
+        if (HISTORY_LOADED) loadHistory();
+    }
+
+    // ----------------------------------------------------
+    // HISTORY
+    // ----------------------------------------------------
+
+    function loadHistory() {
+        var container = el('history-list');
+        HISTORY_LOADING = true;
+        HISTORY_ERROR = '';
+
+        if (!isRunningInCreator()) {
+            HISTORY = [{
+                id: '7001', salesOrder: 'SO-00002', planNo: 'PLAN-00003',
+                supervisorId: '11', supervisor: 'Harpreet Kaur', packedBy: 'Ravi',
+                packedOn: '19-Aug-2026 15:20', boxCount: 2,
+                grossWeight: 9.4, volumetricWeight: 12.1, chargeableWeight: 12.1,
+                boxes: [
+                    { boxNo: 1, carton: 'Box 3', lineNo: 1, sku: 'SKU-00002', itemName: 'Linen Liana Basket', qty: 12, grossWeight: 4.7, volumetricWeight: 6.05 },
+                    { boxNo: 2, carton: 'Box 3', lineNo: 1, sku: 'SKU-00002', itemName: 'Linen Liana Basket', qty: 8, grossWeight: 4.7, volumetricWeight: 6.05 }
+                ]
+            }];
+            HISTORY_LOADING = false;
+            HISTORY_LOADED = true;
+            renderHistory();
+            return;
+        }
+
+        if (container) container.innerHTML = '<div class="pack-hint">Loading packed orders&hellip;</div>';
+
+        // THE SUPERVISOR IS DELIBERATELY NOT SENT, and that is the fix for a bug
+        // rather than an omission.
+        //
+        // It used to send SELECTED_SUP, so the server returned only that
+        // supervisor's rows. Switching the picker then filtered an
+        // already-narrowed list - which held nothing for anybody else - and
+        // HISTORY_LOADED blocked a re-fetch, so the tab sat on "nothing packed"
+        // for ever with no call going out. That is exactly what it looked like:
+        // an API that was not being called.
+        //
+        // Fetching unfiltered costs nothing, because getPackingHistory applies
+        // its "newest 50" range BEFORE the supervisor test. Sending the id never
+        // gave a supervisor his own fifty - it only trimmed the same page - so
+        // the coverage is identical and switching is now instant and correct.
+        //
+        // The server still accepts supervisorId. It is a Custom API and another
+        // caller may want one supervisor; this screen is simply not that caller.
+        callApi('getPackingHistory', {})
+            .then(function (parsed) {
+                HISTORY = parsed.packings || [];
+                HISTORY_LOADING = false;
+                HISTORY_LOADED = true;
+                renderHistory();
+            })
+            .catch(function (err) {
+                console.error('getPackingHistory failed:', err);
+                HISTORY_LOADING = false;
+                HISTORY_ERROR = (err && err.message) ? err.message : String(err);
+                renderHistory();
+            });
+    }
+
+    function visibleHistory() {
+        if (!SELECTED_SUP) return [];
+        return HISTORY.filter(function (p) {
+            return String(p.supervisorId) === String(SELECTED_SUP);
+        });
+    }
+
+    function toggleHistory(id) {
+        OPEN_PACKING_ID = (String(OPEN_PACKING_ID) === String(id)) ? null : String(id);
+        renderHistory();
+    }
+
+    function renderHistory() {
+        var container = el('history-list');
+        var countEl = el('history-count');
+        var badge = el('count-history');
+        var rows = visibleHistory();
+
+        if (badge) {
+            badge.innerText = rows.length ? String(rows.length) : '';
+            badge.classList.toggle('hidden', rows.length === 0);
+        }
+        if (countEl) {
+            countEl.innerText = rows.length ? plural(rows.length, 'order') + ' packed' : '';
+        }
+        if (!container) return;
+
+        if (HISTORY_ERROR) {
+            container.innerHTML = '<div class="pack-hint is-bad">' + esc(HISTORY_ERROR) + '</div>';
+            return;
+        }
+        if (HISTORY_LOADING) {
+            container.innerHTML = '<div class="pack-hint">Loading packed orders&hellip;</div>';
+            return;
+        }
+        if (!rows.length) {
+            container.innerHTML = '<div class="pack-hint">Nothing packed yet for this supervisor</div>';
+            return;
+        }
+
+        // Same accordion and the same shared item-card classes as the queue above
+        // and the store screen's history, so the two tabs read as one screen.
+        container.innerHTML = rows.map(function (p) {
+            var open = (String(p.id) === String(OPEN_PACKING_ID));
+
+            // One row per PHYSICAL box, which is what Packed_Boxes holds and what
+            // answers "what is in box 3" months later.
+            var boxRows = (p.boxes || []).map(function (b) {
+                return '<tr>' +
+                    '<td class="col-num">' + n(b.boxNo) + '</td>' +
+                    '<td>' + esc(b.carton || '') + '</td>' +
+                    '<td class="material-name-cell">' +
+                        '<div class="mat-name">' + esc(b.itemName || '') + '</div>' +
+                        (b.sku ? '<div class="mat-sku">' + esc(b.sku) + '</div>' : '') +
+                    '</td>' +
+                    '<td class="col-num col-strong">' + n(b.qty) + '</td>' +
+                    '<td class="col-num">' + kg(b.grossWeight) + '</td>' +
+                    '<td class="col-num">' + kg(b.volumetricWeight) + '</td>' +
+                    '</tr>';
+            }).join('');
+
+            // VOLUMETRIC ON THE HEADER. Chargeable used to lead here - the
+            // greater of gross and volumetric, which is what the courier bills -
+            // but it is a derived figure and on a garment carton it is almost
+            // always just the volumetric repeated, so the card carried the same
+            // number twice under two names. Volumetric is the one that is
+            // measured from the carton, so it is the one shown.
+            //
+            // The server still returns chargeableWeight; nothing on this screen
+            // reads it now, and savePackingRecord still computes it for the
+            // message it returns on save.
+            var meta = esc(p.packedOn || '') +
+                (p.packedBy ? ' &middot; ' + esc(p.packedBy) : '') +
+                ' &middot; ' + plural(n(p.boxCount), 'box');
+
+            return '<div class="item-card' + (open ? ' open' : '') + '">' +
+                '<div class="item-header" onclick="PackingScreen.toggleHistory(\'' + esc(p.id) + '\')">' +
+                '<div class="item-header-info">' +
+                '<h2>' + esc(p.salesOrder || '—') + '</h2>' +
+                '<div class="item-meta-line"><span>' + meta + '</span></div>' +
+                '</div>' +
+                '<div class="item-header-right">' +
+                '<span class="pack-charge">' + kg(p.volumetricWeight) +
+                '<span class="unit">kg volumetric</span></span>' +
+                '<span class="chevron" aria-hidden="true">' +
+                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
+                'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
+                '</span>' +
+                '</div>' +
+                '</div>' +
+                '<div class="item-body">' +
+                // Gross stays: it is what the packer actually put on the scale,
+                // the one figure here that was measured rather than derived, and
+                // the only thing volumetric can be checked against.
+                '<div class="pack-hist-totals">' +
+                '<span>Gross <b>' + kg(p.grossWeight) + ' kg</b></span>' +
+                '<span>Volumetric <b>' + kg(p.volumetricWeight) + ' kg</b></span>' +
+                (p.planNo ? '<span>Plan <b>' + esc(p.planNo) + '</b></span>' : '') +
+                '</div>' +
+                '<div class="table-wrapper">' +
+                '<table><thead><tr>' +
+                '<th class="col-num">Box</th><th>Carton</th><th>Item</th>' +
+                '<th class="col-num">Pieces</th><th class="col-num">Gross kg</th>' +
+                '<th class="col-num">Volumetric kg</th>' +
+                '</tr></thead><tbody>' + boxRows + '</tbody></table>' +
+                '</div>' +
+                '</div>' +
+                '</div>';
+        }).join('');
+    }
+
+    // Refresh reloads whichever tabs have been opened - the same rule the store
+    // screen's TAB_LOADERS follow. A tab never opened costs nothing.
+    function refreshAll() {
+        loadQueue();
+        if (HISTORY_LOADED) loadHistory();
     }
 
     // Only what the generated markup's onclick handlers and the host page need.
     return {
         init: init,
-        refresh: loadQueue,
+        refresh: refreshAll,
+        showTab: showTab,
+        toggleHistory: toggleHistory,
         selectOrder: selectOrder,
         setStaff: setStaff,
         addBox: addBox,
@@ -721,6 +981,8 @@ var PackingScreen = (function () {
         setBoxWeight: setBoxWeight,
         save: save,
         // for the stub-DOM tests only
+        _setHistory: function (h) { HISTORY = h; HISTORY_LOADED = true; renderHistory(); },
+        _visibleHistory: visibleHistory,
         _state: function () { return ACTIVE_ORDER; },
         _setup: setupActiveOrder,
         _setQueue: function (q) { QUEUE = q; renderQueue(); },

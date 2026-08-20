@@ -1,0 +1,261 @@
+string getPackingHistory(string payloadJson)
+{
+	// Orders that have been packed, for the packing screen's History tab.
+	// POST, one argument: payloadJson. { "supervisorId":"123" } - empty means
+	// every supervisor.
+	//
+	// Reads Packing, the record savePackingRecord writes. The sales order's
+	// status can say an order reached "Packed"; only this can say what went into
+	// which carton, what it weighed and who packed it.
+	//
+	// SHAPED ON getFinishingHistory, deliberately, because the two have the same
+	// problem and it is not the one getStoreIssueHistory has:
+	//
+	//   - PACKING HAS NO DATE FIELD. savePackingRecord writes no Packed_On, so
+	//     Added_Time is the only record of when it happened, and there is nothing
+	//     for a From/To picker to filter on. Adding one is a Creator form change
+	//     and a second writer of a fact the record already carries.
+	//   - THE SUPERVISOR IS NOT ON THE RECORD EITHER. Packing.Employee is the
+	//     person who packed it. Which supervisor's order it was comes off
+	//     Production_Planning.Assigned_To, exactly as getPackingQueue stamps the
+	//     queue, so the filter cannot go in the query - it is decided in code
+	//     after the fetch.
+	//
+	// That second point is why this pages the newest N and filters afterwards
+	// rather than using "range from A to B" as a pager. A page boundary applied
+	// before a filter decided in code gives a page of fifty that shows three, and
+	// a pager whose numbers do not match what is on screen is worse than none.
+	//
+	// PAGED ALL THE SAME. The statement-execution limit is NOT catchable - it
+	// kills the script and the widget gets a bare HTTP 500 with no error card -
+	// so the cost has to stop depending on how much has ever been packed.
+
+	res = "{\"errors\":[\"Nothing ran\"]}";
+
+	try
+	{
+		// Held as TEXT and compared against Assigned_To as text. Assigned_To is a
+		// lookup holding a record id while ID is a long, and comparing them as-is
+		// is a mixed-type comparison, which THROWS rather than returning false.
+		// Empty means no filter.
+		supFilter = "";
+		raw = ifnull(payloadJson,"").toString().trim();
+
+		if(raw != "")
+		{
+			inp = raw.toMap();
+			supIdTxt = ifnull(inp.get("supervisorId"),"").toString().trim();
+
+			if(supIdTxt != "" && supIdTxt.isNumber() == true)
+			{
+				supFilter = supIdTxt;
+			}
+		}
+
+		//------------------------------------------------------------------
+		// The carton catalogue, fetched ONCE.
+		//
+		// Packed_Boxes.Box_Type is a LOOKUP, so Deluge reads it as the record id -
+		// printing it puts an 18-digit number where the carton name belongs, which
+		// is the same fault getStoreIssueHistory records for materials.
+		//
+		// A map rather than a query per box row: one order can be thirty cartons
+		// and fifty orders is fifteen hundred lookups, which is exactly the shape
+		// that trips the uncatchable limit. Box_Master is master data - a dozen
+		// rows that do not grow with trading.
+		//------------------------------------------------------------------
+		boxNameMap = Map();
+
+		for each  bmC in Box_Master[ID != 0]
+		{
+			boxNameMap.put(bmC.ID.toString(),ifnull(bmC.Box_Name,"").toString().trim().replaceAll("\"","'"));
+		}
+
+		// sort by on its own assignment, never inline in a for-each header.
+		packRuns = Packing[ID != 0] sort by Added_Time desc range from 1 to 50;
+
+		// A range holds many orders but only a handful of people, so the same few
+		// names were being fetched over and over. Same cache the store history
+		// uses, for the same reason.
+		empCache = Map();
+
+		rowsJson = "";
+		shownCount = 0;
+		boxTotal = 0;
+
+		for each  pk in packRuns
+		{
+			soNo = "";
+			planNo = "";
+			rowSupKey = "";
+			rowSupName = "";
+
+			//--------------------------------------------------------------
+			// THE SUPERVISOR, off the plan. Nothing downstream of checking
+			// carries one, and the walk is already being made for the order
+			// number, so the filter costs nothing extra.
+			//
+			// One order produces exactly one plan, which is what makes taking
+			// the plan's supervisor correct here - the same invariant
+			// saveProductionPhase relies on to mirror the plan's completion
+			// onto the order.
+			//--------------------------------------------------------------
+			if(pk.Sales_Order != null)
+			{
+				for each  so in Sales_Order[ID == pk.Sales_Order]
+				{
+					soNo = ifnull(so.Sales_Order,"").toString().replaceAll("\"","'");
+				}
+
+				for each  pl in Production_Planning[Sales_Order == pk.Sales_Order]
+				{
+					planNo = ifnull(pl.Plan_No,"").toString().replaceAll("\"","'");
+					if(pl.Assigned_To != null)
+					{
+						rowSupKey = pl.Assigned_To.toString();
+					}
+				}
+			}
+
+			// Text against text - see the note on supFilter above.
+			keepRow = true;
+			if(supFilter != "" && rowSupKey != supFilter)
+			{
+				keepRow = false;
+			}
+
+			if(keepRow == true)
+			{
+				if(rowSupKey != "")
+				{
+					rowSupName = ifnull(empCache.get(rowSupKey),"").toString();
+					if(rowSupName == "")
+					{
+						for each  supE in Employee[ID == rowSupKey.toLong()]
+						{
+							rowSupName = ifnull(supE.Employee_Name,"").toString().replaceAll("\"","'");
+						}
+						empCache.put(rowSupKey,rowSupName);
+					}
+				}
+
+				// Who actually packed it. A different person from the supervisor,
+				// and the one a query about a carton goes to.
+				packedBy = "";
+				pkEmpKey = ifnull(pk.Employee,"").toString().trim();
+				if(pkEmpKey != "")
+				{
+					packedBy = ifnull(empCache.get(pkEmpKey),"").toString();
+					if(packedBy == "")
+					{
+						for each  pkE in Employee[ID == pkEmpKey.toLong()]
+						{
+							packedBy = ifnull(pkE.Employee_Name,"").toString().replaceAll("\"","'");
+						}
+						empCache.put(pkEmpKey,packedBy);
+					}
+				}
+
+				// Added_Time is the only record of when this happened - there is
+				// no Packed_On field. Formatted here rather than on the widget so
+				// a raw Creator date-time never crosses JSON.
+				packedOn = "";
+				if(pk.Added_Time != null)
+				{
+					packedOn = pk.Added_Time.toString("dd-MMM-yyyy HH:mm");
+				}
+
+				//----------------------------------------------------------
+				// ONE ROW PER PHYSICAL BOX, which is what Packed_Boxes holds and
+				// what answers "what is in box 3" months later. Not summarised -
+				// the totals are on the parent and are read from there.
+				//----------------------------------------------------------
+				boxesJson = "";
+				rowBoxes = 0;
+
+				for each  bx in pk.Packed_Boxes
+				{
+					bxTypeKey = ifnull(bx.Box_Type,"").toString().trim();
+					bxName = "";
+					if(bxTypeKey != "")
+					{
+						bxName = ifnull(boxNameMap.get(bxTypeKey),"").toString();
+					}
+					// A carton later removed from Box_Master misses the map. The
+					// box still shipped, so it is named by its number rather than
+					// dropped or left blank.
+					if(bxName == "")
+					{
+						bxName = "Carton not on file";
+					}
+
+					// Creator fields that were never written are EMPTY, not null,
+					// and toDecimal() throws on empty.
+					gwS = ifnull(bx.Gross_Weight_Kg,"0").toString().trim();
+					if(gwS == "")
+					{
+						gwS = "0";
+					}
+					vwS = ifnull(bx.Volumetric_Weight_Kg,"0").toString().trim();
+					if(vwS == "")
+					{
+						vwS = "0";
+					}
+
+					if(boxesJson != "")
+					{
+						boxesJson = boxesJson + ",";
+					}
+					boxesJson = boxesJson + "{\"boxNo\":" + ifnull(bx.Box_No,0) + ",\"carton\":\"" + bxName + "\",\"lineNo\":" + ifnull(bx.Line_No,0) + ",\"sku\":\"" + ifnull(bx.SKU,"").toString().replaceAll("\"","'") + "\",\"itemName\":\"" + ifnull(bx.Item_Name,"").toString().replaceAll("\"","'") + "\",\"qty\":" + ifnull(bx.Quantity,0) + ",\"grossWeight\":" + gwS.toDecimal() + ",\"volumetricWeight\":" + vwS.toDecimal() + "}";
+
+					rowBoxes = rowBoxes + 1;
+					boxTotal = boxTotal + 1;
+				}
+
+				tgS = ifnull(pk.Total_Gross_Weight_Kg,"0").toString().trim();
+				if(tgS == "")
+				{
+					tgS = "0";
+				}
+				tvS = ifnull(pk.Total_Volumetric_Weight_Kg,"0").toString().trim();
+				if(tvS == "")
+				{
+					tvS = "0";
+				}
+				totGross = tgS.toDecimal();
+				totVol = tvS.toDecimal();
+
+				// CHARGEABLE IS THE GREATER OF THE TWO - what the courier bills.
+				// Computed here rather than stored, the same way savePackingRecord
+				// computes it for the message it returns, so the history and the
+				// save can never disagree about a figure neither of them keeps.
+				chargeable = totGross;
+				if(totVol > totGross)
+				{
+					chargeable = totVol;
+				}
+
+				if(rowsJson != "")
+				{
+					rowsJson = rowsJson + ",";
+				}
+				// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+				rowsJson = rowsJson + "{\"id\":\"" + pk.ID + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"supervisorId\":\"" + rowSupKey + "\",\"supervisor\":\"" + rowSupName + "\",\"packedBy\":\"" + packedBy + "\",\"packedOn\":\"" + packedOn + "\",\"boxCount\":" + rowBoxes + ",\"grossWeight\":" + totGross + ",\"volumetricWeight\":" + totVol + ",\"chargeableWeight\":" + chargeable + ",\"boxes\":[" + boxesJson + "]}";
+
+				shownCount = shownCount + 1;
+			}
+		}
+
+		// Built by hand - Map.toString() does not emit valid JSON once the
+		// structure nests, and List.toString() does not wrap in [].
+		res = "{\"errors\":[],\"packings\":[" + rowsJson + "],\"count\":" + shownCount + ",\"boxCount\":" + boxTotal + "}";
+	}
+	catch (e)
+	{
+		// Creator reports every runtime failure to a widget as code 9430, so the
+		// real message has to travel inside the payload.
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"packings\":[],\"count\":0,\"boxCount\":0}";
+	}
+
+	return res;
+}

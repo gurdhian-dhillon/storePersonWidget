@@ -81,6 +81,9 @@ void completeWashRequest()
 			lotUnw = 0.0;
 			lotInWash = 0.0;
 			hasLotHere = false;
+			// Printed cloth held as discrete pieces. Blank Form means Roll -
+			// every lot that existed before printing has it empty.
+			lotIsPieces = false;
 
 			if(lotIdTxt != "")
 			{
@@ -99,10 +102,42 @@ void completeWashRequest()
 					lotUnw = lwStr.toDecimal();
 					lotInWash = liwStr.toDecimal();
 					hasLotHere = true;
+
+					if(ifnull(wLot.Form,"").toString().trim() == "Pieces")
+					{
+						lotIsPieces = true;
+					}
 				}
 			}
 
-			if(matRec != null && gotQty > 0)
+			//----------------------------------------------------------------
+			// THE SECOND HALF OF THE PIECES GUARD, and it has to be here as well
+			// as at the raise. This is a report action on a form anyone can add a
+			// row to by hand, and a ticket raised before that guard shipped is
+			// already sitting in the queue - pressing "Mark washed" on one of
+			// those is what actually destroys the stock.
+			//
+			// Moving metres from In_Wash to Wash on a Pieces lot leaves every
+			// Fabric_Piece row still saying State = "Unwash" while the header
+			// claims washed metres. The allocator reads the pieces and takes only
+			// State == "Wash", and lotFill zeroes a Pieces lot's metres budget, so
+			// the cloth becomes real, on the rack, and permanently unissuable -
+			// with every total still saying it is there.
+			//
+			// Refused rather than guessed at, exactly as resolveDispute refuses a
+			// Store_Correction on one. Doing it properly means naming which pieces
+			// came back and at what length, because washing shrinks cloth, and
+			// this record does not know either.
+			//
+			// The request is left OPEN. Cancelling it here would strand the metres
+			// in In_Wash_Qty with nothing to bring them back; leaving it open keeps
+			// it on the queue where somebody can see it and use "Cancel wash".
+			//----------------------------------------------------------------
+			if(lotIsPieces == true)
+			{
+				info "completeWashRequest refused: lot " + lotIdTxt + " is printed cloth held as pieces. Washing pieces moves Fabric_Piece rows, not a metres figure, and that is not built yet - the request has been left open.";
+			}
+			else if(matRec != null && gotQty > 0)
 			{
 				unwStr = ifnull(matRec.Unwash_Quantity,"0").toString().trim();
 				if(unwStr == "")

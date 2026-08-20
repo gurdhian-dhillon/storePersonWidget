@@ -769,6 +769,42 @@ refuses to queue a second wash request while one is open **for that material**. 
 wrong — a wash running on lot 2 would block a wash on lot 3. The guard becomes per material **and
 lot**.
 
+**There are THREE exits from `In_Wash_Qty`, and for a long time there was one.**
+`raiseMaterialException` is the only thing that raises it, and `completeWashRequest` was the only
+thing that lowered it — so the sole way out of the wash house was *"it came back washed"*. Set a
+request to `Cancelled` by hand and the metres sat there for ever: the SKU total stayed right, the
+reconciler balanced, and nothing could be issued off them. **No report shows that**, because every
+column still adds up. `cancelWashRequest` is the missing exit and returns the metres to
+`Unwash_Quantity` — greige is the only counter they can go back to, because it is washing that
+converts greige into washed cloth, and putting them into `Wash_Quantity` would claim a step that
+never happened. Printing already had this in `cancelPrintJob`; the two are deliberately the same
+shape.
+
+> Shrinkage leaves a residue in `In_Wash_Qty` by design — send 40, get 38 back, and 2 stay there.
+> `Cancel wash` is also how that is cleared.
+
+**A `Pieces` lot cannot be washed, and it is REFUSED rather than capped.** On a printed lot the
+metres are the maintained sum of its `Fabric_Piece` rows, and this flow moves a metres figure
+between two columns on the header without touching a single piece. Wash one and the header claims
+washed metres while every piece behind it still says `Unwash` — after which the allocator finds
+nothing (`lotPieces` takes only `State == "Wash"`) and the header's metres are unspendable
+(`lotFill` zeroes a Pieces lot's budget). The cloth ends up real, on the rack, and permanently
+unissuable while every total says it is there.
+
+> Guarded in **three** places, and all three are needed. `raiseMaterialException` refuses to queue
+> the ticket; `completeWashRequest` refuses to move the metres, because it is a report action on a
+> form anyone can add a row to and a pre-guard ticket may already be sitting in the queue; and the
+> store widget's `washableLots` never offers a `Pieces` lot, so he is not shown a choice that would
+> be refused. The allocator already excluded greige pieces from the after-washing simulation for
+> exactly this reason — the wash **picker** read `e.lots` directly and never got the same rule.
+>
+> The refusal leaves the request **Open**, not Cancelled. Cancelling it there would be a second
+> write on a path that is already refusing to write.
+>
+> Washing pieces is designed, not forgotten — see [printing.md](printing.md#washing-pieces). It
+> names which pieces, flips `Fabric_Piece.State`, and must let him correct the length because
+> washing shrinks cloth and the piece list is what the cutting is simulated against.
+
 Washing being where tone most often diverges is exactly why *move between lots* exists.
 
 ## Migration

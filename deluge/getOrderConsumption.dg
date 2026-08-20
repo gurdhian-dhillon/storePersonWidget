@@ -308,6 +308,76 @@ string getOrderConsumption(string salesOrderId)
 		//----------------------------------------------------------------
 		for each  dm in Material_Damage[Plan == plan.ID]
 		{
+			//------------------------------------------------------------
+			// WHO, WHERE AND WHY - resolved ONCE per incident, not per line.
+			//
+			// The DAMAGED column used to be a bare number with nothing behind
+			// it, on a screen whose own footnote says "open a row for the
+			// reasons". Every other figure in this table can be opened and
+			// answered for - a write-off names both people who looked and quotes
+			// their notes, the cutting allowance explains itself - and the one
+			// column that describes somebody ruining material could not say who,
+			// at which stage, or what happened.
+			//
+			// All four things are already on the record and none of them were
+			// being read: Supervisor, Phase_Name, Damage_Reason and Note.
+			//
+			// Hoisted out of the Damage_Lines loop because one incident spoils
+			// several materials at once - a ruined panel takes its cloth, its
+			// thread and its label - and resolving the employee per line would be
+			// one query per material per incident. The statement limit is not
+			// catchable, so it kills the script and the widget sees a bare 500.
+			//------------------------------------------------------------
+			dmWho = "";
+			if(dm.Supervisor != null)
+			{
+				for each  dmEmp in Employee[ID == dm.Supervisor]
+				{
+					dmWho = ifnull(dmEmp.Employee_Name,"").toString().replaceAll("\"","'");
+				}
+			}
+			if(dmWho == "")
+			{
+				dmWho = "Not recorded";
+			}
+
+			dmStage = ifnull(dm.Phase_Name,"").toString().trim().replaceAll("\"","'");
+			dmReason = ifnull(dm.Damage_Reason,"").toString().trim().replaceAll("\"","'");
+			dmNote = ifnull(dm.Note,"").toString().trim().replaceAll("\"","'").replaceAll("\n"," ");
+
+			dmOn = "";
+			if(dm.Reported_On != null)
+			{
+				dmOn = dm.Reported_On.toString("dd-MMM-yyyy");
+			}
+
+			// The sentence the admin reads, built once. Reason first because it
+			// is what he is looking for; the note only when there is one, because
+			// an empty trailing separator reads as truncated data.
+			dmLooked = dmWho;
+			if(dmStage != "")
+			{
+				dmLooked = dmLooked + " at " + dmStage;
+			}
+			if(dmReason != "")
+			{
+				dmLooked = dmLooked + " - " + dmReason;
+			}
+			if(dmNote != "")
+			{
+				dmLooked = dmLooked + " | " + dmNote;
+			}
+
+			// The column heading already says "Damaged", so the type carries the
+			// STAGE instead of repeating the word. That is the part that differs
+			// between two rows of the same material, and it is what makes a list
+			// of three incidents readable rather than three identical labels.
+			dmType = "Damaged";
+			if(dmStage != "")
+			{
+				dmType = "Damaged at " + dmStage;
+			}
+
 			for each  dl in dm.Damage_Lines
 			{
 				dlMat = dl.Material;
@@ -327,8 +397,48 @@ string getOrderConsumption(string salesOrderId)
 						dlCur.put("damagedPieces",0);
 						keyList.add(dlKey);
 					}
-					dlCur.put("damagedQty",dlCur.get("damagedQty") + ifnull(dl.Damaged_Qty,0));
-					dlCur.put("damagedPieces",dlCur.get("damagedPieces") + ifnull(dl.Damaged_Pieces,0));
+
+					dlQty = ifnull(dl.Damaged_Qty,0);
+					dlPcs = ifnull(dl.Damaged_Pieces,0);
+
+					dlCur.put("damagedQty",dlCur.get("damagedQty") + dlQty);
+					dlCur.put("damagedPieces",dlCur.get("damagedPieces") + dlPcs);
+
+					//----------------------------------------------------
+					// ONE ENTRY PER INCIDENT PER MATERIAL, never merged.
+					//
+					// Two panels ruined on two different days by two different
+					// people are two answers, and a summed figure with one
+					// reason attached would attribute both to whoever happened
+					// to be read last.
+					//
+					// isWaste false: this is measured material off the line, in
+					// the row's own unit - the same footing the write-off entries
+					// use, so the drill-down does not need to know which kind of
+					// row it is looking at.
+					//
+					// A line carrying no quantity is skipped. A label torn while
+					// being attached spoils no garment and consumes no material,
+					// and an entry reading "0" in the reasons list is a row the
+					// admin has to read before finding out it says nothing.
+					//----------------------------------------------------
+					if(dlQty > 0 || dlPcs > 0)
+					{
+						dmQtyTxt = dlQty;
+						if(dlQty <= 0)
+						{
+							dmQtyTxt = dlPcs;
+						}
+
+						dRJson = dlCur.get("reasons");
+						if(dRJson != "")
+						{
+							dRJson = dRJson + ",";
+						}
+						dRJson = dRJson + "{\"type\":\"" + dmType + "\",\"qty\":" + dmQtyTxt + ",\"isWaste\":false,\"on\":\"" + dmOn + "\",\"plan\":\"" + ifnull(plan.Plan_No,"").toString() + "\",\"looked\":\"" + dmLooked + "\"}";
+						dlCur.put("reasons",dRJson);
+					}
+
 					agg.put(dlKey,dlCur);
 				}
 			}

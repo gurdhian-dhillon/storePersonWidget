@@ -463,3 +463,50 @@
     border-radius: 9999px;
     padding: 0.2rem 0.7rem;
 }
+
+/* ----------------------------------------------------------------------------
+   HISTORY TAB
+   ----------------------------------------------------------------------------
+   The card list itself is the shared .item-card, exactly as the queue above and
+   the store screen's history, so only the two things unique to a packed order
+   need styling here.
+*/
+
+/* CHARGEABLE WEIGHT ON THE HEADER, where the queue card carries its status
+   badge. It is the figure the courier bills, so it is the one thing worth
+   knowing without opening the card - gross and volumetric are the working and
+   live inside. */
+.pack-charge {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.25rem;
+    font-size: 0.9375rem;
+    font-weight: 700;
+    color: var(--text-main);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.pack-charge .unit {
+    font-size: 0.6875rem;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+/* The three weights and the plan, on one line above the carton table. A strip
+   rather than a panel: they are the totals of the table right below them, and a
+   bordered block would read as a separate thing to reconcile against. */
+.pack-hist-totals {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.25rem;
+    padding: 0.25rem 0 0.875rem;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+}
+
+.pack-hist-totals b {
+    color: var(--text-main);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}

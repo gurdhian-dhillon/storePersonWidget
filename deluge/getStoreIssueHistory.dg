@@ -155,6 +155,31 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	matNameMap = Map();
 	matSkuMap = Map();
 
+	//--------------------------------------------------------------------------
+	// WHICH LOT THE CLOTH CAME OFF.
+	//
+	// Issue_Lines.Lot is stamped at the moment the cloth crosses the counter and
+	// is the only record of the shade that went out - the requirement row holds
+	// metres and has never held a lot. Without it the history says a supervisor
+	// took 1.05 Mtr of Block Print / Donna and cannot say WHICH Donna, which is
+	// the one question a tone complaint a week later actually asks.
+	//
+	// Fetched whole and once, the same shape as the material maps above and for
+	// the same reason: lots are master data, a few hundred rows that do not grow
+	// with trading, and a query per line is what trips the statement limit on a
+	// 30-day range. The limit is NOT catchable.
+	//
+	// A LOOKUP HOLDS THE RECORD ID, so the readable number has to come off the
+	// lot record - .toString() on the lookup gives an 18-digit id, which is
+	// exactly how those ids ended up under every material name before.
+	//--------------------------------------------------------------------------
+	lotNumMap = Map();
+
+	for each  ltC in Raw_Material_Lot[ID != 0]
+	{
+		lotNumMap.put(ltC.ID.toString(),ifnull(ltC.Lot_Number,"").toString().trim().replaceAll("\"","'"));
+	}
+
 	for each  rmC in Raw_Material[ID != 0]
 	{
 		rmKey = rmC.ID.toString();
@@ -240,11 +265,21 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 				lnName = ifnull(ln.Material_Name,"").toString().trim().replaceAll("\"","'");
 			}
 
+			// Empty on a pre-lot handover and on every non-fabric line, because
+			// lots exist for fabric alone. Sent as an empty string rather than
+			// omitted, so the widget renders one shape for every row.
+			lnLotKey = ifnull(ln.Lot,"").toString().trim();
+			lnLot = "";
+			if(lnLotKey != "")
+			{
+				lnLot = ifnull(lotNumMap.get(lnLotKey),"").toString();
+			}
+
 			if(linesJson != "")
 			{
 				linesJson = linesJson + ",";
 			}
-			linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + "}";
+			linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"lot\":\"" + lnLot + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + "}";
 			totalLines = totalLines + 1;
 		}
 

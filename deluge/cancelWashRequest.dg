@@ -1,0 +1,189 @@
+void cancelWashRequest()
+{
+	// Report custom action on the Wash Request report, Detail View ->
+	// "For Selected Record" -> "Cancel wash".
+	//
+	// The cloth went to the wash house and came back unwashed, or never went at
+	// all. This puts it back on the rack.
+	//
+	// WITHOUT THIS THE CLOTH IS STUCK, and this is not a theoretical gap - it was
+	// live. raiseMaterialException is the only thing that RAISES In_Wash_Qty and
+	// completeWashRequest was the only thing that lowered it, so the single exit
+	// from the wash house was "it came back washed". Set a request to Cancelled by
+	// hand and the metres sit in In_Wash_Qty for ever: the SKU total stays right,
+	// the reconciler balances, and nothing can be issued off them. No report shows
+	// it, because every column still adds up.
+	//
+	// Printing already had this exit - cancelPrintJob - and washing did not. This
+	// is the same function for the other counter, deliberately the same shape.
+	//
+	// IT REVERSES THE SEND EXACTLY: In_Wash_Qty comes down and the same metres go
+	// back to Unwash_Quantity, on the lot AND the parent in one pass. Greige is
+	// the only counter they can go back to - it is washing that converts greige
+	// into washed cloth, so cloth that did not get washed is still greige. Putting
+	// it into Wash_Quantity would claim a step that never happened, and washing is
+	// where the tone moves, which is the whole reason lots exist.
+	//
+	// PENDING AND IN_PROGRESS ONLY, forward-only for the same reason
+	// completeWashRequest is: a Completed request has already moved the metres into
+	// Wash_Quantity, so there is nothing at the wash house left to give back and
+	// reversing it would turn washed cloth into greige. A Cancelled one would
+	// credit the same metres twice.
+	//
+	// WHAT IT DOES NOT DO: it does not reopen the Material_Exception. The exception
+	// is the record of why the wash was wanted, and completeWashRequest resolves it
+	// on the way out. A cancel leaves whatever state it is in - if the material is
+	// still short, the store summary shows it short again on the next load and a
+	// fresh ticket can be raised, which is exactly what happens after a wash that
+	// came back short.
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic error, so catch the real message.
+	try
+	{
+	// The current record. If the workflow editor rejects a bare ID here, the
+	// other form Creator uses is input.ID - one of the two resolves.
+	recId = ID;
+
+	for each  wr in Wash_Request[ID == recId]
+	{
+		wrStat = ifnull(wr.Status,"").toString().trim();
+
+		if(wrStat == "Pending" || wrStat == "In_Progress")
+		{
+			// Creator fields that were never written are EMPTY, not null, and
+			// toDecimal() throws on empty - normalise to string first.
+			reqStr = ifnull(wr.Requested_Qty,"0").toString().trim();
+			if(reqStr == "")
+			{
+				reqStr = "0";
+			}
+			backQty = reqStr.toDecimal();
+
+			//------------------------------------------------------------
+			// WHAT CAN ACTUALLY COME BACK is what is still at the wash house,
+			// not what the ticket asked for.
+			//
+			// Capped at In_Wash_Qty on both the lot and the parent, and taken at
+			// the SMALLER of the two. A ticket raised before In_Wash_Qty existed
+			// never moved anything, so there is nothing to return and the cap
+			// lands on zero - which is right: its metres are still sitting in
+			// Unwash_Quantity where they always were, and crediting them again
+			// would invent cloth.
+			//
+			// The lot is read first because the parent is the sum of its lots, so
+			// the parent can cover a figure one lot cannot.
+			//------------------------------------------------------------
+			lotIdTxt = ifnull(wr.Lot,"").toString().trim();
+			lotInWash = 0.0;
+			hasLotHere = false;
+
+			if(lotIdTxt != "")
+			{
+				for each  wLot in Raw_Material_Lot[ID == lotIdTxt.toLong()]
+				{
+					liwStr = ifnull(wLot.In_Wash_Qty,"0").toString().trim();
+					if(liwStr == "")
+					{
+						liwStr = "0";
+					}
+					lotInWash = liwStr.toDecimal();
+					hasLotHere = true;
+				}
+			}
+
+			matRec = null;
+			for each  rm in Raw_Material[ID == wr.Material]
+			{
+				matRec = rm;
+			}
+
+			moveQty = 0.0;
+
+			if(matRec != null)
+			{
+				inwStr = ifnull(matRec.In_Wash_Qty,"0").toString().trim();
+				if(inwStr == "")
+				{
+					inwStr = "0";
+				}
+				unwStr = ifnull(matRec.Unwash_Quantity,"0").toString().trim();
+				if(unwStr == "")
+				{
+					unwStr = "0";
+				}
+				inwQty = inwStr.toDecimal();
+				unwQty = unwStr.toDecimal();
+
+				moveQty = backQty;
+				if(moveQty > inwQty)
+				{
+					moveQty = inwQty;
+				}
+				if(hasLotHere == true && moveQty > lotInWash)
+				{
+					moveQty = lotInWash;
+				}
+				if(moveQty < 0)
+				{
+					moveQty = 0;
+				}
+
+				if(moveQty > 0)
+				{
+					matRec.In_Wash_Qty = inwQty - moveQty;
+					matRec.Unwash_Quantity = unwQty + moveQty;
+
+					// The same move on the lot, in the same pass, so the lot and
+					// the maintained parent total cannot disagree. Never one
+					// without the other: the parent is the sum of its lots, and a
+					// parent raised with no lot behind it breaks that invariant
+					// in a way only the reconciler would ever notice.
+					if(hasLotHere == true)
+					{
+						for each  wLotUpd in Raw_Material_Lot[ID == lotIdTxt.toLong()]
+						{
+							liwUpd = ifnull(wLotUpd.In_Wash_Qty,"0").toString().trim();
+							if(liwUpd == "")
+							{
+								liwUpd = "0";
+							}
+							luUpd = ifnull(wLotUpd.Unwash_Quantity,"0").toString().trim();
+							if(luUpd == "")
+							{
+								luUpd = "0";
+							}
+							wLotUpd.In_Wash_Qty = liwUpd.toDecimal() - moveQty;
+							wLotUpd.Unwash_Quantity = luUpd.toDecimal() + moveQty;
+						}
+					}
+				}
+			}
+
+			// Stamped whatever came back, including nothing. A pre-In_Wash_Qty
+			// ticket has no metres to return and still has to leave the queue, or
+			// it reads as work in hand for ever.
+			wr.Status = "Cancelled";
+			wr.Washed_Qty = 0;
+
+			oldRem = ifnull(wr.Remarks,"").toString();
+			addRem = zoho.currentdate.toString("dd-MMM HH:mm") + " - cancelled, " + moveQty + " returned to greige";
+			if(oldRem != "")
+			{
+				addRem = oldRem + "\n" + addRem;
+			}
+			wr.Remarks = addRem;
+
+			info "wash cancelled: " + wr.Material_Name + " returned " + moveQty + " to Unwash_Quantity";
+		}
+		else
+		{
+			info "cancelWashRequest skipped: status is '" + wrStat + "' - only Pending or In_Progress can be cancelled.";
+		}
+	}
+	}
+	catch (e)
+	{
+		info "cancelWashRequest failed: " + e.toString();
+	}
+}

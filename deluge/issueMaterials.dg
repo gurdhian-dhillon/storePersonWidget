@@ -397,10 +397,49 @@ string issueMaterials(string supervisorId, string issuesJson)
 						// How many cut pieces do these actually yield? Same
 						// grain-fixed maths as the allocation: across the piece
 						// width, down its length, never rotated.
+						//
+						// A REMNANT TOO SMALL FOR THE CUT YIELDS ZERO, NOT ONE, and
+						// the difference is a silent-loss bug of the exact family
+						// CLAUDE.md already records four of.
+						//
+						// The fallback used to be a flat 1 for every case the guard
+						// rejected, which lumped "this row is not counted in cut
+						// pieces at all" together with "this offcut cannot take this
+						// cut". The second credits Pieces_From_Waste with a piece
+						// nobody can cut: the requirement closes, the item goes
+						// Ready_For_Production, and the supervisor is holding a
+						// remnant narrower than his marker. Fabric fulfilment is
+						// counted in CUT PIECES - a row whose pieces read as issued
+						// looks complete however little cloth it has.
+						//
+						// The widget never offers such a pick (remnantYield returns 0
+						// and the scorer skips it), but this is a Custom API and the
+						// payload is not evidence. The printed-piece block below
+						// already gets this right - `if(pcAcross > 0 && pcAlong > 0)`
+						// - and this is the same rule for offcuts.
+						//
+						// Zero rather than a refusal, deliberately. The remnant still
+						// physically goes with him and its metres still leave the
+						// rack; what must not happen is the requirement being told it
+						// was covered. Under-crediting leaves the line open and the
+						// store issues real cloth, which is the recoverable
+						// direction - exactly what a too-small printed piece does.
+						//
+						// The flat 1 survives only where pieces are not the unit:
+						// a non-fabric row, or a fabric row planned before
+						// Required_Pieces existed and so carrying no cut size.
 						yieldPer = 1;
-						if(isFab == true && cutW > 0 && cutL > 0 && wpw >= cutW && wpl >= cutL)
+						if(isFab == true && cutW > 0 && cutL > 0)
 						{
-							yieldPer = (wpw / cutW).floor() * (wpl / cutL).floor();
+							yieldPer = 0;
+							if(wpw >= cutW && wpl >= cutL)
+							{
+								yieldPer = (wpw / cutW).floor() * (wpl / cutL).floor();
+							}
+							else
+							{
+								info "waste piece " + wId + " (" + wpw + "x" + wpl + ") cannot take a " + cutW + "x" + cutL + " cut - issued, but credited 0 pieces";
+							}
 						}
 						piecesFromWaste = piecesFromWaste + (wantPcs * yieldPer);
 

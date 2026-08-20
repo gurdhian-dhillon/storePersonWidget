@@ -179,6 +179,23 @@
 .pill-done { background: var(--status-success-bg); color: #065f46; }
 .pill-outsourced { background: #ede9fe; color: #5b21b6; }
 
+/* Rework on an order. Amber rather than red: a remake is normal work being done
+   again, not a fault state — and it must not read louder than the stage pill
+   beside it, which is what the row is actually about. */
+.pill-remake { background: #fef3c7; color: #92400e; }
+
+/* What the stage on screen has put out so far. Sits under the stage name, muted
+   and small, because it qualifies the stage rather than competing with it — and
+   it must never be mistaken for the produced/ordered column, which counts
+   finished garments, not one stage's output. */
+.stage-out {
+    display: block;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    margin-top: 2px;
+}
+
 /* ---- nobody logged anything ---- */
 
 .nolog {

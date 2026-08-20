@@ -341,6 +341,35 @@ string raiseMaterialException(string payloadJson)
 				//----------------------------------------------------------
 				washQty = shortQty;
 
+				//----------------------------------------------------------
+				// A PIECES LOT CANNOT BE WASHED, and this is a refusal, not a
+				// cap. Same guard resolveDispute already applies to a
+				// Store_Correction, for the same reason and with the same
+				// consequences if it is missing.
+				//
+				// On a Pieces lot the metres are the MAINTAINED SUM of its
+				// Fabric_Piece rows. This flow moves a metres figure between
+				// two columns on the header and touches no piece row, so a
+				// washed Pieces lot ends up claiming washed metres with every
+				// piece behind it still saying State = "Unwash".
+				//
+				// Nothing recovers from that inside the app. The allocator reads
+				// the PIECES and takes only State == "Wash", so it finds none;
+				// lotFill sets a Pieces lot's metres budget to zero so the
+				// header's metres are never spendable either. The cloth is real,
+				// on the rack, and permanently invisible - while every total
+				// still says it is there. That is the worst shape a stock fault
+				// can take.
+				//
+				// Washing pieces is a real feature and is designed - it names
+				// which pieces, flips Fabric_Piece.State, and lets him correct
+				// the length because washing shrinks cloth. Until it is built,
+				// the honest answer is that the row is short. docs/printing.md
+				// says this already: greige printed pieces are visible and
+				// correctly refused by the allocator, and offering a wash the
+				// store cannot perform is worse than saying so.
+				//----------------------------------------------------------
+				washFormTxt = "Roll";
 				lotUnwHave = 0.0;
 				if(lotIdTxt != "")
 				{
@@ -352,12 +381,26 @@ string raiseMaterialException(string payloadJson)
 							luChk = "0";
 						}
 						lotUnwHave = luChk.toDecimal();
+
+						// Blank Form means Roll - every lot that existed before
+						// printing has the field empty, and reading blank as
+						// anything else would refuse every roll in the building.
+						if(ifnull(wLotChk.Form,"").toString().trim() == "Pieces")
+						{
+							washFormTxt = "Pieces";
+						}
 					}
 
 					if(washQty > lotUnwHave)
 					{
 						washQty = lotUnwHave;
 					}
+				}
+
+				if(washFormTxt == "Pieces")
+				{
+					washQty = 0;
+					info "Wash_Request NOT queued for " + matName + ": lot " + lotIdTxt + " is printed cloth held as pieces, and washing pieces is not built yet. The exception stands; the row is short.";
 				}
 
 				if(washQty > 0)

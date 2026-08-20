@@ -1557,7 +1557,15 @@ function renderUsedRow(m) {
     var detail = facts.map(function (f) {
         return '<div class="reason-line"><span class="reason-tag is-fact">Detail</span>' + esc(f) + '</div>';
     }).join('') + reasons.map(function (r) {
-        var tag = r.type === 'Lost' ? 'is-lost' : (r.type === 'Offcut reuse' ? 'is-reuse' : 'is-cutting');
+        // A damage entry carries the stage in its type — "Damaged at Cutting" —
+        // because that is what differs between two incidents on the same
+        // material, so it is matched on the prefix rather than the whole string.
+        // Without this it fell through to the cutting-allowance amber, which
+        // reads as routine and is the one thing damage is not.
+        var isDamage = typeof r.type === 'string' && r.type.indexOf('Damaged') === 0;
+        var tag = r.type === 'Lost' ? 'is-lost'
+            : (r.type === 'Offcut reuse' ? 'is-reuse'
+            : (isDamage ? 'is-damage' : 'is-cutting'));
         // The server still calls it "Offcut reuse". Relabelled here rather than
         // in Deluge so the wording can change without a function redeploy.
         var label = r.type === 'Offcut reuse' ? 'Offcuts reused' : r.type;

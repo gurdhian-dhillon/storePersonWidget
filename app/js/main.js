@@ -708,13 +708,33 @@ function summaryEntry(kind, idx) {
 //   1. enough greige AND already has washed cloth
 //   2. enough greige
 //   3. most greige, washed cloth as the tie-break
-function recommendWashLot(e, need) {
-    // Blocked lots excluded: washing quarantined greige converts it into
+// A PRINTED LOT CANNOT BE WASHED YET, so it is never a candidate.
+//
+// Its metres are the maintained sum of its Fabric_Piece rows, and a wash request
+// moves a metres figure between two columns on the header without touching a
+// single piece — so washing one leaves the header claiming washed metres while
+// every piece behind it still says Unwash. The allocator reads the pieces and
+// takes only State === 'Wash', and lotFill zeroes a Pieces lot's metres budget,
+// so the cloth ends up real, on the rack, and permanently unissuable.
+//
+// The allocator already excludes greige pieces from the after-washing simulation
+// for exactly this reason (see lotPieces), so a Pieces lot never reaches
+// `washLots`. This picker read `e.lots` directly instead — every lot the server
+// sent — which is how a printed one could still be chosen by hand.
+//
+// Refused here AND in raiseMaterialException. This is the courtesy; that is the
+// guard.
+function washableLots(e) {
+    // Blocked lots excluded too: washing quarantined greige converts it into
     // quarantined washed cloth, which still cannot be issued. The wash team would
     // do the work for nothing.
-    var lots = (e.lots || []).filter(function (l) {
-        return !l.blocked && (Number(l.unwash) || 0) > 0;
+    return (e.lots || []).filter(function (l) {
+        return !l.blocked && l.form !== 'Pieces' && (Number(l.unwash) || 0) > 0;
     });
+}
+
+function recommendWashLot(e, need) {
+    var lots = washableLots(e);
     if (lots.length === 0) return null;
 
     var want = Number(need) || 0;
@@ -741,13 +761,21 @@ function recommendWashLot(e, need) {
 }
 
 function washLotPickerHtml(e, entry) {
-    // Blocked lots excluded: washing quarantined greige converts it into
-    // quarantined washed cloth, which still cannot be issued. The wash team would
-    // do the work for nothing.
-    var lots = (e.lots || []).filter(function (l) {
-        return !l.blocked && (Number(l.unwash) || 0) > 0;
-    });
+    var lots = washableLots(e);
     if (lots.length === 0) {
+        // A material whose only greige is PRINTED pieces reads as "unwashed
+        // stock exists" everywhere else on this card, because the parent's
+        // Unwash_Quantity includes it. Saying "buy more" there would be wrong
+        // and he would go and buy it, so the two cases are named apart.
+        var greigePieces = (e.lots || []).some(function (l) {
+            return l.form === 'Pieces' && (Number(l.unwash) || 0) > 0;
+        });
+        if (greigePieces) {
+            return '<div class="exc-nolot">The only unwashed cloth here is ' +
+                '<b>printed, held as pieces</b>, and washing pieces is not built ' +
+                'yet &mdash; a wash ticket moves metres, not pieces. Nothing to ' +
+                'send from this screen.</div>';
+        }
         return '<div class="exc-nolot">No lot has unwashed cloth &mdash; there is ' +
             'nothing to send. This one needs buying, not washing.</div>';
     }
@@ -3753,6 +3781,20 @@ function renderHistory(handovers, lineCount) {
                 '<td>' + (hasCut
                     ? '<span class="cut-size">' + fmt(l.cutLength) + ' &times; ' + fmt(l.cutWidth) + '<span class="unit">cm</span></span>'
                     : '<span class="is-muted">&mdash;</span>') + '</td>' +
+                // WHICH SHADE WENT OUT. Stamped on Issue_Lines as the cloth
+                // crossed the counter — the requirement row holds metres and has
+                // never held a lot, so this line is the only record of it.
+                //
+                // Beside the quantity, the same place the issue screen puts it,
+                // because it qualifies the metres rather than the material.
+                //
+                // A dash on every non-fabric row and on any handover written
+                // before lots existed. Lots exist for fabric alone, so an empty
+                // cell here is the ordinary case for thread and labels, not a
+                // gap — which is why it reads as a dash and not as blank.
+                '<td>' + (l.lot
+                    ? '<span class="hist-lot">' + escapeHtml(l.lot) + '</span>'
+                    : '<span class="is-muted">&mdash;</span>') + '</td>' +
                 '<td class="col-num col-strong">' + fmt(l.qty) + '<span class="unit">' + escapeHtml(l.unit || '') + '</span></td>' +
                 '</tr>';
         }).join('');
@@ -3794,7 +3836,7 @@ function renderHistory(handovers, lineCount) {
             '<div class="tables-container">' +
             '<div class="table-wrapper">' +
             '<table><thead><tr>' +
-            '<th>Material</th><th>Cut piece size</th><th class="col-num">Qty issued</th>' +
+            '<th>Material</th><th>Cut piece size</th><th>Lot</th><th class="col-num">Qty issued</th>' +
             '</tr></thead><tbody>' + lines + '</tbody></table>' +
             '</div>' +
             '</div>' +

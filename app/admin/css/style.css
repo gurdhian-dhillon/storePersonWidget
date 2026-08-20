@@ -736,7 +736,17 @@ tr.mine { background: #eff6ff; box-shadow: inset 3px 0 0 var(--primary); }
 .reason-tag.is-reuse { background: #dcfce7; color: #15803d; }
 .reason-tag.is-cutting { background: #ffedd5; color: #b45309; }
 .reason-tag.is-fact { background: #e8f0ff; color: var(--primary); }
+/* Damage is somebody ruining material, which is not the same event as a
+   write-off nobody can account for - so it is its own colour rather than
+   borrowing the Lost red. Amber-red: worse than the cutting allowance beside
+   it, not as final as a loss. */
+.reason-tag.is-damage { background: #fee4e2; color: #c2410c; }
 .reason-looked { font-style: italic; }
+
+/* WHO DID IT, AND WHERE. On a damage line this carries the name, the stage and
+   the reason, and it is the whole point of opening the row - so it gets its own
+   line rather than trailing off the end of a run of small spans. */
+.reason-line .reason-looked { flex: 1 1 100%; }
 
 /* The lot an order is committed to. Narrow: it holds a short lot number and
    at most one qualifying word, and it must not push the numbers off screen. */

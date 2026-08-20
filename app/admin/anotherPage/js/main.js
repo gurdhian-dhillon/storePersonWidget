@@ -329,10 +329,34 @@ function renderInProgressOrders() {
         '<th class="r">Produced / ordered</th><th>Next step</th></tr></thead><tbody>';
 
     orders.forEach(function (order) {
+        // WHAT THE STAGE HAS PUT OUT, beside the stage it belongs to.
+        //
+        // Produced / ordered reads 0 for almost the whole life of an order:
+        // Plan_Item.Qty_Produced is written only when the LAST stage closes, so
+        // the column sits at zero through every stage and then jumps to the
+        // full figure. An order showing "Machine Quilting · Completed" next to
+        // "0 / 6" looks stalled when six pieces have just come off that stage.
+        //
+        // Not merged into the produced column — those are two different
+        // questions and a column has to mean the same thing on every row. This
+        // is one stage's output; produced is the finished garment count.
+        var out = Number(order.stageOut) || 0;
         var stage = order.currentStage
-            ? esc(order.currentStage) + (order.currentStageStatus ? ' <span class="pill pill-running">' + esc(order.currentStageStatus) + '</span>' : '')
+            ? esc(order.currentStage) +
+              (order.currentStageStatus ? ' <span class="pill pill-running">' + esc(order.currentStageStatus) + '</span>' : '') +
+              (out > 0 ? '<span class="stage-out">' + n(out) + ' out</span>' : '')
             : '<span class="muted">Not started</span>';
-        h += '<tr><td><strong>' + esc(order.salesOrder || '—') + '</strong></td>' +
+
+        // Rework is not demand, so it is not in the quantities — but "this order
+        // has been made twice" is exactly what a dashboard is for, so it is said
+        // where it cannot be mistaken for a count of pieces.
+        var rem = Number(order.remakeItems) || 0;
+        var remTxt = rem > 0
+            ? ' <span class="pill pill-remake" title="Rework: replaces a rejected or damaged piece, so it is not counted as extra demand">' +
+              rem + ' remake' + (rem === 1 ? '' : 's') + '</span>'
+            : '';
+
+        h += '<tr><td><strong>' + esc(order.salesOrder || '—') + '</strong>' + remTxt + '</td>' +
             '<td>' + esc(order.planNo || '—') + '</td>' +
             '<td>' + esc(order.supervisor || '—') + '</td>' +
             '<td>' + stage + '</td>' +

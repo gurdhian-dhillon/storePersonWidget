@@ -2070,6 +2070,23 @@ th.col-num {
     font-weight: 700;
 }
 
+/* The lot on a HISTORY line. Quiet: the history table is read to find out what
+   went out, and the lot is the qualifier on that — it must not compete with the
+   material name or the quantity either side of it. Same accent as .lot-from so
+   a lot reads as a lot on every screen, without the block treatment that suits a
+   line the store person is about to act on. */
+.hist-lot {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--text-main);
+    background: #f1f5f9;
+    border-left: 2px solid var(--primary);
+    padding: 0.1rem 0.4rem;
+    border-radius: 0 3px 3px 0;
+    white-space: nowrap;
+}
+
 /* Which physical pieces to fetch, under the lot line that names them. Only ever
    on a Pieces lot — printed cloth is a stack, not a roll he can measure off, so
    "9 Mtr off P1" is not an instruction anyone can follow. Indented under its lot

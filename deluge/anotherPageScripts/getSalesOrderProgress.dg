@@ -29,6 +29,15 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId)
 		totalProduced = 0;
 		itemCount = 0;
 		completeItems = 0;
+		// Rework items on this order. Counted, never added to the quantities -
+		// see the Plan_Item loop below.
+		remakeItems = 0;
+		// What the stage on screen has actually put out so far. Qty_Produced is
+		// only written when the LAST stage closes, so the produced column reads
+		// zero for the whole life of an order and then jumps - the current
+		// stage's Qty_Out is the live figure and it belongs next to the stage
+		// name, not merged into a column that means something else.
+		stageOut = 0;
 		stageRows = List();
 
 		for each plan in Production_Planning[Sales_Order == so.ID]
@@ -42,19 +51,67 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId)
 				}
 			}
 
+			//--------------------------------------------------------
+			// REWORK IS NOT DEMAND, so a remake does not add to what was
+			// ordered.
+			//
+			// A QC rejection or a ruined panel creates a NEW Plan_Item on the
+			// same plan with Is_Remake set - saveItemCheck and
+			// saveMaterialDamage both do it. Summing Qty_Ordered across every
+			// item therefore reported a five-piece order as SIX the moment one
+			// piece had to be made again, and as seven if it happened twice.
+			// The customer ordered five either way.
+			//
+			// Both totals move together. Counting the remake's output while
+			// refusing its demand would read 6 / 5, and counting neither reads
+			// 5 / 5 - which is the truth, because the remake exists to REPLACE a
+			// piece the root item already counted, not to add one.
+			//
+			// The count is still carried, because "this order needed rework
+			// twice" is exactly the sort of thing an admin dashboard is for -
+			// it is just not a quantity.
+			//--------------------------------------------------------
 			for each item in Plan_Item[Plan == plan.ID]
 			{
-				itemCount = itemCount + 1;
-				totalOrdered = totalOrdered + ifnull(item.Qty_Ordered,0);
-				totalProduced = totalProduced + ifnull(item.Qty_Produced,0);
-				if(ifnull(item.Item_Status,"").toString() == "Complete")
+				if(ifnull(item.Is_Remake,false) == true)
 				{
-					completeItems = completeItems + 1;
+					remakeItems = remakeItems + 1;
+				}
+				else
+				{
+					itemCount = itemCount + 1;
+					totalOrdered = totalOrdered + ifnull(item.Qty_Ordered,0);
+					totalProduced = totalProduced + ifnull(item.Qty_Produced,0);
+					if(ifnull(item.Item_Status,"").toString() == "Complete")
+					{
+						completeItems = completeItems + 1;
+					}
 				}
 			}
 
+			//--------------------------------------------------------
+			// THE FURTHEST-ALONG STAGE, NOT THE MOST RECENTLY STARTED ONE.
+			//
+			// A Stage_Log row is created when a stage is STARTED, so Added_Time
+			// is a start time and sorting by it answers "what did somebody touch
+			// last", which is a different question and often a misleading one:
+			//
+			//   - a plan with several items has several stages open at once. Item
+			//     one is at Stitching from Monday, item two at Cutting from
+			//     Tuesday - and the order reported CUTTING while half of it was
+			//     two stages further on.
+			//   - a remake is worse. It is a new Plan_Item that starts again at
+			//     the first stage, so its log is the newest row on the plan and
+			//     the whole order appears to walk BACKWARDS to Cutting while the
+			//     root items are being finished.
+			//
+			// Sequence_No is the stage's own position and is set on every insert
+			// - saveProductionPhase is the only thing that creates these rows, so
+			// there is no path that leaves it blank.
+			//
 			// Stage_Status is In_Progress while a supervisor has an open stage.
-			openLogs = Stage_Log[Plan == plan.ID && Stage_Status == "In_Progress"] sort by Added_Time desc;
+			//--------------------------------------------------------
+			openLogs = Stage_Log[Plan == plan.ID && Stage_Status == "In_Progress"] sort by Sequence_No desc;
 			hasOpenLog = false;
 			for each openLog in openLogs
 			{
@@ -63,6 +120,7 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId)
 					currentStage = ifnull(openLog.Phase_Name,"").toString();
 					currentStageStatus = "Running";
 					nextStep = "Finish " + currentStage;
+					stageOut = ifnull(openLog.Qty_Out,0);
 					stageRow = Map();
 					stageRow.put("name",currentStage);
 					stageRow.put("state","running");
@@ -75,13 +133,18 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId)
 
 			if(currentStage == "")
 			{
-				doneLogs = Stage_Log[Plan == plan.ID && Stage_Status == "Done"] sort by Added_Time desc;
+				// Same key, same reason: the LAST stage completed is the one
+				// furthest through the sequence, not the one most recently
+				// started. Two stages finished minutes apart in either order
+				// still have one correct answer.
+				doneLogs = Stage_Log[Plan == plan.ID && Stage_Status == "Done"] sort by Sequence_No desc;
 				hasDoneLog = false;
 				for each doneLog in doneLogs
 				{
 					if(!hasDoneLog)
 					{
 						lastCompletedStage = ifnull(doneLog.Phase_Name,"").toString();
+						stageOut = ifnull(doneLog.Qty_Out,0);
 						stageRow = Map();
 						stageRow.put("name",lastCompletedStage);
 						stageRow.put("state","done");
@@ -113,6 +176,8 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId)
 		orderRow.put("producedQty",totalProduced);
 		orderRow.put("itemCount",itemCount);
 		orderRow.put("completedItems",completeItems);
+		orderRow.put("remakeItems",remakeItems);
+		orderRow.put("stageOut",stageOut);
 		orderRow.put("currentStage",currentStage);
 		orderRow.put("currentStageStatus",currentStageStatus);
 		orderRow.put("lastCompletedStage",lastCompletedStage);
