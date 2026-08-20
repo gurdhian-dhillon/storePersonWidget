@@ -1,92 +1,313 @@
-string getFinishingItems(string planNo)
+string getFinishingItems(string payloadJson)
 {
+	// The finishing queue for one SUPERVISOR: every inspected batch that still
+	// owes finishing, across every plan he owns, whether nobody has touched it or
+	// somebody is part way through.
+	//
+	// IT USED TO TAKE A PLAN NUMBER, AND THAT WAS THE WRONG QUESTION. The floor
+	// does not work a plan at a time - finishing is per BATCH, and batches arrive
+	// from checking one at a time while other lines of the same order are still
+	// being cut. Making the finisher pick a plan first meant he had to already
+	// know which plan the pile in front of him came from, and a batch on a plan he
+	// had not selected was invisible. The supervisor is the unit every other
+	// screen in this app filters by, so it is the unit here too.
+	//
+	// THE SUPERVISOR IS Production_Planning.Assigned_To, resolved exactly the way
+	// getPackingQueue resolves it - createProductionPlans stamps it, and the store
+	// list, the receive screen and production all read it from there. Nothing
+	// downstream of checking carries a supervisor of its own, so the plan is the
+	// only route to one.
+	//
+	// NO SUPERVISOR MEANS AN EMPTY QUEUE, NEVER EVERYTHING. An unfiltered read
+	// here would put every open batch in the building in front of whoever loaded
+	// the screen before the picker settled, and two finishers would start the same
+	// pile. A missing id is a screen that has not finished loading, not a request
+	// for all work.
+	//
+	// ONE CARD PER Item_Check, AND NO GROUPING. The widget used to merge every
+	// check sharing an item NAME into a single card and submit them together. A
+	// remake batch repeats its original's name and SKU, and an alteration batch
+	// has its name scrubbed of the "(Alteration Batch)" suffix below, so what
+	// merged was three physically separate piles that arrived on different days -
+	// and every Finishing_Data row they produced was then stamped with one
+	// identical set of times. The durations were fiction.
+	//
+	// Item_Check is one record per BATCH, which is exactly one pile of garments
+	// inspected together. That is the grain the floor works at, so that is the
+	// grain of a card.
+	//
+	// AN OPEN JOB COMES BACK WITH ITS TIMES. status "In_Progress" plus whatever
+	// sub-stage stamps exist, so a refresh, a closed tab or a handover to the next
+	// shift resumes where the last person stopped instead of offering the batch as
+	// untouched.
+	//
+	// "FINISHED" IS Finishing_Status == "Done", not "a row exists". Done means
+	// done; anything else means the job is still open and resumable. Six functions
+	// ask this question and they must all ask the same one - written this way
+	// round so a row carrying neither value stays ON the queue, where somebody can
+	// see it, rather than vanishing as finished work.
+	//
+	// Finishing_Data IS READ ONCE, FOR THE WHOLE QUEUE. The version this replaces
+	// ran a Finishing_Data query per batch, which was survivable while the queue
+	// was one plan and is not now that it is every plan a supervisor has ever
+	// owned. One pass builds both the finished set and, for the open rows, the
+	// row id and its six stamps - so the loop below is query-free on that side.
+	// The statement-execution limit is NOT catchable: it kills the script and the
+	// widget gets a bare 500 with no error card.
+	//
+	// STILL UNBOUNDED, deliberately and on the record: this reads the whole of
+	// Finishing_Data, and it queries Item_Check once per plan the supervisor has
+	// ever been given - including plans whose orders shipped months ago. Same debt
+	// docs/scaling.md lists elsewhere. The real fix is a finishing marker on the
+	// plan, or a date bound; filtering the plans by Order_Status was considered and
+	// left alone, because a plan sitting on the wrong status would then hide real
+	// work with nothing on screen to say so.
+
 	res = "{\"errors\":[\"Nothing ran\"]}";
+
 	try
 	{
-		rowsJson = "";
-		
-		pNo = ifnull(planNo, "").toString().trim();
-		if (pNo == "")
+		raw = ifnull(payloadJson,"").toString().trim();
+
+		if(raw == "")
 		{
 			return "{\"errors\":[],\"queue\":[]}";
 		}
-		
-		// Resolve the plan ID from plan number to avoid lookup query limitations
-		planId = 0;
-		for each p in Production_Planning[Plan_No == pNo]
+
+		inp = raw.toMap();
+		supIdTxt = ifnull(inp.get("supervisorId"),"").toString().trim();
+
+		if(supIdTxt == "" || supIdTxt.isNumber() == false)
 		{
-			planId = p.ID;
+			return "{\"errors\":[],\"queue\":[]}";
 		}
-		
-		// Query checked items that belong to the selected plan
-		checks = Item_Check[Plan == planId && Qty_Approved > 0] sort by Added_Time desc;
-		
-		for each chk in checks
+
+		supId = supIdTxt.toLong();
+
+		//------------------------------------------------------------------
+		// ONE PASS OVER Finishing_Data: which batches are finished, and for
+		// the ones still open, the row to resume and the stamps it carries.
+		//------------------------------------------------------------------
+		// Keyed by Item_Check id as a STRING. Finishing_Data.Item_Check is a
+		// lookup holding a record id while ID is a long, and comparing them
+		// as-is is a mixed-type comparison, which throws rather than
+		// returning false.
+		doneChecks = List();
+		openIdByCheck = Map();
+		foldStartByCheck = Map();
+		foldEndByCheck = Map();
+		pressStartByCheck = Map();
+		pressEndByCheck = Map();
+		brandStartByCheck = Map();
+		brandEndByCheck = Map();
+
+		for each  fd in Finishing_Data[ID != 0]
 		{
-			// Check if this item has already been completed in finishing
-			isCompleted = false;
-			for each lg in Finishing_Data[Item_Check == chk.ID]
+			if(fd.Item_Check != null)
 			{
-				isCompleted = true;
-			}
-			
-			if(!isCompleted)
-			{
-				itemId = chk.Plan_Item;
-				
-				planNoTxt = "";
-				soNo = "";
-				itemName = "";
-				skuTxt = "";
-				
-				// Resolve details from Plan_Item and Production_Planning
-				for each pi in Plan_Item[ID == itemId]
+				fdKey = fd.Item_Check.toString();
+
+				if(ifnull(fd.Finishing_Status,"").toString().trim() == "Done")
 				{
-					itemNameClean = ifnull(pi.Item_Name, "").toString();
-					itemNameClean = itemNameClean.replaceAll("(Alteration Batch)", "");
-					itemNameClean = itemNameClean.replaceAll("(alteration batch)", "");
-					itemNameClean = itemNameClean.replaceAll("Alteration Batch", "");
-					itemNameClean = itemNameClean.replaceAll("alteration batch", "");
-					itemName = itemNameClean.replaceAll("\"", "'").trim();
-					for each imRec in Item_Master[ID == pi.Item_Sku]
+					doneChecks.add(fdKey);
+				}
+				else
+				{
+					// startFinishingJob reuses any non-Done row rather than
+					// adding a second one next to it, so there is at most one
+					// open row per batch and this put cannot fight itself.
+					openIdByCheck.put(fdKey,fd.ID.toString());
+
+					if(fd.Folding_Start_Time != null)
 					{
-						skuTxt = ifnull(imRec.SKU, "").toString().replaceAll("\"", "'");
+						foldStartByCheck.put(fdKey,fd.Folding_Start_Time.toString());
 					}
-					for each p in Production_Planning[ID == pi.Plan]
+					if(fd.Folding_End_Time != null)
 					{
-						planNoTxt = ifnull(p.Plan_No, "").toString().replaceAll("\"", "'");
-						for each so in Sales_Order[ID == p.Sales_Order]
+						foldEndByCheck.put(fdKey,fd.Folding_End_Time.toString());
+					}
+					if(fd.Pressing_Start_Time != null)
+					{
+						pressStartByCheck.put(fdKey,fd.Pressing_Start_Time.toString());
+					}
+					if(fd.Pressing_End_Time != null)
+					{
+						pressEndByCheck.put(fdKey,fd.Pressing_End_Time.toString());
+					}
+					if(fd.Branding_Start_Time != null)
+					{
+						brandStartByCheck.put(fdKey,fd.Branding_Start_Time.toString());
+					}
+					if(fd.Branding_End_Time != null)
+					{
+						brandEndByCheck.put(fdKey,fd.Branding_End_Time.toString());
+					}
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// His plans, with their plan number and order number resolved once
+		// each - both are the same for every batch on a plan, and fetching
+		// them per batch was two queries to learn something already known.
+		//------------------------------------------------------------------
+		planKeys = List();
+		planNoByPlan = Map();
+		soNoByPlan = Map();
+
+		// sort by on its own assignment, never inline in a for each header.
+		// Oldest plan first, so the longest-waiting work is at the top.
+		myPlans = Production_Planning[Assigned_To == supId] sort by Added_Time;
+
+		for each  pl in myPlans
+		{
+			planKeyTxt = pl.ID.toString();
+			planKeys.add(planKeyTxt);
+			planNoByPlan.put(planKeyTxt,ifnull(pl.Plan_No,"").toString().replaceAll("\"","'"));
+
+			soTxt = "";
+
+			if(pl.Sales_Order != null)
+			{
+				for each  so in Sales_Order[ID == pl.Sales_Order]
+				{
+					soTxt = ifnull(so.Sales_Order,"").toString().replaceAll("\"","'");
+				}
+			}
+
+			soNoByPlan.put(planKeyTxt,soTxt);
+		}
+
+		//------------------------------------------------------------------
+		// The batches. Item name and SKU are cached per Plan_Item and filled
+		// in the first time a batch actually needs them, because many checks
+		// point at one item - a root, its remake and its alteration batch all
+		// name the same Plan_Item. itemsSeen records WHICH ids have been
+		// resolved: an item with no name resolves to "", which a Map cannot
+		// tell apart from an id never looked up, so without it every such
+		// item is re-queried on every batch it owns.
+		//------------------------------------------------------------------
+		nameByItem = Map();
+		skuByItem = Map();
+		itemsSeen = List();
+
+		rowsJson = "";
+
+		for each  planKeyOne in planKeys
+		{
+			// sort by on its own assignment, never inline in a for each
+			// header. Oldest batch first within the plan, matching the order
+			// checking released them in.
+			checks = Item_Check[Plan == planKeyOne.toLong() && Qty_Approved > 0] sort by Added_Time;
+
+			for each  chk in checks
+			{
+				chkKey = chk.ID.toString();
+
+				// PROCESSED IS THE "CHECKING IS FINISHED WITH IT" MARKER, and it
+				// is the gate here.
+				//
+				// saveItemCheck inserts the Item_Check with Processed = false and
+				// sets it true as its very last statement, once every record that
+				// check owed exists - the remake batch, the alteration batch,
+				// their requirements. A check sitting at Processed = false is one
+				// that died part way through: the approved figure is on the record
+				// but the batches it should have created may not be.
+				//
+				// Offering it for finishing would put a pile of garments on the
+				// floor before checking had finished deciding what happens to the
+				// rest of them. Cheap test, and it is the one saveItemCheck's own
+				// header names as the pair to look for.
+				chkDone = ifnull(chk.Processed,false);
+
+				if(doneChecks.contains(chkKey) == false && chkDone == true)
+				{
+					itemKeyTxt = "";
+
+					if(chk.Plan_Item != null)
+					{
+						itemKeyTxt = chk.Plan_Item.toString();
+					}
+
+					if(itemKeyTxt != "" && itemsSeen.contains(itemKeyTxt) == false)
+					{
+						itemsSeen.add(itemKeyTxt);
+						nameByItem.put(itemKeyTxt,"");
+						skuByItem.put(itemKeyTxt,"");
+
+						for each  pi in Plan_Item[ID == itemKeyTxt.toLong()]
 						{
-							soNo = ifnull(so.Sales_Order, "").toString().replaceAll("\"", "'");
+							// The suffix is scrubbed so an alteration batch
+							// reads as the product the finisher recognises.
+							// It does NOT merge it with anything - the
+							// batches stay separate cards.
+							nameClean = ifnull(pi.Item_Name,"").toString();
+							nameClean = nameClean.replaceAll("(Alteration Batch)","");
+							nameClean = nameClean.replaceAll("(alteration batch)","");
+							nameClean = nameClean.replaceAll("Alteration Batch","");
+							nameClean = nameClean.replaceAll("alteration batch","");
+							nameByItem.put(itemKeyTxt,nameClean.replaceAll("\"","'").trim());
+
+							// Item_Sku is a LOOKUP holding a record id, not
+							// the SKU text, so it has to be resolved through
+							// the master or the screen shows an 18-digit id.
+							skuTxt = "";
+
+							for each  imRec in Item_Master[ID == pi.Item_Sku]
+							{
+								skuTxt = ifnull(imRec.SKU,"").toString().replaceAll("\"","'");
+							}
+
+							skuByItem.put(itemKeyTxt,skuTxt);
 						}
 					}
+
+					itemName = ifnull(nameByItem.get(itemKeyTxt),"").toString();
+					skuOut = ifnull(skuByItem.get(itemKeyTxt),"").toString();
+
+					// An open row hands back its id and its stamps so the
+					// operator resumes; a batch nobody has touched has no row
+					// yet, so finishingId is 0 and startFinishingJob opens
+					// one on the first press.
+					finIdOut = ifnull(openIdByCheck.get(chkKey),"0").toString();
+					finStatus = "Pending";
+
+					if(finIdOut != "0")
+					{
+						finStatus = "In_Progress";
+					}
+
+					if(rowsJson != "")
+					{
+						rowsJson = rowsJson + ",";
+					}
+
+					// Ids stringified - an 18-digit id breaks JSON.parse on
+					// the widget side.
+					rowsJson = rowsJson + "{\"id\":\"" + chkKey + "\","
+						+ "\"finishingId\":\"" + finIdOut + "\","
+						+ "\"planItemId\":\"" + itemKeyTxt + "\","
+						+ "\"salesOrder\":\"" + ifnull(soNoByPlan.get(planKeyOne),"").toString() + "\","
+						+ "\"planNo\":\"" + ifnull(planNoByPlan.get(planKeyOne),"").toString() + "\","
+						+ "\"itemName\":\"" + itemName + "\","
+						+ "\"sku\":\"" + skuOut + "\","
+						+ "\"qty\":" + ifnull(chk.Qty_Approved,0).toLong() + ","
+						+ "\"status\":\"" + finStatus + "\","
+						+ "\"stages\":{"
+						+ "\"folding\":{\"start\":\"" + ifnull(foldStartByCheck.get(chkKey),"").toString() + "\",\"end\":\"" + ifnull(foldEndByCheck.get(chkKey),"").toString() + "\"},"
+						+ "\"pressing\":{\"start\":\"" + ifnull(pressStartByCheck.get(chkKey),"").toString() + "\",\"end\":\"" + ifnull(pressEndByCheck.get(chkKey),"").toString() + "\"},"
+						+ "\"branding\":{\"start\":\"" + ifnull(brandStartByCheck.get(chkKey),"").toString() + "\",\"end\":\"" + ifnull(brandEndByCheck.get(chkKey),"").toString() + "\"}"
+						+ "}}";
 				}
-				
-				qtyVal = ifnull(chk.Qty_Approved, 0).toLong();
-				
-				if(rowsJson != "")
-				{
-					rowsJson = rowsJson + ",";
-				}
-				
-				rowsJson = rowsJson + "{\"id\":\"" + chk.ID + "\","
-					+ "\"planItemId\":\"" + itemId + "\","
-					+ "\"salesOrder\":\"" + soNo + "\","
-					+ "\"planNo\":\"" + planNoTxt + "\","
-					+ "\"itemName\":\"" + itemName + "\","
-					+ "\"sku\":\"" + skuTxt + "\","
-					+ "\"qty\":" + qtyVal + ","
-					+ "\"round\":" + ifnull(chk.Round, 1).toLong() + ","
-					+ "\"status\":\"Pending\","
-					+ "\"stages\":{\"folding\":{\"start\":null,\"end\":null,\"duration\":null},\"pressing\":{\"start\":null,\"end\":null,\"duration\":null},\"branding\":{\"start\":null,\"end\":null,\"duration\":null}}}";
 			}
 		}
-		
+
 		res = "{\"errors\":[],\"queue\":[" + rowsJson + "]}";
 	}
 	catch (e)
 	{
 		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
 	}
+
 	return res;
 }

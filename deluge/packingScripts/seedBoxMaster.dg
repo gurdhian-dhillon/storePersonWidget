@@ -1,0 +1,152 @@
+string seedBoxMaster(string dryRun)
+{
+	// ONE-OFF, run from Creator's Execute. Not a Custom API.
+	//
+	// Loads the eight carton options into Box_Master. After this the list lives on
+	// a form the office can edit - add a size, retire a size, correct a dimension -
+	// instead of being hardcoded in getPackingDetails.dg and again in the widget,
+	// which is where it lived and where the two copies had already drifted.
+	//
+	// ONE RECORD IS ONE CHOICE THE PACKER MAKES. Each row carries BOTH cartons:
+	// the branded inner carton and the outer carton it ships inside. One outer
+	// holds exactly one inner - the clearance is about 1.25 cm a face, so a second
+	// one physically will not go in - which is why the packer picks a row rather
+	// than picking two things and hoping they match.
+	//
+	// THE DIMENSIONS ARE NORMALISED TO LENGTH / WIDTH / HEIGHT HERE, and that is
+	// the point of doing it in a form at all. The source table is written
+	// L x W x H for boxes 1-5 and W x L x H for boxes 6-8, so the same column
+	// means different things on different rows and any reader has to know which.
+	// Boxes 6, 7 and 8 therefore go in with the first two numbers SWAPPED:
+	//
+	//     Box 6 source "58 x 30 x 22" as W x L x H  ->  L 30, W 58, H 22
+	//     Box 7 source "42 x 22 x 20" as W x L x H  ->  L 22, W 42, H 20
+	//     Box 8 source "55 x 28 x 19" as W x L x H  ->  L 28, W 55, H 19
+	//
+	// CHECK THOSE THREE against a real carton before anybody packs into them. The
+	// swap is what the source table says; nothing here can verify it, and getting
+	// it wrong changes nothing about volume but changes which way round the box is
+	// described to the courier.
+	//
+	// Boxes 6-8 have NO inner carton dimensions in the source, so they go in with
+	// Has_Inner_Carton unticked. If they do have branded inners, tick it and fill
+	// the three fields in - nothing here has to change.
+	//
+	// SAFE TO RUN TWICE: a box whose name already exists is left exactly as it is,
+	// so this never overwrites a dimension somebody has corrected by hand.
+	//
+	// Default is DRY. Anything unrecognised reports and writes nothing. Quotes
+	// stripped as well as trimmed - Creator's Execute box hands the argument over
+	// as typed, and "false" with the quote characters still on it does not equal
+	// false and silently takes the dry path.
+
+	drTxt = ifnull(dryRun,"").toString().trim().toLowerCase().replaceAll("\"","").replaceAll("'","");
+	writeIt = false;
+	if(drTxt == "false" || drTxt == "no" || drTxt == "0" || drTxt == "write")
+	{
+		writeIt = true;
+	}
+
+	info "seedBoxMaster: dryRun argument received as '" + ifnull(dryRun,"") + "' -> writeIt=" + writeIt;
+
+	logTxt = "";
+	addedCount = 0;
+	skipCount = 0;
+
+	try
+	{
+		// name | order | outerL,outerW,outerH | hasInner | innerL,innerW,innerH
+		// Kept as one list of pipe-joined rows rather than eight blocks, so the
+		// numbers sit in one place where they can be read against the source
+		// table in a single glance.
+		rows = List();
+		rows.add("Box 1|1|35|35|10|yes|32.5|32.5|7.5");
+		rows.add("Box 2|2|40|40|15|yes|37.5|37.5|13.5");
+		rows.add("Box 3|3|35|28|5|yes|32.5|26.5|4");
+		rows.add("Box 4|4|60|40|30|yes|57.5|37.5|27.5");
+		rows.add("Box 5|5|30|20|4|yes|28|18|3");
+		rows.add("Box 6|6|30|58|22|no|0|0|0");
+		rows.add("Box 7|7|22|42|20|no|0|0|0");
+		rows.add("Box 8|8|28|55|19|no|0|0|0");
+
+		for each  rowTxt in rows
+		{
+			parts = rowTxt.toList("|");
+
+			boxName = parts.get(0);
+			dispOrder = parts.get(1).toLong();
+			outL = parts.get(2).toDecimal();
+			outW = parts.get(3).toDecimal();
+			outH = parts.get(4).toDecimal();
+			hasInner = false;
+			if(parts.get(5) == "yes")
+			{
+				hasInner = true;
+			}
+			innL = parts.get(6).toDecimal();
+			innW = parts.get(7).toDecimal();
+			innH = parts.get(8).toDecimal();
+
+			exists = false;
+			for each  bmChk in Box_Master[Box_Name == boxName]
+			{
+				exists = true;
+			}
+
+			if(exists == true)
+			{
+				skipCount = skipCount + 1;
+				logTxt = logTxt + "\nSKIP  " + boxName + " already exists, left alone";
+			}
+			else
+			{
+				logTxt = logTxt + "\nADD   " + boxName + "  outer " + outL + " x " + outW + " x " + outH;
+
+				if(hasInner == true)
+				{
+					logTxt = logTxt + "  inner " + innL + " x " + innW + " x " + innH;
+				}
+				else
+				{
+					logTxt = logTxt + "  (no inner carton)";
+				}
+
+				if(writeIt == true)
+				{
+					insert into Box_Master
+					[
+						Box_Name = boxName
+						Display_Order = dispOrder
+						Outer_Length_Cm = outL
+						Outer_Width_Cm = outW
+						Outer_Height_Cm = outH
+						Has_Inner_Carton = hasInner
+						Inner_Length_Cm = innL
+						Inner_Width_Cm = innW
+						Inner_Height_Cm = innH
+						Active = true
+						Added_User = zoho.loginuser
+					];
+
+					addedCount = addedCount + 1;
+				}
+			}
+		}
+
+		modeTxt = "DRY RUN, nothing written";
+		if(writeIt == true)
+		{
+			modeTxt = "WRITTEN";
+		}
+
+		logTxt = "seedBoxMaster [" + modeTxt + "] added " + addedCount + ", already there " + skipCount + logTxt;
+	}
+	catch (e)
+	{
+		logTxt = "seedBoxMaster ERROR after " + addedCount + " added: " + e.toString() + logTxt;
+	}
+
+	info logTxt;
+
+	return logTxt;
+}

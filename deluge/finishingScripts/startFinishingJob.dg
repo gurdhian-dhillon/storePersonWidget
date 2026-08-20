@@ -1,0 +1,173 @@
+string startFinishingJob(string payloadJson)
+{
+	// Opens the Finishing_Data row for one inspected batch, at the moment the
+	// finisher presses Start on the first stage.
+	//
+	// WHY THE ROW EXISTS BEFORE THE WORK IS DONE. It used to be created only at
+	// the very end, so folding and pressing times lived nowhere but the browser
+	// until branding closed. A refresh, a closed tab, a tablet going to sleep or
+	// a shift handover lost the lot, and the batch came back on the queue reading
+	// "Pending" with nothing to say an hour had gone into it. The operator's only
+	// way out was to invent the times.
+	//
+	// This is the same shape as Stage_Log in production: the row is opened when
+	// work starts, carries Finishing_Status = "In_Progress" while it runs, and is
+	// closed by completeFinishingJob. An open row is not finished work and every
+	// reader has to say so - see the note on the status below.
+	//
+	// "FINISHED" IS NOW Finishing_Status == "Done", NOT "a row exists".
+	// Five functions ask that question - getFinishingItems,
+	// getFinishingHistory, recheckOrderComplete, getPackingQueue,
+	// getPackingDetails - and they must all keep asking the same one, or the plan
+	// dropdown, the queue, the order status and the packing list disagree about
+	// whether a batch is done.
+	//
+	// DONE MEANS DONE; ANYTHING ELSE MEANS THE JOB IS STILL OPEN. One rule, no
+	// third case, and it decides which way every one of those functions fails. A
+	// row that somehow carries neither value - a hand-made record, a mistyped
+	// dropdown choice, a write that half landed - reads as UNFINISHED: the batch
+	// stays on the queue where somebody can see it, and the order stops short of
+	// packing. The other direction fails silently, calling that row finished and
+	// walking the order all the way through with a batch nobody ever folded.
+	//
+	// IDEMPOTENT. A batch already open returns its existing row rather than a
+	// second one, so a double press, a refresh or a second operator picking the
+	// same card resumes rather than forking. A batch already finished is refused,
+	// because the only way to finish it twice is to have lost track of it.
+	//
+	// THE CLOCK IS THE SERVER'S. The widget used to format its own timestamps and
+	// send them, so a tablet with a wrong clock wrote wrong times and two devices
+	// on one job disagreed. Nothing here reads a time out of the payload.
+
+	res = "{\"success\":false,\"error\":\"Nothing ran\"}";
+
+	try
+	{
+		inp = payloadJson.toMap();
+		checkIdStr = ifnull(inp.get("itemCheckId"),"").toString().trim();
+		staffName = ifnull(inp.get("staffName"),"").toString().trim();
+
+		if(checkIdStr == "" || checkIdStr.isNumber() == false)
+		{
+			return "{\"success\":false,\"error\":\"Missing or invalid itemCheckId\"}";
+		}
+
+		checkId = checkIdStr.toLong();
+
+		checkFound = false;
+		checkQty = 0;
+		itemId = null;
+
+		for each  chk in Item_Check[ID == checkId]
+		{
+			checkFound = true;
+			checkQty = ifnull(chk.Qty_Approved,0).toLong();
+			itemId = chk.Plan_Item;
+		}
+
+		if(checkFound == false)
+		{
+			return "{\"success\":false,\"error\":\"No Item_Check " + checkId + "\"}";
+		}
+
+		if(checkQty <= 0)
+		{
+			return "{\"success\":false,\"error\":\"Batch " + checkId + " approved nothing, so there is nothing to finish\"}";
+		}
+
+		openId = 0;
+		alreadyDone = false;
+
+		// Only "Done" closes a batch. Any other row is picked up and continued,
+		// which is what stops a half-written or hand-made row turning into a
+		// second one alongside it.
+		for each  fdChk in Finishing_Data[Item_Check == checkId]
+		{
+			if(ifnull(fdChk.Finishing_Status,"").toString().trim() == "Done")
+			{
+				alreadyDone = true;
+			}
+			else
+			{
+				openId = fdChk.ID;
+			}
+		}
+
+		if(alreadyDone == true)
+		{
+			return "{\"success\":false,\"error\":\"This batch has already been finished. Refresh the queue.\"}";
+		}
+
+		// Matched on the name the widget sends. Two active employees with the
+		// same name resolve to whichever is read last - the widget has the id
+		// and should be sending it.
+		empId = null;
+		for each  emp in Employee[Employee_Name == staffName]
+		{
+			empId = emp.ID;
+		}
+
+		startedTxt = "";
+
+		if(openId == 0)
+		{
+			// Qty_Finished stays 0 while the job is open. It is set from the
+			// check when the job closes, so a half-done job cannot be counted as
+			// output by anything that sums it.
+			newFin = insert into Finishing_Data
+			[
+				Item_Check = checkId
+				Finishing_Status = "In_Progress"
+				Qty_Finished = 0
+			];
+
+			openId = newFin.toLong();
+
+			// Lookups and date-times go in AFTER the insert - a null inside an
+			// insert block throws, and Plan_Item is only as reliable as the
+			// check that carries it.
+			for each  fNew in Finishing_Data[ID == openId]
+			{
+				if(itemId != null)
+				{
+					fNew.Plan_Item = itemId;
+				}
+
+				if(empId != null)
+				{
+					fNew.Operator = empId;
+				}
+
+				fNew.Finishing_Start_Time = zoho.currenttime;
+			}
+
+			startedTxt = zoho.currenttime.toString("HH:mm:ss");
+		}
+		else
+		{
+			// RESUMED. Whoever is at the machine now owns the job - a handover
+			// mid-shift is the normal reason a job is picked up again, and the
+			// record should name the person who actually finished it.
+			for each  fOpen in Finishing_Data[ID == openId]
+			{
+				if(empId != null)
+				{
+					fOpen.Operator = empId;
+				}
+
+				if(fOpen.Finishing_Start_Time != null)
+				{
+					startedTxt = fOpen.Finishing_Start_Time.toString("HH:mm:ss");
+				}
+			}
+		}
+
+		res = "{\"success\":true,\"finishingId\":\"" + openId + "\",\"qty\":" + checkQty + ",\"startedAt\":\"" + startedTxt + "\"}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

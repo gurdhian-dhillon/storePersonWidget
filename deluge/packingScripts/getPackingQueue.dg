@@ -1,49 +1,156 @@
 string getPackingQueue(string payloadJson)
 {
+	// Orders waiting to be packed: Order_Status == "Finishing Complete", which
+	// recheckOrderComplete is the only writer of.
+	//
+	// EACH ORDER CARRIES ITS SUPERVISOR, so the screen can be filtered the way
+	// every other screen in this app is. The supervisor is
+	// Production_Planning.Assigned_To - createProductionPlans stamps it and the
+	// store list, the receive screen and production all read it from there. It is
+	// resolved through the plan rather than held on the order, because the order
+	// never had one.
+	//
+	// EMPLOYEE NAMES ARE CACHED. One supervisor covers many orders, so looking the
+	// name up per order is the same query run over and over. The Map is keyed by
+	// id as a STRING - a Map holding a mix of Decimal and String is one more
+	// chance at a mixed-type comparison.
+	//
+	// THE FINISHED-BATCH LOOKUP IS HOISTED. This used to walk, per order, every
+	// plan, then every item, then every check, then run a Finishing_Data query per
+	// check - five levels deep with the query at the bottom. Now one pass over
+	// Finishing_Data builds the set of finished batches and the walk is query-free
+	// below the check.
+	//
+	// "FINISHED" IS Finishing_Status == "Done", not "a row exists".
+	// startFinishingJob opens the row when work starts, so a row alone means
+	// somebody is part way through. Done means done; anything else means the job
+	// is still open - a row carrying neither value reads as unfinished, which
+	// keeps the batch visible instead of quietly passing it to packing.
+	//
+	// The piece count is what actually cleared finishing, not the order quantity:
+	// an order can only reach this queue short-closed, and the packer needs to
+	// know he is boxing fewer than were sold.
+
 	res = "{\"errors\":[\"Nothing ran\"]}";
+
 	try
 	{
-		ordersJson = "";
-		for each so in Sales_Order[Order_Status == "Finishing Complete"]
+		doneChecks = List();
+
+		for each  fd in Finishing_Data[ID != 0]
 		{
+			if(fd.Item_Check != null)
+			{
+				if(ifnull(fd.Finishing_Status,"").toString().trim() == "Done")
+				{
+					doneChecks.add(fd.Item_Check.toString());
+				}
+			}
+		}
+
+		nameByEmp = Map();
+		ordersJson = "";
+
+		for each  so in Sales_Order[Order_Status == "Finishing Complete"]
+		{
+			orderNo = ifnull(so.Sales_Order,"").toString().replaceAll("\"","'");
+			orderSrc = ifnull(so.Order_Source,"").toString().replaceAll("\"","'");
+
+			itemCount = 0;
+			for each  soRow in so.Item_Table
+			{
+				itemCount = itemCount + 1;
+			}
+
+			//----------------------------------------------------------
+			// The supervisor, and the pieces that cleared finishing, from
+			// one walk of the order's plans.
+			//----------------------------------------------------------
+			supId = "";
+			supName = "";
+			planNoTxt = "";
+
+			totalFinished = 0;
+			countedChecks = List();
+
+			// Item_Check carries the order directly where saveItemCheck could
+			// resolve it, which removes the plan and item hops. A check that
+			// missed it is picked up by the plan pass below.
+			for each  chk in Item_Check[Sales_Order == so.ID && Qty_Approved > 0]
+			{
+				chkKey = chk.ID.toString();
+
+				if(doneChecks.contains(chkKey) == true && countedChecks.contains(chkKey) == false)
+				{
+					countedChecks.add(chkKey);
+					totalFinished = totalFinished + ifnull(chk.Qty_Approved,0).toLong();
+				}
+			}
+
+			for each  plan in Production_Planning[Sales_Order == so.ID]
+			{
+				if(plan.Assigned_To != null && supId == "")
+				{
+					supId = plan.Assigned_To.toString();
+				}
+
+				planNoTxt = ifnull(plan.Plan_No,"").toString().replaceAll("\"","'");
+
+				for each  chk2 in Item_Check[Plan == plan.ID && Qty_Approved > 0]
+				{
+					chkKey2 = chk2.ID.toString();
+
+					if(doneChecks.contains(chkKey2) == true && countedChecks.contains(chkKey2) == false)
+					{
+						countedChecks.add(chkKey2);
+						totalFinished = totalFinished + ifnull(chk2.Qty_Approved,0).toLong();
+					}
+				}
+			}
+
+			if(supId != "")
+			{
+				supName = ifnull(nameByEmp.get(supId),"").toString();
+
+				if(supName == "")
+				{
+					for each  emp in Employee[ID == supId.toLong()]
+					{
+						supName = ifnull(emp.Employee_Name,"").toString().replaceAll("\"","'");
+					}
+
+					if(supName == "")
+					{
+						supName = "Unknown";
+					}
+
+					nameByEmp.put(supId,supName);
+				}
+			}
+
 			if(ordersJson != "")
 			{
 				ordersJson = ordersJson + ",";
 			}
-			orderNo = ifnull(so.Sales_Order, "").toString().replaceAll("\"", "'");
-			orderSrc = ifnull(so.Order_Source, "").toString().replaceAll("\"", "'");
-			
-			// Count items in the order
-			itemCount = 0;
-			for each soRow in so.Item_Table
-			{
-				itemCount = itemCount + 1;
-			}
-			
-			// Calculate finished pieces directly from Item_Check & Finishing_Data (ignoring duplicate finishing logs)
-			totalFinished = 0;
-			for each plan in Production_Planning[Sales_Order == so.ID]
-			{
-				for each pi in Plan_Item[Plan == plan.ID]
-				{
-					for each chk in Item_Check[Plan_Item == pi.ID && Qty_Approved > 0]
-					{
-						if(Finishing_Data[Item_Check == chk.ID].count() > 0)
-						{
-							totalFinished = totalFinished + ifnull(chk.Qty_Approved, 0).toLong();
-						}
-					}
-				}
-			}
-			
-			ordersJson = ordersJson + "{\"id\":\"" + so.ID + "\",\"orderNo\":\"" + orderNo + "\",\"source\":\"" + orderSrc + "\",\"itemCount\":" + itemCount + ",\"totalPieces\":" + totalFinished + "}";
+
+			// Ids stringified - an 18-digit id breaks JSON.parse on the widget
+			// side.
+			ordersJson = ordersJson + "{\"id\":\"" + so.ID + "\","
+				+ "\"orderNo\":\"" + orderNo + "\","
+				+ "\"source\":\"" + orderSrc + "\","
+				+ "\"planNo\":\"" + planNoTxt + "\","
+				+ "\"supervisorId\":\"" + supId + "\","
+				+ "\"supervisorName\":\"" + supName + "\","
+				+ "\"itemCount\":" + itemCount + ","
+				+ "\"totalPieces\":" + totalFinished + "}";
 		}
-		
+
 		res = "{\"errors\":[],\"orders\":[" + ordersJson + "]}";
 	}
 	catch (e)
 	{
 		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
 	}
+
 	return res;
 }

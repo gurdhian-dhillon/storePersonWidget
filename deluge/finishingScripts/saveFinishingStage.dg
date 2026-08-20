@@ -1,0 +1,149 @@
+string saveFinishingStage(string payloadJson)
+{
+	// Stamps one end of one sub-stage - folding, pressing or branding - on an
+	// open Finishing_Data row, the moment the finisher presses the button.
+	//
+	// SIX STAMPS, SIX CALLS, NOTHING HELD IN THE BROWSER. That is the whole
+	// reason this exists. The times used to be accumulated in page state and sent
+	// in one payload when branding closed; anything that ended the page before
+	// then threw the shift away. Custom API calls from a widget are not metered,
+	// so there is no reason to batch them.
+	//
+	// THE CLOCK IS THE SERVER'S, never the payload's. A tablet with a wrong clock
+	// used to write wrong times, and a job touched from two devices wrote two
+	// disagreeing sets.
+	//
+	// A STAMP IS NEVER OVERWRITTEN. Pressing Start twice, or a retry after a
+	// response was lost, must not move a time that is already recorded - the
+	// second press would silently shorten the stage. The call succeeds and
+	// reports the stamp that was already there, because from the operator's side
+	// nothing went wrong.
+	//
+	// ONLY AN OPEN JOB. A finished row is closed history; the way to correct one
+	// is in Creator, not by pressing a button on a screen that should not still
+	// be showing it.
+	//
+	// The sub-stage fields are Time, not Date-Time, so they carry a clock reading
+	// with no date. A stage that runs across midnight therefore reads as negative
+	// unless the reader wraps it - getFinishingHistory and the widget both add 24
+	// hours when the end is below the start. The overall Finishing_Start_Time and
+	// Finishing_End_Time are full Date-Times and are the fields to trust for when
+	// the work actually happened.
+
+	res = "{\"success\":false,\"error\":\"Nothing ran\"}";
+
+	try
+	{
+		inp = payloadJson.toMap();
+		finIdStr = ifnull(inp.get("finishingId"),"").toString().trim();
+		stageTxt = ifnull(inp.get("stage"),"").toString().trim().toLowerCase();
+		eventTxt = ifnull(inp.get("event"),"").toString().trim().toLowerCase();
+
+		if(finIdStr == "" || finIdStr.isNumber() == false)
+		{
+			return "{\"success\":false,\"error\":\"Missing or invalid finishingId\"}";
+		}
+
+		if(stageTxt != "folding" && stageTxt != "pressing" && stageTxt != "branding")
+		{
+			return "{\"success\":false,\"error\":\"Unknown stage '" + stageTxt.replaceAll("\"","'") + "'\"}";
+		}
+
+		if(eventTxt != "start" && eventTxt != "end")
+		{
+			return "{\"success\":false,\"error\":\"Unknown event '" + eventTxt.replaceAll("\"","'") + "'\"}";
+		}
+
+		finId = finIdStr.toLong();
+
+		rowFound = false;
+		rowStatus = "";
+		existingTxt = "";
+
+		for each  fdChk in Finishing_Data[ID == finId]
+		{
+			rowFound = true;
+			rowStatus = ifnull(fdChk.Finishing_Status,"").toString().trim();
+
+			if(stageTxt == "folding" && eventTxt == "start" && fdChk.Folding_Start_Time != null)
+			{
+				existingTxt = fdChk.Folding_Start_Time.toString();
+			}
+			else if(stageTxt == "folding" && eventTxt == "end" && fdChk.Folding_End_Time != null)
+			{
+				existingTxt = fdChk.Folding_End_Time.toString();
+			}
+			else if(stageTxt == "pressing" && eventTxt == "start" && fdChk.Pressing_Start_Time != null)
+			{
+				existingTxt = fdChk.Pressing_Start_Time.toString();
+			}
+			else if(stageTxt == "pressing" && eventTxt == "end" && fdChk.Pressing_End_Time != null)
+			{
+				existingTxt = fdChk.Pressing_End_Time.toString();
+			}
+			else if(stageTxt == "branding" && eventTxt == "start" && fdChk.Branding_Start_Time != null)
+			{
+				existingTxt = fdChk.Branding_Start_Time.toString();
+			}
+			else if(stageTxt == "branding" && eventTxt == "end" && fdChk.Branding_End_Time != null)
+			{
+				existingTxt = fdChk.Branding_End_Time.toString();
+			}
+		}
+
+		if(rowFound == false)
+		{
+			return "{\"success\":false,\"error\":\"No Finishing_Data " + finId + "\"}";
+		}
+
+		// Done means done; anything else means the job is still open and can be
+		// stamped. Same rule as everywhere else in the module.
+		if(rowStatus == "Done")
+		{
+			return "{\"success\":false,\"error\":\"That finishing job is already closed. Refresh the queue.\"}";
+		}
+
+		if(existingTxt != "")
+		{
+			return "{\"success\":true,\"stage\":\"" + stageTxt + "\",\"event\":\"" + eventTxt + "\",\"time\":\"" + existingTxt.replaceAll("\"","'") + "\",\"alreadySet\":true}";
+		}
+
+		stampTxt = zoho.currenttime.toString("HH:mm:ss");
+
+		for each  fdSet in Finishing_Data[ID == finId]
+		{
+			if(stageTxt == "folding" && eventTxt == "start")
+			{
+				fdSet.Folding_Start_Time = stampTxt;
+			}
+			else if(stageTxt == "folding" && eventTxt == "end")
+			{
+				fdSet.Folding_End_Time = stampTxt;
+			}
+			else if(stageTxt == "pressing" && eventTxt == "start")
+			{
+				fdSet.Pressing_Start_Time = stampTxt;
+			}
+			else if(stageTxt == "pressing" && eventTxt == "end")
+			{
+				fdSet.Pressing_End_Time = stampTxt;
+			}
+			else if(stageTxt == "branding" && eventTxt == "start")
+			{
+				fdSet.Branding_Start_Time = stampTxt;
+			}
+			else if(stageTxt == "branding" && eventTxt == "end")
+			{
+				fdSet.Branding_End_Time = stampTxt;
+			}
+		}
+
+		res = "{\"success\":true,\"stage\":\"" + stageTxt + "\",\"event\":\"" + eventTxt + "\",\"time\":\"" + stampTxt + "\",\"alreadySet\":false}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

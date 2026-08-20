@@ -1,110 +1,210 @@
 string completeFinishingJob(string payloadJson)
 {
-	res = "{\"success\":false,\"error\":\"Nothing was saved\"}";
+	// Closes one open Finishing_Data row - the last press on the finishing screen
+	// - and then asks the order whether that was the last batch it was waiting
+	// for.
+	//
+	// IT NO LONGER INSERTS. startFinishingJob opens the row when the first stage
+	// starts and saveFinishingStage stamps each sub-stage as it happens; by the
+	// time this runs, everything except the branding end and the closing figures
+	// is already on the record. The version this replaces created the row here,
+	// from six timestamps the browser had been holding for the length of the job.
+	//
+	// IT DOES NOT TOUCH Plan_Item.Item_Status, AND THAT IS THE POINT.
+	//
+	// It used to write Item_Status = "Finishing Done" - a value that is not on
+	// that field's picklist and not even in its spelling style. That field
+	// belongs to the production-to-checking lifecycle and three readers test it
+	// for exactly the word "Complete":
+	//
+	//   recheckOrderComplete  - anything else means "still being made", so a
+	//                           finished item stopped the ORDER ever reaching
+	//                           Checking Passed.
+	//   saveProductionPhase   - anything but Complete/Awaiting_Check means the
+	//                           PLAN is not done, so the plan stayed at In
+	//                           Progress for ever, on the supervisor's board and
+	//                           in the store's issue list, with no work left on it.
+	//   getSalesOrderProgress - stopped counting the item as complete.
+	//
+	// Nothing replaced it because nothing needed to: Finishing_Data carrying
+	// Finishing_Status == "Done" IS "this batch is finished", and that is the
+	// test every other reader uses. Done means done; anything else means the job
+	// is still open. One fact, one place, nothing to drift.
+	//
+	// QTY_FINISHED IS READ FROM THE CHECK, NOT FROM THE PAYLOAD. What was
+	// approved is what goes to packing; a figure the screen could set is a figure
+	// that can disagree with the inspection that produced it. Finishing has no
+	// way to record a piece ruined at the press - see the review; that needs its
+	// own shortfall capture, the way a production stage has one.
+	//
+	// IDEMPOTENT. A row that is already closed returns success without writing
+	// again, and the order is still re-evaluated - so a retry after a lost
+	// response finishes the job rather than doubling it or leaving the order
+	// stranded one status short.
+
+	res = "{\"success\":false,\"error\":\"Nothing ran\"}";
+
 	try
 	{
 		inp = payloadJson.toMap();
-		checkIdStr = ifnull(inp.get("itemCheckId"),"").toString().trim();
-		staffName = ifnull(inp.get("staffName"),"").toString().trim();
-		
-		// Sub-stage Times (formatted string HH:mm:ss from JS)
-		foldingStartStr = ifnull(inp.get("foldingStart"),"").toString().trim();
-		foldingEndStr = ifnull(inp.get("foldingEnd"),"").toString().trim();
-		pressingStartStr = ifnull(inp.get("pressingStart"),"").toString().trim();
-		pressingEndStr = ifnull(inp.get("pressingEnd"),"").toString().trim();
-		brandingStartStr = ifnull(inp.get("brandingStart"),"").toString().trim();
-		brandingEndStr = ifnull(inp.get("brandingEnd"),"").toString().trim();
-		
-		// Overall start/end Date-Times (formatted string yyyy-MM-dd HH:mm:ss from JS)
-		finishingStartStr = ifnull(inp.get("finishingStart"),"").toString().trim();
-		finishingEndStr = ifnull(inp.get("finishingEnd"),"").toString().trim();
-		
-		finStart = if(finishingStartStr == "", null, finishingStartStr.toTime("yyyy-MM-dd HH:mm:ss"));
-		finEnd = if(finishingEndStr == "", null, finishingEndStr.toTime("yyyy-MM-dd HH:mm:ss"));
-		
-		if (checkIdStr == "")
-		{
-			return "{\"success\":false,\"error\":\"Missing itemCheckId\"}";
-		}
-		
-		// Find the employee ID for the staff name
-		empId = null;
-		for each emp in Employee[Employee_Name == staffName]
-		{
-			empId = emp.ID;
-		}
-		
-		ordersToRecheck = List();
-		// checkIdStr contains a comma-separated list of check IDs
-		checkIdsList = checkIdStr.toList(",");
-		for each checkIdVal in checkIdsList
-		{
-			checkId = checkIdVal.trim().toLong();
-			
-			// Resolve Qty Approved and Plan Item from this specific check record
-			checkQty = 0;
-			itemId = null;
-			planId = null;
-			for each chk in Item_Check[ID == checkId]
-			{
-				itemId = chk.Plan_Item;
-				if(chk.Plan != null)
-				{
-					planId = chk.Plan;
-				}
-				checkQty = ifnull(chk.Qty_Approved, 0).toLong();
-				if (chk.Sales_Order != null && !ordersToRecheck.contains(chk.Sales_Order.toString()))
-				{
-					ordersToRecheck.add(chk.Sales_Order.toString());
-				}
-			}
-			
-			// Insert finishing record into new 'Finishing_Data' form
-			newFin = insert into Finishing_Data
-			[
-				Plan_Item = itemId
-				Item_Check = checkId
-				Folding_Start_Time = foldingStartStr
-				Folding_End_Time = foldingEndStr
-				Pressing_Start_Time = pressingStartStr
-				Pressing_End_Time = pressingEndStr
-				Branding_Start_Time = brandingStartStr
-				Branding_End_Time = brandingEndStr
-				Finishing_Start_Time = finStart
-				Finishing_End_Time = finEnd
-				Qty_Finished = checkQty
-			];
-			
-			finId = newFin.toLong();
-			
-			// Update Operator lookup since lookups can be null and fail in block
-			for each f in Finishing_Data[ID == finId]
-			{
-				if(empId != null)
-				{
-					f.Operator = empId;
-				}
-			}
+		finIdStr = ifnull(inp.get("finishingId"),"").toString().trim();
 
-			// Update Plan_Item status to Finishing Done
-			for each pi in Plan_Item[ID == itemId]
+		if(finIdStr == "" || finIdStr.isNumber() == false)
+		{
+			return "{\"success\":false,\"error\":\"Missing or invalid finishingId\"}";
+		}
+
+		finId = finIdStr.toLong();
+
+		rowFound = false;
+		rowStatus = "";
+		checkId = null;
+		brandingEndSet = false;
+
+		for each  fdChk in Finishing_Data[ID == finId]
+		{
+			rowFound = true;
+			rowStatus = ifnull(fdChk.Finishing_Status,"").toString().trim();
+			checkId = fdChk.Item_Check;
+
+			if(fdChk.Branding_End_Time != null)
 			{
-				pi.Item_Status = "Finishing Done";
+				brandingEndSet = true;
 			}
 		}
 
-		for each oId in ordersToRecheck
+		if(rowFound == false)
 		{
-			thisapp.recheckFinishingComplete(oId);
+			return "{\"success\":false,\"error\":\"No Finishing_Data " + finId + "\"}";
 		}
-		
-		
-		res = "{\"success\":true,\"message\":\"Finishing records saved successfully\"}";
+
+		if(checkId == null)
+		{
+			return "{\"success\":false,\"error\":\"Finishing_Data " + finId + " has no Item_Check behind it\"}";
+		}
+
+		// The batch, the plan and the order, resolved once. Item_Check.Sales_Order
+		// is only stamped when saveItemCheck could resolve one, so the plan is the
+		// fallback: without it a check that missed it can never move its order to
+		// Finishing Complete, the order never reaches the packing queue, and
+		// nothing anywhere says why.
+		checkQty = 0;
+		planId = null;
+		orderId = null;
+
+		for each  chk in Item_Check[ID == checkId]
+		{
+			checkQty = ifnull(chk.Qty_Approved,0).toLong();
+
+			if(chk.Plan != null)
+			{
+				planId = chk.Plan;
+			}
+
+			if(chk.Sales_Order != null)
+			{
+				orderId = chk.Sales_Order;
+			}
+		}
+
+		if(orderId == null && planId != null)
+		{
+			for each  plF in Production_Planning[ID == planId]
+			{
+				if(plF.Sales_Order != null)
+				{
+					orderId = plF.Sales_Order;
+				}
+			}
+		}
+
+		closedNow = false;
+
+		if(rowStatus != "Done")
+		{
+			endStampTxt = zoho.currenttime.toString("HH:mm:ss");
+
+			for each  fdSet in Finishing_Data[ID == finId]
+			{
+				// Stamped here rather than in a separate saveFinishingStage call,
+				// so the last press is one round trip and there is no window in
+				// which the branding end is recorded but the job is still open.
+				if(brandingEndSet == false)
+				{
+					fdSet.Branding_End_Time = endStampTxt;
+				}
+
+				fdSet.Finishing_End_Time = zoho.currenttime;
+				fdSet.Qty_Finished = checkQty;
+				fdSet.Finishing_Status = "Done";
+			}
+
+			closedNow = true;
+
+			//----------------------------------------------------------
+			// AND THEN IT IS READ BACK, because the one write in that block
+			// that can fail silently is the one everything depends on.
+			//
+			// Finishing_Status is a Dropdown. A value the code writes that the
+			// picklist does not offer is not an error in Creator - it simply
+			// does not stick. The other three writes here are a Time, a
+			// Date-Time and a Number and they land regardless, so the symptom is
+			// a batch with all six stamps, a Qty_Finished, and a status that is
+			// still In_Progress: finished work that never leaves the queue, and
+			// an order that can never reach packing, with nothing anywhere
+			// saying why. That is exactly what it did.
+			//
+			// One extra query per completed job to turn a silent corruption into
+			// a message naming the cause.
+			//----------------------------------------------------------
+			statusAfter = "";
+
+			for each  fdBack in Finishing_Data[ID == finId]
+			{
+				statusAfter = ifnull(fdBack.Finishing_Status,"").toString().trim();
+			}
+
+			if(statusAfter != "Done")
+			{
+				return "{\"success\":false,\"error\":\"The finishing job was stamped but would not close: Finishing_Status read back as '" + statusAfter.replaceAll("\"","'") + "' instead of 'Done'. The Finishing_Data.Finishing_Status dropdown is missing the choice 'Done' - add it exactly, with no spaces, then press Complete again.\"}";
+			}
+		}
+
+		// THE ORDER IS RECOMPUTED BY recheckOrderComplete, which owns both
+		// "Checking Passed" and "Finishing Complete" in one pass. There is no
+		// separate finishing recheck any more: a pair of functions that had to be
+		// called in the right order was one more thing to get wrong, and calling
+		// one from the other put two levels of thisapp between saveItemCheck and
+		// the finishing test.
+		//
+		// Run for a retry as well as a first close. If the previous attempt wrote
+		// the row and then lost the response, the order still has to be asked -
+		// otherwise it sits one status short with nothing on any screen to press.
+		//
+		// It never throws; it returns its failure as text. Records are already
+		// written by this point and Deluge has no transaction to roll back, so a
+		// late step failing must not make a finished job report itself failed.
+		verdict = "no order resolved";
+
+		if(orderId != null)
+		{
+			verdict = thisapp.recheckOrderComplete(orderId.toString());
+		}
+
+		info "completeFinishingJob: finishing " + finId + " (check " + checkId + ", qty " + checkQty + ", closedNow=" + closedNow + ") -> " + verdict;
+
+		msgTxt = "Finished " + checkQty + " pieces";
+		if(closedNow == false)
+		{
+			msgTxt = "This batch was already recorded as finished";
+		}
+
+		res = "{\"success\":true,\"finishingId\":\"" + finId + "\",\"qty\":" + checkQty + ",\"closedNow\":" + closedNow + ",\"message\":\"" + msgTxt + "\"}";
 	}
 	catch (e)
 	{
 		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
 	}
+
 	return res;
 }
-

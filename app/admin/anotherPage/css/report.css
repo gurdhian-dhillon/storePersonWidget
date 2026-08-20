@@ -352,6 +352,9 @@
 .pipe-card.so-qc { border-left: 3px solid #10b981; background: #ecfdf5; }
 .pipe-card.so-qc .pipe-count, .pipe-card.so-qc .pipe-label { color: #047857; }
 
+.pipe-card.so-finishing { border-left: 3px solid #0ea5e9; background: #f0f9ff; }
+.pipe-card.so-finishing .pipe-count, .pipe-card.so-finishing .pipe-label { color: #0369a1; }
+
 .pipe-card.so-packed { border-left: 3px solid #8b5cf6; background: #f5f3ff; }
 .pipe-card.so-packed .pipe-count, .pipe-card.so-packed .pipe-label { color: #6d28d9; }
 
@@ -395,6 +398,7 @@
 .pill-so-status.so-progress { background: #dbeafe; color: #1e40af; }
 .pill-so-status.so-complete { background: #cffafe; color: #155e75; }
 .pill-so-status.so-qc { background: #d1fae5; color: #065f46; }
+.pill-so-status.so-finishing { background: #e0f2fe; color: #075985; }
 .pill-so-status.so-packed { background: #ede9fe; color: #5b21b6; }
 .pill-so-status.so-dispatched { background: #e2e8f0; color: #334155; }
 .pill-so-status.so-default { background: #f1f5f9; color: #475569; }

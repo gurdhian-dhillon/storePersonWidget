@@ -1,159 +1,386 @@
 string savePackingRecord(string payloadJson)
 {
+	// The packer's record of an order going into cartons, and the writer of
+	// Sales_Order.Order_Status = "Packed".
+	//
+	// ONE ROW PER PHYSICAL BOX. Packed_Boxes is the record: box number, which
+	// carton option, which order line, how many pieces, and what it weighed. That
+	// is what answers "what is in box 3" months later, for a customer query or a
+	// damage claim, and it is the grain the rest of this app already works at -
+	// one row per physical thing, every column meaning the same on every row.
+	//
+	// ONE SKU PER BOX. Not a limitation of the record - a limitation of the
+	// carton. The inner carton is BRANDED packaging, made for one product, so a
+	// napkin set cannot go inside a bedsheet's box. It also matches the export
+	// standard, where mixed cartons are the exception and must be labelled MIXED.
+	// If mixing ever becomes real it is a second subform, not a change to this
+	// one.
+	//
+	// THE QUANTITY CHECK IS ENFORCED HERE, NOT ONLY ON THE SCREEN. Every line's
+	// boxed pieces must equal what finishing actually produced for that line. A
+	// Custom API is callable from anywhere and both the screen and this function
+	// have to agree, so the figure is recomputed from Item_Check and
+	// Finishing_Data rather than trusted from the payload - the same walk
+	// getPackingDetails does, and deliberately the same arithmetic, so packing can
+	// never disagree with the status that let it be packed.
+	//
+	// FOUR GUARDS BEFORE ANYTHING IS WRITTEN:
+	//   1. the order is at "Finishing Complete" - the only status the queue offers
+	//   2. it has no Packing record yet - the whole order is packed in one sitting
+	//   3. every box is usable - a carton, a line, a quantity above zero
+	//   4. the boxed quantity matches the finished quantity, line by line
+	// Each returns a message the packer can act on. Refusing loudly is the point.
+	//
+	// VOLUMETRIC WEIGHT: outer L x W x H / 5000, the divisor FedEx and Blue Dart
+	// bill express shipments at. It appears here and in getPackingDetails and
+	// NOWHERE ELSE - if the client comes back with 4000 or 6000 those are the two
+	// places to change.
+
 	res = "{\"success\":false,\"error\":\"Nothing was saved\"}";
+
 	try
 	{
+		volDivisor = 5000.0;
+
 		inp = payloadJson.toMap();
-		salesIdStr = ifnull(inp.get("salesOrderId"), "").toString().trim();
-		staffName = ifnull(inp.get("staffName"), "").toString().trim();
-		
+		salesIdStr = ifnull(inp.get("salesOrderId"),"").toString().trim();
+		staffName = ifnull(inp.get("staffName"),"").toString().trim();
+
 		if(salesIdStr == "" || salesIdStr.isNumber() == false)
 		{
 			return "{\"success\":false,\"error\":\"Missing or invalid salesOrderId\"}";
 		}
+
 		salesId = salesIdStr.toLong();
-		
-		// Find employee ID for packer
+
+		//------------------------------------------------------------------
+		// GUARD 1 and 2 - the order.
+		//------------------------------------------------------------------
+		orderFound = false;
+		statusNow = "";
+
+		for each  soChk in Sales_Order[ID == salesId]
+		{
+			orderFound = true;
+			statusNow = ifnull(soChk.Order_Status,"").toString().trim();
+		}
+
+		if(orderFound == false)
+		{
+			return "{\"success\":false,\"error\":\"No Sales_Order " + salesId + "\"}";
+		}
+
+		if(Packing[Sales_Order == salesId].count() > 0)
+		{
+			return "{\"success\":false,\"error\":\"This order already has a packing record. Refresh the queue - if it needs correcting, edit the existing Packing record in Creator.\"}";
+		}
+
+		if(statusNow != "Finishing Complete")
+		{
+			return "{\"success\":false,\"error\":\"Order is '" + statusNow + "', not 'Finishing Complete', so it cannot be packed yet. Refresh the queue.\"}";
+		}
+
+		//------------------------------------------------------------------
+		// GUARD 3 - the boxes, read into two Maps keyed by line.
+		//
+		// Map values kept as STRINGS throughout - a Map holding a mix of Decimal
+		// and String is one more chance at a mixed-type comparison.
+		//------------------------------------------------------------------
+		boxList = inp.get("boxes");
+
+		if(boxList == null)
+		{
+			return "{\"success\":false,\"error\":\"No boxes were sent\"}";
+		}
+
+		boxedByLine = Map();
+		boxesCollection = Collection();
+
+		boxCount = 0;
+		totalPieces = 0;
+		totalGross = 0.0;
+		totalVolumetric = 0.0;
+
+		for each  boxVal in boxList
+		{
+			boxMap = boxVal.toMap();
+
+			boxNo = ifnull(boxMap.get("boxNo"),"0").toString().toDecimal().toLong();
+			boxTypeStr = ifnull(boxMap.get("boxTypeId"),"").toString().trim();
+			lineNoStr = ifnull(boxMap.get("lineNo"),"0").toString().trim();
+			skuVal = ifnull(boxMap.get("sku"),"").toString();
+			itemNameVal = ifnull(boxMap.get("itemName"),"").toString();
+			qtyVal = ifnull(boxMap.get("qty"),"0").toString().toDecimal().toLong();
+			grossVal = ifnull(boxMap.get("grossWeight"),"0").toString().toDecimal();
+
+			if(boxTypeStr == "" || boxTypeStr.isNumber() == false)
+			{
+				return "{\"success\":false,\"error\":\"Box " + boxNo + " has no carton selected\"}";
+			}
+
+			if(qtyVal <= 0)
+			{
+				return "{\"success\":false,\"error\":\"Box " + boxNo + " has no pieces in it\"}";
+			}
+
+			if(lineNoStr == "" || lineNoStr.isNumber() == false)
+			{
+				return "{\"success\":false,\"error\":\"Box " + boxNo + " is not against any order line\"}";
+			}
+
+			boxTypeId = boxTypeStr.toLong();
+
+			// The carton's own dimensions decide the volumetric weight, so they
+			// are read from the master rather than taken from the payload - the
+			// screen can be stale, the master cannot.
+			outLen = 0.0;
+			outWid = 0.0;
+			outHgt = 0.0;
+			boxNameTxt = "";
+			boxTypeFound = false;
+
+			for each  bm in Box_Master[ID == boxTypeId]
+			{
+				boxTypeFound = true;
+				boxNameTxt = ifnull(bm.Box_Name,"").toString();
+				outLen = ifnull(bm.Outer_Length_Cm,0).toDecimal();
+				outWid = ifnull(bm.Outer_Width_Cm,0).toDecimal();
+				outHgt = ifnull(bm.Outer_Height_Cm,0).toDecimal();
+			}
+
+			if(boxTypeFound == false)
+			{
+				return "{\"success\":false,\"error\":\"Box " + boxNo + " names a carton that is not in Box_Master\"}";
+			}
+
+			volWt = ((outLen * outWid * outHgt) / volDivisor).round(2);
+
+			haveQ = ifnull(boxedByLine.get(lineNoStr),"0").toString().trim();
+			if(haveQ == "")
+			{
+				haveQ = "0";
+			}
+			boxedByLine.put(lineNoStr,(haveQ.toLong() + qtyVal).toString());
+
+			boxRow = Packing.Packed_Boxes();
+			boxRow.Box_No = boxNo;
+			boxRow.Box_Type = boxTypeId;
+			boxRow.Line_No = lineNoStr.toLong();
+			boxRow.SKU = skuVal;
+			boxRow.Item_Name = itemNameVal;
+			boxRow.Quantity = qtyVal;
+			boxRow.Gross_Weight_Kg = grossVal;
+			boxRow.Volumetric_Weight_Kg = volWt;
+			boxesCollection.insert(boxRow);
+
+			boxCount = boxCount + 1;
+			totalPieces = totalPieces + qtyVal;
+			totalGross = totalGross + grossVal;
+			totalVolumetric = totalVolumetric + volWt;
+		}
+
+		if(boxCount == 0)
+		{
+			return "{\"success\":false,\"error\":\"No boxes were sent\"}";
+		}
+
+		//------------------------------------------------------------------
+		// GUARD 4 - what finishing actually produced, per ORIGINAL line.
+		//
+		// The same walk getPackingDetails does. A remake batch replaces pieces
+		// the customer already bought, so its acceptances belong to the line it
+		// was raised against; Remake_Of always points at the ROOT, so this is one
+		// flat pass. "Finished" is Finishing_Status == "Done" - done means done,
+		// anything else means the job is still open.
+		//------------------------------------------------------------------
+		doneChecks = List();
+
+		for each  fd in Finishing_Data[ID != 0]
+		{
+			if(fd.Item_Check != null)
+			{
+				if(ifnull(fd.Finishing_Status,"").toString().trim() == "Done")
+				{
+					doneChecks.add(fd.Item_Check.toString());
+				}
+			}
+		}
+
+		lineByItem = Map();
+		finByLine = Map();
+		lineKeys = List();
+
+		for each  plan in Production_Planning[Sales_Order == salesId]
+		{
+			rootLineById = Map();
+
+			for each  pi in Plan_Item[Plan == plan.ID]
+			{
+				if(ifnull(pi.Is_Remake,false) == false)
+				{
+					lnS = ifnull(pi.Line_No,"0").toString().trim();
+					if(lnS == "")
+					{
+						lnS = "0";
+					}
+
+					rootLineById.put(pi.ID.toString(),lnS);
+				}
+			}
+
+			for each  pi2 in Plan_Item[Plan == plan.ID]
+			{
+				itemKey = pi2.ID.toString();
+				lineKey = "";
+
+				if(ifnull(pi2.Is_Remake,false) == false)
+				{
+					lineKey = ifnull(rootLineById.get(itemKey),"").toString();
+				}
+				else if(pi2.Remake_Of != null)
+				{
+					lineKey = ifnull(rootLineById.get(pi2.Remake_Of.toString()),"").toString();
+				}
+
+				if(lineKey != "")
+				{
+					lineByItem.put(itemKey,lineKey);
+				}
+			}
+
+			for each  chk in Item_Check[Plan == plan.ID && Qty_Approved > 0]
+			{
+				if(chk.Plan_Item != null && doneChecks.contains(chk.ID.toString()) == true)
+				{
+					lineKeyTxt = ifnull(lineByItem.get(chk.Plan_Item.toString()),"").toString();
+
+					if(lineKeyTxt != "")
+					{
+						haveF = ifnull(finByLine.get(lineKeyTxt),"0").toString().trim();
+						if(haveF == "")
+						{
+							haveF = "0";
+						}
+
+						finByLine.put(lineKeyTxt,(haveF.toLong() + ifnull(chk.Qty_Approved,0).toLong()).toString());
+
+						if(lineKeys.contains(lineKeyTxt) == false)
+						{
+							lineKeys.add(lineKeyTxt);
+						}
+					}
+				}
+			}
+		}
+
+		// Every finished line must be fully boxed, and nothing may be boxed
+		// against a line that produced nothing. Both directions, because a
+		// quantity in the wrong place is as wrong as a quantity missing.
+		mismatchTxt = "";
+
+		for each  lk in lineKeys
+		{
+			finQ = ifnull(finByLine.get(lk),"0").toString().trim();
+			if(finQ == "")
+			{
+				finQ = "0";
+			}
+
+			boxQ = ifnull(boxedByLine.get(lk),"0").toString().trim();
+			if(boxQ == "")
+			{
+				boxQ = "0";
+			}
+
+			if(finQ.toLong() != boxQ.toLong())
+			{
+				if(mismatchTxt != "")
+				{
+					mismatchTxt = mismatchTxt + "; ";
+				}
+
+				mismatchTxt = mismatchTxt + "line " + lk + " boxed " + boxQ + " of " + finQ;
+			}
+		}
+
+		for each  bk in boxedByLine.keys()
+		{
+			if(lineKeys.contains(bk) == false)
+			{
+				if(mismatchTxt != "")
+				{
+					mismatchTxt = mismatchTxt + "; ";
+				}
+
+				mismatchTxt = mismatchTxt + "line " + bk + " has boxes but nothing finished against it";
+			}
+		}
+
+		if(mismatchTxt != "")
+		{
+			return "{\"success\":false,\"error\":\"Boxed quantity does not match what finishing produced -> " + mismatchTxt.replaceAll("\"","'") + "\"}";
+		}
+
+		//------------------------------------------------------------------
+		// THE RECORD.
+		//------------------------------------------------------------------
 		empId = null;
-		for each emp in Employee[Employee_Name == staffName]
+		for each  emp in Employee[Employee_Name == staffName]
 		{
 			empId = emp.ID;
 		}
-		
-		// Setup subform collections
-		itemsCollection = Collection();
-		innerCollection = Collection();
-		outerCollection = Collection();
-		
-		// 1. Map packed items
-		itemsList = inp.get("items");
-		if(itemsList != null)
-		{
-			for each itemVal in itemsList
-			{
-				itemMap = itemVal.toMap();
-				skuVal = ifnull(itemMap.get("sku"), "").toString();
-				itemNameVal = ifnull(itemMap.get("itemName"), "").toString();
-				qtyToPackVal = ifnull(itemMap.get("qtyToPack"), "0").toString().toDecimal().toLong();
-				qtyPackedVal = ifnull(itemMap.get("qtyPacked"), "0").toString().toDecimal().toLong();
-				
-				itemRow = Packing.Packing_Items();
-				itemRow.SKU = skuVal;
-				itemRow.Item_Name = itemNameVal;
-				itemRow.Quantity_Packed = qtyPackedVal;
-				itemsCollection.insert(itemRow);
-			}
-		}
-		
-		// 2. Map inner boxes
-		innerList = inp.get("innerBoxes");
-		totalInner = 0;
-		if(innerList != null)
-		{
-			for each innerVal in innerList
-			{
-				innerMap = innerVal.toMap();
-				boxNoVal = ifnull(innerMap.get("boxNo"), "").toString();
-				boxSizeName = ifnull(innerMap.get("boxSize"), "").toString();
-				skuVal = ifnull(innerMap.get("sku"), "").toString();
-				qtyVal = ifnull(innerMap.get("qty"), "0").toString().toDecimal().toLong();
-				outerBoxNoVal = ifnull(innerMap.get("outerBoxNo"), "").toString();
-				
-				// innerRow = Packing.Packed_Inner_Boxes();
-				// innerRow.Box_No = boxNoVal;
-				// innerRow.SKU = skuVal;
-				// innerRow.Quantity_Packed = qtyVal;
-				// innerRow.Outer_Box_No = outerBoxNoVal;
-				
-				// Lookup box size ID from name (commented out to prevent compilation errors if Box_Size_Master form is not in the app)
-				// boxSizeId = null;
-				// for each bSize in Box_Size_Master[Box_Size_Name == boxSizeName]
-				// {
-				// 	boxSizeId = bSize.ID;
-				// }
-				// if(boxSizeId != null)
-				// {
-				// 	innerRow.Box_Size = boxSizeId;
-				// }
-				
-				// innerCollection.insert(innerRow);
-				totalInner = totalInner + 1;
-			}
-		}
-		
-		// 3. Map outer boxes
-		outerList = inp.get("outerBoxes");
-		totalOuter = 0;
-		outerLen = 0.0;
-		outerWid = 0.0;
-		outerHgt = 0.0;
-		if(outerList != null)
-		{
-			for each outerVal in outerList
-			{
-				outerMap = outerVal.toMap();
-				outerBoxNoVal = ifnull(outerMap.get("outerBoxNo"), "").toString();
-				volUsedVal = ifnull(outerMap.get("volumeUsed"), "0").toString().toDecimal();
-				weightVal = ifnull(outerMap.get("weight"), "0").toString().toDecimal();
-				
-				if(totalOuter == 0)
-				{
-					dimMap = outerMap.get("dimensions");
-					if(dimMap != null)
-					{
-						dimMap = dimMap.toMap();
-						outerLen = ifnull(dimMap.get("l"), "0").toString().toDecimal();
-						outerWid = ifnull(dimMap.get("w"), "0").toString().toDecimal();
-						outerHgt = ifnull(dimMap.get("h"), "0").toString().toDecimal();
-					}
-				}
-				
-				// outerRow = Packing.Packed_Outer_Boxes();
-				// outerRow.Outer_Box_No = outerBoxNoVal;
-				// outerRow.Total_Volume_Utilized = volUsedVal;
-				// outerRow.Total_Weight = weightVal;
-				
-				// outerCollection.insert(outerRow);
-				totalOuter = totalOuter + 1;
-			}
-		}
-		
-		// 4. Create Packing record
+
+		// One outer carton holds exactly one inner, so the two counts are the
+		// same number by definition. Both are kept because both are what the
+		// paperwork asks for.
 		newPack = insert into Packing
 		[
 			Sales_Order = salesId
-			Total_Inner_Boxes = totalInner
-			Total_Outer_Boxes = totalOuter
-			Outer_Box_Length = outerLen
-			Outer_Box_Width = outerWid
-			Outer_Box_Height = outerHgt
+			Total_Inner_Boxes = boxCount
+			Total_Outer_Boxes = boxCount
+			Total_Gross_Weight_Kg = totalGross.round(2)
+			Total_Volumetric_Weight_Kg = totalVolumetric.round(2)
 		];
-		
+
 		packId = newPack.toLong();
-		
-		// Update details/subforms of the created Packing record
-		for each packRec in Packing[ID == packId]
+
+		// Employee is a lookup and can be null, so it is set after the insert - a
+		// null inside an insert block throws. Subform rows go in as a collection
+		// in one call; assigning to the subform directly does not work.
+		for each  packRec in Packing[ID == packId]
 		{
 			if(empId != null)
 			{
 				packRec.Employee = empId;
 			}
-			packRec.Packing_Items.insert(itemsCollection);
-			// packRec.Packed_Inner_Boxes.insert(innerCollection);
-			// packRec.Packed_Outer_Boxes.insert(outerCollection);
+
+			packRec.Packed_Boxes.insert(boxesCollection);
 		}
-		
-		// 5. Update Sales Order status to "Packed"
-		for each so in Sales_Order[ID == salesId]
+
+		//------------------------------------------------------------------
+		// THE ORDER. Forward only, from the one status guard 1 admitted.
+		//------------------------------------------------------------------
+		for each  soSet in Sales_Order[ID == salesId]
 		{
-			so.Order_Status = "Packed";
+			if(ifnull(soSet.Order_Status,"").toString().trim() == "Finishing Complete")
+			{
+				soSet.Order_Status = "Packed";
+			}
 		}
-		
-		res = "{\"success\":true,\"message\":\"Packing record saved successfully\",\"packingId\":\"" + packId + "\"}";
+
+		// Chargeable weight is the greater of the two - what the courier bills.
+		chargeable = totalGross;
+		if(totalVolumetric > totalGross)
+		{
+			chargeable = totalVolumetric;
+		}
+
+		res = "{\"success\":true,\"packingId\":\"" + packId + "\",\"boxes\":" + boxCount + ",\"pieces\":" + totalPieces + ",\"grossWeight\":" + totalGross.round(2) + ",\"volumetricWeight\":" + totalVolumetric.round(2) + ",\"chargeableWeight\":" + chargeable.round(2) + ",\"message\":\"Packed " + totalPieces + " pieces into " + boxCount + " boxes\"}";
 	}
 	catch (e)
 	{
 		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
 	}
+
 	return res;
 }

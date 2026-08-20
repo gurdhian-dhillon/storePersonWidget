@@ -3,177 +3,41 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Packing Dashboard</title>
+    <title>Packing</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="../css/style.css">
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
     <div class="app-container packing-app">
-        <!-- Sticky Header -->
         <header class="app-header">
             <div class="app-header-left">
-                <h1>Packing Dashboard</h1>
-                <p>Pack finished orders into inner and outer boxes</p>
+                <h1>Packing</h1>
+                <span class="app-date" id="pack-date"></span>
             </div>
             <div class="app-header-right">
-                <!-- Packer Staff Selector -->
-                <div class="staff-info">
-                    <span class="staff-avatar" id="staff-avatar-initial">P</span>
-                    <div class="staff-selector-group">
-                        <span class="selector-label">Packer / Staff</span>
-                        <select class="staff-select" id="staff-select-el">
-                            <option value="">Loading staff...</option>
-                        </select>
-                    </div>
-                </div>
-                <button id="refresh-btn" class="primary-btn" type="button" onclick="loadDashboardData()">Refresh Queue</button>
+                <!-- Same place as every other screen: picker then Refresh. -->
+                <select id="pack-sup-select" class="sup-select" aria-label="Choose supervisor">
+                    <option value="">Choose supervisor&hellip;</option>
+                </select>
+                <button class="primary-btn" type="button" onclick="PackingScreen.refresh()">Refresh</button>
             </div>
         </header>
 
-        <!-- Main Body Grid: Sidebar + Workspace -->
-        <div class="packing-main-layout">
-            <!-- Sidebar: Sales Orders Queue -->
-            <aside class="packing-sidebar">
-                <div class="card-header">
-                    <h2>Orders to Pack</h2>
-                    <span class="badge" id="queue-count">0</span>
-                </div>
-                <div id="order-queue-list" class="queue-list">
-                    <div class="empty-state-small">
-                        <div class="icon">📦</div>
-                        <p>No orders pending packing</p>
-                    </div>
-                </div>
-            </aside>
-
-            <!-- Main Packing Workspace -->
-            <main class="packing-workspace">
-                <div id="workspace-empty-state" class="empty-state">
-                    <div class="icon">🔍</div>
-                    <h2>No Sales Order Selected</h2>
-                    <p>Select a sales order from the sidebar queue to start packing</p>
-                </div>
-
-                <div id="packing-editor" class="packing-editor hidden">
-                    <!-- Order Details Panel -->
-                    <section class="order-details-card">
-                        <div class="order-info-header">
-                            <div>
-                                <span class="order-no-label" id="active-order-no">SO-0000</span>
-                                <span class="order-source-pill" id="active-order-source">Shopify</span>
-                            </div>
-                            <div class="order-totals">
-                                <span>Items: <strong id="active-item-count">0</strong></span>
-                                <span class="divider">|</span>
-                                <span>Total Pcs: <strong id="active-total-pieces">0</strong></span>
-                            </div>
-                        </div>
-                    </section>
-
-                    <!-- Tab Navigation -->
-                    <nav class="tab-strip" style="margin-top: 1rem;">
-                        <button type="button" class="tab-btn is-active" id="tab-inner-btn" onclick="switchTab('inner')">
-                            1. Inner Boxes Packing
-                        </button>
-                        <button type="button" class="tab-btn" id="tab-outer-btn" onclick="switchTab('outer')">
-                            2. Outer Box Placement
-                        </button>
-                    </nav>
-
-                    <div class="tab-body">
-                        <!-- TAB 1: INNER PACKING -->
-                        <section class="tab-panel is-active" id="panel-inner">
-                            <div class="packing-instruction">
-                                <span class="info-icon">ℹ️</span>
-                                <p>Items of different types (SKUs) <strong>must</strong> be packed in separate boxes. Set the box size for each box, and distribute the items accordingly.</p>
-                            </div>
-
-                            <div class="inner-packing-grid">
-                                <!-- Left Column: Item List & Packing Progress -->
-                                <div class="items-to-pack-panel">
-                                    <h3>Ordered Items & Progress</h3>
-                                    <div id="items-progress-list" class="items-list">
-                                        <!-- Dynamic items list -->
-                                    </div>
-                                    <div class="items-panel-actions">
-                                        <button type="button" class="action-btn-secondary" onclick="autoPackItems()">
-                                            ⚡ Auto-Pack Items
-                                        </button>
-                                    </div>
-                                </div>
-
-                                <!-- Right Column: Inner Boxes List -->
-                                <div class="inner-boxes-panel">
-                                    <div class="panel-header-row">
-                                        <h3>Inner Boxes</h3>
-                                        <button type="button" class="action-btn-primary" onclick="addInnerBox()">
-                                            ➕ Add Inner Box
-                                        </button>
-                                    </div>
-                                    <div id="inner-boxes-list" class="boxes-container">
-                                        <!-- Dynamic inner boxes -->
-                                    </div>
-                                </div>
-                            </div>
-                        </section>
-
-                        <!-- TAB 2: OUTER PACKING -->
-                        <section class="tab-panel" id="panel-outer">
-                            <div class="packing-instruction">
-                                <span class="info-icon">ℹ️</span>
-                                <p>Place the packed inner boxes into one or more final outer boxes. Inner boxes are packed by volume points (Max 64 points per outer box).</p>
-                            </div>
-
-                            <div class="outer-packing-grid">
-                                <!-- Left Column: Unplaced Inner Boxes -->
-                                <div class="unplaced-boxes-panel">
-                                    <h3>Unplaced Inner Boxes</h3>
-                                    <div id="unplaced-inner-boxes-list" class="unplaced-boxes-container">
-                                        <!-- List of inner boxes not yet placed in any outer box -->
-                                    </div>
-                                </div>
-
-                                <!-- Right Column: Outer Boxes List -->
-                                <div class="outer-boxes-panel">
-                                    <div class="panel-header-row">
-                                        <h3>Outer Boxes</h3>
-                                        <button type="button" class="action-btn-primary" onclick="addOuterBox()">
-                                            ➕ Add Outer Box
-                                        </button>
-                                    </div>
-                                    <div id="outer-boxes-list" class="boxes-container">
-                                        <!-- Dynamic outer boxes -->
-                                    </div>
-                                </div>
-                            </div>
-                        </section>
-                    </div>
-
-                    <!-- Bottom Packing Action Bar -->
-                    <footer class="packing-action-bar">
-                        <div class="packing-validation-msg" id="validation-msg">
-                            <!-- Verification issues displayed here -->
-                        </div>
-                        <div class="packing-buttons">
-                            <button type="button" class="action-btn-secondary" onclick="printPackingSlip()">
-                                🖨️ Print Packing Slip
-                            </button>
-                            <button type="button" class="primary-btn" id="save-packing-btn" onclick="savePackingData()">
-                                Check & Complete Packing
-                            </button>
-                        </div>
-                    </footer>
-                </div>
-            </main>
+        <!-- Everything below is GENERATED by js/main.js - this page carries only
+             the count line and an empty list. Ids are prefixed "pack-". -->
+        <div class="packing-panel">
+            <div class="pack-count" id="pack-queue-count"></div>
+            <div class="pack-queue" id="pack-queue-list"></div>
         </div>
     </div>
 
-    <!-- Print Slip Layout (Hidden by default, shown during print media) -->
-    <div id="print-layout" class="print-only"></div>
-
-    <!-- Zoho Creator SDK & Widget JS -->
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
     <script src="js/main.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            setTimeout(function () { PackingScreen.init(); }, 150);
+        });
+    </script>
 </body>
 </html>

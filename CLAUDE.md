@@ -66,8 +66,9 @@ These are not style preferences. Each one caused a real bug in this app.
 | Form . Field | Style | Values |
 |---|---|---|
 | `Production_Planning.Order_Status` | spaces | `Pending`, `Material Ready`, `Partially Received`, `In Progress`, `Production Complete` |
-| `Sales_Order.Order_Status` | spaces | `Pending`, `In Progress`, `Production Complete`, `Checking Passed`, `Packed`, `Dispatched` |
-| `Plan_Item.Item_Status` | underscores | `Awaiting_Material`, `Ready_For_Production`, `In_Production`, `Awaiting_Check`, `Complete` |
+| `Sales_Order.Order_Status` | spaces | `Pending`, `In Progress`, `Production Complete`, `Checking Passed`, `Finishing Complete`, `Packed`, `Dispatched` |
+| `Plan_Item.Item_Status` | underscores | `Awaiting_Material`, `Ready_For_Production`, `In_Production`, `Awaiting_Check`, `Complete` — **finishing does not write here**, see the post-checking section |
+| `Finishing_Data.Finishing_Status` | underscores | `In_Progress`, `Done` — **only `Done` closes a batch**; anything else means the job is still open |
 | `Plan_Item.Remake_Reason` | underscores | `Production_Loss`, `Check_Reject`, `Alteration` |
 | `Material_Requirement.Source` | underscores | `Plan`, `Reissue`, `Check_Remake`, `Alteration` |
 | `Stage_Log.Stage_Status` | underscores | `In_Progress`, `Done` — **only these two**. A stage not started has no `Stage_Log` row at all, so there is no third value and a `Not_Started` option is unreachable by design. |
@@ -335,7 +336,7 @@ currently marked `Occupied` will stay that way for ever. `Machine_Master.Applica
 longer one of the places a new stage name has to be added.
 
 **Sales order statuses** (`Sales_Order.Order_Status`, a different field):
-`Pending → In Progress → Production Complete → QC Passed → Packed → Dispatched`.
+`Pending → In Progress → Production Complete → Checking Passed → Finishing Complete → Packed → Dispatched`.
 `Pending` **is** the plan-builder's queue — `createProductionPlans` takes every Pending order,
 plans it, and moves it to In Progress. An order it cannot plan keeps its status and is retried.
 
@@ -352,6 +353,68 @@ order would complete when the *first* one did.
 
 Both fields carry the words `Production Complete`. That is the seam, not one field seen twice —
 always check which form a query is against.
+
+**AFTER CHECKING, THE PLAN IS OVER AND ONLY THE ORDER MOVES.** Finishing and packing are done by
+other people, on their own widgets, and neither writes anything on `Production_Planning` or
+`Plan_Item`. Three statuses, three writers, each forward only:
+
+| Status | Written by | Only from |
+|---|---|---|
+| `Checking Passed` | `recheckOrderComplete` | `Production Complete`, `In Progress` |
+| `Finishing Complete` | `recheckOrderComplete`, same pass | `Checking Passed` |
+| `Packed` | `savePackingRecord` | `Finishing Complete` |
+
+> **`recheckOrderComplete` owns both post-production statuses, in one pass.** The finishing test
+> briefly lived in its own `recheckFinishingComplete`, called from here — which put **two levels of
+> `thisapp`** between `saveItemCheck` and the finishing test, something nothing else in this app
+> does. Folding it in removes that question and the ordering problem with it: there is no longer a
+> pair of functions that must be called in the right sequence for an order to reach packing.
+> `completeFinishingJob` calls `recheckOrderComplete` too. **Every caller is exactly one level deep.**
+
+> **FINISHING MUST NOT TOUCH `Plan_Item.Item_Status`.** It used to write `Finishing Done` there —
+> off-picklist, wrong spelling style — and three readers test that field for exactly `Complete`:
+> `recheckOrderComplete` (so the order could never reach `Checking Passed`),
+> `saveProductionPhase`'s all-items-done test (so the **plan** stayed `In Progress` for ever, on the
+> supervisor's board and in the store's issue list with no work left on it), and
+> `getSalesOrderProgress`. The two bugs cancelled: the finishing recheck had a guard whose
+> `else if` chain closed before the block it was meant to protect, so every path fell through to
+> the write and dragged the order to `Finishing Complete` from wherever it was — including from
+> `Packed` and `Dispatched`, which put it in front of the packer twice.
+>
+> **There is nothing to replace that write with, because the state was never missing.**
+> **"This batch is finished" is `Finishing_Data[Item_Check == id]` with
+> `Finishing_Status == "Done"`** — five functions ask it (`getFinishingItems`,
+> `getFinishingHistory`, `recheckOrderComplete`, `getPackingQueue`, `getPackingDetails`) and
+> they must keep asking the same one.
+>
+> **DONE MEANS DONE; ANYTHING ELSE MEANS THE JOB IS STILL OPEN.** One rule, no third case, and it
+> decides which way all six fail. A row carrying neither value — hand-made, a mistyped dropdown
+> choice, a write that half landed — reads as *unfinished*: the batch stays on the queue where
+> somebody can see it and the order stops short of packing. `!= "In_Progress"` fails the other
+> way, silently calling that row finished and walking the order through with a batch nobody
+> folded. The three writers apply the same rule from the other side — `startFinishingJob` reuses
+> any non-`Done` row rather than adding a second one next to it.
+
+**Finishing is per BATCH, so it usually finishes before the order passes checking.** A finisher can
+start the moment a check approves something, while other lines are still being cut. That is why
+`recheckOrderComplete` runs the finishing test on **every** pass, not only when it writes
+`Checking Passed`. Only on the transition would strand an order that was already `Checking Passed`
+when its last batch finished; only on the finishing side would strand one whose last event was a
+**check** — a batch that produced nothing, a short close. Both, or an order sits fully folded and
+never reaches the packing queue. **`Short_Closed` forgives the quantity test in both halves**, for
+the same reason — it is an answer about quantity, not a statement that unfinished work has stopped.
+
+**`Finishing_Data` is the `Stage_Log` of finishing**: one row per `Item_Check`, opened by
+`startFinishingJob` when the first stage starts, stamped a stage at a time by `saveFinishingStage`,
+closed by `completeFinishingJob`. **Every stamp is the server's clock, taken at the press.** The
+widget used to hold all six times in page state until branding closed, so a refresh, a closed tab
+or a shift handover lost the job; and one card merged every check sharing an item *name* — a root,
+its remake and its alteration batch — stamping all of them with one identical set of times.
+**One card per `Item_Check`, which is one pile of garments inspected together.**
+
+`Item_Check.Sales_Order` is only stamped where `saveItemCheck` could resolve one, so anything that
+needs the order from a check must fall back through `Item_Check.Plan → Production_Planning`.
+Without that, a check that missed it never moves its order and nothing says why.
 
 **Dispute model.** Every dispute has a **sender** and a **receiver**, and `Stock_Dispute.Direction`
 says which way round. **An empty `Direction` means `Outbound`** — every dispute raised before the
@@ -406,10 +469,58 @@ Three, all Creator JS API **v2** — `ZOHO.CREATOR.DATA.invokeCustomApi`, **no `
 | `app/` | Store — Issue / History / Waste receipt / Disputes / My requests / Material used |
 | `app/supervisor/` | Supervisor — `shell.js` owns tabs + the shared picker; `receive.js`, `production.js`, `tabs.js` |
 | `app/admin/` | Calculation audit — shows the working behind the fabric maths |
+| `app/checker/` | Checking — the inspection queue and `saveItemCheck` |
+| `app/finishing/` | Finishing — folding / pressing / branding |
+| `app/packing/` | Packing — supervisor picker, orders as an accordion, one row per carton |
+
+> **PACKING IS ITS OWN WIDGET.** It was briefly a second tab inside `app/finishing/`; it is not
+> any more, so the finishing widget does one job. `app/packing/js/main.js` is still written as a
+> module (`PackingScreen`) with every element id prefixed `pack-` — that cost nothing to keep and
+> is what made sharing a page safe while it lasted. **Almost all its markup is generated in JS**:
+> `widget.html` carries a count line and an empty list, and nothing else.
+>
+> **SUPERVISOR AT THE TOP, ORDERS AS AN ACCORDION.** `getPackingQueue` stamps each order with the
+> supervisor off `Production_Planning.Assigned_To`, and the picker filters the list — the same
+> move every other screen makes, in the same place in the header. The list is drawn with the
+> **shared `item-card` classes** the supervisor and store screens use — `item-serial`,
+> `item-title-row`, `item-meta-line`, `chevron`, `item-body` — so the three lists read as one
+> product. One order opens at a time, full width; the carton table is seven columns.
+>
+> **The solver is gone.** Both packing screens used to guess: a 3D bin-packer in the finishing tab
+> and a points table in `app/packing/`. Neither could be right — no garment dimensions exist
+> anywhere in this app, so the solver fell back to 10 x 10 x 2 cm for every product and the points
+> model to a flat ten pieces a box, which locked the packer out of saving any fuller carton.
 
 **Custom API calls from a widget are NOT metered** — verified empirically; only external/Postman
 calls count against the daily quota. Do **not** build router APIs to "save calls"; that advice
 was tested and retracted.
+
+**PACKING IS ONE CARTON PER ROW, AND THE PACKER PICKS IT.** `Box_Master` holds the carton
+options; each record names **both** cartons — the branded inner and the outer it ships inside —
+because **one outer holds exactly one inner**. The clearance is about 1.25 cm a face, so a second
+inner physically will not go in. That is why the packer makes one choice per box, not two, and why
+there is nothing to solve: he knows what fits, and no garment dimensions exist in this app anyway.
+
+> **ONE SKU PER CARTON**, and not as a simplification. The inner carton is *branded* packaging,
+> made for one product, so a napkin set cannot go in a bedsheet's box. It also matches the export
+> standard, where a mixed carton is an exception that must be labelled MIXED on the packing list.
+> If mixing ever becomes real it is a second subform, not a change to `Packed_Boxes`.
+
+> **`Packing.Packed_Boxes` is one row per PHYSICAL BOX** — box number, carton, order line, pieces,
+> the weight the packer put on the scale. That is what answers *"what is in box 3"* months later.
+> The parent keeps the totals; **the per-box dimensions live on the carton**, never on the parent,
+> because one set of dimensions on a record holding two carton sizes is a lie.
+
+> **EVERY FINISHED PIECE MUST BE IN A BOX** before packing saves — enforced in
+> `savePackingRecord`, not only on screen, because a Custom API is callable from anywhere. The
+> finished figure is recomputed from `Item_Check` + `Finishing_Data` rather than trusted from the
+> payload, using the same walk `getPackingDetails` does, so packing can never disagree with the
+> status that let it be packed.
+
+> **Volumetric weight is `outer L x W x H / 5000`** — what FedEx and Blue Dart bill express
+> shipments at. It appears in `getPackingDetails` and `savePackingRecord` and **nowhere else**;
+> air freight uses 6000 and some domestic surface 4000, so those are the two places to change.
+> Chargeable weight is the greater of actual and volumetric.
 
 **Conventions**
 - Tabs load lazily via `TAB_LOADERS`; `Refresh` only reloads tabs already opened.
@@ -508,7 +619,16 @@ Deluge cannot be run here, so:
   > schedule**, or a daily "nothing happened" mail burns the quota and trains people to ignore the
   > one that matters.
 - **No finished-goods stock.** Production says how many were made; nothing receives them.
-- **QC / Packing / Dispatch** have Creator nav but no widgets.
+- **Dispatch is not built.** Nothing writes `Sales_Order.Order_Status = "Dispatched"`; `Packed` is
+  where the app currently stops.
+- **Dispatch has nothing to read yet.** Packing now records every carton, but nothing shows the
+  dispatch person the box list, weights and volumetric weights, and nothing writes `Dispatched`.
+- **Finishing has no shortfall capture.** `Qty_Finished` is always `Item_Check.Qty_Approved`. A
+  piece scorched at the press has nowhere to go, and there is no undo once a job is closed —
+  unlike a production stage, which prompts for damage when fewer come out than went in.
+- **`packingAutoPopulate` must be DELETED in Creator.** It is a `Packing` form workflow that
+  clears and rebuilds `Packing_Items` from `Plan_Item.Qty_Accepted` - a different number from the
+  one the widget boxes, and a second writer of a subform that now has one.
 - **Scaling debt is found, listed and deliberately unfixed** — see `docs/scaling.md`. Ten
   queries fetch a whole transactional form and get slowly worse as records accumulate; the
   worst is `createProductionPlans` fetching every plan ever to read one integer. None is broken

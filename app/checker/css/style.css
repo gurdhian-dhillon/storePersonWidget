@@ -125,6 +125,34 @@ body {
 .item-header-info { flex: 1; min-width: 0; }
 .item-header h2 { font-size: 1rem; font-weight: 600; display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
 
+/* The numbered circle and the row it sits in, copied from ../../css/style.css —
+   the shared sheet the store, supervisor and packing screens draw their cards
+   with. The checker loads its own stylesheet and nothing else, so the classes
+   have to exist here too or the shape does not carry over. */
+.item-title-row {
+    display: flex; align-items: center; gap: 0.75rem;
+    flex: 1 1 auto; min-width: 0;
+}
+.item-serial {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.75rem; height: 1.75rem; flex: 0 0 auto;
+    border-radius: 50%;
+    background: var(--primary); color: #ffffff;
+    font-size: 0.85rem; font-weight: 700;
+}
+
+/* Its colours are inline per batch, exactly as the packing card does it, so only
+   what every one of them shares belongs here. */
+.item-status-badge { white-space: nowrap; line-height: 1.5; }
+
+/* The order, the plan and the line position. Kept — without them he approves 85
+   with no idea whether that finishes the line — but they trail the badge and
+   read quieter, so the eye lands on the batch first. */
+.chk-secondary {
+    display: inline-flex; align-items: baseline; gap: 0.5rem;
+    flex-wrap: wrap; min-width: 0;
+}
+
 .mat-name { font-weight: 600; }
 .mat-sku { font-size: 0.78rem; color: var(--text-muted); font-weight: 500; }
 

@@ -188,8 +188,8 @@ function renderQueue() {
     var openItem = null;
     var openCard = null;
 
-    items.forEach(function (item) {
-        var card = renderItemCard(item);
+    items.forEach(function (item, idx) {
+        var card = renderItemCard(item, idx);
         root.appendChild(card);
         if (String(item.id) === String(openItemId)) {
             openItem = item;
@@ -233,7 +233,42 @@ function linePosition(item) {
         ' accepted · <b>' + out + ' still to come</b></span>';
 }
 
-function renderItemCard(item) {
+// The coloured badge on the card header, inline-styled exactly as the packing
+// card does it so the two lists read as one product. What it carries is the
+// BATCH, because that is the only thing that differs between two cards sitting
+// in this queue — everything here is waiting to be checked, so an original batch
+// says just that.
+//
+// batchTag() is deliberately left alone: the History tab still draws its own
+// pill with it, and that card is a different shape.
+function batchBadge(item) {
+    var colour = '#059669';
+    var text = 'Ready to check';
+
+    if (item.batch === 'Alteration') {
+        // Teal, not amber — the garment is being saved rather than scrapped,
+        // the same reason an offcut is green throughout the app.
+        colour = '#0d9488';
+        text = 'Alteration batch';
+    } else if (item.batch === 'Remake') {
+        colour = '#d97706';
+        text = 'Remake — failed checking';
+    } else if (item.batch === 'Replacement') {
+        // Muted. Nothing failed a check, so it must not wear a quality colour.
+        colour = '#64748b';
+        text = 'Replacement — spoiled in production';
+    }
+
+    return '<span class="item-status-badge" style="color:' + colour +
+        '; font-weight:600; font-size:0.8rem; background:' + colour +
+        '15; padding:0.1rem 0.5rem; border-radius:1rem;">' + escapeHtml(text) + '</span>';
+}
+
+// Same card as the packing and store screens: numbered circle, title, one meta
+// line, chevron. Nothing here decides anything — it is the identical set of
+// facts the two stacked meta lines used to carry, laid out the way every other
+// list in the app lays them out.
+function renderItemCard(item, index) {
     var isOpen = String(item.id) === String(openItemId);
     var produced = num(item.produced);
 
@@ -243,18 +278,25 @@ function renderItemCard(item) {
 
     var header =
         '<div class="item-header">' +
+        '<div class="item-title-row">' +
+        '<div class="item-serial">' + (num(index) + 1) + '</div>' +
         '<div class="item-header-info">' +
-        '<h2><span class="mat-name">' + escapeHtml(item.name) + '</span>' +
-        (item.sku ? '<span class="mat-sku">' + escapeHtml(item.sku) + '</span>' : '') + '</h2>' +
-        '<div class="item-meta-line">' +
+        '<h2><span class="mat-name">' + escapeHtml(item.name) + '</span></h2>' +
+        '<div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">' +
+        (item.sku ? '<span class="mat-sku">' + escapeHtml(item.sku) + '</span>' : '') +
         '<span class="item-qty">' + produced + ' pcs to inspect</span>' +
-        batchTag(item) +
+        batchBadge(item) +
+        // The round stays, as a quiet chip. It is the difference between a first
+        // look and a fourth attempt at the same line.
         '<span class="round-tag">Round ' + num(item.round) + '</span>' +
-        '</div>' +
-        '<div class="item-meta-line">' +
+        // True, needed, but not what he is deciding — so it trails the badge
+        // rather than owning a line of its own.
+        '<span class="chk-secondary">' +
         '<span class="so-ref">' + escapeHtml(item.salesOrder || '—') + ' · ' +
         escapeHtml(item.planNo || '') + '</span>' +
         linePosition(item) +
+        '</span>' +
+        '</div>' +
         '</div>' +
         '</div>' +
         // The chevron alone, exactly as the production screen does it. A Check

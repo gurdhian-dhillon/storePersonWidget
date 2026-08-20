@@ -1,16 +1,25 @@
 map Admin_Space.getOrderPipelineCounts()
 {
+	// One count per Sales_Order.Order_Status, and it has to carry EVERY status
+	// the picklist offers. "Finishing Complete" was missing, so every order
+	// between finishing and packing dropped out of the pipeline entirely - the
+	// cards stopped summing to the number of orders and nothing on the screen
+	// said which bucket had swallowed them.
+	//
+	// Add a status to the picklist, add it here in the same pass.
 	responseMap = Map();
 	pendingCount = Sales_Order[Order_Status == "Pending"].count();
 	inProgressCount = Sales_Order[Order_Status == "In Progress"].count();
 	completedCount = Sales_Order[Order_Status == "Production Complete"].count();
 	qcCount = Sales_Order[Order_Status == "Checking Passed"].count();
+	finishingCount = Sales_Order[Order_Status == "Finishing Complete"].count();
 	packedCount = Sales_Order[Order_Status == "Packed"].count();
 	dispatchedCount = Sales_Order[Order_Status == "Dispatched"].count();
 	responseMap.put("pending",pendingCount);
 	responseMap.put("inProgress",inProgressCount);
 	responseMap.put("completed",completedCount);
 	responseMap.put("qcPassed",qcCount);
+	responseMap.put("finishingComplete",finishingCount);
 	responseMap.put("packed",packedCount);
 	responseMap.put("dispatched",dispatchedCount);
 	return responseMap;

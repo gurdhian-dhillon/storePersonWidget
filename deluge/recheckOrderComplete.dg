@@ -1,7 +1,7 @@
 string recheckOrderComplete(string orderIdTxt)
 {
-	// Decides whether a sales order has been satisfied, and moves it to
-	// "Checking Passed" when it has.
+	// Recomputes where a sales order should be, and moves it there. It owns BOTH
+	// post-production statuses: "Checking Passed" and "Finishing Complete".
 	//
 	// A PLAIN DELUGE FUNCTION, NOT A CUSTOM API. Nothing calls it from a widget -
 	// it is called through thisapp by every function that can change the answer:
@@ -10,9 +10,19 @@ string recheckOrderComplete(string orderIdTxt)
 	//   closeAlterationBatch   - a batch closing with 0 survivors, which never
 	//                            reaches a check at all
 	//   saveProductionPhase    - an item completing with 0 produced, same reason
+	//   completeFinishingJob   - a batch finished, and it may be the last one
 	//   Sales_Order workflow   - on edit, when Short_Closed is ticked
 	//
-	// FOUR CALLERS, ONE WRITER. The old design kept this logic inside
+	// THE FINISHING TEST IS IN HERE, NOT IN A SECOND FUNCTION. It briefly lived
+	// in recheckFinishingComplete, called from this one - which made the chain
+	// saveItemCheck -> recheckOrderComplete -> recheckFinishingComplete two
+	// levels of thisapp deep, something nothing else in this app does. Folding it
+	// in removes the question rather than betting on the answer, and it kills the
+	// ordering problem with it: there is no longer a pair of functions that have
+	// to be called in the right sequence for an order to reach packing. One
+	// function, one pass, both statuses. **recheckFinishingComplete is deleted.**
+	//
+	// FIVE CALLERS, ONE WRITER. The old design kept this logic inside
 	// createRemakeItems and relied on the Quality_Check record being re-saved to
 	// re-run it. There is no such record now, so nothing can be re-saved - every
 	// path that can satisfy an order has to say so itself. Miss one and the order
@@ -249,28 +259,158 @@ string recheckOrderComplete(string orderIdTxt)
 				{
 					verdict = "NOT YET: short -> " + shortLines;
 				}
-				else if(statusNow == "Production Complete" || statusNow == "In Progress")
-				{
-					for each  soSet in Sales_Order[ID == orderId]
-					{
-						soSet.Order_Status = "Checking Passed";
-					}
-
-					verdict = "PASSED: order " + orderId;
-					if(shortClosed == true)
-					{
-						verdict = verdict + " (closed short)";
-					}
-				}
 				else
 				{
-					// FORWARD ONLY. This runs on every check, and once every line
-					// is satisfied it stays satisfied - so an unguarded write would
-					// drag an order back from Packed or Dispatched to Checking
-					// Passed and put it in front of packing a second time. Same
-					// rule saveProductionPhase applies to the order and
+					//--------------------------------------------------
+					// EVERY LINE IS SATISFIED. Two statuses can follow, in
+					// order, and BOTH ARE DECIDED IN THIS ONE PASS.
+					//
+					// FORWARD ONLY. This runs on every check, and once every
+					// line is satisfied it stays satisfied - so an unguarded
+					// write would drag an order back from Packed or Dispatched
+					// and put it in front of packing a second time. Same rule
+					// saveProductionPhase applies to the order and
 					// resolveDispute applies to the plan.
-					verdict = "NO MOVE: order " + orderId + " is '" + statusNow + "'";
+					//--------------------------------------------------
+					if(statusNow == "Production Complete" || statusNow == "In Progress")
+					{
+						for each  soSet in Sales_Order[ID == orderId]
+						{
+							soSet.Order_Status = "Checking Passed";
+						}
+
+						statusNow = "Checking Passed";
+
+						verdict = "PASSED: order " + orderId;
+						if(shortClosed == true)
+						{
+							verdict = verdict + " (closed short)";
+						}
+					}
+					else
+					{
+						verdict = "NO MOVE: order " + orderId + " is '" + statusNow + "'";
+					}
+
+					//--------------------------------------------------
+					// AND THEN FINISHING, IN THE SAME FUNCTION.
+					//
+					// This block used to be recheckFinishingComplete, called
+					// from here through thisapp. That made the chain
+					// saveItemCheck -> recheckOrderComplete ->
+					// recheckFinishingComplete two levels deep, which nothing
+					// else in this app does and which nobody could confirm
+					// without running it. Folding it in removes the question
+					// instead of betting on the answer: every caller of this
+					// function is now exactly one level deep, and the order's
+					// status is recomputed in ONE place rather than by two
+					// functions that have to be called in the right order.
+					//
+					// completeFinishingJob calls THIS function now.
+					//
+					// IT RUNS WHETHER OR NOT THE BLOCK ABOVE WROTE ANYTHING.
+					// Finishing is per BATCH and starts as soon as a check
+					// approves something, so on any order with a second line -
+					// or a single rejection, which makes a second batch - the
+					// last batch is usually finished long before the order
+					// passes checking. If this only ran on the transition, an
+					// order already at Checking Passed when its last batch
+					// finished would sit there fully folded for ever. If it
+					// only ran on the finishing side, an order whose last
+					// event was a CHECK - a batch that produced nothing, a
+					// short close - would do the same from the other side.
+					//
+					// Only from "Checking Passed", so a Packed or Dispatched
+					// order is never pulled back.
+					//--------------------------------------------------
+					if(statusNow == "Checking Passed")
+					{
+						//------------------------------------------
+						// EVERY approved batch must be finished, AND the
+						// quantity must be met. Neither test stands alone:
+						// approvals across rounds can sum past the ordered
+						// quantity, and a batch still in production has no
+						// check yet to be missing.
+						//
+						// "FINISHED" IS Finishing_Status == "Done". Done means
+						// done; anything else means the job is still open, so
+						// a row carrying neither value holds the order back
+						// where it can be seen rather than passing it on. A
+						// batch counts ONCE however many rows it has.
+						//------------------------------------------
+						totalOrderedQty = 0;
+
+						for each  soQ in Sales_Order[ID == orderId]
+						{
+							for each  soRowQ in soQ.Item_Table
+							{
+								totalOrderedQty = totalOrderedQty + ifnull(soRowQ.Quantity,0).toLong();
+							}
+						}
+
+						allFinished = true;
+						anyApproved = false;
+						totalFinishedQty = 0;
+						openBatches = "";
+
+						for each  chkF in Item_Check[Sales_Order == orderId && Qty_Approved > 0]
+						{
+							anyApproved = true;
+
+							batchDone = false;
+
+							for each  fdF in Finishing_Data[Item_Check == chkF.ID]
+							{
+								if(ifnull(fdF.Finishing_Status,"").toString().trim() == "Done")
+								{
+									batchDone = true;
+								}
+							}
+
+							if(batchDone == true)
+							{
+								totalFinishedQty = totalFinishedQty + ifnull(chkF.Qty_Approved,0).toLong();
+							}
+							else
+							{
+								allFinished = false;
+
+								if(openBatches != "")
+								{
+									openBatches = openBatches + ", ";
+								}
+
+								openBatches = openBatches + chkF.ID.toString();
+							}
+						}
+
+						// Short_Closed forgives the QUANTITY and nothing else,
+						// exactly as it does above. Without it a short-closed
+						// order stopped dead here: every batch it had was
+						// finished, nothing would ever ask again, and the
+						// missing pieces were never going to be made.
+						if(anyApproved == false)
+						{
+							verdict = verdict + " | FINISHING: no approved batches";
+						}
+						else if(allFinished == false)
+						{
+							verdict = verdict + " | FINISHING: batches still open -> " + openBatches;
+						}
+						else if(totalFinishedQty < totalOrderedQty && shortClosed == false)
+						{
+							verdict = verdict + " | FINISHING: finished " + totalFinishedQty + " of " + totalOrderedQty;
+						}
+						else
+						{
+							for each  soFin in Sales_Order[ID == orderId]
+							{
+								soFin.Order_Status = "Finishing Complete";
+							}
+
+							verdict = verdict + " | FINISHING COMPLETE (finished " + totalFinishedQty + " / ordered " + totalOrderedQty + ")";
+						}
+					}
 				}
 
 				if(orphanNames != "")

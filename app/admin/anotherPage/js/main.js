@@ -244,6 +244,7 @@ function soStatusClass(status) {
     if (s === 'in progress') return 'so-progress';
     if (s === 'production complete') return 'so-complete';
     if (s === 'checking passed') return 'so-qc';
+    if (s === 'finishing complete') return 'so-finishing';
     if (s === 'packed') return 'so-packed';
     if (s === 'dispatched') return 'so-dispatched';
     return 'so-default';
@@ -262,12 +263,17 @@ function renderPipeline() {
     var p = (DATA && DATA.pipeline) ? DATA.pipeline : {};
     var hasLiveCounts = p.pending !== undefined || p.inProgress !== undefined ||
         p.completed !== undefined || p.qcPassed !== undefined ||
+        p.finishingComplete !== undefined ||
         p.packed !== undefined || p.dispatched !== undefined;
+    // One card per Order_Status the picklist offers, in workflow order. A status
+    // missing from this list does not show as zero - its orders vanish from the
+    // pipeline and the total silently stops matching the number of orders.
     var items = [
         { label: 'Pending', count: p.pending, cls: 'so-pending' },
         { label: 'In Progress', count: p.inProgress, cls: 'so-progress' },
         { label: 'Prod Complete', count: p.completed, cls: 'so-complete' },
         { label: 'Checking Passed', count: p.qcPassed, cls: 'so-qc' },
+        { label: 'Finishing Complete', count: p.finishingComplete, cls: 'so-finishing' },
         { label: 'Packed', count: p.packed, cls: 'so-packed' },
         { label: 'Dispatched', count: p.dispatched, cls: 'so-dispatched' }
     ];

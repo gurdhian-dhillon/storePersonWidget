@@ -1,358 +1,298 @@
-string getFinishingHistory()
+string getFinishingHistory(string payloadJson)
 {
+	// The last 50 finishing jobs, newest first.
+	//
+	// FINISHED JOBS ONLY - Finishing_Status == "Done". Anything else is somebody's
+	// open work, not history: it belongs on the queue, where getFinishingItems
+	// returns it with its stamps so the operator can resume. Done means done and
+	// anything else means still open, the same rule all six readers apply.
+	//
+	// SUPERVISOR IS AN OPTIONAL FILTER, and only here. The queue refuses to answer
+	// without one - handing every open batch in the building to whoever loaded the
+	// screen first is how two finishers end up on the same pile. History is
+	// read-only and finished, so nothing goes wrong if it is read unfiltered, and
+	// an empty payload therefore returns everything rather than nothing.
+	//
+	// The supervisor is Production_Planning.Assigned_To, the same field
+	// getPackingQueue and getFinishingItems resolve, reached through
+	// Finishing_Data -> Plan_Item -> Production_Planning. That walk already
+	// happens here for the plan number, so the filter costs no extra query.
+	//
+	// THE PAGE IS 50 Finishing_Data ROWS, THEN FILTERED - not the last 50 of HIS.
+	// The range is applied by the query and both the Done test and the supervisor
+	// test run after it, so a supervisor whose work is buried under other people's
+	// sees fewer than 50 rows. That is the existing shape of this function, not
+	// something the filter introduced; paging per supervisor needs the plan on the
+	// query, which Finishing_Data does not carry.
+	//
+	// THE DURATION MATHS IS WRITTEN ONCE AND RUN THREE TIMES. It used to be
+	// copied out per stage, three near-identical eighty-line blocks, and the
+	// pressing copy had drifted: it read the FOLDING end's minutes
+	// (peSecs = peHour * 3600 + feMin * 60 + peSec) because the variable above it
+	// had been renamed in two places out of three. Self-consistent, so it never
+	// threw - it just reported the wrong number, and there was no way to see that
+	// by reading one copy.
+	//
+	// AM/PM IS STILL PARSED. saveFinishingStage now writes HH:mm:ss, but rows
+	// written by hand or by the old widget can carry a 12-hour string, and a
+	// misread "2:15 PM" is a fourteen-hour stage.
+	//
+	// MIDNIGHT WRAPS. The sub-stage fields are Time, not Date-Time, so they hold
+	// a clock reading with no date and a night-shift stage ends "before" it
+	// starts. A negative difference gets 24 hours added - which is right for any
+	// stage under a day, and no finishing stage is not. Finishing_Start_Time and
+	// Finishing_End_Time are full Date-Times and are the fields to trust for when
+	// the work actually happened.
+
 	res = "{\"errors\":[\"Nothing ran\"]}";
+
 	try
 	{
-		rowsJson = "";
-		// Query all completed finishing stages from the new 'Finishing' form
-		completedRuns = Finishing_Data[ID != 0] sort by Added_Time desc range from 0 to 49;
-		
-		for each run in completedRuns
+		// The filter is held as TEXT and compared against Assigned_To as text.
+		// Assigned_To is a lookup holding a record id while ID is a long, and
+		// comparing them as-is is a mixed-type comparison, which throws rather
+		// than returning false. Empty means no filter.
+		supFilter = "";
+		raw = ifnull(payloadJson,"").toString().trim();
+
+		if(raw != "")
 		{
-			planItemRec = Plan_Item[ID == run.Plan_Item];
-			itemName = "";
-			planNo = "";
-			soNo = "";
-			
-			for each pi in planItemRec
-			{
-				itemNameClean = ifnull(pi.Item_Name, "").toString();
-				itemNameClean = itemNameClean.replaceAll("(Alteration Batch)", "");
-				itemNameClean = itemNameClean.replaceAll("(alteration batch)", "");
-				itemNameClean = itemNameClean.replaceAll("Alteration Batch", "");
-				itemNameClean = itemNameClean.replaceAll("alteration batch", "");
-				itemName = itemNameClean.replaceAll("\"", "'").trim();
-				planRec = Production_Planning[ID == pi.Plan];
-				for each p in planRec
-				{
-					planNo = ifnull(p.Plan_No, "").toString().replaceAll("\"", "'");
-					for each so in Sales_Order[ID == p.Sales_Order]
-					{
-						soNo = ifnull(so.Sales_Order, "").toString().replaceAll("\"", "'");
-					}
-				}
-			}
-			
-			// Get staff name
-			staffName = "Unknown";
-			if(run.Operator != null)
-			{
-				for each emp in Employee[ID == run.Operator]
-				{
-					staffName = emp.Employee_Name;
-				}
-			}
-			
-			qtyVal = ifnull(run.Qty_Finished, 0).toLong();
-			
-			completedOnTxt = "";
-			if(run.Finishing_End_Time != null)
-			{
-				completedOnTxt = run.Finishing_End_Time.toString("dd-MMM-yyyy HH:mm:ss");
-			}
-			else
-			{
-				completedOnTxt = run.Added_Time.toString("dd-MMM-yyyy HH:mm:ss");
-			}
-			
-			// Calculate Folding Duration
-			foldingDur = null;
-			foldingStartClean = "";
-			foldingStartStr = "";
-			if(run.Folding_Start_Time != null)
-			{
-				foldingStartStr = run.Folding_Start_Time.toString();
-				fParts = foldingStartStr.toList(" ");
-				for each part in fParts
-				{
-					if(part.contains(":"))
-					{
-						foldingStartClean = part;
-					}
-				}
-			}
-			foldingEndClean = "";
-			foldingEndStr = "";
-			if(run.Folding_End_Time != null)
-			{
-				foldingEndStr = run.Folding_End_Time.toString();
-				fParts = foldingEndStr.toList(" ");
-				for each part in fParts
-				{
-					if(part.contains(":"))
-					{
-						foldingEndClean = part;
-					}
-				}
-			}
-			if(foldingStartClean != "" && foldingEndClean != "")
-			{
-				fsParts = foldingStartClean.toList(":");
-				feParts = foldingEndClean.toList(":");
-				if(fsParts.size() >= 2 && feParts.size() >= 2)
-				{
-					fsHour = fsParts.get(0).toLong();
-					fsMin = fsParts.get(1).toLong();
-					fsSec = 0;
-					if(fsParts.size() > 2)
-					{
-						fsSecVal = fsParts.get(2).replaceAll("[^0-9]", "");
-						if(fsSecVal != "")
-						{
-							fsSec = fsSecVal.toLong();
-						}
-					}
-					if(foldingStartStr.toLowerCase().contains("pm") && fsHour < 12)
-					{
-						fsHour = fsHour + 12;
-					}
-					else if(foldingStartStr.toLowerCase().contains("am") && fsHour == 12)
-					{
-						fsHour = 0;
-					}
-					feHour = feParts.get(0).toLong();
-					feMin = feParts.get(1).toLong();
-					feSec = 0;
-					if(feParts.size() > 2)
-					{
-						feSecVal = feParts.get(2).replaceAll("[^0-9]", "");
-						if(feSecVal != "")
-						{
-							feSec = feSecVal.toLong();
-						}
-					}
-					if(foldingEndStr.toLowerCase().contains("pm") && feHour < 12)
-					{
-						feHour = feHour + 12;
-					}
-					else if(foldingEndStr.toLowerCase().contains("am") && feHour == 12)
-					{
-						feHour = 0;
-					}
-					fsSecs = fsHour * 3600 + fsMin * 60 + fsSec;
-					feSecs = feHour * 3600 + feMin * 60 + feSec;
-					diff = feSecs - fsSecs;
-					if(diff < 0)
-					{
-						diff = diff + 86400;
-					}
-					foldingDur = diff;
-				}
-			}
+			inp = raw.toMap();
+			supIdTxt = ifnull(inp.get("supervisorId"),"").toString().trim();
 
-			// Calculate Pressing Duration
-			pressingDur = null;
-			pressingStartClean = "";
-			pressingStartStr = "";
-			if(run.Pressing_Start_Time != null)
+			if(supIdTxt != "" && supIdTxt.isNumber() == true)
 			{
-				pressingStartStr = run.Pressing_Start_Time.toString();
-				fParts = pressingStartStr.toList(" ");
-				for each part in fParts
-				{
-					if(part.contains(":"))
-					{
-						pressingStartClean = part;
-					}
-				}
+				supFilter = supIdTxt;
 			}
-			pressingEndClean = "";
-			pressingEndStr = "";
-			if(run.Pressing_End_Time != null)
-			{
-				pressingEndStr = run.Pressing_End_Time.toString();
-				fParts = pressingEndStr.toList(" ");
-				for each part in fParts
-				{
-					if(part.contains(":"))
-					{
-						pressingEndClean = part;
-					}
-				}
-			}
-			if(pressingStartClean != "" && pressingEndClean != "")
-			{
-				psParts = pressingStartClean.toList(":");
-				peParts = pressingEndClean.toList(":");
-				if(psParts.size() >= 2 && peParts.size() >= 2)
-				{
-					psHour = psParts.get(0).toLong();
-					psMin = psParts.get(1).toLong();
-					psSec = 0;
-					if(psParts.size() > 2)
-					{
-						psSecVal = psParts.get(2).replaceAll("[^0-9]", "");
-						if(psSecVal != "")
-						{
-							psSec = psSecVal.toLong();
-						}
-					}
-					if(pressingStartStr.toLowerCase().contains("pm") && psHour < 12)
-					{
-						psHour = psHour + 12;
-					}
-					else if(pressingStartStr.toLowerCase().contains("am") && psHour == 12)
-					{
-						psHour = 0;
-					}
-					peHour = peParts.get(0).toLong();
-					feMin = peParts.get(1).toLong();
-					peSec = 0;
-					if(peParts.size() > 2)
-					{
-						peSecVal = peParts.get(2).replaceAll("[^0-9]", "");
-						if(peSecVal != "")
-						{
-							peSec = peSecVal.toLong();
-						}
-					}
-					if(pressingEndStr.toLowerCase().contains("pm") && peHour < 12)
-					{
-						peHour = peHour + 12;
-					}
-					else if(pressingEndStr.toLowerCase().contains("am") && peHour == 12)
-					{
-						peHour = 0;
-					}
-					psSecs = psHour * 3600 + psMin * 60 + psSec;
-					peSecs = peHour * 3600 + feMin * 60 + peSec;
-					diff = peSecs - psSecs;
-					if(diff < 0)
-					{
-						diff = diff + 86400;
-					}
-					pressingDur = diff;
-				}
-			}
-
-			// Calculate Branding Duration
-			brandingDur = null;
-			brandingStartClean = "";
-			brandingStartStr = "";
-			if(run.Branding_Start_Time != null)
-			{
-				brandingStartStr = run.Branding_Start_Time.toString();
-				fParts = brandingStartStr.toList(" ");
-				for each part in fParts
-				{
-					if(part.contains(":"))
-					{
-						brandingStartClean = part;
-					}
-				}
-			}
-			brandingEndClean = "";
-			brandingEndStr = "";
-			if(run.Branding_End_Time != null)
-			{
-				brandingEndStr = run.Branding_End_Time.toString();
-				fParts = brandingEndStr.toList(" ");
-				for each part in fParts
-				{
-					if(part.contains(":"))
-					{
-						brandingEndClean = part;
-					}
-				}
-			}
-			if(brandingStartClean != "" && brandingEndClean != "")
-			{
-				bsParts = brandingStartClean.toList(":");
-				beParts = brandingEndClean.toList(":");
-				if(bsParts.size() >= 2 && beParts.size() >= 2)
-				{
-					bsHour = bsParts.get(0).toLong();
-					bsMin = bsParts.get(1).toLong();
-					bsSec = 0;
-					if(bsParts.size() > 2)
-					{
-						bsSecVal = bsParts.get(2).replaceAll("[^0-9]", "");
-						if(bsSecVal != "")
-						{
-							bsSec = bsSecVal.toLong();
-						}
-					}
-					if(brandingStartStr.toLowerCase().contains("pm") && bsHour < 12)
-					{
-						bsHour = bsHour + 12;
-					}
-					else if(brandingStartStr.toLowerCase().contains("am") && bsHour == 12)
-					{
-						bsHour = 0;
-					}
-					beHour = beParts.get(0).toLong();
-					beMin = beParts.get(1).toLong();
-					beSec = 0;
-					if(beParts.size() > 2)
-					{
-						beSecVal = beParts.get(2).replaceAll("[^0-9]", "");
-						if(beSecVal != "")
-						{
-							beSec = beSecVal.toLong();
-						}
-					}
-					if(brandingEndStr.toLowerCase().contains("pm") && beHour < 12)
-					{
-						beHour = beHour + 12;
-					}
-					else if(brandingEndStr.toLowerCase().contains("am") && beHour == 12)
-					{
-						beHour = 0;
-					}
-					bsSecs = bsHour * 3600 + bsMin * 60 + bsSec;
-					beSecs = beHour * 3600 + beMin * 60 + beSec;
-					diff = beSecs - bsSecs;
-					if(diff < 0)
-					{
-						diff = diff + 86400;
-					}
-					brandingDur = diff;
-				}
-			}
-			
-			foldDurStr = "null";
-			if(foldingDur != null)
-			{
-				foldDurStr = foldingDur.toString();
-			}
-			
-			pressDurStr = "null";
-			if(pressingDur != null)
-			{
-				pressDurStr = pressingDur.toString();
-			}
-			
-			brandDurStr = "null";
-			if(brandingDur != null)
-			{
-				brandDurStr = brandingDur.toString();
-			}
-			
-			if(rowsJson != "")
-			{
-				rowsJson = rowsJson + ",";
-			}
-			
-			rowsJson = rowsJson + "{\"id\":\"" + run.ID + "\","
-				+ "\"salesOrder\":\"" + soNo + "\","
-				+ "\"planNo\":\"" + planNo + "\","
-				+ "\"itemName\":\"" + itemName + "\","
-				+ "\"qty\":" + qtyVal + ","
-				+ "\"staff\":\"" + staffName + "\","
-				+ "\"completedOn\":\"" + completedOnTxt + "\","
-				+ "\"stages\":{"
-				+ "\"folding\":{\"start\":\"" + ifnull(run.Folding_Start_Time, "") + "\",\"end\":\"" + ifnull(run.Folding_End_Time, "") + "\",\"duration\":" + foldDurStr + "},"
-				+ "\"pressing\":{\"start\":\"" + ifnull(run.Pressing_Start_Time, "") + "\",\"end\":\"" + ifnull(run.Pressing_End_Time, "") + "\",\"duration\":" + pressDurStr + "},"
-				+ "\"branding\":{\"start\":\"" + ifnull(run.Branding_Start_Time, "") + "\",\"end\":\"" + ifnull(run.Branding_End_Time, "") + "\",\"duration\":" + brandDurStr + "}"
-				+ "}}";
 		}
-		
+
+		rowsJson = "";
+
+		// sort by on its own assignment, never inline in a for each header.
+		// Paged - this is the one function in the finishing module that reads
+		// history rather than work in hand, so it is the one that has to be.
+		completedRuns = Finishing_Data[ID != 0] sort by Added_Time desc range from 0 to 49;
+
+		stageNames = List();
+		stageNames.add("folding");
+		stageNames.add("pressing");
+		stageNames.add("branding");
+
+		for each  run in completedRuns
+		{
+			if(ifnull(run.Finishing_Status,"").toString().trim() == "Done")
+			{
+				itemName = "";
+				planNo = "";
+				soNo = "";
+				rowSupKey = "";
+
+				for each  pi in Plan_Item[ID == run.Plan_Item]
+				{
+					nameClean = ifnull(pi.Item_Name,"").toString();
+					nameClean = nameClean.replaceAll("(Alteration Batch)","");
+					nameClean = nameClean.replaceAll("(alteration batch)","");
+					nameClean = nameClean.replaceAll("Alteration Batch","");
+					nameClean = nameClean.replaceAll("alteration batch","");
+					itemName = nameClean.replaceAll("\"","'").trim();
+
+					for each  p in Production_Planning[ID == pi.Plan]
+					{
+						planNo = ifnull(p.Plan_No,"").toString().replaceAll("\"","'");
+
+						// The plan is the only route to a supervisor - nothing
+						// downstream of checking carries one - and this walk is
+						// already being made for the plan number, so the filter
+						// costs nothing extra.
+						if(p.Assigned_To != null)
+						{
+							rowSupKey = p.Assigned_To.toString();
+						}
+
+						if(p.Sales_Order != null)
+						{
+							for each  so in Sales_Order[ID == p.Sales_Order]
+							{
+								soNo = ifnull(so.Sales_Order,"").toString().replaceAll("\"","'");
+							}
+						}
+					}
+				}
+
+				// A row whose plan has nobody on it belongs to nobody, so it drops
+				// out of a filtered read rather than being handed to whichever
+				// supervisor happens to be picked. Unfiltered it still shows.
+				keepRow = true;
+
+				if(supFilter != "" && rowSupKey != supFilter)
+				{
+					keepRow = false;
+				}
+
+				// Guarded HERE rather than at the append, so a row this read is
+				// not going to show never runs the duration maths at all. The
+				// statement-execution limit is not catchable.
+				if(keepRow == true)
+				{
+					staffName = "Unknown";
+					if(run.Operator != null)
+					{
+						for each  emp in Employee[ID == run.Operator]
+						{
+							staffName = ifnull(emp.Employee_Name,"").toString().replaceAll("\"","'");
+						}
+					}
+
+					qtyVal = ifnull(run.Qty_Finished,0).toLong();
+
+					completedOnTxt = "";
+					if(run.Finishing_End_Time != null)
+					{
+						completedOnTxt = run.Finishing_End_Time.toString("dd-MMM-yyyy HH:mm:ss");
+					}
+					else
+					{
+						completedOnTxt = run.Added_Time.toString("dd-MMM-yyyy HH:mm:ss");
+					}
+
+					//----------------------------------------------------------
+					// The six stamps, gathered by name so the maths below can run
+					// over them instead of being written out three times.
+					//----------------------------------------------------------
+					startByStage = Map();
+					endByStage = Map();
+
+					startByStage.put("folding",ifnull(run.Folding_Start_Time,"").toString());
+					endByStage.put("folding",ifnull(run.Folding_End_Time,"").toString());
+					startByStage.put("pressing",ifnull(run.Pressing_Start_Time,"").toString());
+					endByStage.put("pressing",ifnull(run.Pressing_End_Time,"").toString());
+					startByStage.put("branding",ifnull(run.Branding_Start_Time,"").toString());
+					endByStage.put("branding",ifnull(run.Branding_End_Time,"").toString());
+
+					durByStage = Map();
+
+					for each  stgNm in stageNames
+					{
+						durByStage.put(stgNm,"null");
+
+						rawStart = ifnull(startByStage.get(stgNm),"").toString().trim();
+						rawEnd = ifnull(endByStage.get(stgNm),"").toString().trim();
+
+						if(rawStart != "" && rawEnd != "")
+						{
+							// A Time field can render as "14:23:05" or as
+							// "2:23:05 PM". The clock part is whichever whitespace
+							// separated piece carries a colon; the meridiem is read
+							// off the whole string.
+							clockStart = "";
+							for each  pcS in rawStart.toList(" ")
+							{
+								if(pcS.contains(":"))
+								{
+									clockStart = pcS;
+								}
+							}
+
+							clockEnd = "";
+							for each  pcE in rawEnd.toList(" ")
+							{
+								if(pcE.contains(":"))
+								{
+									clockEnd = pcE;
+								}
+							}
+
+							if(clockStart != "" && clockEnd != "")
+							{
+								sParts = clockStart.toList(":");
+								eParts = clockEnd.toList(":");
+
+								if(sParts.size() >= 2 && eParts.size() >= 2)
+								{
+									sHour = sParts.get(0).toLong();
+									sMin = sParts.get(1).toLong();
+									sSec = 0;
+
+									if(sParts.size() > 2)
+									{
+										sSecTxt = sParts.get(2).replaceAll("[^0-9]","");
+										if(sSecTxt != "")
+										{
+											sSec = sSecTxt.toLong();
+										}
+									}
+
+									if(rawStart.toLowerCase().contains("pm") && sHour < 12)
+									{
+										sHour = sHour + 12;
+									}
+									else if(rawStart.toLowerCase().contains("am") && sHour == 12)
+									{
+										sHour = 0;
+									}
+
+									eHour = eParts.get(0).toLong();
+									eMin = eParts.get(1).toLong();
+									eSec = 0;
+
+									if(eParts.size() > 2)
+									{
+										eSecTxt = eParts.get(2).replaceAll("[^0-9]","");
+										if(eSecTxt != "")
+										{
+											eSec = eSecTxt.toLong();
+										}
+									}
+
+									if(rawEnd.toLowerCase().contains("pm") && eHour < 12)
+									{
+										eHour = eHour + 12;
+									}
+									else if(rawEnd.toLowerCase().contains("am") && eHour == 12)
+									{
+										eHour = 0;
+									}
+
+									diffSecs = (eHour * 3600 + eMin * 60 + eSec) - (sHour * 3600 + sMin * 60 + sSec);
+
+									if(diffSecs < 0)
+									{
+										diffSecs = diffSecs + 86400;
+									}
+
+									durByStage.put(stgNm,diffSecs.toString());
+								}
+							}
+						}
+					}
+
+					if(rowsJson != "")
+					{
+						rowsJson = rowsJson + ",";
+					}
+
+					rowsJson = rowsJson + "{\"id\":\"" + run.ID + "\","
+						+ "\"salesOrder\":\"" + soNo + "\","
+						+ "\"planNo\":\"" + planNo + "\","
+						+ "\"itemName\":\"" + itemName + "\","
+						+ "\"qty\":" + qtyVal + ","
+						+ "\"staff\":\"" + staffName + "\","
+						+ "\"completedOn\":\"" + completedOnTxt + "\","
+						+ "\"stages\":{"
+						+ "\"folding\":{\"start\":\"" + ifnull(startByStage.get("folding"),"").toString() + "\",\"end\":\"" + ifnull(endByStage.get("folding"),"").toString() + "\",\"duration\":" + ifnull(durByStage.get("folding"),"null").toString() + "},"
+						+ "\"pressing\":{\"start\":\"" + ifnull(startByStage.get("pressing"),"").toString() + "\",\"end\":\"" + ifnull(endByStage.get("pressing"),"").toString() + "\",\"duration\":" + ifnull(durByStage.get("pressing"),"null").toString() + "},"
+						+ "\"branding\":{\"start\":\"" + ifnull(startByStage.get("branding"),"").toString() + "\",\"end\":\"" + ifnull(endByStage.get("branding"),"").toString() + "\",\"duration\":" + ifnull(durByStage.get("branding"),"null").toString() + "}"
+						+ "}}";
+				}
+			}
+		}
+
 		res = "{\"errors\":[],\"history\":[" + rowsJson + "]}";
 	}
 	catch (e)
 	{
 		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
 	}
+
 	return res;
 }
-
