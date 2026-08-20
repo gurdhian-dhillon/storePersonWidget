@@ -115,13 +115,19 @@ function getDurationFromTimes(startStr, endStr) {
     return diff;
 }
 
-function shortTime(str) {
+// The stamp as it was taken, seconds and all. Truncating to HH:mm made two
+// stages that were eight seconds apart read as the same minute, which looks
+// like the screen failed to record one of them.
+function exactTime(str) {
     if (!str) return '—';
     var secs = parseClockToSeconds(str);
     if (secs === null) return str;
     var hh = Math.floor(secs / 3600);
     var mm = Math.floor((secs % 3600) / 60);
-    return (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm;
+    var ss = secs % 60;
+    return (hh < 10 ? '0' : '') + hh + ':' +
+           (mm < 10 ? '0' : '') + mm + ':' +
+           (ss < 10 ? '0' : '') + ss;
 }
 
 // An empty string from Deluge means "not stamped yet" and has to become null -
@@ -475,12 +481,12 @@ function stageRow(job, stageName, index) {
 
     if (stage.end !== null) {
         state = 'is-done';
-        detail = shortTime(stage.start) + ' → ' + shortTime(stage.end) +
+        detail = exactTime(stage.start) + ' → ' + exactTime(stage.end) +
             '<span class="fin-dur">' + fmtDuration(stage.duration) + '</span>';
         action = '';
     } else if (index === ACTIVE_STAGE && stage.start !== null) {
         state = 'is-running';
-        detail = 'Started ' + shortTime(stage.start);
+        detail = 'Started ' + exactTime(stage.start);
         action = '<button type="button" class="fin-btn is-end" onclick="completeStage(\'' + stageName + '\')">End ' + label + '</button>';
     } else if (index === ACTIVE_STAGE) {
         state = 'is-next';

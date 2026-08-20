@@ -20,6 +20,19 @@
 // because it hangs off a piece count the admin types and a round trip per
 // keystroke would make the screen unusable. It mirrors getExpectedWaste step for
 // step; if that function changes, this has to change with it.
+//
+// AND THAT INSTRUCTION WAS NOT FOLLOWED, WHICH IS WHY THE MIRROR IS NOW CHECKED
+// RATHER THAN TRUSTED. getExpectedWaste learned to split the fresh-cloth pass per
+// LOT — a lot is a separate roll, so it ends on a whole marker row and the next
+// starts a new one, giving each its own side strip and its own part-filled row.
+// This file went on predicting one combined block, and under-predicted the
+// remnants on every multi-lot item while presenting itself as the working behind
+// the real number.
+//
+// getAdminCalculation already fetches the real answer per item and returns it on
+// `item.expectedWaste`; nothing here read it. serverWasteCheck now does, and says
+// on screen when the two disagree. A comment asking the next person to remember
+// something is not a mechanism; this is.
 
 var DATA = null;
 
@@ -166,24 +179,71 @@ function deriveWaste(mat, pieces, sources) {
     });
 
     // --- pass 2: whatever the leftover pieces could not cover, off fresh cloth ---
+    //
+    // ONE BLOCK PER LOT, and this is the half that had fallen behind
+    // getExpectedWaste. It used to compute a single side strip and a single part
+    // row off the combined piece count, which is what that function did before
+    // lots existed — and its own comment now says why that is wrong:
+    //
+    //   "Each lot's cloth is a separate roll: it gets its own side strip down its
+    //    own full rows, and its own part-filled last row. Treating the fresh
+    //    metres as one continuous block predicted ONE strip of 50 rows where the
+    //    truth is two strips of 30 and 20 — different physical pieces, belonging
+    //    to different lots — and it under-predicted the waste whenever the pieces
+    //    did not divide evenly."
+    //
+    // So this screen quietly under-predicted the remnants on every item whose
+    // cloth came off more than one lot, while presenting itself as the working
+    // behind the real figure.
+    //
+    // Lots come from the handovers, oldest first, which is the order
+    // issueMaterials spent them in. A lot's own metres decide how many pieces its
+    // cloth yields, in whole marker rows — a lot never ends mid-row.
     if (remain > 0) {
         var perRowR = Math.floor(fw / cutW);
         if (perRowR > 0) {
             var sideWR = fw - (perRowR * cutW);
-            var fullRowsR = Math.floor(remain / perRowR);
-            var lastRowR = remain - (fullRowsR * perRowR);
-            var rawRows = fullRowsR + (lastRowR > 0 ? 1 : 0);
-            var lbl = 'fresh cloth';
-
-            if (fullRowsR > 0) remnant(res.rows, sideWR, fullRowsR * cutL, 1, 'side', lbl);
-            if (lastRowR > 0) remnant(res.rows, fw - (lastRowR * cutW), cutL, 1, 'partial_row', lbl);
-
             res.fresh = {
-                perRow: perRowR, sideW: sideWR, fullRows: fullRowsR,
-                lastRow: lastRowR, rows: rawRows,
-                cm: rawRows * cutL, metres: (rawRows * cutL) / 100,
-                pieces: remain
+                perRow: perRowR, sideW: sideWR,
+                rows: 0, cm: 0, metres: 0, pieces: remain, blocks: []
             };
+
+            var cutBlock = function (pcs, label, lot) {
+                var fullRows = Math.floor(pcs / perRowR);
+                var lastRow = pcs - (fullRows * perRowR);
+                var rows = fullRows + (lastRow > 0 ? 1 : 0);
+                if (fullRows > 0) remnant(res.rows, sideWR, fullRows * cutL, 1, 'side', label);
+                if (lastRow > 0) remnant(res.rows, fw - (lastRow * cutW), cutL, 1, 'partial_row', label);
+                res.fresh.rows += rows;
+                res.fresh.cm += rows * cutL;
+                res.fresh.blocks.push({
+                    lot: lot, pieces: pcs, fullRows: fullRows,
+                    lastRow: lastRow, rows: rows
+                });
+                return pcs;
+            };
+
+            (lotBlocks(mat) || []).forEach(function (b) {
+                if (remain <= 0) return;
+                // Whole marker rows off THIS lot's metres, capped by what is left
+                // to cut. `getExpectedWaste` computes the same two lines.
+                var rowsHere = Math.floor((b.qty * 100) / cutL);
+                var pcsHere = perRowR * rowsHere;
+                if (pcsHere > remain) pcsHere = remain;
+                if (pcsHere <= 0) return;
+                remain -= cutBlock(pcsHere, 'fresh cloth · lot ' + b.lot, b.lot);
+            });
+
+            // CLOTH THE HANDOVERS DO NOT ACCOUNT FOR — a pre-lot handover in the
+            // mix, nothing issued yet, or more cut than the lines can explain. It
+            // still produced real waste. Predicted with NO LOT rather than charged
+            // to the last one, exactly as the server does: naming a lot here would
+            // be a guess about tone.
+            if (remain > 0) {
+                remain -= cutBlock(remain, 'fresh cloth', '');
+            }
+
+            res.fresh.metres = res.fresh.cm / 100;
             remain = 0;
         } else {
             res.uncut = remain;
@@ -191,6 +251,27 @@ function deriveWaste(mat, pieces, sources) {
     }
 
     return res;
+}
+
+// The lots this item's fresh cloth came off, oldest first, one entry per lot.
+//
+// `issuedLots` is one row per handover LINE, so a lot issued twice appears twice;
+// getExpectedWaste aggregates by lot before walking, and predicting two half-lots
+// where one lot exists would invent a side strip. Rows with no lot recorded are
+// left out on purpose — they are pre-lot handovers, the server has no metres for
+// them either, and their pieces fall through to the no-lot block.
+function lotBlocks(mat) {
+    var order = [];
+    var byLot = {};
+    (mat.issuedLots || []).forEach(function (li) {
+        var lot = String(li.lot || '').trim();
+        if (!lot || lot === 'not recorded') return;
+        var q = parseFloat(li.qty) || 0;
+        if (q <= 0) return;
+        if (byLot[lot] === undefined) { byLot[lot] = 0; order.push(lot); }
+        byLot[lot] += q;
+    });
+    return order.map(function (lot) { return { lot: lot, qty: byLot[lot] }; });
 }
 
 // ---- rendering ----
@@ -299,11 +380,11 @@ function renderLotDecision(bucket, item) {
     var live = liveFor(bucket, item.planId);
 
     if (!LIVE) {
-        return '<div class="warn">The live allocation could not be read, so the shade decision below is unknown. ' +
+        return '<div class="warn">The live allocation could not be read, so the lot decision below is unknown. ' +
             'Check the console — the plan-time working above is unaffected.</div>';
     }
     if (!live) {
-        return '<div class="aside">This order has nothing outstanding on this fabric, so no shade decision is ' +
+        return '<div class="aside">This order has nothing outstanding on this fabric, so no lot decision is ' +
             'being made for it today. What it was cut from is in <b>What actually went out</b> below.</div>';
     }
 
@@ -324,22 +405,22 @@ function renderLotDecision(bucket, item) {
     } else if (o.why === 'afterWash') {
         why = '<b>' + esc(o.lotNumber) + '</b> is the smallest lot that can cover this whole order once its own ' +
               'greige is washed. Nothing goes out today — an order is served whole or not at all, so issuing ' +
-              'the washed part would commit it to a shade that cannot yet finish it.';
+              'the washed part would commit it to a lot that cannot yet finish it.';
         cls = 'chk-note';
     } else {
         why = 'No lot can cover this order whole, so <b>nothing was allocated to it</b> and the next order in the ' +
               'queue was tried instead. It needs ' + num(o.needMetres, 3) + ' ' + esc(unit) +
-              ' in one shade.';
+              ' from one lot.';
         cls = 'chk-bad';
     }
 
-    var h = '<h5 class="sub">Which shade, and why</h5>' +
+    var h = '<h5 class="sub">Which lot, and why</h5>' +
         '<div class="check ' + cls + '">' + why + '</div>';
 
     h += '<div class="inputs">' +
         '<div class="input-chip"><span>Order still owes</span><b>' + o.pieces + ' pcs</b></div>' +
         (o.lotNumber
-            ? '<div class="input-chip strong"><span>Shade</span><b>' + esc(o.lotNumber) + '</b></div>'
+            ? '<div class="input-chip strong"><span>Lot</span><b>' + esc(o.lotNumber) + '</b></div>'
             : '') +
         '<div class="input-chip"><span>Going out today</span><b>' + num(o.metres, 3) + ' ' + esc(unit) + '</b></div>' +
         (o.wastePieces > 0
@@ -353,7 +434,7 @@ function renderLotDecision(bucket, item) {
     // A recorded override is the only place a deliberate shade change survives,
     // and it is the first thing to look for on an order that went out mixed.
     if (o.override) {
-        h += '<div class="check chk-bad">The original shade was overridden by hand. Reason given: <b>' +
+        h += '<div class="check chk-bad">The original lot was overridden by hand. Reason given: <b>' +
             esc(o.override) + '</b></div>';
     }
 
@@ -381,7 +462,7 @@ function renderLotDecision(bucket, item) {
         } else if (sr.kind === 'nodata') {
             said = 'no cut size on the material';
         } else {
-            said = 'none of this shade left';
+            said = 'none of this lot left';
         }
         h += '<div class="aside">The store screen shows this row as: <b>' + esc(said) + '</b>. ' +
             'That line belongs to the whole row, which may carry more than this one order.</div>';
@@ -393,7 +474,7 @@ function renderLotDecision(bucket, item) {
 function renderAllocStep(mat, bucket, item) {
     var h = '<div class="step step-issue"><div class="step-head"><span class="step-tag tag-issue">2</span>' +
         '<h4>Allocated right now</h4>' +
-        '<span class="step-note">Re-decided on every load, before anything is issued — one shade per order, its own offcuts first</span></div>';
+        '<span class="step-note">Re-decided on every load, before anything is issued — one lot per order, its own offcuts first</span></div>';
 
     if (!bucket) {
         h += '<div class="aside">This line is not in the live allocation. Either its plan is closed, or every piece on it has already been issued — there is nothing left to allocate.</div></div>';
@@ -419,7 +500,7 @@ function renderAllocStep(mat, bucket, item) {
             (others.length === 1 ? '' : 's') + ' of this fabric from other orders (' +
             esc(others.map(function (l) { return l.salesOrder + ' / ' + l.planNo; }).join(', ')) +
             '). They are served in priority order off the same rack, so what is left for ' +
-            'this one depends on them — but each keeps its own shade.</div>';
+            'this one depends on them — but each keeps its own lot.</div>';
         h += '<div class="table-wrapper"><table><thead><tr><th>Plan</th><th>Sales order</th><th class="r">Pieces</th><th class="r">Issued</th></tr></thead><tbody>';
         (bucket.lines || []).forEach(function (l) {
             h += '<tr class="' + (l.isThisOrder ? 'mine' : '') + '"><td>' + esc(l.planNo) + '</td><td>' + esc(l.salesOrder) +
@@ -455,10 +536,10 @@ function renderAllocStep(mat, bucket, item) {
     if (!live) {
         h += '<div class="aside">Nothing outstanding for this order, so no offcuts are being allocated to it.</div>';
     } else if (!mine.length) {
-        h += '<div class="aside">None. Either this shade has no usable offcuts on the rack, or the pieces it has ' +
+        h += '<div class="aside">None. Either this lot has no usable offcuts on the rack, or the pieces it has ' +
             'do not fit a ' + num(bucket.cutLength) + '×' + num(bucket.cutWidth) + ' cm cut — grain is never rotated.</div>';
     } else {
-        h += '<div class="table-wrapper"><table><thead><tr><th>Piece</th><th>Shade</th><th>Carton</th>' +
+        h += '<div class="table-wrapper"><table><thead><tr><th>Piece</th><th>Lot</th><th>Carton</th>' +
             '<th class="r">Pieces</th><th class="r">Cuts each</th></tr></thead><tbody>';
         mine.forEach(function (pk) {
             var perRow = Math.floor((parseFloat(pk.width) || 0) / (bucket.cutWidth || 1));
@@ -484,7 +565,7 @@ function renderAllocStep(mat, bucket, item) {
     if (pool.length) {
         h += '<h5 class="sub">Every offcut of this fabric on the rack</h5>' +
             '<div class="aside">Fit is judged on the cut alone. Whether a fitting piece is <b>offered</b> ' +
-            'also depends on its shade — only offcuts of the lot this order is committed to can be used, ' +
+            'also depends on its lot — only offcuts of the one this order is committed to can be used, ' +
             'which is why a piece can be big enough and still not appear above.</div>';
         h += '<div class="table-wrapper"><table><thead><tr><th>Piece</th><th class="r">In stock</th>' +
             '<th class="r">Per row</th><th class="r">Rows</th><th class="r">Cuts each</th><th>Fits this cut</th></tr></thead><tbody>';
@@ -509,13 +590,13 @@ function renderAllocStep(mat, bucket, item) {
     // Both figures now come from the same run — the derivation from the piece
     // count, the answer from the allocator — so agreement is a real check on the
     // marker-row arithmetic rather than a number compared with itself.
-    h += '<h5 class="sub">Fresh cloth off that shade</h5>';
+    h += '<h5 class="sub">Fresh cloth off that lot</h5>';
     if (!live) {
         h += '<div class="aside">Nothing outstanding for this order.</div>';
     } else if (live.o.why === 'skipped') {
         h += '<div class="check chk-bad">None. No lot covers this order whole, so it was passed over — ' +
             'it needs <b>' + num(live.o.needMetres, 3) + ' ' + esc(bucket.unit || 'Mtr') +
-            '</b> in one shade, and no single lot has that.</div>';
+            '</b> off one lot, and no single lot has that.</div>';
     } else {
         var mineFresh = Math.max(0, live.o.pieces - live.o.wastePieces);
         var perRowF = bucket.freshPerRow > 0
@@ -571,7 +652,7 @@ function renderAllocStep(mat, bucket, item) {
         }
     }
 
-    h += '<div class="stock-line">Stock of this fabric, every shade together: <b>' +
+    h += '<div class="stock-line">Stock of this fabric, every lot together: <b>' +
         num(bucket.washStock, 3) + ' m</b> washed' +
         (bucket.unwashStock > 0 ? ', <b>' + num(bucket.unwashStock, 3) + ' m</b> unwashed' : '') +
         '. <span class="muted">A total, and deliberately not a test — cloth in the wrong shade cannot serve ' +
@@ -587,11 +668,11 @@ function renderWasteStep(mat, item, bucket) {
 
     // THE OFFCUTS THE ALLOCATOR WOULD PICK, for the forecast below.
     //
-    // Came from  until now, which the server stopped filling when
-    // the allocation moved to the widget - so the checkbox that offers this
-    // forecast never appeared and the option was silently dead. Taken from the
-    // live allocation instead, filtered to this order's items, so it is the same
-    // pieces step 2 names.
+    // Came from getStoreMaterialRequirements' `wastePicks` until now, which the
+    // server stopped filling when the allocation moved to the widget - so the
+    // checkbox that offers this forecast never appeared and the option was
+    // silently dead. Taken from the live allocation instead, filtered to this
+    // order's items, so it is the same pieces step 2 names.
     var liveW = liveFor(bucket, item.planId);
     var wouldPick = [];
     if (liveW) {
@@ -681,16 +762,35 @@ function renderWasteStep(mat, item, bucket) {
             factRow('Pieces off fresh cloth', 'left after leftover pieces', '<b>' + w.fresh.pieces + '</b> pieces') +
             factRow('Pieces per row',
                 num(mat.fabricWidthCm) + ' cm of fabric width across a ' + num(mat.cutWidth) + ' cm cut',
-                '<b>' + w.fresh.perRow + '</b> per row') +
-            factRow('Rows',
-                w.fresh.fullRows + ' full' + (w.fresh.lastRow > 0 ? ' + 1 part row (' + w.fresh.lastRow + ' of ' + w.fresh.perRow + ')' : ''),
-                '<b>' + w.fresh.rows + '</b> rows') +
-            factRow('Fresh cloth consumed',
+                '<b>' + w.fresh.perRow + '</b> per row');
+
+        // ONE ROW LINE PER LOT, because that is the shape of the cutting. A lot
+        // is a separate roll: it ends on a whole marker row and the next lot
+        // starts a new one, so two lots means two side strips and — where the
+        // pieces do not divide evenly — two part rows. Showing a single combined
+        // row count would hide the very split that makes the remnant list longer
+        // than the arithmetic looks.
+        var blocks = w.fresh.blocks || [];
+        var multi = blocks.length > 1;
+        blocks.forEach(function (b) {
+            h += factRow(
+                multi ? 'Rows off ' + (b.lot ? 'lot ' + esc(b.lot) : 'cloth with no lot recorded') : 'Rows',
+                b.pieces + ' piece' + (b.pieces === 1 ? '' : 's') + ' — ' + b.fullRows + ' full' +
+                    (b.lastRow > 0 ? ' + 1 part row (' + b.lastRow + ' of ' + w.fresh.perRow + ')' : ''),
+                '<b>' + b.rows + '</b> row' + (b.rows === 1 ? '' : 's'));
+        });
+        if (multi) {
+            h += factRow('Rows in total',
+                blocks.length + ' separate blocks of cloth, each ending on a whole row',
+                '<b>' + w.fresh.rows + '</b> rows');
+        }
+
+        h += factRow('Fresh cloth consumed',
                 w.fresh.rows + ' rows of ' + num(mat.cutLength) + ' cm',
                 '<b>' + num(w.fresh.metres, 3) + ' m</b> <span class="muted">(' + num(w.fresh.cm) + ' cm)</span>') +
             factRow('Side strip left beside the cuts',
                 w.fresh.perRow + ' cuts of ' + num(mat.cutWidth) + ' cm leave the rest of the ' + num(mat.fabricWidthCm) + ' cm width',
-                '<b>' + num(w.fresh.sideW) + ' cm</b> wide') +
+                '<b>' + num(w.fresh.sideW) + ' cm</b> wide' + (multi ? ', one down each block' : '')) +
             '</div>';
     }
 
@@ -733,8 +833,90 @@ function renderWasteStep(mat, item, bucket) {
         }
     }
 
+    h += serverWasteCheck(mat, item, w, pieces);
+
     h += '</div>';
     return h;
+}
+
+// ---- the same question, answered by the function that actually runs ----
+//
+// getAdminCalculation calls getExpectedWaste through thisapp for every item and
+// returns the whole payload on `item.expectedWaste`. Its own comment says why:
+//
+//   "The widget used to mirror this maths in JavaScript so it could react to a
+//    typed piece count without a round trip. That made the screen a check on a
+//    copy rather than on the thing that runs. The authoritative answer for the
+//    ORDERED quantity is fetched here; the widget can still re-derive live for a
+//    what-if figure, but now it has the real one beside it to be measured
+//    against."
+//
+// It was fetched and then never read — nothing in this file mentioned
+// expectedWaste at all. So the round trip was paid for on every item and the
+// screen went on showing only the copy, which is the exact state that comment
+// describes being fixed. This is the "measured against" half.
+function serverWaste(item, mat) {
+    var ew = item && item.expectedWaste;
+    if (!ew || !ew.fabrics) return null;
+    var hit = null;
+    ew.fabrics.forEach(function (f) {
+        if (String(f.materialId) === String(mat.materialId)) hit = f;
+    });
+    return hit;
+}
+
+function serverWasteCheck(mat, item, w, pieces) {
+    var ew = item && item.expectedWaste;
+    if (ew && ew.errors && ew.errors.length) {
+        return '<div class="check bad">getExpectedWaste could not answer for this item: ' +
+            esc(ew.errors.join('; ')) + '</div>';
+    }
+
+    var srv = serverWaste(item, mat);
+    if (!srv) {
+        return '<div class="check note">The real function returned nothing for this fabric, ' +
+            'so there is only the derivation above. That is expected before anything is issued ' +
+            'against the item.</div>';
+    }
+
+    // THE COMPARISON IS ONLY MEANINGFUL AT THE SAME PIECE COUNT. The server
+    // answered for the quantity on the item; the box above is a what-if the admin
+    // can type anything into. Comparing across two different piece counts would
+    // manufacture a disagreement out of the admin's own keystrokes — and this
+    // screen crying wolf is worse than it staying quiet.
+    var srvPieces = parseInt(srv.piecesCut, 10) || 0;
+    if (srvPieces !== (parseInt(pieces, 10) || 0)) {
+        return '<div class="check note">Not compared: the figures above are for <b>' + pieces +
+            '</b> pieces, and the real function answered for the <b>' + srvPieces +
+            '</b> on the item. Set the box back to ' + srvPieces + ' to check the two against each other.</div>';
+    }
+
+    var mine = w.fresh ? w.fresh.metres : 0;
+    var theirs = parseFloat(srv.freshMetres) || 0;
+    var myCount = 0;
+    w.rows.forEach(function (r) { myCount += r.count; });
+    var theirCount = 0;
+    (srv.waste || []).forEach(function (r) { theirCount += (parseInt(r.count, 10) || 0); });
+
+    // Offcuts are the one input the two halves can legitimately disagree about:
+    // the derivation above spends whatever was RECEIVED against this item, while
+    // getExpectedWaste spends the Issued movements it can see. Say so rather than
+    // flagging a fault, otherwise a short waste receipt reads as broken maths.
+    var offcutNote = w.steps.length
+        ? ' Leftover pieces were spent first here, so a difference can also mean the two disagree about which offcuts this item got.'
+        : '';
+
+    if (same(mine, theirs) && myCount === theirCount) {
+        return '<div class="check ok">Matches <b>getExpectedWaste</b>, the function that really runs: ' +
+            '<b>' + num(theirs, 3) + ' m</b> of fresh cloth and <b>' + theirCount + '</b> remnant' +
+            (theirCount === 1 ? '' : 's') + '.</div>';
+    }
+
+    return '<div class="check bad">Does not match <b>getExpectedWaste</b>, the function that really runs. ' +
+        'It says <b>' + num(theirs, 3) + ' m</b> of fresh cloth and <b>' + theirCount + '</b> remnant' +
+        (theirCount === 1 ? '' : 's') + '; the derivation above says <b>' + num(mine, 3) + ' m</b> and <b>' +
+        myCount + '</b>. The derivation is a mirror of that function and one of the two has drifted.' +
+        offcutNote + '</div>';
 }
 
 function renderNonFabric(mat, item) {
@@ -837,17 +1019,17 @@ function matAnswerRow(mat, item, idx) {
     var liveA = mat.isFabric ? liveFor(bucket, item.planId) : null;
 
     var offcuts = '—';
-    var shade = '<span class="muted">—</span>';
+    var lot = '<span class="muted">—</span>';
     var nowNeeded = '—';
 
     if (mat.isFabric) {
         if (!bucket) {
-            // Nothing outstanding, so no shade is being decided. What it WAS cut
+            // Nothing outstanding, so no lot is being decided. What it WAS cut
             // from is recorded and worth showing in its place.
-            if (mat.pinLot) shade = '<b>' + esc(mat.pinLot) + '</b>';
+            if (mat.pinLot) lot = '<b>' + esc(mat.pinLot) + '</b>';
         } else if (!liveA) {
             offcuts = '<span class="muted">none</span>';
-            if (mat.pinLot) shade = '<b>' + esc(mat.pinLot) + '</b>';
+            if (mat.pinLot) lot = '<b>' + esc(mat.pinLot) + '</b>';
         } else {
             offcuts = liveA.o.wastePieces > 0
                 ? '<b>' + liveA.o.wastePieces + '</b> pcs'
@@ -855,15 +1037,15 @@ function matAnswerRow(mat, item, idx) {
             nowNeeded = num(liveA.o.metres, 3);
 
             if (liveA.o.why === 'skipped') {
-                shade = '<span class="no">none fits</span>';
+                lot = '<span class="no">none fits</span>';
             } else {
-                shade = '<b>' + esc(liveA.o.lotNumber) + '</b>';
+                lot = '<b>' + esc(liveA.o.lotNumber) + '</b>';
                 if (liveA.o.why === 'pinned') {
-                    shade += ' <span class="muted">pinned</span>';
+                    lot += ' <span class="muted">pinned</span>';
                 } else if (liveA.o.why === 'afterWash') {
-                    shade += ' <span class="muted">after wash</span>';
+                    lot += ' <span class="muted">after wash</span>';
                 }
-                if (liveA.o.override) shade += ' <span class="no">overridden</span>';
+                if (liveA.o.override) lot += ' <span class="no">overridden</span>';
             }
         }
     } else {
@@ -876,14 +1058,14 @@ function matAnswerRow(mat, item, idx) {
             '<div class="ans-name">' + esc(mat.material) + '</div>' +
             '<div class="ans-sub">' + (mat.sku ? esc(mat.sku) : '') +
                 (mat.isFabric
-                    ? (mat.sku ? ' · ' : '') + num(mat.cutLength) + ' × ' + num(mat.cutWidth) + ' cm cut'
+                    ? (mat.sku ? ' · ' : '') + num(mat.cutLength) + ' × ' + num(mat.cutWidth) + ' cm cut (L × W)'
                     : (mat.sku ? ' · ' : '') + 'not fabric') +
             '</div></td>' +
         '<td class="r">' + esc(unit) + '</td>' +
         '<td class="r">' + planned + '</td>' +
         '<td class="r">' + num(mat.storedRequiredQty, 3) + '</td>' +
         '<td class="r ' + cls + '" title="' + esc(note) + '">' + mark + '</td>' +
-        '<td class="shade-cell">' + shade + '</td>' +
+        '<td class="lot-cell">' + lot + '</td>' +
         '<td class="r offcut-cell">' + offcuts + '</td>' +
         '<td class="r strong">' + nowNeeded + '</td>' +
         '<td class="r">' + num(mat.issuedQty, 3) + '</td>' +
@@ -911,7 +1093,13 @@ function renderItemMaterials(item) {
     var h = '<div class="table-wrapper"><table class="ans-table"><thead><tr>' +
         '<th>Material</th><th class="r">Unit</th>' +
         '<th class="r">Planned</th><th class="r">Stored</th><th class="r">Check</th>' +
-        '<th>Shade</th>' +
+        // LOT, not "Shade". Every other screen in the app calls this a lot — the
+        // store's issue column, the Lot_Number field, the L1/L2 the store person
+        // reads off the rack — and one screen using a private word for it made
+        // the audit harder to check against the thing it audits. The shade is WHY
+        // the lot matters, not another name for it, so the word survives where it
+        // is doing that job and nowhere else.
+        '<th>Lot</th>' +
         '<th class="r">From offcuts</th>' +
         '<th class="r">Now needed</th><th class="r">Issued</th><th class="r">Received</th><th></th>' +
         '</tr></thead><tbody>';
@@ -920,8 +1108,9 @@ function renderItemMaterials(item) {
         '<div class="aside ans-legend"><b>Planned</b> and <b>Stored</b> are the same calculation — the requirement fixed ' +
         'when the plan was made — so they are the pair that must agree. <b>Now needed</b> is the live allocation, ' +
         'recalculated whenever offcut stock moves; it is meant to be lower and is not a discrepancy. ' +
-        '<b>Shade</b> is the lot this order is committed to, and the reason it was chosen is in the working. ' +
-        '<b>From offcuts</b> is what the store is about to be offered off that same shade — read live from the ' +
+        '<b>Lot</b> is the roll this order is committed to — one order is cut from one lot so its pieces match ' +
+        'in colour — and the reason that lot was chosen is in the working. ' +
+        '<b>From offcuts</b> is what the store is about to be offered off that same lot — read live from the ' +
         'store screen itself, so it is visible before anything is issued. It is advisory: the same remnant can ' +
         'be claimed by a higher-priority supervisor first. Open a row for the working behind any of it.</div>';
     return h;
@@ -943,6 +1132,38 @@ function renderItemMaterials(item) {
 // .Issued_Lot holds the shade this order started in and is never overwritten, so
 // a line disagreeing with it is not a bug — it is a recorded human decision, and
 // the note beside it is the only place the reason survives.
+// Every distinct lot this ORDER has taken of one material, across all its items.
+//
+// The plan is the order — createProductionPlans inserts one plan per order — so
+// walking the plan that owns this requirement row answers the order-level
+// question. "not recorded" is left out: a pre-lot handover is not a second
+// colour, it is an unknown one, and counting it would report mixing on orders
+// that predate lots entirely.
+function orderLots(mat) {
+    var seen = {};
+    var order = [];
+    (DATA && DATA.plans ? DATA.plans : []).forEach(function (p) {
+        var ownsIt = (p.items || []).some(function (i) {
+            return (i.materials || []).some(function (m) {
+                return String(m.reqId) === String(mat.reqId);
+            });
+        });
+        if (!ownsIt) return;
+        (p.items || []).forEach(function (i) {
+            (i.materials || []).forEach(function (m) {
+                if (String(m.materialId) !== String(mat.materialId)) return;
+                (m.issuedLots || []).forEach(function (li) {
+                    var lot = String(li.lot || '').trim();
+                    if (!lot || lot === 'not recorded' || seen[lot]) return;
+                    seen[lot] = true;
+                    order.push(lot);
+                });
+            });
+        });
+    });
+    return order;
+}
+
 function renderIssuedStep(mat) {
     var h = '<div class="step step-issued"><div class="step-head"><span class="step-tag tag-issued">4</span>' +
         '<h4>What actually went out</h4>' +
@@ -952,19 +1173,19 @@ function renderIssuedStep(mat) {
     var unit = mat.isFabric ? 'Mtr' : (mat.unit || '');
 
     if (!mat.pinLot && !rows.length) {
-        h += '<div class="aside">Nothing has been handed over for this line yet, so no shade has been ' +
+        h += '<div class="aside">Nothing has been handed over for this line yet, so no lot has been ' +
             'committed to. The decision above is still free to change with the rack.</div></div>';
         return h;
     }
 
     if (mat.pinLot) {
-        h += '<div class="check chk-note">This order is committed to shade <b>' + esc(mat.pinLot) +
+        h += '<div class="check chk-note">This order is committed to lot <b>' + esc(mat.pinLot) +
             '</b>. Every later handover on it — a second issue, a remake, a reissue — has to come off ' +
             'that same lot, or the finished pieces will not match.</div>';
     } else {
-        h += '<div class="check chk-bad">Cloth has gone out but no shade is recorded against the requirement. ' +
+        h += '<div class="check chk-bad">Cloth has gone out but no lot is recorded against the requirement. ' +
             'This is a handover from before lots existed, or the pin was never stamped — nothing can hold a ' +
-            'later remake to the right shade.</div>';
+            'later remake to the right lot.</div>';
     }
 
     if (!rows.length) {
@@ -973,13 +1194,10 @@ function renderIssuedStep(mat) {
         return h;
     }
 
-    h += '<div class="table-wrapper"><table><thead><tr><th>Shade</th><th class="r">Issued</th>' +
+    h += '<div class="table-wrapper"><table><thead><tr><th>Lot</th><th class="r">Issued</th>' +
         '<th class="r">Confirmed</th><th>When</th><th>Against the pin</th></tr></thead><tbody>';
 
-    var mixed = {};
     rows.forEach(function (r) {
-        mixed[String(r.lot)] = true;
-
         var verdict;
         if (r.overrideFrom) {
             // The one case that is a decision rather than a discrepancy.
@@ -1009,13 +1227,22 @@ function renderIssuedStep(mat) {
 
     // The finding this whole step exists to surface, stated rather than left to be
     // spotted by reading a column.
-    var shades = Object.keys(mixed).filter(function (k) { return k !== 'not recorded'; });
-    if (shades.length > 1) {
-        h += '<div class="check chk-bad">This order has been cut from <b>' + shades.length +
-            ' different shades</b> (' + esc(shades.join(', ')) + '). The finished pieces will not match ' +
-            'each other, and that cannot be undone.</div>';
-    } else if (shades.length === 1) {
-        h += '<div class="check chk-ok">One shade throughout.</div>';
+    //
+    // ASKED ACROSS THE WHOLE ORDER, NOT THIS LINE. `issuedLots` is keyed by
+    // Plan_Item, so the table above is one ITEM's handovers — but "one lot per
+    // order" is an ORDER-level rule: the allocator pins per plan, and the pin is
+    // then copied onto each item's requirement row. An order whose bag came off
+    // L1 and whose basket came off L2 therefore had every line reading "matches"
+    // against its own pin and "one lot throughout" underneath it, while the order
+    // it belongs to was cut in two colours — the one finding this step exists for,
+    // invisible precisely when it had happened.
+    var lotsUsed = orderLots(mat);
+    if (lotsUsed.length > 1) {
+        h += '<div class="check chk-bad">This order has been cut from <b>' + lotsUsed.length +
+            ' different lots</b> (' + esc(lotsUsed.join(', ')) + ') across its items. The finished pieces ' +
+            'will not match each other, and that cannot be undone.</div>';
+    } else if (lotsUsed.length === 1) {
+        h += '<div class="check chk-ok">One lot throughout, so every piece matches.</div>';
     }
 
     h += '</div>';
@@ -1080,7 +1307,7 @@ function render() {
                 '<div class="item-title-row"><span class="item-serial">' + (item.lineNo || idx + 1) + '</span>' +
                 '<div class="item-header-info"><h2>' + esc(item.itemName) + '</h2>' +
                 '<div class="item-meta-line">Ordered ' + item.qtyOrdered + ' · produced ' + item.qtyProduced +
-                ' · ' + esc(String(item.status).replace(/_/g, ' ')) +
+                (item.status ? ' · ' + esc(String(item.status).replace(/_/g, ' ')) : '') +
                 (item.hasBom ? '' : ' · <span class="no">no BOM</span>') + '</div></div></div>' +
                 '<span class="chevron" aria-hidden="true">' +
                     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +

@@ -598,17 +598,56 @@ function refreshCardState(supIdx) {
 
 // ---- Rendering ----
 
+// CAN THIS FABRIC ROW BE COUNTED IN PIECES AT ALL?
+//
+// THE FOURTH COPY OF ONE TEST, and the three that already existed all agree:
+// getStoreMaterialRequirements (`canCount`), issueMaterials (`canPiece`) and
+// applyLotAllocation all ask for a piece count, a cut length and a cut that fits
+// across the cloth — and all three fall back to the METRES balance when they
+// cannot get one. A row planned before Required_Pieces existed, a cut wider than
+// the cloth, or a fabric whose width was never recorded.
+//
+// applyLotAllocation has already decided this and left the answer on the row, so
+// prefer its flag. The recompute is for callers that run before allocation.
+function isPieceTracked(m) {
+    if (!m.isFabric) return false;
+    if (m.noPieceData === true) return false;
+    if (m.noPieceData === false) return true;
+    var width = Number(m.fabricWidthCm) || 0;
+    var cutW = Number(m.cutWidth) || 0;
+    var perRow = (width > 0 && cutW > 0) ? Math.floor(width / cutW) : 0;
+    return (Number(m.requiredPieces) || 0) > 0 && perRow > 0 && (Number(m.cutLength) || 0) > 0;
+}
+
 // A row is done when nothing is left to issue against it. Fully-issued rows
 // become a read-only receipt instead of a dead, disabled input.
 //
 // Fabric is judged on PIECES, not metres. `remaining` carries the waste-adjusted
 // metres, so a requirement fully covered by waste sits at 0 metres from the
 // start — judging on metres would mark it issued before anything was handed out.
+//
+// UNLESS THE ROW HAS NO PIECES TO JUDGE ON, and that was a real bug: the test
+// was `m.requiredPieces !== undefined`, which is true of EVERY fabric row
+// because the server always sends the field. So the pieces branch always won and
+// the metres line below was unreachable for fabric — while issueMaterials, for
+// exactly these rows, advances Issued_Qty and leaves Pieces_From_Raw at 0
+// because it has nothing to count with. issuedPieces could never reach
+// requiredPieces, the row could never be settled, and the Issue badge kept
+// counting it after the cloth had gone out. It only dropped later, when the
+// supervisor received and the plan left this screen's query at Material Ready —
+// which read as the count waiting on receipt.
+//
+// The metres side uses requiredTotal, not required. For fabric the server
+// overwrites `required` with the OUTSTANDING fresh metres, so a settled row
+// carries required = 0 and `required > 0` would reject the very rows this
+// branch exists to catch. requiredTotal is the plan's Required_Qty and is sent
+// for fabric only; non-fabric keeps using `required`, which is its real total.
 function isFullyIssued(m) {
-    if (m.isFabric && m.requiredPieces !== undefined) {
+    if (m.isFabric && isPieceTracked(m)) {
         return m.requiredPieces > 0 && (Number(m.issuedPieces) || 0) >= m.requiredPieces;
     }
-    return (Number(m.required) || 0) > 0 && (Number(m.remaining) || 0) <= 0.0001;
+    var reqTotal = Number(m.requiredTotal !== undefined ? m.requiredTotal : m.required) || 0;
+    return reqTotal > 0 && (Number(m.remaining) || 0) <= 0.0001;
 }
 
 // ---- Rows ----
@@ -1810,20 +1849,48 @@ function renderSupervisorCard(sup, idx, arr) {
     // explain why the figure moved.
     var isRe = function (m) { return m && m.isReissue === true; };
 
+    // A SETTLED ROW IS NOT DRAWN — IT BELONGS TO HISTORY.
+    //
+    // The same rule the card filter above applies, applied at the row it was
+    // always about. A card survives while ANY line still owes something, so
+    // every settled line of that supervisor's plans used to ride along under it
+    // as a read-only green receipt — and a plan stays in this screen's query
+    // right through production, because In Progress can still owe material.
+    // Nine green rows and three live ones, with the master checkbox the only
+    // thing saying which was which.
+    //
+    // It was also inconsistent three ways for no reason the store person could
+    // see: a card with nothing pending disappears, a plan reaching Material
+    // Ready disappears, but a settled row next to an unsettled one stayed.
+    //
+    // History is the better record of it anyway — getStoreIssueHistory reads
+    // Material_Issue, so it has the date and the person, where the green tag
+    // only ever showed a cumulative Issued_Qty that matches no single handover.
+    // The header meta below still counts them, so the card says they exist.
+    //
+    // FILTERED HERE AND NOWHERE ELSE. `sup.materials` must keep every row:
+    //   - applyLotAllocation's pin pass reads `issuedLot` from EVERY line,
+    //     settled ones included — in the ordinary remake the settled original is
+    //     the only record of which lot the order was cut from.
+    //   - every element id and handler is supIdx/matIdx into that array, so the
+    //     index passed below has to stay the real one. `.map` keeps it; only the
+    //     markup is dropped.
+    var live = function (m) { return !isFullyIssued(m); };
+
     var fabricHtml = sup.materials.map(function (m, matIdx) {
-        return (m.isFabric && !isRe(m)) ? renderFabricRows(m, idx, matIdx) : '';
+        return (m.isFabric && !isRe(m) && live(m)) ? renderFabricRows(m, idx, matIdx) : '';
     }).join('');
 
     var otherHtml = sup.materials.map(function (m, matIdx) {
-        return (!m.isFabric && !isRe(m)) ? renderQtyIssueRow(m, idx, matIdx, '') : '';
+        return (!m.isFabric && !isRe(m) && live(m)) ? renderQtyIssueRow(m, idx, matIdx, '') : '';
     }).join('');
 
     var reFabricHtml = sup.materials.map(function (m, matIdx) {
-        return (m.isFabric && isRe(m)) ? renderFabricRows(m, idx, matIdx) : '';
+        return (m.isFabric && isRe(m) && live(m)) ? renderFabricRows(m, idx, matIdx) : '';
     }).join('');
 
     var reOtherHtml = sup.materials.map(function (m, matIdx) {
-        return (!m.isFabric && isRe(m)) ? renderQtyIssueRow(m, idx, matIdx, '') : '';
+        return (!m.isFabric && isRe(m) && live(m)) ? renderQtyIssueRow(m, idx, matIdx, '') : '';
     }).join('');
 
     // NO STOCK COLUMNS ON FABRIC. The store person issues from a LOT, and the
@@ -1865,9 +1932,12 @@ function renderSupervisorCard(sup, idx, arr) {
         return stockStatus(m).cls !== 'status-sufficient';
     }).length;
 
+    // THE ONLY TRACE OF THE SETTLED ROWS ON THIS SCREEN, now that they are not
+    // drawn — so it says where they went rather than just how many there were.
+    // Without that the count reads as a number he cannot open.
     var metaText = pending.length + ' pending';
     if (doneCount > 0) {
-        metaText += ' &middot; ' + doneCount + ' issued';
+        metaText += ' &middot; ' + doneCount + ' issued &mdash; see History';
     }
 
     // PRIORITY POSITION.
@@ -2332,14 +2402,17 @@ function loadRequirements() {
 //
 // "issue" is deliberately absent. It is the home tab, loaded by
 // loadRequirements() on boot, and Refresh names it directly.
+// Listed in TAB-STRIP ORDER. A map, so this is readability only — nothing here
+// decides where a tab appears; widget.html does, and the two are easier to keep
+// honest when they read the same way down the page.
 var TAB_LOADERS = {
-    stockin: loadStockIn,
-    print: loadPrint,
     history: loadHistory,
     waste: loadWasteReceipt,
     disputes: loadDisputes,
     requests: loadRequests,
-    materials: loadMaterials
+    materials: loadMaterials,
+    stockin: loadStockIn,
+    print: loadPrint
 };
 
 var tabsLoaded = {};

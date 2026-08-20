@@ -47,6 +47,12 @@
 
 /* ---------- queue ---------- */
 
+/* The SHARED .item-body is padding: 1.5rem 1.5rem 0 - no bottom at all, so the
+   stage list sat flush against the bottom edge of an open card. */
+.finishing-app .item-body {
+    padding-bottom: 1.5rem;
+}
+
 .fin-count {
     font-size: 0.8125rem;
     color: var(--text-muted);
@@ -60,11 +66,11 @@
 }
 
 .fin-sku {
-    font-size: 0.6875rem;
+    font-size: 0.8125rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: #64748b;
+    color: #475569;
     background: #f1f5f9;
-    padding: 2px 6px;
+    padding: 3px 8px;
     border-radius: 4px;
 }
 

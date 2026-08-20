@@ -48,6 +48,38 @@ string getPackingQueue(string payloadJson)
 			}
 		}
 
+		//------------------------------------------------------------------
+		// WHAT GOES IN THE BOX BESIDES THE GARMENTS - the care card, the
+		// thank-you note, the swatch.
+		//
+		// ONE FLAT LIST, THE SAME FOR EVERY ORDER, and it rides along here rather
+		// than in getPackingDetails because it does not vary by order: fetching
+		// it per order would be the same query run once per card he opens.
+		//
+		// IT IS A REMINDER AND NOTHING ELSE. The packer ticks these off as he
+		// works and the ticks are never stored - there is no Packed_Inclusions
+		// subform and the save does not read them. If "did the gift card go in
+		// that order" ever needs an answer, that is a different feature and it
+		// starts here, with a subform on Packing.
+		//
+		// Inactive rows are left out rather than flagged: a retired insert is not
+		// a thing to remember, and the list is not the place to explain that.
+		//------------------------------------------------------------------
+		inclusionsJson = "";
+
+		// sort by on its own assignment, never inline in a for each header.
+		incRecs = Packing_Inclusion[Active == true] sort by Display_Order;
+
+		for each  inc in incRecs
+		{
+			if(inclusionsJson != "")
+			{
+				inclusionsJson = inclusionsJson + ",";
+			}
+
+			inclusionsJson = inclusionsJson + "{\"id\":\"" + inc.ID + "\",\"name\":\"" + ifnull(inc.Inclusion_Name,"").toString().replaceAll("\"","'") + "\"}";
+		}
+
 		nameByEmp = Map();
 		ordersJson = "";
 
@@ -145,7 +177,7 @@ string getPackingQueue(string payloadJson)
 				+ "\"totalPieces\":" + totalFinished + "}";
 		}
 
-		res = "{\"errors\":[],\"orders\":[" + ordersJson + "]}";
+		res = "{\"errors\":[],\"orders\":[" + ordersJson + "],\"inclusions\":[" + inclusionsJson + "]}";
 	}
 	catch (e)
 	{

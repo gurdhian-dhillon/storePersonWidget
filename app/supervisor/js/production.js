@@ -91,6 +91,13 @@ let parties = [];
 let selectedSupId = null;
 let selectedPlanId = null;
 
+// Which plan we have ALREADY re-asked the server for, so the detail retry below
+// can fire once and never twice. Without it a plan the server declines to
+// detail - one belonging to another supervisor, one that has left the live set
+// between the two calls - would refetch for ever, each answer selecting the same
+// plan and finding it detail-less again.
+let detailRetryFor = null;
+
 // Items where the supervisor has pressed "Start production" but not yet started
 // a stage. Nothing is written to Creator for that click — it only reveals the
 // flow — so a spurious tracking row never gets created. Once the first stage
@@ -485,7 +492,40 @@ function fetchAllData(afterRender) {
 				selectedSupId = elSupSelect.value || selectedSupId;
 
 				renderSupDropdown();
+
+				// THE PLAN THE WIDGET OPENS AND THE PLAN THE SERVER DETAILED ARE
+				// PICKED BY TWO DIFFERENT RULES, and on a first load they can
+				// disagree.
+				//
+				// planId leaves here empty the first time, so getProductionWidgetData
+				// falls back to the FIRST plan in its list. renderPlanDropdown then
+				// auto-opens the first plan that is not "Pending", because a Pending
+				// order has nothing he can act on. A supervisor whose oldest order is
+				// still awaiting material therefore lands on a different plan from the
+				// one that came back with items - and the screen said "No Items Found"
+				// on an order that has them.
+				//
+				// hasDetail is the server saying which plan it answered for, so this
+				// asks it rather than trying to keep the two rules in step. The change
+				// handler on the dropdown already does exactly this; the auto-selection
+				// was the path with no guard on it.
 				renderPlanDropdown();
+
+				const shownPlan = plans.find(
+					(p) => String(p.id) === String(selectedPlanId),
+				);
+				if (
+					selectedPlanId &&
+					(!shownPlan || shownPlan.hasDetail !== true) &&
+					detailRetryFor !== String(selectedPlanId)
+				) {
+					detailRetryFor = String(selectedPlanId);
+					showLoading();
+					fetchAllData(afterRender);
+					return;
+				}
+				detailRetryFor = null;
+
 				renderSelectedPlan();
 
 				if (typeof afterRender === "function") {

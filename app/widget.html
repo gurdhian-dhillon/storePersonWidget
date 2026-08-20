@@ -23,13 +23,21 @@
         </header>
 
         <!-- Tab strip. Counts are filled from the boot fetch, not separate
-             calls — a badge is not worth a round trip of its own. -->
+             calls — a badge is not worth a round trip of its own.
+
+             ORDER IS THE DAY'S ORDER, and it is only markup — showTab, the
+             panels and TAB_LOADERS are all keyed by data-tab, so moving a
+             button moves the tab and nothing else needs to know.
+
+             Issue first because it is the home tab and the job. Then the four
+             that answer for it — what went out, what came back, what is in
+             dispute, what was asked for. Then the two reference lists. Print
+             is LAST: it is a side errand for one material at a time, not part
+             of the handover chain, and sitting at position two it separated
+             Issue from the History of that same issuing. -->
         <nav class="tab-strip" id="tab-strip">
             <button type="button" class="tab-btn is-active" data-tab="issue">
                 Issue<span class="tab-count" id="count-issue"></span>
-            </button>
-            <button type="button" class="tab-btn" data-tab="print">
-                Print
             </button>
             <button type="button" class="tab-btn" data-tab="history">
                 History
@@ -49,6 +57,9 @@
             <button type="button" class="tab-btn" data-tab="stockin">
                 Unallocated quantity
             </button>
+            <button type="button" class="tab-btn" data-tab="print">
+                Print Fabric
+            </button>
         </nav>
 
         <main class="tab-body">
@@ -61,13 +72,16 @@
                 <div id="dynamic-content"></div>
             </section>
 
-            <section class="tab-panel" id="panel-print"></section>
+            <!-- Kept in strip order. Only one is ever visible, so this order
+                 changes nothing on screen — it is so the two lists can be read
+                 against each other. -->
             <section class="tab-panel" id="panel-history"></section>
             <section class="tab-panel" id="panel-waste"></section>
             <section class="tab-panel" id="panel-disputes"></section>
             <section class="tab-panel" id="panel-requests"></section>
             <section class="tab-panel" id="panel-materials"></section>
             <section class="tab-panel" id="panel-stockin"></section>
+            <section class="tab-panel" id="panel-print"></section>
 
         </main>
 

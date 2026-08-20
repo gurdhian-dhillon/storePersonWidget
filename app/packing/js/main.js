@@ -36,6 +36,10 @@ var PackingScreen = (function () {
     var SELECTED_STAFF = '';
 
     var QUEUE = [];
+
+    // The same flat list for every order, straight off Packing_Inclusion.
+    // Displayed only - see inclusionsSection.
+    var INCLUSIONS = [];
     var ACTIVE_ORDER_ID = null;
     var ACTIVE_ORDER = null;
     // ACTIVE_ORDER = {
@@ -190,6 +194,7 @@ var PackingScreen = (function () {
                 { id: '9001', orderNo: 'SO-00140', source: 'Shopify', supervisorId: '10', supervisorName: 'Baljinder Singh', itemCount: 1, totalPieces: 20 },
                 { id: '9002', orderNo: 'SO-00002', source: 'Shopify', supervisorId: '11', supervisorName: 'Harpreet Kaur', itemCount: 2, totalPieces: 44 }
             ];
+            INCLUSIONS = [{ id: '1', name: 'Thank-you card' }, { id: '2', name: 'Care card' }, { id: '3', name: 'Fabric swatch' }];
             renderQueue();
             return;
         }
@@ -198,6 +203,7 @@ var PackingScreen = (function () {
 
         callApi('getPackingQueue', {}).then(function (parsed) {
             QUEUE = parsed.orders || [];
+            INCLUSIONS = parsed.inclusions || [];
             renderQueue();
         }).catch(function (err) {
             console.error('getPackingQueue failed:', err);
@@ -411,7 +417,7 @@ var PackingScreen = (function () {
             return;
         }
 
-        host.innerHTML = packedBySection() + linesSection() + cartonsSection() + footerSection();
+        host.innerHTML = packedBySection() + linesSection() + cartonsSection() + inclusionsSection() + footerSection();
         renderTotals();
     }
 
@@ -441,18 +447,34 @@ var PackingScreen = (function () {
             '<tbody>' + rows + '</tbody></table></div></section>';
     }
 
+    function dims(l, w, h) {
+        return n(l) + ' × ' + n(w) + ' × ' + n(h);
+    }
+
+    // THE PACKER CHOOSES THE INNER BOX; THE OUTER FOLLOWS. One outer holds exactly
+    // one inner, and the pairing is fixed on the Box_Master record, so the outer is
+    // shown beside his choice as a DISABLED field: it is what actually ships and
+    // what the courier is billed on, so hiding it would be hiding the answer - but
+    // it is derived, and a field he cannot type in says that without a word.
     function cartonsSection() {
         var body;
 
         if (!ACTIVE_ORDER.boxes.length) {
-            body = '<tr class="empty-row"><td colspan="7">No cartons yet — add one against a line above</td></tr>';
+            body = '<tr class="empty-row"><td colspan="8">No cartons yet — add one against a line above</td></tr>';
         } else {
             body = ACTIVE_ORDER.boxes.map(function (b, i) {
                 var carton = cartonById(b.boxTypeId);
 
+                // The dropdown names the INNER box and its inner dimensions,
+                // because that is the carton he physically picks up. A box option
+                // with no branded inner says so instead of showing a size it has
+                // not got.
                 var cartonOpts = ACTIVE_ORDER.cartons.map(function (c) {
-                    return '<option value="' + esc(c.id) + '"' + (String(c.id) === String(b.boxTypeId) ? ' selected' : '') + '>' +
-                        esc(c.name) + ' · ' + n(c.outerLength) + '×' + n(c.outerWidth) + '×' + n(c.outerHeight) + '</option>';
+                    var label = c.hasInner
+                        ? esc(c.name) + ' · ' + dims(c.innerLength, c.innerWidth, c.innerHeight)
+                        : esc(c.name) + ' · no inner box';
+                    return '<option value="' + esc(c.id) + '"' +
+                        (String(c.id) === String(b.boxTypeId) ? ' selected' : '') + '>' + label + '</option>';
                 }).join('');
 
                 var lineOpts = ACTIVE_ORDER.items.map(function (it) {
@@ -460,10 +482,12 @@ var PackingScreen = (function () {
                         esc(it.itemName) + '</option>';
                 }).join('');
 
+                var outerTxt = carton ? dims(carton.outerLength, carton.outerWidth, carton.outerHeight) : '—';
+
                 return '<tr>' +
                     '<td class="col-no"><span class="box-no">' + (i + 1) + '</span></td>' +
-                    '<td class="col-carton"><select class="cell-select" onchange="PackingScreen.setBoxCarton(' + i + ', this.value)">' + cartonOpts + '</select>' +
-                        (carton && !carton.hasInner ? '<span class="no-inner">no inner carton</span>' : '') + '</td>' +
+                    '<td class="col-carton"><select class="cell-select" onchange="PackingScreen.setBoxCarton(' + i + ', this.value)">' + cartonOpts + '</select></td>' +
+                    '<td class="col-outer"><input type="text" class="cell-input is-derived" value="' + esc(outerTxt) + '" disabled title="Fixed by the inner box - one outer holds one inner"></td>' +
                     '<td class="col-item"><select class="cell-select" onchange="PackingScreen.setBoxLine(' + i + ', this.value)">' + lineOpts + '</select></td>' +
                     '<td class="col-num"><input type="number" class="cell-input" min="1" step="1" value="' + n(b.qty) + '" onchange="PackingScreen.setBoxQty(' + i + ', this.value)"></td>' +
                     '<td class="col-num"><input type="number" class="cell-input" min="0" step="0.01" placeholder="—" value="' + esc(b.grossWeight) + '" oninput="PackingScreen.setBoxWeight(' + i + ', this.value)"></td>' +
@@ -474,14 +498,45 @@ var PackingScreen = (function () {
         }
 
         return '<section class="pack-sec">' +
-            '<div class="pack-sec-head"><h3>Cartons</h3>' +
-            '<button type="button" class="mini-btn" onclick="PackingScreen.addBox()">+ Add a carton</button></div>' +
+            '<div class="pack-sec-head">' +
+                '<h3>Cartons <span class="pack-sec-unit">L × W × H in cm</span></h3>' +
+                '<button type="button" class="mini-btn" onclick="PackingScreen.addBox()">+ Add a carton</button>' +
+            '</div>' +
             '<div class="pack-scroll"><table class="pack-tbl">' +
-            '<thead><tr><th class="col-no">#</th><th class="col-carton">Carton</th><th class="col-item">Item</th>' +
+            '<thead><tr><th class="col-no">#</th><th class="col-carton">Inner box</th>' +
+            '<th class="col-outer">Outer box</th><th class="col-item">Item</th>' +
             '<th class="col-num">Pieces</th><th class="col-num">Weight kg</th><th class="col-num">Volumetric</th>' +
             '<th class="col-act"></th></tr></thead>' +
-            '<tbody>' + body + '</tbody><tfoot id="pack-boxes-tfoot"></tfoot></table></div>' +
-            '<p class="pack-note" id="pack-carton-note"></p></section>';
+            '<tbody>' + body + '</tbody><tfoot id="pack-boxes-tfoot"></tfoot></table></div></section>';
+    }
+
+    // ALSO IN THE BOX - the care card, the thank-you note, the swatch.
+    //
+    // A PLAIN LIST, NOT CHECKBOXES. Nothing here is recorded: the list is the
+    // same for every order, it comes straight off Packing_Inclusion, and the save
+    // payload does not carry it. Checkboxes offered a state that was thrown away
+    // the moment he opened another order, which is worse than no state at all -
+    // a control that looks like it remembers something and does not.
+    //
+    // Nothing here blocks the save either. An insert that does not apply to an
+    // order is an ordinary thing.
+    //
+    // The whole section is skipped when no inclusions are defined, rather than
+    // rendering an empty box asking him to remember nothing.
+    function inclusionsSection() {
+        if (!INCLUSIONS.length) return '';
+
+        var items = INCLUSIONS.map(function (inc) {
+            return '<span class="inc-item">' + esc(inc.name) + '</span>';
+        }).join('');
+
+        return '<section class="pack-sec">' +
+            '<div class="pack-sec-head">' +
+                '<h3>Also in the box</h3>' +
+                '<span class="pack-sec-hint">put these in with the garments</span>' +
+            '</div>' +
+            '<div class="inc-list">' + items + '</div>' +
+            '</section>';
     }
 
     // WHO IS PACKING IT COMES FIRST, at the top of the card. It was in the footer
@@ -508,9 +563,14 @@ var PackingScreen = (function () {
 
     // Totals and the carton note only - so typing a weight does not rebuild the
     // dropdowns the packer is working in.
+    // The footnote that used to spell out the cartons in use is gone: both sets of
+    // dimensions are now on the row itself, so it was saying the same thing twice.
+    //
+    // Column count is EIGHT - #, inner, outer, item, pieces, weight, volumetric,
+    // action - and the two colspans below have to add up to it or the totals slide
+    // out from under the numbers they total.
     function renderTotals() {
         var tfoot = el('boxes-tfoot');
-        var note = el('carton-note');
         if (!ACTIVE_ORDER) return;
 
         var pieces = 0, gross = 0, vol = 0;
@@ -523,25 +583,9 @@ var PackingScreen = (function () {
 
         if (tfoot) {
             tfoot.innerHTML = !ACTIVE_ORDER.boxes.length ? '' :
-                '<tr><td colspan="3">' + plural(ACTIVE_ORDER.boxes.length, 'carton') + '</td>' +
+                '<tr><td colspan="4">' + plural(ACTIVE_ORDER.boxes.length, 'carton') + '</td>' +
                 '<td class="col-num">' + pieces + '</td><td class="col-num">' + kg(gross) + '</td>' +
-                '<td class="col-num">' + kg(vol) + '</td><td class="col-act"></td></tr>' +
-                '<tr class="charge-row"><td colspan="5">Chargeable — the greater of actual and volumetric</td>' +
-                '<td class="col-num">' + kg(Math.max(gross, vol)) + '</td><td class="col-act"></td></tr>';
-        }
-
-        // The cartons in use, spelled out - he is looking at a real box on a table
-        // and needs to know the branded inner goes inside this one.
-        if (note) {
-            var used = {};
-            ACTIVE_ORDER.boxes.forEach(function (b) { used[b.boxTypeId] = true; });
-            var bits = Object.keys(used).map(function (id) {
-                var c = cartonById(id);
-                if (!c) return '';
-                return esc(c.name) + ': outer ' + n(c.outerLength) + '×' + n(c.outerWidth) + '×' + n(c.outerHeight) +
-                    ', ' + (c.hasInner ? 'inner ' + n(c.innerLength) + '×' + n(c.innerWidth) + '×' + n(c.innerHeight) : 'no inner carton');
-            }).filter(Boolean);
-            note.innerHTML = bits.length ? 'L×W×H in cm &nbsp;—&nbsp; ' + bits.join(' &nbsp;·&nbsp; ') : '';
+                '<td class="col-num">' + kg(vol) + '</td><td class="col-act"></td></tr>';
         }
 
         renderValidation();

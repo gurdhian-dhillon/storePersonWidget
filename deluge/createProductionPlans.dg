@@ -62,6 +62,13 @@ string createProductionPlans()
 	createdList = list();
 	supervisorList = list();
 	storeList = list();
+	// Push notifications are best-effort and temporary-recipient for now. The
+	// report link is the one verified by testPushNotification, and the recipient
+	// can be swapped to role/login based emails when auth is wired.
+	pushNotifyTo = "livelinenstore@gmail.com";
+	pushReportLink = "Production_Planning_Report";
+	firstCreatedPlanId = "";
+	supervisorPushList = list();
 	logLines = list();
 	// Oldest first - an order that has been waiting longest gets planned first,
 	// and that ordering carries through to the store's issue screen, where it is
@@ -86,6 +93,17 @@ string createProductionPlans()
 			// Planned already, but still sitting in the queue - a plan built
 			// before the status drove this, or a run that died between the two
 			// writes. Move it on rather than rescanning it every run for ever.
+			//
+			// Mirror the existing plan's supervisor onto Sales_Order too. The
+			// production screens read Production_Planning.Assigned_To, but the
+			// Sales Order form has its own Assigned_To field for the admin view.
+			for each  exPlan in Production_Planning[ID == existingIds.get(0)]
+			{
+				if(exPlan.Assigned_To != null)
+				{
+					so.Assigned_To = exPlan.Assigned_To;
+				}
+			}
 			so.Order_Status = "In Progress";
 			skippedCount = skippedCount + 1;
 			logLines.add("SKIP (plan exists, order moved to In Progress) -> SO " + so.Sales_Order);
@@ -383,8 +401,14 @@ string createProductionPlans()
 			Added_User=zoho.loginuser
 		];
 		// 2) re-fetch by Plan_No for a real record handle, attach both subforms
+		currentPlanId = "";
 		for each  planRec in Production_Planning[Plan_No == planNo]
 		{
+			currentPlanId = planRec.ID.toString();
+			if(firstCreatedPlanId == "")
+			{
+				firstCreatedPlanId = currentPlanId;
+			}
 			// Plan_Item first, then its requirements - a Material_Requirement
 			// cannot be written until the item it belongs to has an id.
 			lineNo = 0;
@@ -451,6 +475,11 @@ string createProductionPlans()
 		// LAST, and only now: the order leaves the queue. Set any earlier and a
 		// failure part-way through would drop the order out of "Pending" with no
 		// plan behind it, and nothing would ever look at it again.
+		//
+		// Assigned_To is mirrored onto Sales_Order for the Sales screen only.
+		// The production source of truth remains Production_Planning.Assigned_To,
+		// which is what every floor widget already reads.
+		so.Assigned_To = assignedEmpId;
 		so.Order_Status = "In Progress";
 
 		createdCount = createdCount + 1;
@@ -470,6 +499,16 @@ string createProductionPlans()
 		createdList.add("<tr><td style='" + mTd + ";white-space:nowrap'><b style='color:#2563eb'>" + planNo + "</b></td><td style='" + mTd + ";white-space:nowrap'>" + so.Sales_Order + "</td><td style='" + mTd + "'>" + supName + "</td><td style='" + mTdR + "'>" + itemLineCount + "</td></tr>");
 		supervisorList.add("<tr><td style='" + mTd + ";white-space:nowrap'><b>" + so.Sales_Order + "</b></td><td style='" + mTdR + "'>" + totalProduceQty + "</td></tr>");
 		storeList.add("<tr><td style='" + mTd + "'><b>" + supName + "</b></td><td style='" + mTdR + "'>" + matLineCount + " materials</td></tr>");
+		if(currentPlanId != "")
+		{
+			supPush = Map();
+			supPush.put("supId",assignedEmpId.toString());
+			supPush.put("supName",supName);
+			supPush.put("planId",currentPlanId);
+			supPush.put("orderNo",so.Sales_Order);
+			supPush.put("pieces",totalProduceQty);
+			supervisorPushList.add(supPush);
+		}
 	}
 	//------------------------------------------------------------------------
 	// ONE MAIL PER RUN, covering both halves of what happened: the plans that
@@ -693,7 +732,63 @@ string createProductionPlans()
 		mailNote = "FAILED - " + eMail.toString();
 		logLines.add("MAIL " + mailNote);
 	}
-	summary = "Done. Created: " + createdCount + ", Not planned: " + failedCount + ", Skipped (plan exists): " + skippedCount + " | Mail: " + mailNote;
+	pushNote = "not attempted";
+	try
+	{
+		if(createdCount > 0 && firstCreatedPlanId != "")
+		{
+			adminMsg = createdCount + " production plan(s) created.";
+			if(failedCount > 0)
+			{
+				adminMsg = adminMsg + " " + failedCount + " order(s) could not be planned.";
+			}
+			zoho.pushNotification(pushNotifyTo,"Production planning",adminMsg,pushReportLink,firstCreatedPlanId.toLong());
+			zoho.pushNotification(pushNotifyTo,"Store material issue",createdCount + " new production plan(s) need material issue.",pushReportLink,firstCreatedPlanId.toLong());
+			sentSupIds = list();
+			for each  sp in supervisorPushList
+			{
+				supIdTxt = ifnull(sp.get("supId"),"").toString();
+				if(sentSupIds.contains(supIdTxt) == false)
+				{
+					sentSupIds.add(supIdTxt);
+					supPlanCount = 0;
+					supPieces = 0;
+					firstSupPlanId = ifnull(sp.get("planId"),"").toString();
+					firstOrderNo = ifnull(sp.get("orderNo"),"").toString();
+					supNameTxt = ifnull(sp.get("supName"),"").toString();
+					for each  sp2 in supervisorPushList
+					{
+						if(ifnull(sp2.get("supId"),"").toString() == supIdTxt)
+						{
+							supPlanCount = supPlanCount + 1;
+							supPieces = supPieces + ifnull(sp2.get("pieces"),0);
+						}
+					}
+					supPushMsg = supPlanCount + " new order(s) assigned to " + supNameTxt + ".";
+					if(supPlanCount == 1)
+					{
+						supPushMsg = "New order assigned: " + firstOrderNo + " (" + supPieces + " pcs).";
+					}
+					zoho.pushNotification(pushNotifyTo,"New supervisor order",supPushMsg,pushReportLink,firstSupPlanId.toLong());
+				}
+			}
+			pushNote = "accepted, to " + pushNotifyTo + ", report " + pushReportLink;
+			logLines.add("PUSH " + pushNote);
+		}
+		else
+		{
+			pushNote = "not sent - no created plan record to open";
+			logLines.add("PUSH " + pushNote);
+		}
+	}
+	catch (ePush)
+	{
+		// Push is an alert only. Planning and email must remain the source of
+		// truth even if Creator notification delivery rejects one recipient.
+		pushNote = "FAILED - " + ePush.toString();
+		logLines.add("PUSH " + pushNote);
+	}
+	summary = "Done. Created: " + createdCount + ", Not planned: " + failedCount + ", Skipped (plan exists): " + skippedCount + " | Mail: " + mailNote + " | Push: " + pushNote;
 	logLines.add(summary);
 	info logLines;
 	return summary;

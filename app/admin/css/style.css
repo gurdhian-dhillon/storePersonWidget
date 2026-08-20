@@ -740,7 +740,7 @@ tr.mine { background: #eff6ff; box-shadow: inset 3px 0 0 var(--primary); }
 
 /* The lot an order is committed to. Narrow: it holds a short lot number and
    at most one qualifying word, and it must not push the numbers off screen. */
-.shade-cell {
+.lot-cell {
     font-size: 12px;
     white-space: nowrap;
 }

@@ -142,15 +142,29 @@ string getOrderConsumption(string salesOrderId)
 				// A Creator field never written is EMPTY, not null, so every row
 				// raised before Source existed falls through to "planned" - which
 				// is exactly what those rows were.
+				//
+				// TESTED THE OTHER WAY ROUND, and that is the fix rather than a
+				// style choice. This read `== "Reissue"`, which was every value
+				// there was when it was written. Source now also carries
+				// "Check_Remake" (saveItemCheck's remake, raised from the
+				// supervisor's Reissue tab) and "Alteration" - both raised AFTER
+				// the plan, both landing in the else, both inflating PLANNED by
+				// exactly the cloth the variance exists to expose. The bug the
+				// comment above describes, reintroduced through the two values it
+				// could not know about.
+				//
+				// So: empty or "Plan" is the plan; anything else was raised later.
+				// A Source value added tomorrow is additional demand until someone
+				// says otherwise, which is the safe way for this to be wrong.
 				//----------------------------------------------------------
 				srcTxt = ifnull(mr.Source,"").toString().trim();
-				if(srcTxt == "Reissue")
+				if(srcTxt == "" || srcTxt == "Plan")
 				{
-					cur.put("reissued",cur.get("reissued") + pStr.toDecimal());
+					cur.put("planned",cur.get("planned") + pStr.toDecimal());
 				}
 				else
 				{
-					cur.put("planned",cur.get("planned") + pStr.toDecimal());
+					cur.put("reissued",cur.get("reissued") + pStr.toDecimal());
 				}
 				cur.put("issued",cur.get("issued") + iStr.toDecimal());
 				cur.put("received",cur.get("received") + rStr.toDecimal());
@@ -441,7 +455,16 @@ string getOrderConsumption(string salesOrderId)
 			reasonsJson = reasonsJson + "{\"type\":\"Cutting allowance\",\"qty\":" + cuttingV + ",\"isWaste\":false,\"on\":\"\",\"plan\":\"\",\"looked\":\"Cloth is issued in whole marker rows, so part of the last row is paid for whether or not it is cut.\"}";
 		}
 
-		wp = e.get("wastePieces");
+		// ifnull for the same reason every read in the JSON below has it, and this
+		// one was the exception that proves the note there. Three of the four
+		// places an entry can be created - the dispute pass, the damage pass and
+		// the waste pass - never put "wastePieces", so a material that reaches
+		// this report through a write-off or a returned remnant WITHOUT a
+		// requirement row of its own arrives here with the key missing. A bare
+		// Map.get() then returns null, and "null > 0" is a mixed-type comparison,
+		// which Deluge throws on - taking the whole tab down with a DELUGE: error
+		// where a dash was wanted.
+		wp = ifnull(e.get("wastePieces"),0);
 		if(wp > 0)
 		{
 			if(reasonsJson != "")

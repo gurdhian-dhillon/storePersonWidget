@@ -453,6 +453,68 @@ from anywhere:
 - **`Lost` is never an input.** When the *second* side denies, `resolveDispute` writes the loss
   off itself. No one person can take stock off the books.
 
+> **AN OUTBOUND DISPUTE HAS EXACTLY THREE ENDINGS, AND TWO OF THEM MEAN THE STORE ISSUES AGAIN.**
+> This is the whole point of the mechanism and every change to it has to keep it true:
+>
+> | | Ending | Requirement re-opens? | Stock back on the shelf? |
+> |---|---|---|---|
+> | Store's mistake | `Store_Correction` | **yes** | yes — it never left |
+> | He found it in the production house | `Found` | no | no — it reached him |
+> | Lost | both sides `Denied` | **yes** | no — it is gone |
+>
+> Correction and Lost differ **only** in whether stock comes back; production needs the material
+> either way, so both wind back `Issued_Qty`, `Pieces_From_Raw` (fabric) and `Pieces_From_Waste`
+> (remnants), *and* the `Issued` `Waste_Movement` itself. Miss that last one and the handover
+> stays on the supervisor's receive screen for ever, the store re-issues into a second movement,
+> and the item can never reach `Ready_For_Production` — the readiness test fails while any issued
+> movement is unreceived.
+>
+> **A dispute is raised PER PLAN, and it must name the plan whose rows actually carry the gap.**
+> The fan in `receiveMaterials` credits a bulk handover oldest-plan-first, so the shortfall lands
+> on the newest rows; a ticket stamped with the first plan that merely had something *owed* points
+> at the opposite end of the same walk. Both readers key off it — `getSupervisorMaterials`
+> discounts per plan+material, `resolveDispute` re-opens `Material_Requirement[Plan == dsp.Plan]` —
+> so naming the wrong plan leaves the material on his receive screen for ever *and* hands the stock
+> back while re-opening nothing.
+>
+> **`receiveMaterials` must net off open disputes exactly as the screen does.** The figure he types
+> is already net of them. Reading pending straight off `Issued_Qty - Received_Qty` raises a second
+> dispute for material already disputed the moment more of it is issued against the same plan while
+> the first is still open — and settles it off `In_Transit_Qty` twice.
+
+> **THE INBOUND LEG IS THE SAME SHAPE REVERSED, and it has FOUR endings, not three.**
+> The sender is the supervisor and the receiver is the store, so "the store issues that much
+> again" becomes "he sends them again" — `Supervisor_Resending` is the mirror, and it is the only
+> ending that puts anything back in front of anybody.
+>
+> | | Ending | Goes back on the check-in list? | Lands on the rack? |
+> |---|---|---|---|
+> | His mistake — never cut | `Supervisor_Correction` | no | no, they never existed |
+> | Store found them | `Found` | no | **yes** |
+> | Lost | both sides `Denied` | no | no |
+> | He still has them | `Supervisor_Resending` | **yes** | on the ordinary check-in |
+>
+> **THE `Declared` MOVEMENT IS THE INBOUND `Issued` MOVEMENT, and it has to match what exists.**
+> `getOrderConsumption` reads its `Piece_Count` straight into **waste kept** — the remnants that
+> went back on the rack and *will be reused* — plus the area beside it, and
+> `getSupervisorWasteReturns` and `getStoreWasteHistory` quote the same number. So
+> `Supervisor_Correction` and `Lost` must reduce it, or the report credits the good outcome to
+> cloth that does not exist. `Found` must not — the declaration was true. Reduced, **never moved
+> to `Scrapped`**: that means deliberately binned, and `Waste_Master.Status` already carries
+> `Miscounted` / `Lost`. Fixing the status and leaving the movement is the same mistake one level
+> down, and it is the one that was live.
+>
+> **A resend that splits a declaration across two rows must net to zero.** When the row already
+> holds `Available` stock the re-sent pieces get a `Waste_Master` and a `Declared` movement of
+> their own — so the same count comes off the original declaration in the same pass. One cutting
+> event threw off five remnants however many rows they end up spread across; leave the first at
+> five and the report reads 5 + 2 = **seven**, two of them invented by the act of re-sending.
+>
+> **The inbound leg needs no dispute-netting on receipt.** `receiveWastePieces` only ever moves a
+> `Pending_Receipt` row forward, so a piece already in dispute cannot be checked in a second time —
+> the status guard does what the open-dispute discount does on the outbound side. Do not "fix" it
+> by adding one.
+
 **An inbound dispute touches no requirement.** Offcuts coming back are owed to nobody: there is
 no `Issued` movement to read a yield from, no `Pieces_From_Waste` to wind back, and the
 `Item_Status` / `Order_Status` sweep is skipped. Never tell the store an inbound write-off

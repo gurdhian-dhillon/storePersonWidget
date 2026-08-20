@@ -612,6 +612,61 @@ string resolveDispute(string payloadJson)
 									dcN.Moved_By = dsp.Supervisor;
 								}
 							}
+
+							//--------------------------------------------
+							// AND THE SAME COUNT COMES OFF THE ORIGINAL
+							// DECLARATION, because the pieces MOVED between two
+							// rows - they were not generated a second time.
+							//
+							// One cutting event threw off five remnants. The
+							// store found three and this splits the other two
+							// onto a row of their own so they can be checked in
+							// separately. Leave the first declaration at five and
+							// getOrderConsumption reads 5 + 2 = SEVEN remnants
+							// kept, with the area to match - two of them invented
+							// by the act of re-sending. getStoreWasteHistory and
+							// his own returns tab show the same seven.
+							//
+							// Net zero across the pair is the invariant: however
+							// many rows a declaration ends up split across, the
+							// counts still add to what he actually cut.
+							//--------------------------------------------
+							rsDeclId = null;
+							rsDeclHad = 0;
+
+							for each  dmvR in Waste_Movement[Waste_Piece == dsp.Waste_Piece && Movement_Type == "Declared"]
+							{
+								dmvRHad = ifnull(dmvR.Piece_Count,0);
+								if(rsDeclId == null || (rsDeclHad <= 0 && dmvRHad > 0))
+								{
+									rsDeclId = dmvR.ID;
+									rsDeclHad = dmvRHad;
+								}
+							}
+
+							if(rsDeclId != null && rsDeclHad > 0)
+							{
+								pullR = rsCount;
+								if(pullR > rsDeclHad)
+								{
+									pullR = rsDeclHad;
+								}
+
+								if(pullR > 0)
+								{
+									for each  dmvRU in Waste_Movement[ID == rsDeclId]
+									{
+										dmvRU.Piece_Count = rsDeclHad - pullR;
+
+										rPrev = ifnull(dmvRU.Remarks,"").toString().trim();
+										if(rPrev != "")
+										{
+											rPrev = rPrev + " | ";
+										}
+										dmvRU.Remarks = rPrev + pullR + " moved to a re-sent row on dispute " + dispId;
+									}
+								}
+							}
 						}
 						catch (eRs)
 						{
@@ -777,6 +832,95 @@ string resolveDispute(string payloadJson)
 				}
 
 				//------------------------------------------------------
+				// 2ii. INBOUND - THE DECLARATION HAS TO MATCH WHAT EXISTS.
+				//
+				// The mirror of what section 2 does to an Issued movement on the
+				// way out, and it was missing here for the same reason: the stock
+				// counters were corrected and the movement that created them was
+				// not.
+				//
+				// getOrderConsumption reads the Declared movement's Piece_Count
+				// straight into "waste kept" - the remnants that went back on the
+				// rack and WILL BE REUSED - and into the area printed beside it;
+				// getSupervisorWasteReturns and getStoreWasteHistory quote the same
+				// number. So a declaration of 5 that turned out to be 3 keeps
+				// reporting five reusable remnants for ever, and the consumption
+				// report credits the good outcome to cloth that does not exist.
+				//
+				// Waste_Master.Status = "Miscounted" was added so a piece that was
+				// never cut cannot inflate the scrap figure. This is the same
+				// mistake one level down: the status was fixed, the movement that
+				// feeds the report was not.
+				//
+				// EXACTLY TWO OUTCOMES REDUCE IT:
+				//
+				//   Supervisor_Correction  never cut, so never declared.
+				//   Lost                   cut, but nobody has them - they are not
+				//                          on the rack and will not be reused.
+				//
+				// NOT moved into Scrapped. Scrapped means he cut a real remnant and
+				// binned it, which is what makes "how much did we throw away this
+				// month" answerable; a lost piece is not a binned one, and
+				// Waste_Master.Status = "Lost" already records what happened.
+				//
+				// Found leaves it alone - the pieces are on the rack and the
+				// declaration was true all along. Supervisor_Resending leaves it
+				// alone too: they exist and are on their way, and where that splits
+				// a declaration across two rows it is handled at the split.
+				//------------------------------------------------------
+				if(inbound == true && dsp.Waste_Piece != null && (applyKind == "Supervisor_Correction" || applyKind == "Lost"))
+				{
+					try
+					{
+						declMvId = null;
+						declHad = 0;
+
+						for each  dmv3 in Waste_Movement[Waste_Piece == dsp.Waste_Piece && Movement_Type == "Declared"]
+						{
+							dmvHad = ifnull(dmv3.Piece_Count,0);
+							// Prefer one that still carries pieces. A row whose
+							// declaration has already been wound to zero by an
+							// earlier partial answer has nothing left to take.
+							if(declMvId == null || (declHad <= 0 && dmvHad > 0))
+							{
+								declMvId = dmv3.ID;
+								declHad = dmvHad;
+							}
+						}
+
+						if(declMvId != null && declHad > 0)
+						{
+							pullD = take.toLong();
+							if(pullD > declHad)
+							{
+								pullD = declHad;
+							}
+
+							if(pullD > 0)
+							{
+								for each  dmvU in Waste_Movement[ID == declMvId]
+								{
+									dmvU.Piece_Count = declHad - pullD;
+
+									// Appended, never overwritten - the movement may
+									// already carry why the remnant was cut.
+									dPrev = ifnull(dmvU.Remarks,"").toString().trim();
+									if(dPrev != "")
+									{
+										dPrev = dPrev + " | ";
+									}
+									dmvU.Remarks = dPrev + pullD + " un-declared on dispute " + dispId + " (" + applyKind + ")";
+								}
+							}
+						}
+					}
+					catch (eDecl)
+					{
+						info "Declared movement not wound back for waste piece " + dsp.Waste_Piece + ": " + eDecl.toString();
+					}
+				}
+
+				//------------------------------------------------------
 				// 2. The requirement side - waste pieces
 				//
 				// A waste dispute is counted in PHYSICAL remnants, but the
@@ -789,17 +933,39 @@ string resolveDispute(string payloadJson)
 				{
 					mvYield = 1;
 					parentMv = null;
+					// How many of the chosen movement's pieces are still owed, so
+					// the un-issue below can never take back more than went out.
+					parentOut = 0;
+
 					issuedMvs = Waste_Movement[Waste_Piece == dsp.Waste_Piece && Movement_Type == "Issued"];
 
 					for each  mv in issuedMvs
 					{
 						if(mv.Plan != null && mv.Plan.toString() == dsp.Plan.toString())
 						{
-							parentMv = mv.ID;
-							yv = ifnull(mv.Pieces_Yielded,0);
-							if(yv > 0)
+							// PREFER A MOVEMENT THAT IS STILL OWED. A piece issued
+							// twice against one plan leaves two rows, and only an
+							// unreceived one can be the handover this dispute is
+							// about - taking the last match blindly could re-open a
+							// movement he has already signed for. Falls back to the
+							// last match when none is outstanding, which is exactly
+							// what it did before.
+							mvOut = ifnull(mv.Piece_Count,0);
+							for each  rvC in Waste_Movement[Parent_Movement == mv.ID && Movement_Type == "Received"]
 							{
-								mvYield = yv;
+								mvOut = mvOut - ifnull(rvC.Piece_Count,0);
+							}
+
+							if(parentMv == null || (parentOut <= 0 && mvOut > 0))
+							{
+								parentMv = mv.ID;
+								parentOut = mvOut;
+								mvYield = 1;
+								yv = ifnull(mv.Pieces_Yielded,0);
+								if(yv > 0)
+								{
+									mvYield = yv;
+								}
 							}
 						}
 					}
@@ -867,6 +1033,62 @@ string resolveDispute(string payloadJson)
 									}
 									rowW.Pieces_From_Waste = fromW - pullW;
 									toPull = toPull - pullW;
+								}
+							}
+						}
+
+						//----------------------------------------------------
+						// AND THE HANDOVER ITSELF HAS TO BE UN-RECORDED.
+						//
+						// This is the mirror of what section 3 does to a measured
+						// row's Issued_Qty, and it was missing. The piece went back
+						// on the rack and its cut pieces went back on the bill, but
+						// the Issued movement was left standing with no Received
+						// child - and pending is Piece_Count minus its children
+						// EVERYWHERE: the supervisor's receive list, the readiness
+						// test in receiveMaterials, section 3b just below.
+						//
+						// So the moment the dispute stopped being Open and no
+						// longer discounted it, that movement came back as an
+						// ordinary pending delivery. The store re-issued, wrote a
+						// SECOND movement, and he was looking at two remnants where
+						// one had ever existed. Worse and quieter: the item could
+						// never reach Ready_For_Production again, because a
+						// permanently unreceived movement fails the readiness test
+						// however many times the piece is re-issued and confirmed.
+						//
+						// Reducing the parent is what makes every one of those
+						// readers right with no new movement type for them to learn
+						// - and it is the truth: only the pieces that actually left
+						// the shelf were ever issued. Found is untouched; it writes
+						// a Received child and completes the handover properly.
+						//
+						// The dispute is the audit trail for the change, so the
+						// remark points at it rather than restating it.
+						//----------------------------------------------------
+						if(parentMv != null && parentOut > 0)
+						{
+							pullMv = take.toLong();
+							if(pullMv > parentOut)
+							{
+								pullMv = parentOut;
+							}
+
+							if(pullMv > 0)
+							{
+								for each  mvU in Waste_Movement[ID == parentMv]
+								{
+									mvHad = ifnull(mvU.Piece_Count,0);
+									mvU.Piece_Count = mvHad - pullMv;
+
+									// Appended, never overwritten - the movement may
+									// already carry why it was cut.
+									mvPrev = ifnull(mvU.Remarks,"").toString().trim();
+									if(mvPrev != "")
+									{
+										mvPrev = mvPrev + " | ";
+									}
+									mvU.Remarks = mvPrev + pullMv + " un-issued on dispute " + dispId + " (" + applyKind + ")";
 								}
 							}
 						}

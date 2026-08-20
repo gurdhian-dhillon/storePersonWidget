@@ -75,6 +75,98 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	supIssues = Material_Issue[Issued_To == supId] sort by Added_Time;
 
 	//------------------------------------------------------------------------
+	// Which order each plan belongs to, resolved ONCE.
+	//
+	// A dispute is raised per plan now, and both the notification mail and the
+	// message the supervisor sees have to name the order it is against - two
+	// rows reading "Stitching Thread / Green, 8 short" with nothing telling them
+	// apart is not something the store can act on. One query per open plan, of
+	// which he has a handful; inside the material loop it would be one per line
+	// on the receipt, which is the shape that blows the statement limit.
+	//------------------------------------------------------------------------
+	soNoByPlan = Map();
+	for each  planSo in plans
+	{
+		soTxtP = "";
+		for each  soRec in Sales_Order[ID == planSo.Sales_Order]
+		{
+			soTxtP = ifnull(soRec.Sales_Order,"").toString().replaceAll("\"","'");
+		}
+		soNoByPlan.put(planSo.ID + "",soTxtP);
+	}
+
+	//------------------------------------------------------------------------
+	// WHAT IS ALREADY IN DISPUTE, AND THEREFORE NOT PART OF THIS HANDOVER.
+	//
+	// getSupervisorMaterials takes open disputes off the figure it puts on his
+	// screen, so the number he types is already NET of them. This function did
+	// not - it read pending straight off Issued_Qty - Received_Qty - and the two
+	// disagreed by exactly the disputed amount the moment a dispute was left open
+	// while more of the same material was issued against the same plan.
+	//
+	// What that looked like: the screen offers him the new cloth only, he confirms
+	// all of it and is right to, and this reads the confirmation as short by the
+	// OLD dispute's quantity. A second dispute for pieces already disputed, and
+	// Disputed_Qty charged for them twice - the same material counted as missing
+	// twice over, on a receipt where he did nothing wrong. It also settled the
+	// disputed quantity off In_Transit_Qty a second time, which it had already
+	// left on the receipt that raised the dispute.
+	//
+	// Same rule and same key as the screen, drawn down as it is applied so two
+	// requirement rows on one plan and material cannot each discount the same
+	// dispute. The disputed part is never credited to Received_Qty either, which
+	// is correct: it is disputed, not received.
+	//------------------------------------------------------------------------
+	openDispPM = Map();
+	openDispWP = Map();
+
+	for each  dspO in Stock_Dispute[Supervisor == supId && Status == "Open"]
+	{
+		dqStrO = ifnull(dspO.Disputed_Qty,"0").toString().trim();
+		if(dqStrO == "")
+		{
+			dqStrO = "0";
+		}
+
+		resSoFarO = 0.0;
+		for each  rlO in dspO.Resolution_Lines
+		{
+			rqStrO = ifnull(rlO.Resolved_Qty,"0").toString().trim();
+			if(rqStrO == "")
+			{
+				rqStrO = "0";
+			}
+			resSoFarO = resSoFarO + rqStrO.toDecimal();
+		}
+
+		stillOpenO = dqStrO.toDecimal() - resSoFarO;
+
+		if(stillOpenO > 0)
+		{
+			if(ifnull(dspO.Is_Waste,false) == true && dspO.Waste_Piece != null)
+			{
+				wKeyO = dspO.Waste_Piece + "";
+				wHaveO = openDispWP.get(wKeyO);
+				if(wHaveO == null)
+				{
+					wHaveO = 0.0;
+				}
+				openDispWP.put(wKeyO,wHaveO + stillOpenO);
+			}
+			else if(dspO.Plan != null && dspO.Material != null)
+			{
+				pmKeyO = dspO.Plan + "|" + dspO.Material;
+				pmHaveO = openDispPM.get(pmKeyO);
+				if(pmHaveO == null)
+				{
+					pmHaveO = 0.0;
+				}
+				openDispPM.put(pmKeyO,pmHaveO + stillOpenO);
+			}
+		}
+	}
+
+	//------------------------------------------------------------------------
 	// Fungible materials - metres, cones, labels. Fan across the plan rows.
 	//------------------------------------------------------------------------
 	for each  mRaw in mats
@@ -108,13 +200,40 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 			pendingTotal = 0.0;
 			matName = "";
 			matUnit = "";
-			// Where to hang the dispute if this comes up short. The receipt is
-			// against a bulk handover that can span plans, so the first line
-			// still owed is used - the same "oldest plan first" rule the fan
-			// itself follows, so the ticket points at the order that has been
-			// waiting longest.
-			shortPlanId = null;
-			shortItemId = null;
+
+			//--------------------------------------------------------------
+			// THE SHORTFALL IS RECORDED PER PLAN, because that is where it
+			// actually lands and every reader looks for it there.
+			//
+			// The receipt is against a bulk handover that can span orders, and
+			// the fan below credits the confirmed quantity OLDEST PLAN FIRST. So
+			// the gap always ends up on the NEWEST rows - while a single dispute
+			// used to be stamped with the FIRST plan that had anything pending,
+			// which is the opposite end of the same walk.
+			//
+			// Everything downstream keys off that plan. getSupervisorMaterials
+			// discounts open disputes per plan+material; resolveDispute re-opens
+			// Material_Requirement[Plan == dsp.Plan]. Name a plan whose rows were
+			// credited in full and both walk rows with a zero gap: the material
+			// stayed on his receive screen as an ordinary pending delivery, and a
+			// Store_Correction handed the stock back while re-opening nothing, so
+			// the store was never asked to issue it again. Both were live, and
+			// both are the same mistake.
+			//
+			// ONE DISPUTE PER PLAN THAT CARRIES A GAP. A receipt short on one
+			// material across two orders is genuinely two questions - the store
+			// re-issues against each order separately - and it keeps both readers
+			// correct without either of them having to learn about the fan.
+			//
+			// Four parallel maps rather than one of maps: a Deluge Map holding
+			// Maps does not survive being read back reliably, and these are only
+			// ever read by key.
+			//--------------------------------------------------------------
+			shortKeys = List();
+			shortQty = Map();
+			shortPend = Map();
+			shortGot = Map();
+			shortItem = Map();
 
 			for each  plan in plans
 			{
@@ -143,14 +262,31 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 
 						rowPend = issStr.toDecimal() - already;
 
+						// Net off anything on this plan and material that is
+						// already reported missing. It belongs to the disputes
+						// screen until somebody answers it, and it was not on the
+						// figure he was shown either.
+						pmKeyF = plan.ID + "|" + matId;
+						dispLeftF = openDispPM.get(pmKeyF);
+						if(dispLeftF != null && dispLeftF > 0 && rowPend > 0)
+						{
+							takeOffF = dispLeftF;
+							if(takeOffF > rowPend)
+							{
+								takeOffF = rowPend;
+							}
+							rowPend = rowPend - takeOffF;
+							openDispPM.put(pmKeyF,dispLeftF - takeOffF);
+						}
+
 						if(rowPend > 0)
 						{
 							pendingTotal = pendingTotal + rowPend;
-							if(shortPlanId == null)
-							{
-								shortPlanId = plan.ID;
-								shortItemId = row.Plan_Item;
-							}
+
+							// Declared before the branch, not inside it - a name
+							// first assigned inside an if is not safe to read
+							// after a pass where the if did not run.
+							give = 0.0;
 							if(toFan > 0)
 							{
 								give = rowPend;
@@ -160,6 +296,29 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 								}
 								row.Received_Qty = already + give;
 								toFan = toFan - give;
+							}
+
+							pKey = plan.ID + "";
+							if(shortQty.get(pKey) == null)
+							{
+								shortKeys.add(pKey);
+								shortQty.put(pKey,0.0);
+								shortPend.put(pKey,0.0);
+								shortGot.put(pKey,0.0);
+								shortItem.put(pKey,"");
+							}
+							shortQty.put(pKey,shortQty.get(pKey) + (rowPend - give));
+							shortPend.put(pKey,shortPend.get(pKey) + rowPend);
+							shortGot.put(pKey,shortGot.get(pKey) + give);
+
+							// The item the ticket points at is the first one that
+							// actually went short, not the first one that had
+							// anything owed. Those are different rows the moment a
+							// plan is part-credited, and the second is the one a
+							// person opening the dispute needs to look at.
+							if((rowPend - give) > 0 && ifnull(shortItem.get(pKey),"").toString() == "")
+							{
+								shortItem.put(pKey,ifnull(row.Plan_Item,"").toString());
 							}
 						}
 					}
@@ -347,25 +506,24 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 			}
 
 			//--------------------------------------------------------------
-			// TELL INVENTORY. Everything that settled off In_Transit minus the
-			// part he says never arrived - only the confirmed metres are
-			// consumed. The disputed part stays on hand in Inventory because it
-			// is still ours until the dispute is answered.
+			// INVENTORY ADJUSTMENT DISABLED FOR NOW.
 			//
-			// Queued, not posted: the drain batches every event in the window
-			// into one adjustment. queueInventoryPost never throws, so a queue
-			// failure leaves Inventory one event behind - which reconciliation
-			// catches - rather than failing a receipt that physically happened.
+			// This used to enqueue a Consumption row into Inventory_Post_Queue:
+			//
+			//   consumedQty = settleQty - shortBy;
+			//   if(consumedQty < 0)
+			//   {
+			//       consumedQty = 0;
+			//   }
+			//   if(consumedQty > 0)
+			//   {
+			//       invQRes = thisapp.queueInventoryPost("Consumption","Raw_Material",matId,matId,consumedQty.toString());
+			//   }
+			//
+			// We are not creating Zoho Inventory adjustments at the moment, so
+			// receiving material must update Creator only and leave the external
+			// adjustment queue untouched.
 			//--------------------------------------------------------------
-			consumedQty = settleQty - shortBy;
-			if(consumedQty < 0)
-			{
-				consumedQty = 0;
-			}
-			if(consumedQty > 0)
-			{
-				invQRes = thisapp.queueInventoryPost("Consumption","Raw_Material",matId,matId,consumedQty.toString());
-			}
 
 			if(shortBy > 0)
 			{
@@ -379,62 +537,82 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 				// person - was it mismeasured, taken by someone else, or lost -
 				// and the system cannot answer any of those.
 				//
-				// His remark is stored on the dispute as well as echoed back
-				// below. The echo is gone the moment he closes the screen, and
-				// the store then opens a dispute with no idea what he saw.
-				try
+				// His remark is stored on every dispute this receipt raises as
+				// well as echoed back below. The echo is gone the moment he closes
+				// the screen, and the store then opens a dispute with no idea what
+				// he saw. He said it once about one handover, so the same words
+				// belong on each order it turned out to span.
+				for each  pKey2 in shortKeys
 				{
-					newDispId = insert into Stock_Dispute
-					[
-						Material_Name=matName
-						Unit=matUnit
-						Is_Waste=false
-						Direction="Outbound"
-						Issued_Qty=pendingTotal
-						Received_Qty=gotQty
-						Disputed_Qty=shortBy
-						Status="Open"
-						Raised_On=zoho.currentdate
-						Raised_Note=remark.replaceAll("\"","'")
-						Added_User=zoho.loginuser
-					];
-
-					for each  dsp in Stock_Dispute[ID == newDispId.toLong()]
+					planShort = shortQty.get(pKey2);
+					if(planShort > 0)
 					{
-						dsp.Material = matId.toLong();
-						dsp.Supervisor = supId;
-						// Where the cloth came off, so a Store_Correction can put
-						// it back on the same lot rather than on the material at
-						// large. Empty on a pre-lot handover, which resolveDispute
-						// treats as "parent only" exactly as it always did.
-						if(dispLotId != "")
-						{
-							dsp.Lot = dispLotId.toLong();
-						}
-						if(shortPlanId != null)
-						{
-							dsp.Plan = shortPlanId;
-						}
-						if(shortItemId != null)
-						{
-							dsp.Plan_Item = shortItemId;
-						}
-					}
-					// Gathered for the notification. Inside the try, after the
-					// insert succeeded - a dispute that failed to write must not
-					// be announced as though it exists.
-					dispRows.add(matName + "|" + matUnit + "|" + pendingTotal + "|" + gotQty + "|" + shortBy);
-				}
-				catch (e2)
-				{
-					info "Stock_Dispute not raised for " + matName + ": " + e2.toString();
-				}
+						planSoNo = ifnull(soNoByPlan.get(pKey2),"").toString();
 
-				if(errJson != "")
-				{
-					errJson = errJson + ",";
+						try
+						{
+							// Issued and Received are THIS PLAN's share, not the
+							// receipt's total. A ticket saying 188 issued when the
+							// order it names only ever owed 168 sends whoever opens
+							// it looking for twenty cones that were never against it.
+							newDispId = insert into Stock_Dispute
+							[
+								Material_Name=matName
+								Unit=matUnit
+								Is_Waste=false
+								Direction="Outbound"
+								Issued_Qty=shortPend.get(pKey2)
+								Received_Qty=shortGot.get(pKey2)
+								Disputed_Qty=planShort
+								Status="Open"
+								Raised_On=zoho.currentdate
+								Raised_Note=remark.replaceAll("\"","'")
+								Added_User=zoho.loginuser
+							];
+
+							for each  dsp in Stock_Dispute[ID == newDispId.toLong()]
+							{
+								dsp.Material = matId.toLong();
+								dsp.Supervisor = supId;
+								// Where the cloth came off, so a Store_Correction can put
+								// it back on the same lot rather than on the material at
+								// large. Empty on a pre-lot handover, which resolveDispute
+								// treats as "parent only" exactly as it always did.
+								//
+								// ONE LOT FOR THE WHOLE RECEIPT, stamped on each of
+								// these. The lot pass above already charged that lot
+								// the full shortfall, and each resolution restores its
+								// own share capped at what the lot still holds as
+								// disputed - so the parts add back up to the whole
+								// however many orders the gap spanned.
+								if(dispLotId != "")
+								{
+									dsp.Lot = dispLotId.toLong();
+								}
+								dsp.Plan = pKey2.toLong();
+								itemTxt = ifnull(shortItem.get(pKey2),"").toString();
+								if(itemTxt != "")
+								{
+									dsp.Plan_Item = itemTxt.toLong();
+								}
+							}
+							// Gathered for the notification. Inside the try, after the
+							// insert succeeded - a dispute that failed to write must not
+							// be announced as though it exists.
+							dispRows.add(matName + "|" + planSoNo + "|" + matUnit + "|" + shortPend.get(pKey2) + "|" + shortGot.get(pKey2) + "|" + planShort);
+						}
+						catch (e2)
+						{
+							info "Stock_Dispute not raised for " + matName + " on plan " + pKey2 + ": " + e2.toString();
+						}
+
+						if(errJson != "")
+						{
+							errJson = errJson + ",";
+						}
+						errJson = errJson + "\"" + matName + " (" + planSoNo + "): " + planShort + " short of the " + shortPend.get(pKey2) + " issued" + noteTxt + " - dispute raised\"";
+					}
 				}
-				errJson = errJson + "\"" + matName + ": " + shortBy + " short of the " + pendingTotal + " issued" + noteTxt + " - dispute raised\"";
 			}
 
 			if(okJson != "")
@@ -526,6 +704,24 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 				if(stillOut < 0)
 				{
 					stillOut = 0;
+				}
+
+				// Same rule as the measured rows above: pieces already reported
+				// missing are on the disputes screen, not still on the trolley.
+				// Without this a piece part-disputed and part-pending raises a
+				// second dispute for the same remnants on the next receipt, and
+				// charges Disputed_Count for them twice.
+				wKeyF = wi.Waste_Piece + "";
+				wDispLeftF = openDispWP.get(wKeyF);
+				if(wDispLeftF != null && wDispLeftF > 0 && stillOut > 0)
+				{
+					wTakeOffF = wDispLeftF;
+					if(wTakeOffF > stillOut)
+					{
+						wTakeOffF = stillOut;
+					}
+					stillOut = stillOut - wTakeOffF.toLong();
+					openDispWP.put(wKeyF,wDispLeftF - wTakeOffF);
 				}
 
 				for each  wmStock in Waste_Master[ID == wi.Waste_Piece]
@@ -630,7 +826,16 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 								wdsp.Plan_Item = wi.Plan_Item;
 							}
 						}
-						dispRows.add(wDispName + " (offcuts)|pcs|" + issuedW + "|" + (alreadyW + takePcs) + "|" + stillOut);
+						// Same six-field shape the measured rows use. A waste
+						// dispute has always been against one plan - the movement
+						// carries it - so this half never had the fan's problem;
+						// it only has to name the order in the mail like the rest.
+						wSoNo = "";
+						if(wi.Plan != null)
+						{
+							wSoNo = ifnull(soNoByPlan.get(wi.Plan + ""),"").toString();
+						}
+						dispRows.add(wDispName + " (offcuts)|" + wSoNo + "|pcs|" + issuedW + "|" + (alreadyW + takePcs) + "|" + stillOut);
 					}
 					catch (e3)
 					{
@@ -831,15 +1036,20 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 			dTdR = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a;text-align:right;font-weight:600";
 			dTdBad = "padding:10px 12px;border-bottom:1px solid #fee2e2;font-size:13px;color:#991b1b;text-align:right;font-weight:700";
 
+			// ORDER IS A COLUMN NOW. A receipt short on one material across two
+			// orders raises a dispute per order, so without it the mail carries
+			// two rows naming the same material and the store cannot tell which
+			// one it is being asked to look at - or that they are two.
+			// Fields: name|order|unit|issued|received|short.
 			dRowsHtml = "";
 			for each  dr in dispRows
 			{
 				dp = dr.toList("|");
-				dRowsHtml = dRowsHtml + "<tr><td style='" + dTd + "'>" + dp.get(0) + "</td><td style='" + dTdR + "'>" + dp.get(2) + " <span style='color:#64748b;font-weight:400'>" + dp.get(1) + "</span></td><td style='" + dTdR + "'>" + dp.get(3) + "</td><td style='" + dTdBad + "'>" + dp.get(4) + "</td></tr>";
+				dRowsHtml = dRowsHtml + "<tr><td style='" + dTd + "'>" + dp.get(0) + "</td><td style='" + dTd + ";white-space:nowrap'>" + dp.get(1) + "</td><td style='" + dTdR + "'>" + dp.get(3) + " <span style='color:#64748b;font-weight:400'>" + dp.get(2) + "</span></td><td style='" + dTdR + "'>" + dp.get(4) + "</td><td style='" + dTdBad + "'>" + dp.get(5) + "</td></tr>";
 			}
 
 			dTable = "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;margin-top:14px;border:1px solid #e2e8f0;border-radius:6px'>";
-			dTable = dTable + "<tr><th style='" + dTh + "'>Material</th><th style='" + dThR + "'>Issued</th><th style='" + dThR + "'>Received</th><th style='" + dThR + "'>Short by</th></tr>";
+			dTable = dTable + "<tr><th style='" + dTh + "'>Material</th><th style='" + dTh + "'>Order</th><th style='" + dThR + "'>Issued</th><th style='" + dThR + "'>Received</th><th style='" + dThR + "'>Short by</th></tr>";
 			dTable = dTable + dRowsHtml + "</table>";
 
 			dWord = "disputes";

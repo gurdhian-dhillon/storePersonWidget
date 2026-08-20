@@ -9,6 +9,14 @@
    loaded into the finishing widget. Unscoped, .app-header-left turned the
    finishing widget's title row into a column. */
 
+/* The SHARED .item-body is padding: 1.5rem 1.5rem 0 - no bottom at all, so the
+   last thing in an open card sits flush against its edge. Every screen that uses
+   it has to put that back. */
+.packing-app .item-body,
+.finishing-app .item-body {
+    padding-bottom: 1.5rem;
+}
+
 .packing-panel {
     display: flex;
     flex-direction: column;
@@ -94,6 +102,26 @@
     margin: 0;
 }
 
+/* The unit, sitting on the heading so it is not repeated on every row. */
+.pack-sec-unit {
+    margin-left: 0.5rem;
+    font-size: 0.65rem;
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+    color: #94a3b8;
+}
+
+/* Derived, not editable - the outer follows from the inner box. */
+.cell-input.is-derived {
+    width: 100%;
+    text-align: left;
+    background: #f8fafc;
+    color: var(--text-muted);
+    border-style: dashed;
+    cursor: not-allowed;
+}
+
 .pack-sec-hint {
     font-size: 0.7rem;
     color: #94a3b8;
@@ -171,7 +199,8 @@
 }
 
 .pack-tbl .col-no { width: 3rem; }
-.pack-tbl .col-carton { min-width: 14rem; }
+.pack-tbl .col-carton { min-width: 15rem; }
+.pack-tbl .col-outer { width: 9rem; }
 .pack-tbl .col-item { min-width: 11rem; }
 
 .it-name {
@@ -292,17 +321,6 @@
     font-size: 0.8125rem;
 }
 
-.pack-tbl tfoot .charge-row td {
-    font-weight: 600;
-    color: var(--text-muted);
-    border-top: 1px dashed var(--border);
-}
-
-.pack-tbl tfoot .charge-row .col-num {
-    color: var(--text-main);
-    font-weight: 700;
-}
-
 .pack-note {
     padding: 0.5rem 0 0;
     font-size: 0.7rem;
@@ -420,4 +438,28 @@
         width: 100%;
         order: 3;
     }
+}
+
+/* ---------- "also in the box" ---------- */
+/*
+   A reminder, not a control. Deliberately the lightest thing on the screen: no
+   card, no borders, no checkboxes. It is the one section that is not being
+   written down, and nothing here should look clickable.
+*/
+
+.inc-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.5rem;
+    padding: 0.25rem 0 0.875rem;
+}
+
+.inc-item {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.8125rem;
+    color: #475569;
+    background: #f1f5f9;
+    border-radius: 9999px;
+    padding: 0.2rem 0.7rem;
 }
