@@ -510,3 +510,8 @@
     font-weight: 700;
     font-variant-numeric: tabular-nums;
 }
+
+#pack-history-list td {
+    vertical-align: top;
+    padding-top: 0.75rem;
+}
