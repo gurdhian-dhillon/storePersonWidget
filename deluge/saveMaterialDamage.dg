@@ -94,9 +94,15 @@ string saveMaterialDamage(string payloadJson)
 
 	// Does he intend to make these pieces again?
 	//
-	// Independent of the material question. He may need cloth and not remake
-	// (someone else will), or remake with spares and need nothing. Only a piece
-	// loss can be remade - a torn label ruins no garment.
+	// STILL READ, NEVER ACTED ON. "needsRemake" was the supervisor saying whether
+	// the lost pieces should be made again, and answering it wrongly - or closing
+	// the dialog before reaching it - was one of the three ways an order ended
+	// short. coverProductionLoss decides that now, from the stage logs, and there
+	// is no way to decline it.
+	//
+	// The field is accepted and echoed back rather than rejected, so a widget that
+	// has not been re-uploaded yet still saves its damage report instead of
+	// failing on an argument the server no longer wants.
 	wantRemake = ifnull(inp.get("needsRemake"),false);
 	remakeWanted = false;
 	if(wantRemake == true || wantRemake.toString() == "true")
@@ -269,203 +275,93 @@ string saveMaterialDamage(string payloadJson)
 	}
 
 	//----------------------------------------------------------------------
-	// THE REMAKE BATCH.
+	// THE REMAKE BATCH IS NO LONGER THIS FUNCTION'S TO OPEN.
 	//
-	// A second Plan_Item for the pieces he is going to make again, created HERE
-	// and not at QC. He cannot wait for the reissue - cloth takes days - so the
-	// good pieces carry on and finish, and the replacements run as their own
-	// batch whenever the material turns up. Two items, one order, neither
-	// holding the other up.
+	// It used to be, and only when remakeWanted was ticked. That made a modal
+	// the single thing standing between a lost garment and an order shipping
+	// short: cancel the dialog or untick the box and the pieces were gone, the
+	// item completed with a reduced Qty_Produced, and nothing anywhere said so.
+	// The widget's own comment admitted it - "without it the order simply ends
+	// short".
 	//
-	// This is the same record createRemakeItems builds for a QC rejection. The
-	// only difference is the trigger and the reason, and the reason matters:
-	// a QC remake replaces a piece that WAS made and then failed, so the
-	// original already counted it. A production loss replaces a piece that was
-	// never made at all.
+	// coverProductionLoss owns it now, and saveProductionPhase calls it the
+	// moment a stage closes with fewer pieces out than in. By the time a damage
+	// report gets here the batch already exists, because the widget only opens
+	// this dialog after the phase has saved.
+	//
+	// THIS STILL HAS TO ASK, and not just for tidiness. Material_Damage
+	// .Remake_Item is what raiseReissueRequest follows to point the replacement
+	// CLOTH at the batch instead of at the original item - miss it and the store
+	// is asked twice for one event, once for the ruined material and again for
+	// the batch's own BOM. So it asks coverProductionLoss which batch this loss
+	// belongs to and writes that down.
+	//
+	// Calling it a second time is safe: it is idempotent, deriving coverage from
+	// the stage logs rather than adding a number handed to it, so it returns the
+	// existing batch and writes nothing. That is exactly why it can be called
+	// from both places.
+	//
+	// A DAMAGE REPORT WITH NO STAGE SHORTFALL OPENS NOTHING, which is correct.
+	// Damaged_Qty means "material that had to be replaced", not "garments
+	// destroyed" - a torn label ruins no piece. If garments really were lost the
+	// stage closes short and the batch appears from there.
 	//----------------------------------------------------------------------
 	remakeId = 0;
 
-	if(remakeWanted == true && damagedPieces > 0)
+	if(damagedPieces > 0)
 	{
-		// The ROOT line, never the previous remake. A remake of a remake still
-		// hangs off the original, so "how many of line 3 exist in total" stays
-		// one flat query - and Deluge has no recursion.
-		rootId = itemId;
-		srcSku = null;
-		srcBom = null;
-		srcName = itemName;
-		srcPlan = planIdNum;
-
-		for each  srcIt in Plan_Item[ID == itemId]
+		//------------------------------------------------------------------
+		// WHICH BATCH DO THESE PIECES BELONG TO?
+		//
+		// Asked, never decided here. coverProductionLoss derives the answer from
+		// the stage logs, so it returns the batch saveProductionPhase already
+		// opened when the stage closed short - and writes nothing, because the
+		// loss is already covered by then.
+		//
+		// Safe to call even when it was called seconds ago: it sets coverage TO
+		// the derived loss rather than adding a number handed to it. The old code
+		// added damagedPieces to whatever was there, which is exactly why it had
+		// to be the only caller and why cancelling this dialog lost the pieces.
+		//
+		// Its own try/catch - the damage record is already written, and a failure
+		// to resolve the batch must not report a saved report as failed.
+		//------------------------------------------------------------------
+		try
 		{
-			srcSku = srcIt.Item_Sku;
-			srcBom = srcIt.BOM;
-			if(srcIt.Remake_Of != null)
+			covRaw = thisapp.coverProductionLoss(itemId.toString());
+			covMap = covRaw.toMap();
+
+			// Booleans crossing JSON are compared as TEXT - a Map holding a mix of
+			// Boolean and String is one more chance at a mixed-type comparison.
+			if(ifnull(covMap.get("success"),"false").toString().trim() == "true")
 			{
-				rootId = srcIt.Remake_Of;
+				bTxt = ifnull(covMap.get("batchId"),"0").toString().trim();
+				if(bTxt == "")
+				{
+					bTxt = "0";
+				}
+
+				remakeId = bTxt.toLong();
+				logLines = "loss cover -> " + covRaw;
+			}
+			else
+			{
+				logLines = "loss cover REFUSED -> " + covRaw;
 			}
 		}
-
-		//------------------------------------------------------------------
-		// MERGE INTO A BATCH THAT HAS NOT STARTED, rather than opening a
-		// second one. Two losses on one item would otherwise mean running
-		// every stage twice for two and one piece.
-		//
-		// "Not started" is tested on Stage_Log, not on Item_Status: a batch
-		// can sit at Ready_For_Production for days and still be safe to add
-		// to, but the moment a stage exists its Qty_In is fixed and quietly
-		// raising the order quantity underneath it would leave the stage
-		// short of the item it belongs to.
-		//------------------------------------------------------------------
-		openBatch = 0;
-		for each  cand in Plan_Item[Plan == srcPlan && Remake_Of == rootId]
+		catch (eCov)
 		{
-			if(openBatch == 0 && ifnull(cand.Remake_Reason,"").toString() == "Production_Loss")
-			{
-				if(Stage_Log[Plan_Item == cand.ID].count() == 0)
-				{
-					openBatch = cand.ID;
-				}
-			}
-		}
-
-		if(openBatch > 0)
-		{
-			for each  ob in Plan_Item[ID == openBatch]
-			{
-				haveQ = ifnull(ob.Qty_Ordered,"0").toString().trim();
-				if(haveQ == "")
-				{
-					haveQ = "0";
-				}
-				ob.Qty_Ordered = haveQ.toDecimal().toLong() + damagedPieces;
-			}
-			remakeId = openBatch;
-			logLines = "merged " + damagedPieces + " into remake batch " + openBatch;
-		}
-		else
-		{
-			// Highest Line_No on the plan, so the new batch sorts last.
-			maxLine = 0;
-			planItemsAsc = Plan_Item[Plan == srcPlan] sort by Line_No;
-			for each  pl in planItemsAsc
-			{
-				maxLine = ifnull(pl.Line_No,0);
-			}
-
-			newItemId = insert into Plan_Item
-			[
-				Plan=srcPlan
-				Item_Name=srcName
-				Qty_Ordered=damagedPieces
-				Qty_Produced=0
-				Qty_Accepted=0
-				Qty_Rejected=0
-				Item_Status="Awaiting_Material"
-				Line_No=maxLine + 1
-				Is_Remake=true
-				Remake_Reason="Production_Loss"
-				Added_User=zoho.loginuser
-			];
-
-			remakeId = newItemId.toLong();
-
-			// Lookups after the insert - a null one fails the whole block.
-			for each  ni in Plan_Item[ID == remakeId]
-			{
-				if(srcSku != null)
-				{
-					ni.Item_Sku = srcSku;
-				}
-				if(srcBom != null)
-				{
-					ni.BOM = srcBom;
-				}
-				ni.Remake_Of = rootId;
-			}
-			logLines = "opened remake batch " + remakeId + " for " + damagedPieces;
-		}
-
-		//------------------------------------------------------------------
-		// A batch nobody will issue material for is READY, not waiting.
-		//
-		// receiveMaterials only ever moves an item to Ready_For_Production,
-		// and it treats an item with no requirements as not-ready - so a
-		// remake he has spares for would sit at Awaiting_Material for ever
-		// with nothing that could release it.
-		//------------------------------------------------------------------
-		if(lineCount == 0 || pendingLines == 0)
-		{
-			for each  rdy in Plan_Item[ID == remakeId]
-			{
-				if(ifnull(rdy.Item_Status,"").toString() == "Awaiting_Material")
-				{
-					rdy.Item_Status = "Ready_For_Production";
-				}
-			}
-		}
-
-		//------------------------------------------------------------------
-		// THE PLAN HAS TO BE SOMEWHERE HE CAN SEE THE BATCH.
-		//
-		// A shortfall on the LAST stage completes the plan, so the batch is
-		// created against a plan that is already "Production Complete" - and
-		// getProductionWidgetData deliberately leaves those out, because they
-		// are history. The batch would exist, be owed to the customer, and be
-		// invisible to the only person who can build it.
-		//
-		// raiseReissueRequest does the same thing when material is asked for.
-		// This covers the case where none is - he has spares, so nothing else
-		// would ever reopen the plan.
-		//
-		// Forward from a finished state only. A plan already back at work is
-		// left where it is: "In Progress" is production's to own, and Pending or
-		// Partially Received would be a step backwards.
-		//------------------------------------------------------------------
-		for each  plB in Production_Planning[ID == srcPlan]
-		{
-			pStB = ifnull(plB.Order_Status,"").toString();
-			if(pStB == "Material Ready" || pStB == "Production Complete")
-			{
-				plB.Order_Status = "In Progress";
-				logLines = logLines + " | plan pulled back from '" + pStB + "'";
-			}
-		}
-
-		//------------------------------------------------------------------
-		// AND THE SALES ORDER WITH IT.
-		//
-		// saveProductionPhase mirrors the plan onto the order, so a shortfall on
-		// the last stage sets BOTH to Production Complete. Pulling only the plan
-		// back left the order claiming it was finished while it was still owed
-		// pieces - and the order is what most screens and reports read.
-		//
-		// Safe now that QC filters on Ready_For_QC rather than on this status:
-		// the pieces that ARE finished stay inspectable while the batch runs.
-		//
-		// Only from Production Complete, the same rule createRemakeItems applies.
-		// An order already past QC - passed, packed, dispatched - is not dragged
-		// backwards by a late damage report.
-		//------------------------------------------------------------------
-		for each  plO in Production_Planning[ID == srcPlan]
-		{
-			if(plO.Sales_Order != null)
-			{
-				for each  soB in Sales_Order[ID == plO.Sales_Order]
-				{
-					if(ifnull(soB.Order_Status,"").toString() == "Production Complete")
-					{
-						soB.Order_Status = "In Progress";
-					}
-				}
-			}
+			logLines = "loss cover THREW: " + eCov.toString();
 		}
 
 		// Written on the damage record so raiseReissueRequest knows which item
 		// the material is really for.
-		for each  dmgU in Material_Damage[ID == damageId]
+		if(remakeId > 0)
 		{
-			dmgU.Remake_Item = remakeId;
+			for each  dmgU in Material_Damage[ID == damageId]
+			{
+				dmgU.Remake_Item = remakeId;
+			}
 		}
 	}
 

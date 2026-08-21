@@ -200,13 +200,50 @@ string raiseReissueRequest(string payloadJson)
 		// it, so the flag adds nothing - and a Creator field that was never written
 		// reads EMPTY rather than false, which makes "== false" a mixed-type
 		// comparison, and those THROW rather than returning false.
-		if(remakeReason != "Check_Reject")
+		// TWO REASONS TAKE THIS PATH, and they need the same thing: the batch's
+		// whole BOM, all or nothing, costed by the same arithmetic as the
+		// original. Check_Reject is the checker rejecting garments that were
+		// made; Production_Loss is coverProductionLoss replacing garments a stage
+		// never produced. What differs is the why on the row and the Source, and
+		// the Source matters - it is what the draft test reads back.
+		if(remakeReason != "Check_Reject" && remakeReason != "Production_Loss")
 		{
-			return "{\"success\":false,\"error\":\"" + itemName.replaceAll("\"","'") + " is not a batch the checker rejected\"}";
+			return "{\"success\":false,\"error\":\"" + itemName.replaceAll("\"","'") + " is not a remake batch\"}";
+		}
+
+		isLossBatch = false;
+		remakeSrc = "Check_Remake";
+
+		if(remakeReason == "Production_Loss")
+		{
+			isLossBatch = true;
+			remakeSrc = "Production_Remake";
 		}
 
 		// count(), not size() - this is a query result, not a List.
-		if(Material_Requirement[Plan_Item == itemId && Source == "Check_Remake"].count() > 0)
+		//
+		// A LOSS BATCH TESTS FOR ANY REQUIREMENT AT ALL, not just its own Source.
+		// A damage report on the same event points its replacement cloth at this
+		// batch through Material_Damage.Remake_Item and writes rows of Source
+		// "Reissue" against it; asking only about "Production_Remake" would issue
+		// the full BOM on top of those and the store would be asked twice for one
+		// loss. getReissueDrafts applies the identical test, and the two must keep
+		// agreeing or the tab and the button disagree about whether there is work.
+		alreadyAsked = false;
+
+		if(isLossBatch == true)
+		{
+			if(Material_Requirement[Plan_Item == itemId].count() > 0)
+			{
+				alreadyAsked = true;
+			}
+		}
+		else if(Material_Requirement[Plan_Item == itemId && Source == "Check_Remake"].count() > 0)
+		{
+			alreadyAsked = true;
+		}
+
+		if(alreadyAsked == true)
 		{
 			return "{\"success\":false,\"error\":\"The store has already been asked for " + itemName.replaceAll("\"","'") + ". It is on their issue screen.\"}";
 		}
@@ -224,7 +261,62 @@ string raiseReissueRequest(string payloadJson)
 		whyRemakeTxt = "Rejected at checking";
 		chkDateVal = null;
 
-		if(checkRefId != null)
+		//------------------------------------------------------------------
+		// A LOSS BATCH HAS NO CHECK TO QUOTE. Its why comes off the stages that
+		// let the pieces go, which is what the store wants to see on their own
+		// screen - "we are cutting this again because Stitching lost 2" reads as
+		// an account of something, where a bare "reissue" reads as an error.
+		//------------------------------------------------------------------
+		if(isLossBatch == true)
+		{
+			whyRemakeTxt = "Lost in production, remake";
+			lossWhereTxt = "";
+			lossRootId = 0;
+
+			for each  lrIt in Plan_Item[ID == itemId]
+			{
+				if(lrIt.Remake_Of != null)
+				{
+					lossRootId = lrIt.Remake_Of;
+				}
+			}
+
+			if(lossRootId != 0)
+			{
+				for each  lgW in Stage_Log[Plan_Item == lossRootId && Stage_Status == "Done"]
+				{
+					// A Creator numeric never written is an EMPTY STRING, not
+					// null, and toDecimal() throws on it.
+					wiS = ifnull(lgW.Qty_In,"0").toString().trim();
+					if(wiS == "")
+					{
+						wiS = "0";
+					}
+					woS = ifnull(lgW.Qty_Out,"0").toString().trim();
+					if(woS == "")
+					{
+						woS = "0";
+					}
+
+					wGap = wiS.toDecimal().toLong() - woS.toDecimal().toLong();
+
+					if(wGap > 0)
+					{
+						if(lossWhereTxt != "")
+						{
+							lossWhereTxt = lossWhereTxt + ", ";
+						}
+						lossWhereTxt = lossWhereTxt + ifnull(lgW.Phase_Name,"").toString() + " " + wGap;
+					}
+				}
+			}
+
+			if(lossWhereTxt != "")
+			{
+				whyRemakeTxt = "Lost in production - " + lossWhereTxt + ", remake";
+			}
+		}
+		else if(checkRefId != null)
 		{
 			for each  icQ in Item_Check[ID == checkRefId]
 			{
@@ -251,7 +343,7 @@ string raiseReissueRequest(string payloadJson)
 			}
 		}
 
-		matsTxt = thisapp.buildItemRequirements(bomKey,qtyOrdS,"check remake of " + itemName + " (item " + itemId + ")");
+		matsTxt = thisapp.buildItemRequirements(bomKey,qtyOrdS,remakeSrc + " of " + itemName + " (item " + itemId + ")");
 		matsList = matsTxt.toJSONList();
 
 		for each  mRaw in matsList
@@ -273,7 +365,7 @@ string raiseReissueRequest(string payloadJson)
 				Required_Pieces=mm.get("pcs")
 				Pieces_From_Waste=0
 				Pieces_From_Raw=0
-				Source="Check_Remake"
+				Source=remakeSrc
 				Reason=whyRemakeTxt
 				Added_User=zoho.loginuser
 			];

@@ -110,6 +110,16 @@ function openDamageDialog(plan, item, opts) {
             '<b>' + o.pieces + '</b> fewer piece' + (o.pieces === 1 ? '' : 's') +
             ' came out of ' + escapeHtml(o.phaseName || 'this stage') +
             ' than went in. What material went with them?' +
+            '</div>' +
+            // SAYS WHAT HAS ALREADY HAPPENED, so closing this dialog is a safe
+            // thing to do. The batch is opened by the server the moment the
+            // stage closes short - this dialog no longer decides it, and he
+            // should not be left guessing that cancelling loses the pieces.
+            // It did, once, and that is what this whole mechanism replaced.
+            '<div class="dmg-covered">' +
+            'A replacement batch for ' + (o.pieces === 1 ? 'it' : 'them') +
+            ' has already been opened &mdash; find it on the <b>Reissue</b> tab. ' +
+            'This form is only about the material.' +
             '</div>'
             : '') +
 
@@ -124,23 +134,20 @@ function openDamageDialog(plan, item, opts) {
         'a torn label or a snapped thread still costs material.</p>' +
         '</div>' +
 
-        // THE REMAKE DECISION, separate from the material one.
+        // THERE IS NO REMAKE DECISION HERE ANY MORE.
         //
-        // He cannot wait for the cloth — a reissue takes days — so the good
-        // pieces carry on and finish, and ticking this opens a second batch
-        // for the replacements that runs whenever the material turns up.
-        // Without it the order simply ends short.
+        // A tickbox used to sit here — "These pieces need making again" — and
+        // whether the lost garments were ever replaced hung off it. Its own
+        // comment admitted the cost: without it the order simply ends short. So
+        // did closing this dialog before reaching it.
         //
-        // Only meaningful when a garment was actually spoiled: a torn label
-        // ruins no piece, so there is nothing to make again.
-        '<div class="dmg-step" id="dmg-remake-wrap">' +
-        '<label class="dmg-check">' +
-        '<input type="checkbox" id="dmg-remake" checked>' +
-        '<span>These pieces need making again</span>' +
-        '</label>' +
-        '<p class="exc-hint">A second batch is opened for them straight away. ' +
-        'The pieces you already have carry on and finish without waiting.</p>' +
-        '</div>' +
+        // coverProductionLoss decides it now, from the stage logs, the moment a
+        // stage closes with fewer pieces out than in. It cannot be declined,
+        // it cannot be missed by cancelling a modal, and the batch it opens
+        // holds the order open until the pieces are made or somebody explicitly
+        // says the order is shipping short.
+        //
+        // This dialog is back to one job: recording WHICH MATERIAL was ruined.
 
         '<div id="dmg-mats"></div>' +
 
@@ -152,20 +159,6 @@ function openDamageDialog(plan, item, opts) {
     document.getElementById('dmg-next').addEventListener('click', function () {
         loadDamageProposal();
     });
-
-    var pcsEl = document.getElementById('dmg-pieces');
-    var syncRemake = function () {
-        var wrap = document.getElementById('dmg-remake-wrap');
-        var box = document.getElementById('dmg-remake');
-        if (!wrap || !box) return;
-        var n = Number(pcsEl ? pcsEl.value : 0) || 0;
-        // Hidden rather than disabled at zero: there is nothing to decide, and a
-        // greyed-out tick invites him to wonder what he is missing.
-        wrap.style.display = n > 0 ? '' : 'none';
-        if (n <= 0) box.checked = false;
-    };
-    if (pcsEl) pcsEl.addEventListener('input', syncRemake);
-    syncRemake();
 }
 
 function loadDamageProposal() {
@@ -463,10 +456,10 @@ function saveDamage() {
                 stageLogId: String(damageCtx.stageLogId || ''),
                 phaseName: String(damageCtx.phaseName || ''),
                 damagedPieces: String(pieces),
-                needsRemake: (function () {
-                    var b = document.getElementById('dmg-remake');
-                    return pieces > 0 && b ? b.checked : false;
-                })(),
+                // needsRemake is no longer sent. The server still accepts and
+                // echoes it so an un-refreshed widget keeps working, but nothing
+                // reads it — coverProductionLoss opens the batch off the stage
+                // logs and there is no way to decline it.
                 reason: reason,
                 note: noteText,
                 lines: lines
@@ -586,6 +579,169 @@ function renderReissue() {
             raiseReissue(Number(btn.getAttribute('data-item')), btn);
         });
     });
+
+    panel.querySelectorAll('.ri-shortclose').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            openShortCloseDialog(Number(btn.getAttribute('data-item')));
+        });
+    });
+}
+
+// ---- Ship the order short ----
+//
+// THE ONLY WAY PAST A PRODUCTION LOSS, and it is deliberately the hardest thing
+// on this tab to do by accident.
+//
+// It is a decision about what a customer receives, so it is not a tick and it is
+// not a browser confirm(). The dialog states the order, the quantity ordered and
+// the quantity that will actually ship, in that order and in that size; the
+// button stays disabled until a reason is typed; and the reason is written onto
+// the order where the office can read it months later.
+//
+// What it does NOT do is cancel work already under way. shortCloseOrder closes
+// out only the batches nobody has started — pieces being made on the floor right
+// now still finish and still go to the customer.
+
+var shortCloseIdx = -1;
+
+function shortCloseModalEl() {
+    var el = document.getElementById('sc-modal');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'sc-modal';
+        el.className = 'exc-modal hidden';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+function closeShortCloseDialog() {
+    shortCloseModalEl().classList.add('hidden');
+    shortCloseIdx = -1;
+}
+
+function openShortCloseDialog(idx) {
+    var it = reissueItems[idx];
+    if (!it) return;
+
+    shortCloseIdx = idx;
+
+    var ordered = Number(it.ordered) || 0;
+    var deliverable = Number(it.deliverable) || 0;
+    var qty = Number(it.qty) || 0;
+
+    var el = shortCloseModalEl();
+    el.classList.remove('hidden');
+    el.innerHTML =
+        '<div class="exc-panel sc-panel">' +
+        '<div class="sc-head">' +
+        '<h3>Ship ' + escapeHtml(it.salesOrder || 'this order') + ' short?</h3>' +
+        '</div>' +
+
+        '<div class="sc-body">' +
+        '<div class="sc-nums">' +
+        '<div class="sc-num"><span>Customer ordered</span><b>' + fmt(ordered) + '</b></div>' +
+        '<div class="sc-num"><span>They will receive</span><b>' + fmt(deliverable) + '</b></div>' +
+        '<div class="sc-num is-gap"><span>Short by</span><b>' + fmt(qty) + '</b></div>' +
+        '</div>' +
+
+        '<p class="sc-warn">' +
+        'These <b>' + fmt(qty) + '</b> piece' + (qty === 1 ? '' : 's') + ' of ' +
+        '<b>' + escapeHtml(it.item || 'this item') + '</b> will not be made. ' +
+        'The order will be allowed to finish and be packed under quantity.' +
+        '</p>' +
+        '<p class="sc-warn-sub">' +
+        'Work already started on the floor is not cancelled &mdash; only batches ' +
+        'nobody has touched. If these pieces should be made, close this and press ' +
+        '<b>Ask the store</b> instead.' +
+        '</p>' +
+
+        '<label class="sc-label" for="sc-reason">Why is this order shipping short?</label>' +
+        '<textarea id="sc-reason" rows="3" placeholder="e.g. customer accepted 14, needs it Friday"></textarea>' +
+        '</div>' +
+
+        '<p class="sc-error hidden" id="sc-error"></p>' +
+
+        '<div class="sc-foot">' +
+        '<button type="button" class="ghost-btn" id="sc-cancel">Keep the order whole</button>' +
+        '<button type="button" class="sc-confirm-btn" id="sc-confirm" disabled>Ship short</button>' +
+        '</div>' +
+        '</div>';
+
+    document.getElementById('sc-cancel').addEventListener('click', closeShortCloseDialog);
+
+    // The confirm button is dead until a reason exists. An unexplained short
+    // close is indistinguishable from the accident this whole change replaced.
+    var reasonEl = document.getElementById('sc-reason');
+    var confirmEl = document.getElementById('sc-confirm');
+    reasonEl.addEventListener('input', function () {
+        confirmEl.disabled = reasonEl.value.trim() === '';
+    });
+
+    confirmEl.addEventListener('click', function () {
+        sendShortClose(reasonEl.value.trim(), confirmEl);
+    });
+}
+
+function sendShortClose(reason, btn) {
+    var it = reissueItems[shortCloseIdx];
+    if (!it) return;
+
+    var errEl = document.getElementById('sc-error');
+    errEl.classList.add('hidden');
+
+    if (!reason) {
+        errEl.textContent = 'Say why this order is shipping short.';
+        errEl.classList.remove('hidden');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Closing...';
+
+    function fail(msg) {
+        errEl.textContent = msg;
+        errEl.classList.remove('hidden');
+        btn.disabled = false;
+        btn.textContent = 'Ship short';
+    }
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'shortCloseOrder',
+        http_method: 'POST',
+        payload: {
+            payloadJson: JSON.stringify({
+                // The plan's order, not the item — a short close is a decision
+                // about the whole order, and the server resolves it from there.
+                salesOrderId: String(it.salesOrderId || ''),
+                planId: String(it.planId || ''),
+                reason: reason
+            })
+        }
+    }).then(function (response) {
+        var parsed;
+        try {
+            parsed = JSON.parse(response.result);
+        } catch (e) {
+            console.error('shortCloseOrder parse failed:', e, response.result);
+            fail('Could not read the reply from Creator.');
+            return;
+        }
+
+        if (!parsed.success) {
+            fail(parsed.error || 'The order was not closed.');
+            return;
+        }
+
+        closeShortCloseDialog();
+        alert(parsed.salesOrder + ' is marked as shipping short.\n\n' +
+            parsed.cancelledPieces + ' piece(s) across ' + parsed.cancelledBatches +
+            ' batch(es) will not be made.');
+        loadReissue();
+    }).catch(function (err) {
+        console.error('shortCloseOrder error:', err);
+        fail('Network error. Check the console.');
+    });
 }
 
 function damageCardHtml(it, idx) {
@@ -648,6 +804,21 @@ function remakeCardHtml(it, idx) {
     var when = ((it.lines || [])[0] || {}).reportedOn || '';
     var qty = Number(it.qty) || 0;
 
+    // A PRODUCTION LOSS IS THE SAME CARD WITH A WARNING ON IT.
+    //
+    // Materially it is identical to a rejected batch: a whole BOM, all or
+    // nothing, raised with one button. What is different is the consequence of
+    // ignoring it — a rejected batch replaces garments that were made and
+    // counted, so the order is whole while it runs; a lost one means the
+    // customer is short until somebody does something about it.
+    //
+    // So the card says so, at the top, in the order's own numbers. It stays on
+    // this tab until the store is asked or the order is deliberately closed
+    // short — it cannot be dismissed, which is the entire point.
+    var isLoss = it.remakeReason === 'Production_Loss';
+    var ordered = Number(it.ordered) || 0;
+    var deliverable = Number(it.deliverable) || 0;
+
     var rows = (it.lines || []).map(function (l) {
         var isFab = l.isFab === true;
         return '<tr>' +
@@ -664,25 +835,65 @@ function remakeCardHtml(it, idx) {
             '</tr>';
     }).join('');
 
-    return '<div class="item-card ri-card ri-remake">' +
+    return '<div class="item-card ri-card ri-remake' + (isLoss ? ' ri-loss' : '') + '">' +
+
+        // THE SHORTFALL, IN THE ORDER'S OWN NUMBERS, ABOVE EVERYTHING ELSE.
+        //
+        // Not a hint and not a coloured word in a sentence — the whole width of
+        // the card, before the item name, saying what the customer asked for and
+        // what they would actually get. This is the warning that was missing
+        // entirely: orders were reaching Packed under quantity with nothing
+        // anywhere saying so.
+        (isLoss
+            ? '<div class="ri-short-banner">' +
+              '<div class="ri-short-title">' + escapeHtml(it.salesOrder || 'This order') +
+              ' will ship short</div>' +
+              '<div class="ri-short-nums">' +
+              '<span>Ordered <b>' + fmt(ordered) + '</b></span>' +
+              '<span>Can deliver <b>' + fmt(deliverable) + '</b></span>' +
+              '<span class="ri-short-gap"><b>' + fmt(qty) + '</b> short</span>' +
+              '</div>' +
+              (it.lostAt
+                  ? '<div class="ri-short-where">Lost at ' + escapeHtml(it.lostAt) + '</div>'
+                  : '') +
+              '</div>'
+            : '') +
+
         '<div class="ri-head">' +
         '<div>' +
         '<h2>' + escapeHtml(it.item || 'Item') + '</h2>' +
         '<div class="ri-sub">' + escapeHtml(it.salesOrder || '') + '</div>' +
         '</div>' +
+        '<div class="ri-head-acts">' +
+        // Ship short sits BESIDE the fix, never instead of it, and never first.
+        // It is the quieter of the two on purpose: making the pieces is the
+        // ordinary answer, and under-delivering is the exception that has to be
+        // argued for.
+        (isLoss
+            ? '<button type="button" class="ghost-btn ri-shortclose" data-item="' + idx + '">' +
+              'Ship order short' +
+              '</button>'
+            : '') +
         '<button type="button" class="primary-btn ri-raise" data-item="' + idx + '">' +
         'Ask the store' +
         '</button>' +
+        '</div>' +
         '</div>' +
 
         // Says what happened and what it commits him to. Nothing has reached the
         // store yet and the batch cannot start until it does, which is the one
         // thing he needs to know before pressing the button.
         '<div class="ri-remake-why">' +
-        '<b>' + fmt(qty) + '</b> piece' + (qty === 1 ? '' : 's') + ' failed checking' +
-        (it.round ? ' in round ' + escapeHtml(String(it.round)) : '') +
-        (when ? ' on ' + escapeHtml(when) : '') +
-        '. This is the material to make them again &mdash; the store has not been asked for it yet.' +
+        (isLoss
+            ? '<b>' + fmt(qty) + '</b> piece' + (qty === 1 ? '' : 's') +
+              ' never came out of production. This is the material to make them ' +
+              'again &mdash; the store has not been asked for it yet, and the order ' +
+              'cannot finish until they are made.'
+            : '<b>' + fmt(qty) + '</b> piece' + (qty === 1 ? '' : 's') + ' failed checking' +
+              (it.round ? ' in round ' + escapeHtml(String(it.round)) : '') +
+              (when ? ' on ' + escapeHtml(when) : '') +
+              '. This is the material to make them again &mdash; the store has not ' +
+              'been asked for it yet.') +
         '</div>' +
 
         '<div class="table-wrapper">' +

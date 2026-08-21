@@ -181,10 +181,17 @@ string getReissueDrafts(string supervisorId)
 
 	// Newest first, same as the damage cards. "sort by" must sit on its own
 	// assignment; inline in a for-each header it does not reliably parse.
-	draftBatches = Plan_Item[Remake_Reason == "Check_Reject" && Item_Status == "Awaiting_Material"] sort by Added_Time desc;
+	// BOTH KINDS OF BATCH NOBODY HAS ASKED FOR. Check_Reject is the checker
+	// rejecting garments; Production_Loss is coverProductionLoss replacing pieces
+	// a stage lost. They are the same card - a whole BOM, all or nothing - and
+	// they differ only in the why, and in what happens if he ignores it.
+	draftBatches = Plan_Item[Item_Status == "Awaiting_Material" && (Remake_Reason == "Check_Reject" || Remake_Reason == "Production_Loss")] sort by Added_Time desc;
 
 	planSupCache = Map();
 	planOrderCache = Map();
+	// The order ID as well as its number - the ship-short action on a loss card
+	// acts on the order, and this walk is already being made for the name.
+	planOrderIdCache = Map();
 
 	for each  rb in draftBatches
 	{
@@ -207,6 +214,7 @@ string getReissueDrafts(string supervisorId)
 				// re-fetched on every batch it owns.
 				supKey = "-";
 				soName = "";
+				soIdTxt = "";
 
 				for each  plQ in Production_Planning[ID == rbPlanKey.toLong()]
 				{
@@ -216,6 +224,8 @@ string getReissueDrafts(string supervisorId)
 					}
 					if(plQ.Sales_Order != null)
 					{
+						soIdTxt = plQ.Sales_Order.toString();
+
 						for each  soQ in Sales_Order[ID == plQ.Sales_Order]
 						{
 							soName = ifnull(soQ.Sales_Order,"").toString().replaceAll("\"","'");
@@ -225,6 +235,7 @@ string getReissueDrafts(string supervisorId)
 
 				planSupCache.put(rbPlanKey,supKey);
 				planOrderCache.put(rbPlanKey,soName);
+				planOrderIdCache.put(rbPlanKey,soIdTxt);
 			}
 
 			// Ids compared as text on both sides - a mixed-type comparison
@@ -239,7 +250,29 @@ string getReissueDrafts(string supervisorId)
 				//
 				// count(), not size() - this is a query result, not a List.
 				//----------------------------------------------------
-				if(Material_Requirement[Plan_Item == rb.ID && Source == "Check_Remake"].count() == 0)
+				rbReason = ifnull(rb.Remake_Reason,"").toString().trim();
+				alreadyAsked = false;
+
+				if(rbReason == "Production_Loss")
+				{
+					// ANY requirement at all, from any source - deliberately not a
+					// list of Source values. A damage report on the same event points
+					// its replacement cloth at this batch through
+					// Material_Damage.Remake_Item and writes rows of Source "Reissue"
+					// against it; matching only on "Production_Remake" would offer the
+					// full BOM on top of those and the store would be asked twice for
+					// one loss.
+					if(Material_Requirement[Plan_Item == rb.ID].count() > 0)
+					{
+						alreadyAsked = true;
+					}
+				}
+				else if(Material_Requirement[Plan_Item == rb.ID && Source == "Check_Remake"].count() > 0)
+				{
+					alreadyAsked = true;
+				}
+
+				if(alreadyAsked == false)
 				{
 					bomKey = "";
 					if(rb.BOM != null)
@@ -273,6 +306,64 @@ string getReissueDrafts(string supervisorId)
 					if(roundTxt != "")
 					{
 						whyTxt = whyTxt + " - round " + roundTxt;
+					}
+
+					//----------------------------------------------------
+					// WHAT THE CUSTOMER IS SHORT BY, for the warning on the
+					// card. Only a production loss carries it: a rejected
+					// batch replaces garments that were made and counted, so
+					// the order is not short while it runs.
+					//
+					// The batch's own Qty_Ordered IS the shortfall - that is
+					// what coverProductionLoss opened it for - and the root
+					// line's Qty_Ordered is what the customer asked for.
+					//----------------------------------------------------
+					orderedQty = 0;
+					lostAtTxt = "";
+
+					if(rbReason == "Production_Loss")
+					{
+						whyTxt = "Lost in production";
+
+						if(rb.Remake_Of != null)
+						{
+							for each  rootQ in Plan_Item[ID == rb.Remake_Of]
+							{
+								roQS = ifnull(rootQ.Qty_Ordered,"0").toString().trim();
+								if(roQS == "")
+								{
+									roQS = "0";
+								}
+								orderedQty = roQS.toDecimal().toLong();
+							}
+
+							// Which stages let them go. Named so the card is an
+							// account of what happened rather than a bare number.
+							for each  lgQ in Stage_Log[Plan_Item == rb.Remake_Of && Stage_Status == "Done"]
+							{
+								lqiS = ifnull(lgQ.Qty_In,"0").toString().trim();
+								if(lqiS == "")
+								{
+									lqiS = "0";
+								}
+								lqoS = ifnull(lgQ.Qty_Out,"0").toString().trim();
+								if(lqoS == "")
+								{
+									lqoS = "0";
+								}
+
+								lqGap = lqiS.toDecimal().toLong() - lqoS.toDecimal().toLong();
+
+								if(lqGap > 0)
+								{
+									if(lostAtTxt != "")
+									{
+										lostAtTxt = lostAtTxt + ", ";
+									}
+									lostAtTxt = lostAtTxt + ifnull(lgQ.Phase_Name,"").toString().replaceAll("\"","'") + " (" + lqGap + ")";
+								}
+							}
+						}
 					}
 
 					//----------------------------------------------------
@@ -339,7 +430,19 @@ string getReissueDrafts(string supervisorId)
 							remakeJson = remakeJson + ",";
 						}
 
-						remakeJson = remakeJson + "{\"kind\":\"remake\",\"planItemId\":\"" + rb.ID + "\",\"planId\":\"" + rbPlanKey + "\",\"item\":\"" + ifnull(rb.Item_Name,"").toString().replaceAll("\"","'") + "\",\"salesOrder\":\"" + ifnull(planOrderCache.get(rbPlanKey),"").toString() + "\",\"qty\":" + qtyOrdS + ",\"round\":\"" + roundTxt + "\",\"why\":\"" + whyTxt + "\",\"lines\":[" + lnJson + "]}";
+						// remakeReason is what the widget draws the card from:
+						// a Production_Loss card carries the shortfall banner and
+						// the ship-short action, a Check_Reject one does not.
+						// deliverable is sent computed rather than left to the
+						// widget, so the figure the supervisor is warned with and
+						// the figure the server holds cannot disagree.
+						deliverQty = orderedQty - qtyOrdS.toDecimal().toLong();
+						if(deliverQty < 0)
+						{
+							deliverQty = 0;
+						}
+
+						remakeJson = remakeJson + "{\"kind\":\"remake\",\"remakeReason\":\"" + rbReason + "\",\"planItemId\":\"" + rb.ID + "\",\"planId\":\"" + rbPlanKey + "\",\"item\":\"" + ifnull(rb.Item_Name,"").toString().replaceAll("\"","'") + "\",\"salesOrder\":\"" + ifnull(planOrderCache.get(rbPlanKey),"").toString() + "\",\"salesOrderId\":\"" + ifnull(planOrderIdCache.get(rbPlanKey),"").toString() + "\",\"qty\":" + qtyOrdS + ",\"ordered\":" + orderedQty + ",\"deliverable\":" + deliverQty + ",\"lostAt\":\"" + lostAtTxt + "\",\"round\":\"" + roundTxt + "\",\"why\":\"" + whyTxt + "\",\"lines\":[" + lnJson + "]}";
 
 						remakeCount = remakeCount + 1;
 					}

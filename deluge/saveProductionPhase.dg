@@ -101,6 +101,11 @@ string saveProductionPhase(string payloadJson)
 		// toDecimal() throws on empty - normalise to string first.
 		qInStr = ifnull(inp.get("qtyIn"),"0").toString().trim();
 		if (qInStr == "") { qInStr = "0"; }
+		// Initialised HERE, not where it is written. It is only assigned on the
+		// End path, and the response below quotes it on every path - a Deluge
+		// variable that was never assigned throws when it is read.
+		lossWarn = "";
+
 		qOutStr = ifnull(inp.get("qtyOut"),"0").toString().trim();
 		if (qOutStr == "") { qOutStr = "0"; }
 		seqStr = ifnull(inp.get("sequence"),"0").toString().trim();
@@ -403,6 +408,74 @@ string saveProductionPhase(string payloadJson)
 		if (endTStr != "")
 		{
 			//--------------------------------------------------------------
+			// PIECES THAT DID NOT COME OUT ARE MADE AGAIN, AUTOMATICALLY.
+			//
+			// This is the only thing standing between a stage losing garments
+			// and an order shipping short. It used to be a modal: the widget
+			// asked, saveMaterialDamage opened the batch, and it did so only if
+			// the supervisor answered and left a tick in place. Cancel it, untick
+			// it, or lower a finished count afterwards and the pieces were gone -
+			// the item completed with a reduced Qty_Produced, the checker
+			// inspected fewer, packing's "every finished piece boxed" test passed,
+			// and the order reached Packed under quantity with nothing anywhere
+			// saying so.
+			//
+			// coverProductionLoss is IDEMPOTENT - it sets coverage to the loss the
+			// stage logs describe rather than adding a number handed to it - so
+			// calling it here, and again from a damage report a minute later,
+			// cannot open two batches or double one.
+			//
+			// THE FIGURES ARE RE-READ FROM THE ROW rather than taken from the
+			// locals above. Two branches wrote it, an alteration stage has its
+			// Qty_Out forced, and a split stage's total was recomputed from its
+			// shares - the record is the only thing that knows what all of that
+			// settled on.
+			//
+			// IT RUNS BEFORE THE ROLL-UP BELOW so the new batch is already an open
+			// item when the all-items-done test looks. That test is what keeps the
+			// order off the checker's queue until the pieces are made, and a batch
+			// opened one statement too late would miss its own order completing.
+			//
+			// ITS OWN TRY/CATCH, because the stage is already written. A failure
+			// here must not report a saved stage as failed - but it must not be
+			// silent either, so it travels back in the payload and the widget says
+			// so out loud.
+			//--------------------------------------------------------------
+			lossWarn = "";
+
+			if (isAlterationBatch == false && logId > 0)
+			{
+				lossIn = 0;
+				lossOut = 0;
+
+				for each  lgLoss in Stage_Log[ID == logId]
+				{
+					// A Creator numeric never written is an EMPTY STRING, not
+					// null, and toDecimal() throws on it.
+					liS = ifnull(lgLoss.Qty_In,"0").toString().trim();
+					if (liS == "") { liS = "0"; }
+					loS = ifnull(lgLoss.Qty_Out,"0").toString().trim();
+					if (loS == "") { loS = "0"; }
+
+					lossIn = liS.toDecimal().toLong();
+					lossOut = loS.toDecimal().toLong();
+				}
+
+				if (lossIn > lossOut)
+				{
+					try
+					{
+						info thisapp.coverProductionLoss(itemId.toString());
+					}
+					catch (eLoss)
+					{
+						lossWarn = "The " + (lossIn - lossOut) + " missing pieces could NOT be queued for remaking: " + eLoss.toString().replaceAll("\"","'") + " - tell the office before this order is packed.";
+						info "coverProductionLoss FAILED for item " + itemId + ": " + eLoss.toString();
+					}
+				}
+			}
+
+			//--------------------------------------------------------------
 			// THE INVARIANT THE WHOLE CHECKING MODULE RESTS ON.
 			//
 			// THIS FUNCTION NO LONGER WRITES "Complete". The last stage ending
@@ -648,7 +721,7 @@ string saveProductionPhase(string payloadJson)
 		// pieces came out than went in. Without it the report is still made, but
 		// with no Stage_Log behind it - and "which stage loses most" is then
 		// unanswerable, which is the question the whole feature exists for.
-		res = "{\"success\":true,\"logId\":\"" + logId + "\",\"orderComplete\":" + orderDone + ",\"salesOrder\":\"" + soNoTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"totalOrdered\":" + totalOrdered + ",\"totalProduced\":" + totalProduced + ",\"totalRemade\":" + totalRemade + ",\"summary\":[" + sumJson + "]}";
+		res = "{\"success\":true,\"logId\":\"" + logId + "\",\"orderComplete\":" + orderDone + ",\"salesOrder\":\"" + soNoTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"totalOrdered\":" + totalOrdered + ",\"totalProduced\":" + totalProduced + ",\"totalRemade\":" + totalRemade + ",\"lossWarning\":\"" + lossWarn + "\",\"summary\":[" + sumJson + "]}";
 	}
 	catch (e)
 	{

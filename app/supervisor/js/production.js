@@ -1452,12 +1452,32 @@ function renderItemCard(plan, item, index) {
 					const given = Number(a.assigned) || 0;
 
 					if (done) {
-						// STILL CORRECTABLE. The stage has not closed — this card is
-						// only drawn while it is open — so a mistyped count is a
-						// number he can fix, and the server takes it. Locking the row
-						// the moment Done is pressed would leave him with no way back
-						// at all: he cannot re-open the share, and the stage's total
-						// is the sum of these.
+						// A CLOSED SHARE IS READ-ONLY, and the count is text rather
+						// than a field.
+						//
+						// It was editable, behind a "Fix" button, so a mistyped count
+						// could be corrected while the stage was still open. What that
+						// actually bought was a way to REDUCE a finished count long
+						// after the moment the shortfall would have been explained.
+						//
+						// The pieces a stage loses are only replaced by
+						// saveMaterialDamage, which opens the Production_Loss batch and
+						// writes the damage lines the Reissue tab asks the store from.
+						// That dialog is offered once, when the STAGE ends. Lower a
+						// share afterwards and the stage simply produces fewer pieces,
+						// with nothing anywhere raising a replacement - the order ends
+						// short and nothing says why.
+						//
+						// Correcting it is not lost, it just costs the stage: the
+						// figures are still open until "End stage" is pressed, and the
+						// shortfall is asked about there, which is where the answer
+						// belongs.
+						//
+						// NOTE THIS DOES NOT STOP A SHORT CLOSE. The open row above
+						// still has an editable "finished" field beside its Done
+						// button, and it is meant to - "he finished 38 of the 40 he was
+						// given" is a real thing that has to be recordable. This only
+						// stops the number moving after the fact.
 						const short = given - (Number(a.qtyOut) || 0);
 						return `
                     <tr class="share-row is-done" data-asgid="${a.id}" data-given="${given}">
@@ -1465,13 +1485,12 @@ function renderItemCard(plan, item, index) {
                         <td class="col-num">${given}</td>
                         <td class="share-time">${hhmm(a.start)} &ndash; ${hhmm(a.end)}</td>
                         <td class="col-num">
-                            <input type="number" class="share-out" min="0" max="${given}" value="${Number(a.qtyOut) || 0}">
+                            <span class="share-out-done">${Number(a.qtyOut) || 0}</span>
                             ${short > 0 ? `<div class="short-hint">${short} short</div>` : ""}
                         </td>
                         <td class="share-act">
                             <div class="share-act-in">
                                 <span class="share-tick" title="Finished">&#10003;</span>
-                                <button type="button" class="btn-share-fix" title="Correct what he finished">Fix</button>
                             </div>
                         </td>
                     </tr>`;
@@ -1864,10 +1883,13 @@ function renderItemCard(plan, item, index) {
 			});
 		});
 
-		// Closing a share and correcting a closed one are the same call — "this is
-		// what he finished". Only the label differs, so they share a handler
-		// rather than growing a second copy of the same validation.
-		card.querySelectorAll(".btn-share-done, .btn-share-fix").forEach((btnDone) => {
+		// Closing a share — "this is what he finished". A closed share is not
+		// re-openable from here any more; see the read-only row above for why.
+		// saveStageAssignment still accepts "end" on a Done share while the stage
+		// is open, deliberately: it is a Custom API, the guard that matters
+		// (STAGE_DONE) is the one on the stage, and nothing should depend on a
+		// button being absent from one screen.
+		card.querySelectorAll(".btn-share-done").forEach((btnDone) => {
 			btnDone.addEventListener("click", () => {
 				const row = btnDone.closest("tr");
 				const asgId = row.getAttribute("data-asgid");
@@ -2083,6 +2105,17 @@ function savePhasePayload(payload, btnSave, originalText, lost) {
 				console.log("saveProductionPhase ->", data);
 
 				if (data.success) {
+					// THE ONE FAILURE THAT MUST NOT BE QUIET.
+					//
+					// The stage saved, but coverProductionLoss could not open the
+					// batch for the pieces that did not come out. Everything else
+					// on screen will look normal and the order will quietly end
+					// short - which is the exact bug the batch exists to prevent -
+					// so this is said before anything else happens.
+					if (data.lossWarning) {
+						alert("MISSING PIECES WERE NOT QUEUED\n\n" + data.lossWarning);
+					}
+
 					// Re-fetch so the whole state re-renders cleanly. If that save
 					// finished the last item on the order, the summary is shown
 					// AFTERWARDS - by then the plan has dropped out of the live list
