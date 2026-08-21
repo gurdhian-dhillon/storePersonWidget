@@ -1,0 +1,205 @@
+string shortCloseOrder(string payloadJson)
+{
+	// "WE ARE SHIPPING THIS ORDER SHORT." The only way past coverProductionLoss,
+	// and the only thing in this app that decides a customer gets fewer pieces
+	// than they asked for.
+	//
+	// Custom API, POST, one argument: payloadJson.
+	//   { "salesOrderId":"9001", "reason":"customer accepted 14, needs it Friday" }
+	//
+	// WHY IT IS A FUNCTION AND NOT A CHECKBOX. Sales_Order.Short_Closed already
+	// existed and recheckOrderComplete already read it - it forgives the quantity
+	// test in checking and in finishing, and nothing else. But the only way to set
+	// it was to open the record in Creator and tick it, which is exactly the kind
+	// of quiet decision that let orders ship short by accident in the first place.
+	// This puts it behind a screen that has to name the shortfall out loud, and
+	// records why.
+	//
+	// A REASON IS MANDATORY. The whole point is that somebody decided this. An
+	// unexplained short close is indistinguishable from the bug this replaced.
+	//
+	// IT CANCELS THE OUTSTANDING REMAKE BATCHES, and it has to. Short-closing an
+	// order while a Production_Loss batch still sits at Awaiting_Material leaves
+	// the plan permanently unfinishable - the all-items-done test in
+	// saveProductionPhase would never pass, and the order would be forgiven its
+	// quantity but stranded anyway. Saying "we are not making these" and leaving
+	// a record that says "these are still to be made" is two answers to one
+	// question.
+	//
+	// A BATCH THAT HAS ALREADY STARTED IS LEFT ALONE. Work that is happening on
+	// the floor is not cancelled by a decision made at a desk; those pieces will
+	// finish and the customer gets them. Only batches with no Stage_Log against
+	// them - nobody has touched them - are closed out.
+	//
+	// Cancelled batches go to Complete with Qty_Produced 0, which is the same
+	// shape saveProductionPhase already writes for an item that produced nothing:
+	// there is nothing to inspect, so it must not sit on the checker's queue.
+
+	res = "{\"success\":false,\"error\":\"Nothing ran\"}";
+
+	try
+	{
+		inp = payloadJson.toMap();
+
+		orderTxt = ifnull(inp.get("salesOrderId"),"").toString().trim();
+		reasonTxt = ifnull(inp.get("reason"),"").toString().trim();
+
+		// THE PLAN IS A FALLBACK, not a second way of doing this. Every screen
+		// downstream of production carries the plan more reliably than the order -
+		// Plan_Item has no sales order of its own - so a caller that only knows
+		// the plan can still name the order. One order produces exactly one plan,
+		// which is what makes the hop safe in this direction.
+		if(orderTxt == "" || orderTxt.isNumber() == false)
+		{
+			planTxt = ifnull(inp.get("planId"),"").toString().trim();
+
+			if(planTxt != "" && planTxt.isNumber() == true)
+			{
+				for each  plF in Production_Planning[ID == planTxt.toLong()]
+				{
+					if(plF.Sales_Order != null)
+					{
+						orderTxt = plF.Sales_Order.toString();
+					}
+				}
+			}
+		}
+
+		if(orderTxt == "" || orderTxt.isNumber() == false)
+		{
+			return "{\"success\":false,\"error\":\"Missing or non-numeric salesOrderId\"}";
+		}
+
+		if(reasonTxt == "")
+		{
+			return "{\"success\":false,\"code\":\"NO_REASON\",\"error\":\"Say why this order is shipping short. It is recorded on the order.\"}";
+		}
+
+		orderId = orderTxt.toLong();
+
+		//------------------------------------------------------------------
+		// THE ORDER. Refused once it is packed or gone - by then the quantity
+		// is not a decision anybody is still making, and Short_Closed would be
+		// rewriting history rather than authorising anything.
+		//------------------------------------------------------------------
+		orderFound = false;
+		statusNow = "";
+		alreadyShort = false;
+		orderNo = "";
+
+		for each  soChk in Sales_Order[ID == orderId]
+		{
+			orderFound = true;
+			statusNow = ifnull(soChk.Order_Status,"").toString().trim();
+			orderNo = ifnull(soChk.Sales_Order,"").toString().replaceAll("\"","'");
+
+			if(ifnull(soChk.Short_Closed,false) == true)
+			{
+				alreadyShort = true;
+			}
+		}
+
+		if(orderFound == false)
+		{
+			return "{\"success\":false,\"error\":\"No Sales_Order " + orderId + "\"}";
+		}
+
+		if(statusNow == "Packed" || statusNow == "Dispatched")
+		{
+			return "{\"success\":false,\"code\":\"TOO_LATE\",\"error\":\"" + orderNo + " is already '" + statusNow + "'. Its quantity is settled.\"}";
+		}
+
+		if(alreadyShort == true)
+		{
+			return "{\"success\":false,\"code\":\"ALREADY\",\"error\":\"" + orderNo + " is already marked as shipping short.\"}";
+		}
+
+		//------------------------------------------------------------------
+		// CANCEL WHAT NOBODY HAS STARTED. Every Production_Loss batch on this
+		// order's plans that is still waiting, with no stage against it.
+		//
+		// Both plan and item are walked rather than queried across, because
+		// Plan_Item carries no sales order of its own - the same hop
+		// getPackingQueue and getReissueDrafts make.
+		//------------------------------------------------------------------
+		cancelled = 0;
+		cancelledPieces = 0;
+
+		for each  plQ in Production_Planning[Sales_Order == orderId]
+		{
+			for each  piQ in Plan_Item[Plan == plQ.ID]
+			{
+				piReason = ifnull(piQ.Remake_Reason,"").toString().trim();
+				piStatus = ifnull(piQ.Item_Status,"").toString().trim();
+
+				if(piReason == "Production_Loss")
+				{
+					if(piStatus == "Awaiting_Material" || piStatus == "Ready_For_Production")
+					{
+						// count(), not size() - a query result, not a List.
+						if(Stage_Log[Plan_Item == piQ.ID].count() == 0)
+						{
+							// A Creator numeric never written is an EMPTY STRING,
+							// not null, and toDecimal() throws on it.
+							pqS = ifnull(piQ.Qty_Ordered,"0").toString().trim();
+							if(pqS == "")
+							{
+								pqS = "0";
+							}
+
+							cancelledPieces = cancelledPieces + pqS.toDecimal().toLong();
+							cancelled = cancelled + 1;
+
+							piQ.Item_Status = "Complete";
+							piQ.Qty_Produced = 0;
+						}
+					}
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// THE DECISION ITSELF.
+		//------------------------------------------------------------------
+		for each  soSet in Sales_Order[ID == orderId]
+		{
+			soSet.Short_Closed = true;
+			soSet.Short_Close_Reason = reasonTxt;
+		}
+
+		//------------------------------------------------------------------
+		// MOVE IT ON NOW, rather than waiting for the next event to notice.
+		//
+		// recheckOrderComplete is what reads Short_Closed - it forgives the
+		// quantity test in the checking half and the finishing half, both on the
+		// same pass. Without this call the order would sit exactly where it was
+		// until somebody happened to save a check or close a finishing job, which
+		// on a short-closed order may be never.
+		//
+		// Its own try/catch: the decision is already written, and a recheck that
+		// throws must not report it as unsaved.
+		//------------------------------------------------------------------
+		recheckTxt = "";
+
+		try
+		{
+			recheckTxt = thisapp.recheckOrderComplete(orderId.toString()).toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+		}
+		catch (eRc)
+		{
+			recheckTxt = "recheck failed: " + eRc.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+		}
+
+		info "shortCloseOrder " + orderNo + " | cancelled " + cancelled + " batches (" + cancelledPieces + " pieces) | reason: " + reasonTxt + " | " + recheckTxt;
+
+		res = "{\"success\":true,\"salesOrder\":\"" + orderNo + "\",\"cancelledBatches\":" + cancelled + ",\"cancelledPieces\":" + cancelledPieces + ",\"recheck\":\"" + recheckTxt + "\"}";
+	}
+	catch (e)
+	{
+		// Creator reports every runtime failure to a widget as code 9430, so the
+		// real message has to travel inside the payload.
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

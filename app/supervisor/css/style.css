@@ -1552,24 +1552,17 @@ th.col-num {
     font-weight: 400;
 }
 
-/* Correcting a count he has already entered — quiet, because it is a repair,
-   not the next thing to do. Live only while the stage is open, which is the
-   only time this card is drawn at all. */
-.btn-share-fix {
-    border: 1px solid var(--border);
-    background: #fff;
-    color: var(--text-muted);
-    border-radius: 4px;
-    font-family: inherit;
-    font-size: 0.75rem;
+/* What a finished share produced, as TEXT. It was an input behind a "Fix"
+   button; both are gone, because lowering a finished count after the stage's
+   shortfall question has been asked loses the pieces with nothing raising a
+   replacement. Sized and aligned like the input it replaced so a stage part
+   finished does not have its column jump about. */
+.share-out-done {
+    display: inline-block;
+    min-width: 3rem;
     font-weight: 600;
-    padding: 0.2rem 0.5rem;
-    cursor: pointer;
-}
-
-.btn-share-fix:hover {
+    font-variant-numeric: tabular-nums;
     color: var(--text-main);
-    background: #f1f5f9;
 }
 
 /* max-width, because the 5rem is a fixed size inside a percentage column. On a
@@ -3173,3 +3166,209 @@ th.col-num {
     background: #f0fdfa; border: 1px solid #99f6e4; }
 .check-outcome-head { font-size: 0.78rem; font-weight: 600; color: #0e7490; }
 .check-outcome-nums { font-size: 0.82rem; color: var(--text-main); }
+
+/* ----------------------------------------------------------------------------
+   A PRODUCTION LOSS ON THE REISSUE TAB
+   ----------------------------------------------------------------------------
+   The same card as a checker's remake, with a warning above it. The warning is
+   the whole width of the card and sits before the item name, because it is
+   about the ORDER rather than about this batch: the customer is short until
+   somebody does something, and that used to be visible nowhere at all.
+*/
+
+.ri-loss {
+    border-color: #fecaca;
+}
+
+.ri-short-banner {
+    background: #fef2f2;
+    border-bottom: 1px solid #fecaca;
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding: 0.875rem 1.125rem;
+    margin: -1px -1px 0;
+}
+
+.ri-short-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #991b1b;
+    letter-spacing: 0.01em;
+}
+
+.ri-short-nums {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1.5rem;
+    padding-top: 0.5rem;
+    font-size: 0.875rem;
+    color: #7f1d1d;
+}
+
+.ri-short-nums b {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+/* The gap is the number he is being asked to do something about, so it is the
+   one that is allowed to shout. */
+.ri-short-gap b {
+    font-size: 1.0625rem;
+    color: var(--status-danger);
+}
+
+.ri-short-where {
+    padding-top: 0.4rem;
+    font-size: 0.8125rem;
+    color: #b91c1c;
+}
+
+/* Two actions on a loss card, and they must not read as equals - see the note
+   in remakeCardHtml. */
+.ri-head-acts {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    flex-shrink: 0;
+}
+
+/* ---------- the ship-short confirmation ---------- */
+
+.sc-panel {
+    max-width: 32rem;
+}
+
+.sc-head h3 {
+    color: #991b1b;
+}
+
+.sc-nums {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1.75rem;
+    padding: 0.875rem 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 0.875rem;
+}
+
+.sc-num {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+.sc-num > span {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+
+.sc-num > b {
+    font-size: 1.375rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-main);
+    line-height: 1.1;
+}
+
+.sc-num.is-gap > b {
+    color: var(--status-danger);
+}
+
+.sc-warn {
+    font-size: 0.875rem;
+    color: var(--text-main);
+    margin: 0 0 0.5rem;
+    line-height: 1.5;
+}
+
+.sc-warn-sub {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    margin: 0 0 1rem;
+    line-height: 1.5;
+}
+
+.sc-label {
+    display: block;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--text-main);
+    margin-bottom: 0.35rem;
+}
+
+.sc-body textarea {
+    width: 100%;
+    font-family: inherit;
+    font-size: 0.875rem;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    outline: none;
+    resize: vertical;
+}
+
+.sc-body textarea:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.sc-error {
+    margin: 0.6rem 1.25rem 0;
+    padding: 0.5rem 0.7rem;
+    border-radius: 6px;
+    background: var(--status-danger-bg);
+    color: var(--status-danger);
+    font-size: 0.8125rem;
+    font-weight: 600;
+}
+
+.sc-error.hidden {
+    display: none;
+}
+
+.sc-foot {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.125rem 0 0;
+}
+
+/* RED, AND DISABLED UNTIL A REASON EXISTS. The disabled state is not decoration:
+   an unexplained short close is indistinguishable from the accident this whole
+   mechanism replaced. */
+.sc-confirm-btn {
+    font-family: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #fff;
+    background: var(--status-danger);
+    border: none;
+    border-radius: 0.5rem;
+    padding: 0.55rem 1.1rem;
+    cursor: pointer;
+}
+
+.sc-confirm-btn:hover:not(:disabled) {
+    background: #b91c1c;
+}
+
+.sc-confirm-btn:disabled {
+    background: #fca5a5;
+    cursor: not-allowed;
+}
+
+/* Green, and stated as a fact rather than an instruction: the batch already
+   exists by the time this dialog opens. Closing this form is safe, and it must
+   look safe - it used to be the thing that lost the pieces. */
+.dmg-covered {
+    margin: 0.5rem 0 0.25rem;
+    padding: 0.5rem 0.7rem;
+    border-radius: 6px;
+    background: var(--status-success-bg);
+    color: #047857;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+}

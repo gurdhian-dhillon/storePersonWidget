@@ -58,17 +58,30 @@ string getSupervisorCounts(string supervisorId)
 	// because he stops opening it.
 	//
 	// Counted the same way getReissueDrafts finds them, and it has to STAY the
-	// same way or the two disagree: a Check_Reject batch still at
-	// Awaiting_Material with no Check_Remake requirement against it. The status
-	// is what bounds this - a batch leaves Awaiting_Material the moment its cloth
-	// is received - so it is the open ones, never the year's history of remakes.
+	// same way or the two disagree - a badge of 0 over a tab with work on it is
+	// worse than no badge, because he stops opening it.
+	//
+	// TWO KINDS OF BATCH, and their draft tests are NOT the same test:
+	//
+	//   Check_Reject     no Material_Requirement of Source "Check_Remake"
+	//   Production_Loss  no Material_Requirement AT ALL, any Source
+	//
+	// The second is wider on purpose. A damage report on the same event points
+	// its replacement cloth at the loss batch through Material_Damage.Remake_Item
+	// and writes rows of Source "Reissue" against it; asking only about
+	// "Production_Remake" would count a batch that has already been dealt with.
+	// getReissueDrafts and raiseReissueRequest apply exactly this pair.
+	//
+	// The status is what bounds this - a batch leaves Awaiting_Material the
+	// moment its cloth is received - so it is the open ones, never the year's
+	// history of remakes.
 	//
 	// Plan_Item carries no supervisor, so the filter runs through the plan, and
 	// the plan's supervisor is cached: one order's rejections land on several
 	// batches of the same plan.
 	cntSupCache = Map();
 
-	for each  drb in Plan_Item[Remake_Reason == "Check_Reject" && Item_Status == "Awaiting_Material"]
+	for each  drb in Plan_Item[Item_Status == "Awaiting_Material" && (Remake_Reason == "Check_Reject" || Remake_Reason == "Production_Loss")]
 	{
 		drbPlanKey = "";
 		if(drb.Plan != null)
@@ -104,7 +117,21 @@ string getSupervisorCounts(string supervisorId)
 			// throws rather than returning false.
 			if(cntSupKey == supId.toString())
 			{
-				if(Material_Requirement[Plan_Item == drb.ID && Source == "Check_Remake"].count() == 0)
+				drbUnasked = false;
+
+				if(ifnull(drb.Remake_Reason,"").toString().trim() == "Production_Loss")
+				{
+					if(Material_Requirement[Plan_Item == drb.ID].count() == 0)
+					{
+						drbUnasked = true;
+					}
+				}
+				else if(Material_Requirement[Plan_Item == drb.ID && Source == "Check_Remake"].count() == 0)
+				{
+					drbUnasked = true;
+				}
+
+				if(drbUnasked == true)
 				{
 					reissueWaiting = reissueWaiting + 1;
 				}

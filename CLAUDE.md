@@ -70,7 +70,7 @@ These are not style preferences. Each one caused a real bug in this app.
 | `Plan_Item.Item_Status` | underscores | `Awaiting_Material`, `Ready_For_Production`, `In_Production`, `Awaiting_Check`, `Complete` — **finishing does not write here**, see the post-checking section |
 | `Finishing_Data.Finishing_Status` | underscores | `In_Progress`, `Done` — **only `Done` closes a batch**; anything else means the job is still open |
 | `Plan_Item.Remake_Reason` | underscores | `Production_Loss`, `Check_Reject`, `Alteration` |
-| `Material_Requirement.Source` | underscores | `Plan`, `Reissue`, `Check_Remake`, `Alteration` |
+| `Material_Requirement.Source` | underscores | `Plan`, `Reissue`, `Check_Remake`, `Production_Remake`, `Alteration` |
 | `Stage_Log.Stage_Status` | underscores | `In_Progress`, `Done` — **only these two**. A stage not started has no `Stage_Log` row at all, so there is no third value and a `Not_Started` option is unreachable by design. |
 | `Item_Check.Check_Type` | spaces | `Stain`, `Measurement`, `Thread`, `Stitching`, `Fabric Softness` |
 | `Waste_Master.Status` | underscores | `Pending_Receipt`, `Available`, `Disputed`, `Issued`, `Consumed`, `Scrapped`, `Lost`, `Miscounted` |
@@ -228,6 +228,60 @@ Written by `receiveMaterials`, `resolveDispute` (both directions) and `saveProdu
 `resolveDispute` only moves items in the two states *before* cutting — dragging a started item
 backwards would deny work that really happened.
 
+**A PIECE LOST IN PRODUCTION IS ALWAYS MADE AGAIN, AND NOBODY IS ASKED WHETHER TO.**
+`coverProductionLoss` is the only thing that opens a `Production_Loss` batch. `saveProductionPhase`
+calls it the moment a stage closes with fewer pieces out than in; `saveMaterialDamage` calls it too,
+only to ask *which* batch a damage report belongs to so it can write `Remake_Item`.
+
+> **It is IDEMPOTENT, and that is the whole design.** `lost` comes off the root family's `Stage_Log`
+> rows, `covered` off the `Production_Loss` batches under that root, and it writes `lost − covered`
+> — setting coverage *to* the derived loss rather than adding a number handed to it. Two callers on
+> one event cannot double the batch. The old code added `damagedPieces` to whatever was there, which
+> is exactly why it had to be called once, from one place, behind a modal.
+>
+> **THE BATCH IS WHAT GUARANTEES THE ORDER.** It sits at `Awaiting_Material`, so the all-items-done
+> test cannot pass and the order cannot reach `Production Complete`. Same property that makes an
+> unchecked item impossible to lose: no report to remember, it simply cannot proceed.
+>
+> **What this replaced.** The batch used to be opened by `saveMaterialDamage`, and only when a
+> tickbox was left ticked in a modal offered once, right after the stage saved. Three things lost the
+> pieces — cancelling the dialog, unticking the box, and lowering a finished count afterwards — and
+> in every case the item completed with a reduced `Qty_Produced`, the checker inspected fewer,
+> packing's "every finished piece boxed" test passed, and the order reached `Packed` under quantity
+> with **nothing anywhere saying so**. The widget's own comment admitted it: *"Without it the order
+> simply ends short."*
+>
+> **An alteration batch is skipped**, and not as a special case bolted on: one garment can be worked
+> at two of its stages, so a survivor count cannot be derived from any `Qty_Out` — it is *declared*
+> by `closeAlterationBatch`. Reading a shortfall off its stage logs would invent losses and open a
+> batch to replace garments that are fine.
+>
+> **A batch that has STARTED is never topped up.** Its `Qty_In` is fixed, and raising the quantity
+> underneath it would leave the stage short of the item it belongs to. A later loss opens a second
+> batch instead — the same rule the merge-or-create block has always applied.
+>
+> **`saveMaterialDamage` no longer opens batches at all.** `Damaged_Qty` means "material that had to
+> be replaced", not "garments destroyed" — a torn label ruins no piece. If garments really were lost
+> the stage closes short and the batch appears from there. It still writes `Remake_Item`, which is
+> load-bearing: `raiseReissueRequest` follows it to point the replacement *cloth* at the batch rather
+> than the original item, and without it the store is asked twice for one event.
+
+**SHIPPING SHORT IS A DELIBERATE, RECORDED ACT — `shortCloseOrder`.** The only way past an
+uncovered loss. It writes `Sales_Order.Short_Closed` plus a mandatory `Short_Close_Reason`, cancels
+the `Production_Loss` batches **nobody has started** (work already on the floor still finishes and
+still ships), and calls `recheckOrderComplete` so the order moves on immediately.
+
+> `Short_Closed` already existed and `recheckOrderComplete` already read it — it forgives the
+> quantity test in checking and finishing and nothing else. What was missing was any way to set it
+> except ticking a box on the record in Creator, which is the same quiet decision that was happening
+> by accident. **The reason is mandatory**: an unexplained short close is indistinguishable from the
+> bug. The supervisor's Reissue tab is where it is offered, behind a red confirmation that states
+> what the customer ordered against what they will actually receive.
+>
+> **Cancelling the unstarted batches is not tidying, it is required.** Leaving one at
+> `Awaiting_Material` would forgive the order its quantity and strand the plan anyway — two answers
+> to one question.
+
 **NOBODY ASKS THE STORE FOR MATERIAL EXCEPT THE SUPERVISOR.** Both routes that discover a batch
 needs cloth — he ruined some (`saveMaterialDamage`), or the checker rejected garments
 (`saveItemCheck`) — write the batch and stop there. The demand is raised separately, from his
@@ -243,6 +297,19 @@ and could not see coming.
 > can drift out of step with them. `getReissueDrafts`, `getSupervisorCounts` and
 > `raiseReissueRequest` all apply that same test and **must keep applying the same one**, or the
 > badge, the tab and the button disagree about whether there is work.
+>
+> **A `Production_Loss` draft is the same card with a different test.** Its batch is real (see
+> `coverProductionLoss` above); what is derived is the *material request*, exactly as here. But its
+> guard is **`Material_Requirement[Plan_Item == batchId].count() == 0` — any row, any `Source`** —
+> not a `Source` list. A damage report on the same event points its cloth at that batch through
+> `Material_Damage.Remake_Item` and writes rows of `Source == "Reissue"` against it; matching only
+> `Production_Remake` would offer the full BOM on top of those and the store would be asked twice
+> for one loss.
+>
+> **All THREE sites carry the pair of tests, not two of them.** `getReissueDrafts` (the tab),
+> `getSupervisorCounts` (the badge) and `raiseReissueRequest` (the button) — the same three named
+> above, for the same reason. `getSupervisorCounts` was missed on the first pass and the badge read
+> 0 over a tab holding a production loss, which is worse than no badge because he stops opening it.
 >
 > Storing the draft was considered twice and rejected both times. As a `Material_Damage` row it
 > would put a check rejection in the consumption report's **damaged** column — the exact double
@@ -276,6 +343,25 @@ and the second write would lose the first.
 >
 > Pieces the supervisor never handed to anybody are allowed. They fall out as the ordinary
 > "fewer out than in" shortfall and raise the existing damage prompt.
+>
+> **A CLOSED SHARE IS READ-ONLY ON THE SCREEN.** Its finished count renders as text
+> (`.share-out-done`); there is no field and no **Fix** button. Both existed, so a mistyped count
+> could be corrected while the stage was still open — and what that actually bought was a way to
+> **lower a finished count long after the moment the shortfall would have been explained.** A
+> stage's lost pieces are only replaced by `saveMaterialDamage`, which opens the `Production_Loss`
+> batch and writes the damage lines the Reissue tab asks the store from, and that dialog is offered
+> **once**, when the stage ends. Reduce a share afterwards and the stage just produces fewer pieces
+> with nothing raising a replacement: the order ends short and nothing says why.
+>
+> **`saveStageAssignment` still accepts `end` on a `Done` share while the stage is open**, and that
+> is deliberate — it is a Custom API, the guard that matters is `STAGE_DONE` on the *stage*, and no
+> rule should rest on a button being absent from one screen. The correction is not lost either, it
+> costs the stage: nothing is final until **End stage**, which is where the shortfall is asked
+> about, which is where the answer belongs.
+>
+> **This does NOT stop a short close, and must not.** The *open* share row keeps its editable
+> finished field beside **Done** — "he finished 38 of the 40 he was given" is a real thing that has
+> to be recordable. Only the after-the-fact edit is gone.
 
 **A THIRD PARTY IS ONE OF THOSE SHARES.** `sendToThirdParty` writes a `Stage_Assignment` with
 `Third_Party` filled instead of `Operator`, plus `Sent_On` / `Returned_On` / `Outsource_Ref`. A
