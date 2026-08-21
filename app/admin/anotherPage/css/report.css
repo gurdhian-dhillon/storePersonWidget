@@ -460,3 +460,33 @@
     vertical-align: middle !important;
     white-space: nowrap !important;
 }
+
+/* Clickable row styling */
+.mat-row-clickable {
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+.mat-row-clickable:hover {
+    background-color: #f1f5f9 !important;
+}
+.mat-row-clickable.is-expanded {
+    background-color: #f8fafc !important;
+}
+
+/* Detailed breakdown row */
+.lots-detail-row {
+    background-color: #f8fafc;
+}
+.lots-detail-row td {
+    border-bottom: 1px solid var(--border) !important;
+}
+
+/* Chevron animation */
+.mat-chevron {
+    display: inline-flex;
+    transition: transform 0.2s ease;
+}
+.mat-chevron.expanded {
+    transform: rotate(90deg);
+}
+
