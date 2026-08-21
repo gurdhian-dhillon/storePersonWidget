@@ -1813,8 +1813,109 @@ string issueMaterials(string supervisorId, string issuesJson)
 	{
 		if(issueLines.size() > 0)
 		{
+			//------------------------------------------------------------
+			// THE VOUCHER NUMBER. One per handover, because one handover is
+			// one record - the store issues again, that is a new record and a
+			// new number.
+			//
+			// GENERATED HERE, NOT BY A FORM WORKFLOW. An "on add" workflow
+			// using input.Voucher_No fires only when a human opens the Creator
+			// form and types a record. Nothing ever does: every Material_Issue
+			// in this app is created by the insert below, so a workflow would
+			// leave every voucher blank. Same reason Plan_No is built inside
+			// createProductionPlans rather than on the form.
+			//
+			// SORTED ON ID, NOT ON Voucher_No, AND THAT IS NOT A DETAIL.
+			//
+			// "sort by Voucher_No desc" is a TEXT sort. Zero padding makes it
+			// agree with the numeric order only while the width stays the same -
+			// the moment SIV-100000 exists beside SIV-99999, text order puts
+			// SIV-9... above SIV-1..., the highest reads as 99999, and the next
+			// handover is issued SIV-100000 for the SECOND time. A duplicate
+			// voucher number that nothing would notice until two transfer orders
+			// quoted it.
+			//
+			// Record ids are monotonic, so the newest row always holds the
+			// highest number whatever its width, and the ceiling disappears.
+			//
+			// TEN ROWS, NOT ONE. Sorting by id means the top row is the NEWEST,
+			// not the highest - and a row with an empty Voucher_No at the top
+			// would restart numbering at 1 and duplicate everything. Nothing
+			// writes a blank today, but a record added by hand in Creator would,
+			// and so would this very field the day before it was filled in.
+			// Walking a few rows and keeping the largest costs nothing and
+			// cannot be tripped by one bad row.
+			//
+			// Bounded either way. The plan numberer scans every plan ever to
+			// read one integer and is listed in docs/scaling.md for it; there
+			// was no reason to copy that.
+			//
+			// NOT SAFE AGAINST TWO STORE PEOPLE ISSUING IN THE SAME INSTANT -
+			// both would read the same last number. There is one store counter
+			// and one person at it, and Deluge has no sequence to lock; if that
+			// ever changes this needs a different mechanism, not a retry.
+			//------------------------------------------------------------
+			// sort by on its own assignment, never inline in a for-each header.
+			lastVouchers = Material_Issue[ID != 0] sort by ID desc range from 1 to 10;
+
+			lastVNum = 0;
+
+			for each  lv in lastVouchers
+			{
+				lvTxt = ifnull(lv.Voucher_No,"").toString().trim();
+
+				if(lvTxt != "")
+				{
+					// Split rather than substring - toList/get is the string
+					// idiom this app already relies on, and it does not care how
+					// many dashes a hand-edited number picked up.
+					vParts = lvTxt.toList("-");
+
+					if(vParts.size() > 1)
+					{
+						vNumTxt = vParts.get(vParts.size() - 1).trim();
+
+						if(vNumTxt.isNumber() == true)
+						{
+							vSeen = vNumTxt.toLong();
+
+							if(vSeen > lastVNum)
+							{
+								lastVNum = vSeen;
+							}
+						}
+					}
+				}
+			}
+
+			nextVNum = lastVNum + 1;
+
+			if(nextVNum < 10)
+			{
+				vPad = "0000" + nextVNum;
+			}
+			else if(nextVNum < 100)
+			{
+				vPad = "000" + nextVNum;
+			}
+			else if(nextVNum < 1000)
+			{
+				vPad = "00" + nextVNum;
+			}
+			else if(nextVNum < 10000)
+			{
+				vPad = "0" + nextVNum;
+			}
+			else
+			{
+				vPad = "" + nextVNum;
+			}
+
+			voucherNo = "SIV-" + vPad;
+
 			newIssueId = insert into Material_Issue
 			[
+				Voucher_No=voucherNo
 				Issue_Date=zoho.currentdate
 				Issue_Status="Issued"
 				Added_User=zoho.loginuser
