@@ -304,7 +304,12 @@ and could not see coming.
 > not a `Source` list. A damage report on the same event points its cloth at that batch through
 > `Material_Damage.Remake_Item` and writes rows of `Source == "Reissue"` against it; matching only
 > `Production_Remake` would offer the full BOM on top of those and the store would be asked twice
-> for one loss. `getReissueDrafts` and `raiseReissueRequest` both apply it and must keep agreeing.
+> for one loss.
+>
+> **All THREE sites carry the pair of tests, not two of them.** `getReissueDrafts` (the tab),
+> `getSupervisorCounts` (the badge) and `raiseReissueRequest` (the button) — the same three named
+> above, for the same reason. `getSupervisorCounts` was missed on the first pass and the badge read
+> 0 over a tab holding a production loss, which is worse than no badge because he stops opening it.
 >
 > Storing the draft was considered twice and rejected both times. As a `Material_Damage` row it
 > would put a check rejection in the consumption report's **damaged** column — the exact double

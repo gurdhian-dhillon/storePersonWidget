@@ -22,10 +22,16 @@ string raiseReissueRequest(string payloadJson)
 	// need its own Custom API wrapper in Creator; this needs none - the argument
 	// list does not change.
 	//
-	// THE REMAKE SHAPE PICKS NOTHING, and that is deliberate. A rejected garment
-	// needs its whole BOM again; there is no per-material decision to make, so
+	// THE REMAKE SHAPE PICKS NOTHING, and that is deliberate. A garment being made
+	// again needs its whole BOM; there is no per-material decision to make, so
 	// there are no ticks and the card is raised whole. The damage shape has ticks
 	// because "3 were ruined but I have spares" is a real answer.
+	//
+	// THE REMAKE SHAPE COVERS BOTH KINDS OF BATCH - Check_Reject, opened by
+	// saveItemCheck when the checker rejects garments, and Production_Loss, opened
+	// by coverProductionLoss when a stage produces fewer pieces than it received.
+	// They need identical treatment and differ only in the Source they write and
+	// the why they carry.
 	//
 	// ONE ROW PER LINE, NEVER SUMMED. He ruined 1.2m on Monday and 0.8m on
 	// Wednesday; the store sees two rows, each carrying its own date and its own
@@ -47,8 +53,8 @@ string raiseReissueRequest(string payloadJson)
 	// into that whole class of bug for no gain.
 	//
 	// FIELDS THIS NEEDS ADDING to Material_Requirement:
-	//   Source        Dropdown - Plan / Reissue / Check_Remake / Alteration
-	//                                                          (default Plan)
+	//   Source        Dropdown - Plan / Reissue / Check_Remake /
+	//                            Production_Remake / Alteration   (default Plan)
 	//   Damage_Ref    Lookup   -> Material_Damage
 	//   Reason        Multi Line
 	//   Reported_On   Date
@@ -196,10 +202,12 @@ string raiseReissueRequest(string payloadJson)
 	if(kindTxt == "remake")
 	{
 		// Remake_Reason IS the whole test. Is_Remake is deliberately not consulted:
-		// only saveItemCheck writes this reason and it always sets Is_Remake beside
-		// it, so the flag adds nothing - and a Creator field that was never written
-		// reads EMPTY rather than false, which makes "== false" a mixed-type
-		// comparison, and those THROW rather than returning false.
+		// the two functions that write a reason - saveItemCheck and
+		// coverProductionLoss - both set Is_Remake beside it, so the flag adds
+		// nothing; and a Creator field that was never written reads EMPTY rather
+		// than false, which makes "== false" a mixed-type comparison, and those
+		// THROW rather than returning false.
+		//
 		// TWO REASONS TAKE THIS PATH, and they need the same thing: the batch's
 		// whole BOM, all or nothing, costed by the same arithmetic as the
 		// original. Check_Reject is the checker rejecting garments that were
@@ -395,7 +403,7 @@ string raiseReissueRequest(string payloadJson)
 			}
 
 			madeCount = madeCount + 1;
-			logLines.add("CHECK REMAKE -> " + ifnull(mm.get("name"),"").toString() + " | qty " + ifnull(mm.get("req"),0) + " | pieces " + ifnull(mm.get("pcs"),0));
+			logLines.add(remakeSrc + " -> " + ifnull(mm.get("name"),"").toString() + " | qty " + ifnull(mm.get("req"),0) + " | pieces " + ifnull(mm.get("pcs"),0));
 		}
 
 		//------------------------------------------------------------------
