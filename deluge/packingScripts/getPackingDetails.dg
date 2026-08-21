@@ -1,7 +1,8 @@
 string getPackingDetails(string payloadJson)
 {
-	// What the packer sees for one order: the original lines, and how many pieces
-	// of each actually cleared finishing.
+	// What the packer sees for one order: the original lines, how many pieces of
+	// each actually cleared finishing, what one piece of each weighs, and the
+	// carton catalogue his dimension fields are autofilled from.
 	//
 	// THE WALK IS DONE ONCE, NOT ONCE PER LINE. This used to re-run
 	// Production_Planning -> Plan_Item -> Item_Check -> Finishing_Data inside the
@@ -21,8 +22,19 @@ string getPackingDetails(string payloadJson)
 	// else means the job is still open, so a row carrying neither value is left
 	// out of the packed quantity rather than quietly counted into it.
 	//
-	// THE CARTON OPTIONS COME FROM Box_Master, not from a list in this file and
-	// a second copy in the widget. See the block that builds them.
+	// UNIT WEIGHT RIDES ALONG ON THE LINE. Item_Master.Weight is kilograms for one
+	// saleable unit - a napkin set of six is one unit, counted the same way the
+	// pieces on this screen are - so it multiplies straight against the quantity
+	// in a box. It is sent so the screen can show a running estimate as he types;
+	// savePackingRecord resolves it again from the master rather than trusting
+	// what comes back, for the same reason it recomputes the quantities.
+	//
+	// THE CARTON OPTIONS COME FROM Box_Master, and they are AUTOFILL ONLY.
+	// Every dimension on the packing screen is editable - the catalogue seeds the
+	// six numbers and stops there - so no volumetric weight is computed here any
+	// more. It would describe a carton the packer may have already re-measured.
+	// The divisor now lives in the widget (live, as he types) and in
+	// savePackingRecord (authoritative, from the dimensions actually stored).
 
 	res = "{\"errors\":[\"Nothing ran\"]}";
 
@@ -143,10 +155,23 @@ string getPackingDetails(string payloadJson)
 
 				// SKU is a LOOKUP holding a record id, so it has to be resolved
 				// through the master or the packer is shown an 18-digit number.
+				// The unit weight comes off the same record in the same hop.
 				skuTxt = "";
+				unitWtTxt = "0";
+
 				for each  im in Item_Master[ID == soRow.SKU]
 				{
 					skuTxt = ifnull(im.SKU,"").toString().replaceAll("\"","'");
+
+					// A field never written is EMPTY, not null, and toDecimal()
+					// throws on empty. An item with no weight on file estimates
+					// as zero, which the screen shows as a gap rather than
+					// blocking a carton that is physically packed and weighed.
+					unitWtTxt = ifnull(im.Weight,"0").toString().trim();
+					if(unitWtTxt == "")
+					{
+						unitWtTxt = "0";
+					}
 				}
 
 				finQtyTxt = ifnull(finByLine.get(idx.toString()),"0").toString().trim();
@@ -160,16 +185,20 @@ string getPackingDetails(string payloadJson)
 					itemsJson = itemsJson + ",";
 				}
 
-				itemsJson = itemsJson + "{\"lineNo\":" + idx + ",\"sku\":\"" + skuTxt + "\",\"itemName\":\"" + ifnull(soRow.Item_Name,"").toString().replaceAll("\"","'") + "\",\"qty\":" + finQtyTxt.toLong() + "}";
+				itemsJson = itemsJson + "{\"lineNo\":" + idx + ",\"sku\":\"" + skuTxt + "\",\"itemName\":\"" + ifnull(soRow.Item_Name,"").toString().replaceAll("\"","'") + "\",\"qty\":" + finQtyTxt.toLong() + ",\"unitWeight\":" + unitWtTxt.toDecimal() + "}";
 			}
 		}
 
 			//------------------------------------------------------------------
 		// THE CARTON OPTIONS, from Box_Master.
 		//
-		// One record is one choice the packer makes, and it names BOTH cartons:
-		// the branded inner and the outer it ships inside. One outer holds
-		// exactly one inner, so there is nothing to pair up on screen.
+		// AUTOFILL, NOT A CONTRACT. Picking a carton seeds the six dimension
+		// fields on the box; the packer can then correct any of them, and what he
+		// leaves is what gets stored and what the volumetric weight is computed
+		// from. Has_Inner_Carton only decides whether the three inner fields are
+		// seeded - whether an inner carton is actually used is a per-box choice,
+		// because a branded inner that has run out on the floor must not need a
+		// change to master data before the box can ship.
 		//
 		// This list used to be hardcoded here AND again in the widget. Two
 		// copies of the same master data in two languages, and they had already
@@ -187,10 +216,6 @@ string getPackingDetails(string payloadJson)
 
 		for each  bm in boxRecs
 		{
-			outLen = ifnull(bm.Outer_Length_Cm,0).toDecimal();
-			outWid = ifnull(bm.Outer_Width_Cm,0).toDecimal();
-			outHgt = ifnull(bm.Outer_Height_Cm,0).toDecimal();
-
 			hasInnerTxt = "false";
 			if(ifnull(bm.Has_Inner_Carton,false) == true)
 			{
@@ -202,22 +227,13 @@ string getPackingDetails(string payloadJson)
 				boxesJson = boxesJson + ",";
 			}
 
-			// VOLUMETRIC WEIGHT IS COMPUTED HERE, once, so the screen and
-			// savePackingRecord cannot disagree about it. Divisor 5000 - what
-			// FedEx and Blue Dart bill express shipments at. Air freight uses
-			// 6000 and some domestic surface uses 4000; if the client comes back
-			// with a different number it changes HERE and in savePackingRecord,
-			// and nowhere else.
-			volWt = ((outLen * outWid * outHgt) / 5000.0).round(2);
-
 			boxesJson = boxesJson + "{\"id\":\"" + bm.ID + "\","
 				+ "\"name\":\"" + ifnull(bm.Box_Name,"").toString().replaceAll("\"","'") + "\","
-				+ "\"outerLength\":" + outLen + ",\"outerWidth\":" + outWid + ",\"outerHeight\":" + outHgt + ","
+				+ "\"outerLength\":" + ifnull(bm.Outer_Length_Cm,0).toDecimal() + ",\"outerWidth\":" + ifnull(bm.Outer_Width_Cm,0).toDecimal() + ",\"outerHeight\":" + ifnull(bm.Outer_Height_Cm,0).toDecimal() + ","
 				+ "\"hasInner\":" + hasInnerTxt + ","
 				+ "\"innerLength\":" + ifnull(bm.Inner_Length_Cm,0).toDecimal() + ","
 				+ "\"innerWidth\":" + ifnull(bm.Inner_Width_Cm,0).toDecimal() + ","
-				+ "\"innerHeight\":" + ifnull(bm.Inner_Height_Cm,0).toDecimal() + ","
-				+ "\"volumetricWeight\":" + volWt + "}";
+				+ "\"innerHeight\":" + ifnull(bm.Inner_Height_Cm,0).toDecimal() + "}";
 		}
 
 		res = "{\"errors\":[],\"salesOrderId\":\"" + salesIdStr + "\",\"orderNo\":\"" + orderNo + "\",\"source\":\"" + orderSrc + "\",\"items\":[" + itemsJson + "],\"boxes\":[" + boxesJson + "]}";

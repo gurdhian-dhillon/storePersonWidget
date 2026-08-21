@@ -282,7 +282,7 @@ string getSupervisorMaterials(string supervisorId)
 					// The reason travels down to the line as well. On the drill-
 					// down he can see WHICH of the plans behind this figure is the
 					// reissue and why - the header flag only says that one is.
-					dJson = dJson + "{\"planNo\":\"" + plan.Plan_No + "\",\"salesOrder\":\"" + soNo + "\",\"pending\":" + pend + ",\"isReissue\":" + isRe + ",\"reason\":\"" + ifnull(mr.Reason,"").toString().replaceAll("\"","'").replaceAll("\n"," ") + "\"}";
+					dJson = dJson + "{\"planNo\":\"" + plan.Plan_No + "\",\"salesOrder\":\"" + soNo + "\",\"pending\":" + pend + ",\"isReissue\":" + isRe + ",\"reason\":\"" + ifnull(mr.Reason,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
 					detail.put(key,dJson);
 				}
 			}

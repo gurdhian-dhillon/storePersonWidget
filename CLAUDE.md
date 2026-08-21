@@ -95,7 +95,30 @@ These are not style preferences. Each one caused a real bug in this app.
   structure nests (Map → List → Map), and `List.toString()` does not wrap in `[]`. This
   worked for months only because the deepest level happened to be empty.
 - **Always stringify ids** — 18-digit ids break `JSON.parse` on the widget side.
-- Escape free text going into hand-built JSON: `.replaceAll("\"","'")`.
+- **Free text going into hand-built JSON needs the WHOLE chain, not just the quote:**
+  `.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ")`
+  > **A raw newline inside a JSON string literal is invalid JSON, not an escaping nicety**, and it
+  > fails in the one way that teaches you nothing: Deluge does not throw, so there is no error card
+  > and no 9430 — the widget gets *"bad control character in string literal at line 1 column 1963"*
+  > and the tab simply will not render. The column number is the only clue and it points at the
+  > response, not at any line of code.
+  >
+  > **Every `Remarks` / `Note` / `Reason` field in this app is a Multi Line field fed by a
+  > `<textarea>`**, so one press of Enter anywhere puts a newline in a record that a dozen readers
+  > emit. `receiveFromThirdParty` also *appends* its return note under the existing remark with a
+  > `\n` deliberately, so the field reads as a log in Creator — which is correct, and means the
+  > flattening belongs to the READER, never the writer. **The record keeps its line breaks; only
+  > the copy crossing JSON is flattened,** because a JSON string is a single line by definition.
+  > `" | "` rather than a space: several appended notes run into one unreadable sentence otherwise.
+  >
+  > This bit once before and was patched at exactly one call site — `getStoreMaterialRequirements`
+  > carried a lone `.replaceAll("\n"," ")` while `getSupervisorMaterials`, reading **the same
+  > `Material_Requirement.Reason`**, did not. Patch the class, not the column number.
+  >
+  > **A backslash in free text breaks JSON too and is NOT handled.** It is left alone on purpose:
+  > Deluge's `replaceAll` takes a regex, and a lone `"\\"` as a pattern is a syntax error, so the
+  > cure throws where the disease has never yet occurred. If it ever does, that is the reason it
+  > was skipped.
 
 **Iteration**
 - Two live iterators over the same list do not work. Build a **separate counter list** if you
@@ -533,7 +556,7 @@ Three, all Creator JS API **v2** — `ZOHO.CREATOR.DATA.invokeCustomApi`, **no `
 | `app/admin/` | Calculation audit — shows the working behind the fabric maths |
 | `app/checker/` | Checking — the inspection queue and `saveItemCheck` |
 | `app/finishing/` | Finishing — folding / pressing / branding |
-| `app/packing/` | Packing — supervisor picker, orders as an accordion, one row per carton |
+| `app/packing/` | Packing — supervisor picker, orders as an accordion, one card per box |
 
 > **PACKING IS ITS OWN WIDGET.** It was briefly a second tab inside `app/finishing/`; it is not
 > any more, so the finishing widget does one job. `app/packing/js/main.js` is still written as a
@@ -546,7 +569,21 @@ Three, all Creator JS API **v2** — `ZOHO.CREATOR.DATA.invokeCustomApi`, **no `
 > move every other screen makes, in the same place in the header. The list is drawn with the
 > **shared `item-card` classes** the supervisor and store screens use — `item-serial`,
 > `item-title-row`, `item-meta-line`, `chevron`, `item-body` — so the three lists read as one
-> product. One order opens at a time, full width; the carton table is seven columns.
+> product. One order opens at a time, full width.
+>
+> **A BOX IS A CARD, NOT A TABLE ROW.** A box carries two grains at once — its own carton,
+> dimensions and weights, *and* the list of items inside it — and a table row can only draw one of
+> them: it either repeats per item and counts the weights twice, or it holds one item and cannot
+> hold two. So the box is a card with a small contents table inside it, and the same shape is used
+> in History so the thing he built and the thing he reads back are recognisably one object.
+>
+> **The card is TWO CAPPED COLUMNS** — what the box *is* (carton, packaging, six dimensions) beside
+> what is *in* it, weights underneath — laid out with `justify-content: start` so the grid stops
+> where its columns stop. Every control was one full-width row to begin with, which on a wide
+> screen put a 900-pixel dropdown next to a two-character quantity field and stranded the weight on
+> the far side of the card from the numbers it belongs to. **A form reads at a fixed width; the
+> card can be as wide as it likes.** They stack below 900px, where a dimension row — a label, three
+> inputs and two `×` — stops fitting.
 >
 > **The solver is gone.** Both packing screens used to guess: a 3D bin-packer in the finishing tab
 > and a points table in `app/packing/`. Neither could be right — no garment dimensions exist
@@ -557,32 +594,69 @@ Three, all Creator JS API **v2** — `ZOHO.CREATOR.DATA.invokeCustomApi`, **no `
 calls count against the daily quota. Do **not** build router APIs to "save calls"; that advice
 was tested and retracted.
 
-**PACKING IS ONE CARTON PER ROW, AND THE PACKER PICKS IT.** `Box_Master` holds the carton
-options; each record names **both** cartons — the branded inner and the outer it ships inside —
-because **one outer holds exactly one inner**. The clearance is about 1.25 cm a face, so a second
-inner physically will not go in. That is why the packer makes one choice per box, not two, and why
-there is nothing to solve: he knows what fits, and no garment dimensions exist in this app anyway.
+**PACKING IS TWO SUBFORMS, TWO GRAINS, AND EVERY PACKING RULE FOLLOWS FROM THAT.**
 
-> **ONE SKU PER CARTON**, and not as a simplification. The inner carton is *branded* packaging,
-> made for one product, so a napkin set cannot go in a bedsheet's box. It also matches the export
-> standard, where a mixed carton is an exception that must be labelled MIXED on the packing list.
-> If mixing ever becomes real it is a second subform, not a change to `Packed_Boxes`.
+| Subform | One row is | Holds |
+|---|---|---|
+| `Packing.Packed_Boxes` | one **physical box** | `Box_No`, `Box_Type`, `Uses_Inner`, the six dimensions actually used, `Estimated_Weight_Kg`, `Gross_Weight_Kg`, `Volumetric_Weight_Kg` |
+| `Packing.Packed_Box_Items` | one **item in a box** | `Box_No`, `Line_No`, `SKU`, `Item_Name`, `Quantity`, `Unit_Weight_Kg` |
 
-> **`Packing.Packed_Boxes` is one row per PHYSICAL BOX** — box number, carton, order line, pieces,
-> the weight the packer put on the scale. That is what answers *"what is in box 3"* months later.
-> The parent keeps the totals; **the per-box dimensions live on the carton**, never on the parent,
-> because one set of dimensions on a record holding two carton sizes is a lie.
+> **Creator has no subform inside a subform, so the two are siblings joined by `Box_No`** — which
+> is why `savePackingRecord` refuses a packing record where two boxes share a number, and why
+> `getPackingHistory` reads the items **once** into a map keyed by box rather than querying per
+> box. A query per box is fifteen hundred lookups across a page of fifty orders, which is exactly
+> the shape that trips the uncatchable statement limit.
+
+> **A BOX MAY HOLD SEVERAL SKUs.** It used to hold exactly one — the inner carton is *branded*
+> packaging made for one product — and `SKU`, `Item_Name`, `Quantity` and `Line_No` therefore sat
+> on the box row itself. They cannot stay there once a box holds two things: either the box row
+> repeats and its weights are counted twice, or the second item has nowhere to go.
+> **Those four fields are still on `Packed_Boxes` in Creator and are NO LONGER WRITTEN** — they
+> carry the contents of every box packed before the split, and `getPackingHistory` reads them as a
+> one-item box when a box has no `Packed_Box_Items` rows. Deleting them blanks the history of
+> orders that really shipped. A mixed carton is still an exception on an export packing list and
+> must be labelled MIXED; nothing in this app prints that yet.
+
+> **THE INNER CARTON IS OPTIONAL, PER BOX.** Some orders ship in the outer alone. `Uses_Inner`
+> records which, so `Total_Inner_Boxes` and `Total_Outer_Boxes` on the parent stop being the same
+> number — outer is every box, inner is the ones that had an inner in them, which is the figure
+> packaging reorders from. `Box_Master.Has_Inner_Carton` only decides whether the inner fields are
+> **seeded** when a carton is picked; a branded inner that has run out on the floor must never need
+> a master-data change before the box can ship. An unused inner stores as **zeroes**, not as the
+> size it would have been — the record says what went out.
+
+> **`Box_Master` IS AUTOFILL, NOT A CONTRACT.** Picking a carton seeds the six dimension fields on
+> the box and stops there; every one stays editable, and what the packer leaves is what is stored
+> and what the volumetric weight is computed from. One outer still holds exactly one inner — about
+> 1.25 cm clearance a face — so each catalogue record still names both cartons and he still makes
+> one choice per box. **Editing never writes back to `Box_Master`**: the catalogue is a starting
+> point, and a correction made mid-pack would apply retroactively to nothing and confuse the next
+> packer. This is why `savePackingRecord` **validates** the payload's dimensions (every outer above
+> zero, every inner above zero when an inner was used) instead of overriding them from the master,
+> which is what it used to do.
 
 > **EVERY FINISHED PIECE MUST BE IN A BOX** before packing saves — enforced in
 > `savePackingRecord`, not only on screen, because a Custom API is callable from anywhere. The
 > finished figure is recomputed from `Item_Check` + `Finishing_Data` rather than trusted from the
 > payload, using the same walk `getPackingDetails` does, so packing can never disagree with the
-> status that let it be packed.
+> status that let it be packed. **The SKU, the name and the unit weight are resolved server-side
+> from the order line too** — the payload carries only a line number and a quantity, so nothing
+> describing an item can arrive from outside.
+
+> **Estimated weight is `Item_Master.Weight` × pieces, and nothing else.** The field is kilograms
+> for one *saleable unit* — a napkin set of six is one unit, counted the way this screen counts
+> pieces — so it multiplies straight. **No allowance is added for cardboard**: the gap between the
+> estimate and the scale *is* the packaging, and burying a tare in the estimate hides it. An item
+> with no weight on file estimates as zero and is shown as `—` rather than `0.00`; it never blocks
+> a box that is physically packed and weighed.
 
 > **Volumetric weight is `outer L x W x H / 5000`** — what FedEx and Blue Dart bill express
-> shipments at. It appears in `getPackingDetails` and `savePackingRecord` and **nowhere else**;
-> air freight uses 6000 and some domestic surface 4000, so those are the two places to change.
-> Chargeable weight is the greater of actual and volumetric.
+> shipments at, computed from the dimensions **the packer left**, not the catalogue's. It appears
+> in `savePackingRecord` (authoritative) and in `app/packing/js/main.js` (live, as he types a
+> dimension) and **nowhere else** — `getPackingDetails` no longer computes one, because a
+> catalogue volumetric is meaningless the moment a dimension is editable. Air freight uses 6000 and
+> some domestic surface 4000, so those are the two places to change. Chargeable weight is the
+> greater of actual and volumetric.
 
 **Conventions**
 - Tabs load lazily via `TAB_LOADERS`; `Refresh` only reloads tabs already opened.

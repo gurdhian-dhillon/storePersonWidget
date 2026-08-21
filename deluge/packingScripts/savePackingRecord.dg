@@ -3,38 +3,71 @@ string savePackingRecord(string payloadJson)
 	// The packer's record of an order going into cartons, and the writer of
 	// Sales_Order.Order_Status = "Packed".
 	//
-	// ONE ROW PER PHYSICAL BOX. Packed_Boxes is the record: box number, which
-	// carton option, which order line, how many pieces, and what it weighed. That
-	// is what answers "what is in box 3" months later, for a customer query or a
-	// damage claim, and it is the grain the rest of this app already works at -
-	// one row per physical thing, every column meaning the same on every row.
+	// TWO SUBFORMS, TWO GRAINS, AND THAT IS THE WHOLE SHAPE OF THIS FUNCTION.
 	//
-	// ONE SKU PER BOX. Not a limitation of the record - a limitation of the
-	// carton. The inner carton is BRANDED packaging, made for one product, so a
-	// napkin set cannot go inside a bedsheet's box. It also matches the export
-	// standard, where mixed cartons are the exception and must be labelled MIXED.
-	// If mixing ever becomes real it is a second subform, not a change to this
-	// one.
+	//   Packed_Boxes      one row per PHYSICAL BOX - its carton, the six
+	//                     dimensions actually used, whether an inner carton went
+	//                     in, and the three weights.
+	//   Packed_Box_Items  one row per ITEM IN A BOX - box number, order line,
+	//                     SKU, name, pieces, unit weight.
+	//
+	// A BOX MAY NOW HOLD SEVERAL ITEMS. It used to hold exactly one, on the
+	// strength of the branded inner carton being made for a single product, and
+	// the SKU / quantity columns therefore sat on the box row itself. They cannot
+	// stay there once a box holds two things: either the box row repeats and its
+	// weights are counted twice, or the second item has nowhere to go. Creator has
+	// no subform inside a subform, so the two are siblings joined by Box_No, which
+	// is why Box_No has to be unique within one packing record and is checked
+	// below.
+	//
+	// THE OLD COLUMNS ARE LEFT ON Packed_Boxes AND ARE NO LONGER WRITTEN.
+	// Line_No, SKU, Item_Name and Quantity carry the contents of every box packed
+	// before this change; getPackingHistory reads them when a box has no
+	// Packed_Box_Items rows. Deleting them would blank the history of orders that
+	// really shipped.
+	//
+	// THE DIMENSIONS ARE THE PACKER'S, NOT THE CATALOGUE'S. Box_Master autofills
+	// the six numbers and stops there. What arrives here is what he left in the
+	// fields, and it is what gets stored and what the volumetric weight is
+	// computed from - so the dimensions are VALIDATED here rather than overridden
+	// from the master. A box measured on the floor beats a carton size typed into
+	// a form last year, and a zero would otherwise pass straight through into a
+	// volumetric weight of nothing.
+	//
+	// AN INNER CARTON IS OPTIONAL, PER BOX. Some orders go in the outer alone.
+	// Uses_Inner records which, and the two totals on the parent stop being the
+	// same number: Total_Outer_Boxes is every box, Total_Inner_Boxes is the ones
+	// that had an inner in them.
+	//
+	// ESTIMATED WEIGHT IS RESOLVED HERE, NOT TAKEN FROM THE PAYLOAD.
+	// Item_Master.Weight is kilograms for one saleable unit and multiplies
+	// straight against the pieces in the box. The screen shows the same running
+	// figure, but a Custom API is callable from anywhere and the stored estimate
+	// has to come from the master. It is an estimate beside a measurement, and
+	// the gap between them is the packaging - nothing is blocked by it being
+	// wrong or missing.
 	//
 	// THE QUANTITY CHECK IS ENFORCED HERE, NOT ONLY ON THE SCREEN. Every line's
-	// boxed pieces must equal what finishing actually produced for that line. A
-	// Custom API is callable from anywhere and both the screen and this function
-	// have to agree, so the figure is recomputed from Item_Check and
-	// Finishing_Data rather than trusted from the payload - the same walk
-	// getPackingDetails does, and deliberately the same arithmetic, so packing can
-	// never disagree with the status that let it be packed.
+	// boxed pieces must equal what finishing actually produced for that line. The
+	// figure is recomputed from Item_Check and Finishing_Data rather than trusted
+	// from the payload - the same walk getPackingDetails does, and deliberately
+	// the same arithmetic, so packing can never disagree with the status that let
+	// it be packed.
 	//
-	// FOUR GUARDS BEFORE ANYTHING IS WRITTEN:
+	// FIVE GUARDS BEFORE ANYTHING IS WRITTEN:
 	//   1. the order is at "Finishing Complete" - the only status the queue offers
 	//   2. it has no Packing record yet - the whole order is packed in one sitting
-	//   3. every box is usable - a carton, a line, a quantity above zero
-	//   4. the boxed quantity matches the finished quantity, line by line
+	//   3. every box is usable - a carton, unique number, real outer dimensions,
+	//      real inner dimensions if an inner was used
+	//   4. every box holds at least one item, each against a real order line, each
+	//      with pieces above zero, and no line listed twice in the same box
+	//   5. the boxed quantity matches the finished quantity, line by line
 	// Each returns a message the packer can act on. Refusing loudly is the point.
 	//
 	// VOLUMETRIC WEIGHT: outer L x W x H / 5000, the divisor FedEx and Blue Dart
-	// bill express shipments at. It appears here and in getPackingDetails and
-	// NOWHERE ELSE - if the client comes back with 4000 or 6000 those are the two
-	// places to change.
+	// bill express shipments at. It is computed HERE and in the widget, which
+	// shows it live as he types a dimension. Air freight uses 6000 and some
+	// domestic surface 4000; those are the two places to change.
 
 	res = "{\"success\":false,\"error\":\"Nothing was saved\"}";
 
@@ -81,10 +114,53 @@ string savePackingRecord(string payloadJson)
 		}
 
 		//------------------------------------------------------------------
-		// GUARD 3 - the boxes, read into two Maps keyed by line.
+		// THE ORDER'S LINES, read once into three Maps keyed by line number.
+		//
+		// The payload carries only a line number and a quantity per item; the
+		// SKU, the name and the unit weight are resolved from the order and the
+		// master here, so nothing describing an item can be typed in from
+		// outside. SKU is a LOOKUP holding a record id - printing it without the
+		// hop puts an 18-digit number on a packing list.
 		//
 		// Map values kept as STRINGS throughout - a Map holding a mix of Decimal
 		// and String is one more chance at a mixed-type comparison.
+		//------------------------------------------------------------------
+		skuByLine = Map();
+		nameByLine = Map();
+		unitWtByLine = Map();
+
+		for each  soRead in Sales_Order[ID == salesId]
+		{
+			lineIdx = 0;
+
+			for each  soRow in soRead.Item_Table
+			{
+				lineIdx = lineIdx + 1;
+
+				rowSku = "";
+				rowUnitWt = "0";
+
+				for each  imRec in Item_Master[ID == soRow.SKU]
+				{
+					rowSku = ifnull(imRec.SKU,"").toString().replaceAll("\"","'");
+
+					// A field never written is EMPTY, not null, and toDecimal()
+					// throws on empty.
+					rowUnitWt = ifnull(imRec.Weight,"0").toString().trim();
+					if(rowUnitWt == "")
+					{
+						rowUnitWt = "0";
+					}
+				}
+
+				skuByLine.put(lineIdx.toString(),rowSku);
+				nameByLine.put(lineIdx.toString(),ifnull(soRow.Item_Name,"").toString().replaceAll("\"","'"));
+				unitWtByLine.put(lineIdx.toString(),rowUnitWt);
+			}
+		}
+
+		//------------------------------------------------------------------
+		// GUARD 3 and 4 - the boxes and what is in them.
 		//------------------------------------------------------------------
 		boxList = inp.get("boxes");
 
@@ -95,11 +171,15 @@ string savePackingRecord(string payloadJson)
 
 		boxedByLine = Map();
 		boxesCollection = Collection();
+		itemsCollection = Collection();
+		seenBoxNos = List();
 
 		boxCount = 0;
+		innerCount = 0;
 		totalPieces = 0;
 		totalGross = 0.0;
 		totalVolumetric = 0.0;
+		totalEstimated = 0.0;
 
 		for each  boxVal in boxList
 		{
@@ -107,45 +187,54 @@ string savePackingRecord(string payloadJson)
 
 			boxNo = ifnull(boxMap.get("boxNo"),"0").toString().toDecimal().toLong();
 			boxTypeStr = ifnull(boxMap.get("boxTypeId"),"").toString().trim();
-			lineNoStr = ifnull(boxMap.get("lineNo"),"0").toString().trim();
-			skuVal = ifnull(boxMap.get("sku"),"").toString();
-			itemNameVal = ifnull(boxMap.get("itemName"),"").toString();
-			qtyVal = ifnull(boxMap.get("qty"),"0").toString().toDecimal().toLong();
 			grossVal = ifnull(boxMap.get("grossWeight"),"0").toString().toDecimal();
+
+			outLen = ifnull(boxMap.get("outerLength"),"0").toString().toDecimal();
+			outWid = ifnull(boxMap.get("outerWidth"),"0").toString().toDecimal();
+			outHgt = ifnull(boxMap.get("outerHeight"),"0").toString().toDecimal();
+
+			innLen = ifnull(boxMap.get("innerLength"),"0").toString().toDecimal();
+			innWid = ifnull(boxMap.get("innerWidth"),"0").toString().toDecimal();
+			innHgt = ifnull(boxMap.get("innerHeight"),"0").toString().toDecimal();
+
+			usesInner = false;
+			if(ifnull(boxMap.get("usesInner"),"false").toString().trim().toLowerCase() == "true")
+			{
+				usesInner = true;
+			}
+
+			if(seenBoxNos.contains(boxNo.toString()) == true)
+			{
+				return "{\"success\":false,\"error\":\"Two boxes are both numbered " + boxNo + "\"}";
+			}
+			seenBoxNos.add(boxNo.toString());
 
 			if(boxTypeStr == "" || boxTypeStr.isNumber() == false)
 			{
 				return "{\"success\":false,\"error\":\"Box " + boxNo + " has no carton selected\"}";
 			}
 
-			if(qtyVal <= 0)
+			if(outLen <= 0 || outWid <= 0 || outHgt <= 0)
 			{
-				return "{\"success\":false,\"error\":\"Box " + boxNo + " has no pieces in it\"}";
+				return "{\"success\":false,\"error\":\"Box " + boxNo + " is missing an outer dimension\"}";
 			}
 
-			if(lineNoStr == "" || lineNoStr.isNumber() == false)
+			if(usesInner == true && (innLen <= 0 || innWid <= 0 || innHgt <= 0))
 			{
-				return "{\"success\":false,\"error\":\"Box " + boxNo + " is not against any order line\"}";
+				return "{\"success\":false,\"error\":\"Box " + boxNo + " says an inner carton was used but is missing an inner dimension\"}";
 			}
 
 			boxTypeId = boxTypeStr.toLong();
 
-			// The carton's own dimensions decide the volumetric weight, so they
-			// are read from the master rather than taken from the payload - the
-			// screen can be stale, the master cannot.
-			outLen = 0.0;
-			outWid = 0.0;
-			outHgt = 0.0;
-			boxNameTxt = "";
+			// The carton still has to exist. It no longer decides the dimensions -
+			// it is what autofilled them - but it names the box on a packing list
+			// and in the history, so a reference to a record that was never there
+			// is a mistake worth refusing.
 			boxTypeFound = false;
 
-			for each  bm in Box_Master[ID == boxTypeId]
+			for each  bmChk in Box_Master[ID == boxTypeId]
 			{
 				boxTypeFound = true;
-				boxNameTxt = ifnull(bm.Box_Name,"").toString();
-				outLen = ifnull(bm.Outer_Length_Cm,0).toDecimal();
-				outWid = ifnull(bm.Outer_Width_Cm,0).toDecimal();
-				outHgt = ifnull(bm.Outer_Height_Cm,0).toDecimal();
 			}
 
 			if(boxTypeFound == false)
@@ -153,30 +242,113 @@ string savePackingRecord(string payloadJson)
 				return "{\"success\":false,\"error\":\"Box " + boxNo + " names a carton that is not in Box_Master\"}";
 			}
 
-			volWt = ((outLen * outWid * outHgt) / volDivisor).round(2);
-
-			haveQ = ifnull(boxedByLine.get(lineNoStr),"0").toString().trim();
-			if(haveQ == "")
+			// An inner carton that was not used is stored as zeroes rather than as
+			// the size it would have been. The record says what went out.
+			if(usesInner == false)
 			{
-				haveQ = "0";
+				innLen = 0.0;
+				innWid = 0.0;
+				innHgt = 0.0;
 			}
-			boxedByLine.put(lineNoStr,(haveQ.toLong() + qtyVal).toString());
+
+			//--------------------------------------------------------------
+			// WHAT IS IN THIS BOX.
+			//--------------------------------------------------------------
+			itemList = boxMap.get("items");
+
+			if(itemList == null)
+			{
+				return "{\"success\":false,\"error\":\"Box " + boxNo + " has nothing in it\"}";
+			}
+
+			boxPieces = 0;
+			boxEstimated = 0.0;
+			seenLinesInBox = List();
+
+			for each  itemVal in itemList
+			{
+				itemMap = itemVal.toMap();
+
+				lineNoStr = ifnull(itemMap.get("lineNo"),"").toString().trim();
+				qtyVal = ifnull(itemMap.get("qty"),"0").toString().toDecimal().toLong();
+
+				if(lineNoStr == "" || lineNoStr.isNumber() == false)
+				{
+					return "{\"success\":false,\"error\":\"Box " + boxNo + " has an item that is not against any order line\"}";
+				}
+
+				if(qtyVal <= 0)
+				{
+					return "{\"success\":false,\"error\":\"Box " + boxNo + " has an item with no pieces in it\"}";
+				}
+
+				if(seenLinesInBox.contains(lineNoStr) == true)
+				{
+					return "{\"success\":false,\"error\":\"Box " + boxNo + " lists order line " + lineNoStr + " twice - put the pieces on one row\"}";
+				}
+				seenLinesInBox.add(lineNoStr);
+
+				lineSku = ifnull(skuByLine.get(lineNoStr),"").toString();
+				lineName = ifnull(nameByLine.get(lineNoStr),"").toString();
+
+				unitWtTxt = ifnull(unitWtByLine.get(lineNoStr),"0").toString().trim();
+				if(unitWtTxt == "")
+				{
+					unitWtTxt = "0";
+				}
+				unitWt = unitWtTxt.toDecimal();
+
+				haveQ = ifnull(boxedByLine.get(lineNoStr),"0").toString().trim();
+				if(haveQ == "")
+				{
+					haveQ = "0";
+				}
+				boxedByLine.put(lineNoStr,(haveQ.toLong() + qtyVal).toString());
+
+				itemRow = Packing.Packed_Box_Items();
+				itemRow.Box_No = boxNo;
+				itemRow.Line_No = lineNoStr.toLong();
+				itemRow.SKU = lineSku;
+				itemRow.Item_Name = lineName;
+				itemRow.Quantity = qtyVal;
+				itemRow.Unit_Weight_Kg = unitWt;
+				itemsCollection.insert(itemRow);
+
+				boxPieces = boxPieces + qtyVal;
+				boxEstimated = boxEstimated + (unitWt * qtyVal);
+			}
+
+			if(boxPieces <= 0)
+			{
+				return "{\"success\":false,\"error\":\"Box " + boxNo + " has nothing in it\"}";
+			}
+
+			volWt = ((outLen * outWid * outHgt) / volDivisor).round(2);
 
 			boxRow = Packing.Packed_Boxes();
 			boxRow.Box_No = boxNo;
 			boxRow.Box_Type = boxTypeId;
-			boxRow.Line_No = lineNoStr.toLong();
-			boxRow.SKU = skuVal;
-			boxRow.Item_Name = itemNameVal;
-			boxRow.Quantity = qtyVal;
+			boxRow.Uses_Inner = usesInner;
+			boxRow.Inner_Length_Cm = innLen;
+			boxRow.Inner_Width_Cm = innWid;
+			boxRow.Inner_Height_Cm = innHgt;
+			boxRow.Outer_Length_Cm = outLen;
+			boxRow.Outer_Width_Cm = outWid;
+			boxRow.Outer_Height_Cm = outHgt;
+			boxRow.Estimated_Weight_Kg = boxEstimated.round(2);
 			boxRow.Gross_Weight_Kg = grossVal;
 			boxRow.Volumetric_Weight_Kg = volWt;
 			boxesCollection.insert(boxRow);
 
 			boxCount = boxCount + 1;
-			totalPieces = totalPieces + qtyVal;
+			if(usesInner == true)
+			{
+				innerCount = innerCount + 1;
+			}
+			totalPieces = totalPieces + boxPieces;
 			totalGross = totalGross + grossVal;
 			totalVolumetric = totalVolumetric + volWt;
+			totalEstimated = totalEstimated + boxEstimated;
 		}
 
 		if(boxCount == 0)
@@ -185,7 +357,7 @@ string savePackingRecord(string payloadJson)
 		}
 
 		//------------------------------------------------------------------
-		// GUARD 4 - what finishing actually produced, per ORIGINAL line.
+		// GUARD 5 - what finishing actually produced, per ORIGINAL line.
 		//
 		// The same walk getPackingDetails does. A remake batch replaces pieces
 		// the customer already bought, so its acceptances belong to the line it
@@ -330,14 +502,15 @@ string savePackingRecord(string payloadJson)
 			empId = emp.ID;
 		}
 
-		// One outer carton holds exactly one inner, so the two counts are the
-		// same number by definition. Both are kept because both are what the
-		// paperwork asks for.
+		// The two counts are no longer the same number. Every box has an outer;
+		// only some have an inner. Total_Inner_Boxes is how many branded inner
+		// cartons left the building, which is the figure packaging reorders from.
 		newPack = insert into Packing
 		[
 			Sales_Order = salesId
-			Total_Inner_Boxes = boxCount
+			Total_Inner_Boxes = innerCount
 			Total_Outer_Boxes = boxCount
+			Total_Estimated_Weight_Kg = totalEstimated.round(2)
 			Total_Gross_Weight_Kg = totalGross.round(2)
 			Total_Volumetric_Weight_Kg = totalVolumetric.round(2)
 		];
@@ -355,6 +528,7 @@ string savePackingRecord(string payloadJson)
 			}
 
 			packRec.Packed_Boxes.insert(boxesCollection);
+			packRec.Packed_Box_Items.insert(itemsCollection);
 		}
 
 		//------------------------------------------------------------------
@@ -375,7 +549,7 @@ string savePackingRecord(string payloadJson)
 			chargeable = totalVolumetric;
 		}
 
-		res = "{\"success\":true,\"packingId\":\"" + packId + "\",\"boxes\":" + boxCount + ",\"pieces\":" + totalPieces + ",\"grossWeight\":" + totalGross.round(2) + ",\"volumetricWeight\":" + totalVolumetric.round(2) + ",\"chargeableWeight\":" + chargeable.round(2) + ",\"message\":\"Packed " + totalPieces + " pieces into " + boxCount + " boxes\"}";
+		res = "{\"success\":true,\"packingId\":\"" + packId + "\",\"boxes\":" + boxCount + ",\"innerBoxes\":" + innerCount + ",\"pieces\":" + totalPieces + ",\"estimatedWeight\":" + totalEstimated.round(2) + ",\"grossWeight\":" + totalGross.round(2) + ",\"volumetricWeight\":" + totalVolumetric.round(2) + ",\"chargeableWeight\":" + chargeable.round(2) + ",\"message\":\"Packed " + totalPieces + " pieces into " + boxCount + " boxes\"}";
 	}
 	catch (e)
 	{

@@ -156,7 +156,7 @@ string receiveFromThirdParty(string payloadJson)
 	{
 		noteTxt = noteTxt + " - " + remarkTxt;
 	}
-	noteTxt = noteTxt.replaceAll("\"","'");
+	noteTxt = noteTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
 
 	//------------------------------------------------------------------
 	// Close the shares. Every one at the full quantity except the last,
@@ -439,7 +439,7 @@ string receiveFromThirdParty(string payloadJson)
 	{
 		oNote = oNote + " - " + remarkTxt;
 	}
-	oNote = oNote.replaceAll("\"","'");
+	oNote = oNote.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
 
 	// Returned_On is set on all of them first, including the last, because
 	// saveProductionPhase refuses to touch a stage that is outsourced and

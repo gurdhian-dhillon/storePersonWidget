@@ -5,15 +5,16 @@
    point: three screens, one list. This file only adds what is packing-specific,
    which is the tables inside an open card.
 
-   Page-level rules are scoped under .packing-app because this stylesheet is also
-   loaded into the finishing widget. Unscoped, .app-header-left turned the
-   finishing widget's title row into a column. */
+   Page-level rules stay scoped under .packing-app. This file WAS loaded into the
+   finishing widget as well, back when packing was a tab inside it, and unscoped
+   .app-header-left turned that widget's title row into a column. Packing is its
+   own widget now and nothing else links this file - but the scoping is kept,
+   because it costs nothing and it is what made sharing safe last time. */
 
 /* The SHARED .item-body is padding: 1.5rem 1.5rem 0 - no bottom at all, so the
    last thing in an open card sits flush against its edge. Every screen that uses
-   it has to put that back. */
-.packing-app .item-body,
-.finishing-app .item-body {
+   it has to put that back; app/finishing has its own copy of this rule. */
+.packing-app .item-body {
     padding-bottom: 1.5rem;
 }
 
@@ -58,7 +59,7 @@
 }
 
 .pack-count {
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
     color: var(--text-muted);
 }
 
@@ -70,7 +71,7 @@
 
 /* The plan number, sitting quietly after the status badge on the card header. */
 .pack-plan {
-    font-size: 0.7rem;
+    font-size: 0.75rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     color: #94a3b8;
 }
@@ -90,11 +91,11 @@
     justify-content: space-between;
     align-items: center;
     gap: 1rem;
-    padding: 0.75rem 0 0.5rem;
+    padding: 1rem 0 0.75rem;
 }
 
 .pack-sec-head h3 {
-    font-size: 0.7rem;
+    font-size: 0.78rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -105,37 +106,37 @@
 /* The unit, sitting on the heading so it is not repeated on every row. */
 .pack-sec-unit {
     margin-left: 0.5rem;
-    font-size: 0.65rem;
+    font-size: 0.72rem;
     font-weight: 500;
     text-transform: none;
     letter-spacing: 0;
     color: #94a3b8;
 }
 
-/* Derived, not editable - the outer follows from the inner box. */
-.cell-input.is-derived {
-    width: 100%;
-    text-align: left;
+/* Switched off, not derived - the inner dimensions of a box packed in the outer
+   alone. Left on screen rather than removed so the two dimension rows stay in
+   the same place on every box card. */
+.dim-input.is-derived {
     background: #f8fafc;
-    color: var(--text-muted);
+    color: #cbd5e1;
     border-style: dashed;
     cursor: not-allowed;
 }
 
 .pack-sec-hint {
-    font-size: 0.7rem;
+    font-size: 0.78rem;
     color: #94a3b8;
 }
 
 .mini-btn {
     font-family: inherit;
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     font-weight: 600;
     color: var(--primary);
     background: #eff6ff;
     border: 1px solid #bfdbfe;
     border-radius: 6px;
-    padding: 0.28rem 0.6rem;
+    padding: 0.35rem 0.7rem;
     cursor: pointer;
     white-space: nowrap;
     transition: background-color 0.12s ease;
@@ -164,8 +165,8 @@
     position: static;
     background: #f8fafc;
     border-bottom: 1px solid var(--border);
-    padding: 0.4rem 0.875rem;
-    font-size: 0.65rem;
+    padding: 0.55rem 1rem;
+    font-size: 0.72rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -173,8 +174,8 @@
 }
 
 .pack-tbl td {
-    padding: 0.5rem 0.875rem;
-    font-size: 0.8125rem;
+    padding: 0.625rem 1rem;
+    font-size: 0.875rem;
     border-bottom: 1px solid #f1f5f9;
     vertical-align: middle;
 }
@@ -190,7 +191,7 @@
 .pack-tbl .col-num {
     text-align: right;
     font-variant-numeric: tabular-nums;
-    width: 6.5rem;
+    width: 7rem;
 }
 
 .pack-tbl .col-act {
@@ -198,10 +199,8 @@
     width: 6rem;
 }
 
-.pack-tbl .col-no { width: 3rem; }
-.pack-tbl .col-carton { min-width: 15rem; }
-.pack-tbl .col-outer { width: 9rem; }
-.pack-tbl .col-item { min-width: 11rem; }
+.pack-tbl .col-no { width: 3.25rem; }
+.pack-tbl .col-item { min-width: 12rem; }
 
 .it-name {
     font-weight: 600;
@@ -211,7 +210,7 @@
 .it-sku {
     display: inline-block;
     margin-left: 0.5rem;
-    font-size: 0.6875rem;
+    font-size: 0.75rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     color: #94a3b8;
 }
@@ -222,10 +221,10 @@
 
 .left-pill {
     display: inline-block;
-    min-width: 2.25rem;
-    padding: 1px 8px;
+    min-width: 2.5rem;
+    padding: 2px 10px;
     border-radius: 9999px;
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     font-weight: 700;
     text-align: center;
 }
@@ -245,24 +244,24 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 24px;
-    height: 24px;
+    width: 27px;
+    height: 27px;
     border-radius: 50%;
     background: #eff6ff;
     color: var(--primary);
     font-weight: 700;
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
 }
 
 .cell-select,
 .cell-input {
     font-family: inherit;
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
     color: var(--text-main);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 6px;
-    padding: 0.3rem 0.45rem;
+    padding: 0.42rem 0.6rem;
     outline: none;
     transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
@@ -273,7 +272,7 @@
 }
 
 .cell-input {
-    width: 5rem;
+    width: 5.75rem;
     text-align: right;
     font-variant-numeric: tabular-nums;
 }
@@ -284,21 +283,9 @@
     box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
-.no-inner {
-    display: block;
-    margin-top: 2px;
-    font-size: 0.65rem;
-    font-weight: 600;
-    color: var(--status-warning);
-}
-
-.pack-tbl .vol {
-    color: var(--text-muted);
-}
-
 .x-btn {
     font-family: inherit;
-    font-size: 0.8rem;
+    font-size: 0.9rem;
     color: #cbd5e1;
     background: transparent;
     border: none;
@@ -318,13 +305,283 @@
     border-top: 1px solid var(--border);
     border-bottom: none;
     font-weight: 700;
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
 }
 
 .pack-note {
     padding: 0.5rem 0 0;
     font-size: 0.7rem;
     color: #94a3b8;
+}
+
+/* ---------- a box is a card ----------
+   A box carries two grains at once - its own carton, dimensions and weights,
+   AND the list of items inside it. A table row can only draw one of those, so
+   the box gets a card and the contents get a small table inside it. */
+
+.box-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+/* TWO COLUMNS, BOTH CAPPED. Left is what the box IS - carton, packaging, the
+   six dimensions. Right is what is IN it. The weights run underneath, ending
+   where the columns end.
+
+   justify-content: start is what stops the card stretching. Every control here
+   was a full-width row to begin with, which on a wide screen put a 900-pixel
+   dropdown beside a two-character quantity field and left the weight stranded
+   on the far side of the card from the numbers it belongs to. A form reads at a
+   fixed width; the card can be as wide as it likes. */
+.box-card {
+    display: grid;
+    grid-template-columns: minmax(22rem, 24rem) minmax(0, 34rem);
+    justify-content: start;
+    align-items: start;
+    gap: 0.35rem 2.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: 0.875rem 1.125rem 1.125rem;
+}
+
+.box-topline,
+.box-foot {
+    grid-column: 1 / -1;
+}
+
+/* The number, the carton it is, how much is in it - the three things worth
+   knowing without reading the card. Same line as the remove button, and the
+   same shape as a box block in History. */
+.box-topline {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding-bottom: 0.75rem;
+}
+
+.box-topline-name {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-main);
+}
+
+.box-topline-pieces {
+    font-size: 0.875rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.box-remove {
+    margin-left: auto;
+}
+
+.box-setup {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.box-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 0;
+}
+
+.box-field > span {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #94a3b8;
+}
+
+/* The two dimension rows, one under the other and aligned on the same grid, so
+   inner and outer can be read against each other at a glance. */
+.box-dims {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.375rem 0 0;
+}
+
+.dim-row {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.dim-label {
+    width: 3.6rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+
+/* No spinners. Six of them on one card is more chrome than the numbers, and a
+   carton dimension is typed off a tape measure, never stepped. */
+.dim-input::-webkit-outer-spin-button,
+.dim-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.dim-input {
+    -moz-appearance: textfield;
+    appearance: textfield;
+    font-family: inherit;
+    font-size: 0.875rem;
+    width: 4.9rem;
+    min-width: 0;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-main);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.42rem 0.6rem;
+    outline: none;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.dim-input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.dim-x {
+    font-size: 0.8125rem;
+    color: #cbd5e1;
+}
+
+.dim-unit {
+    margin-left: 0.35rem;
+    font-size: 0.78rem;
+    color: #94a3b8;
+}
+
+.dim-note {
+    margin-left: 0.5rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--status-warning);
+}
+
+.box-contents {
+    min-width: 0;
+}
+
+.box-sub-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-bottom: 0.5rem;
+    /* Sits level with the CARTON label opposite it, so the two columns start on
+       the same line rather than a few pixels apart. */
+    min-height: 1.35rem;
+}
+
+.box-sub-head > span {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #94a3b8;
+}
+
+.box-items-tbl {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    table-layout: fixed;
+    white-space: normal;
+}
+
+.box-items-tbl .col-num { width: 7.25rem; }
+.box-items-tbl .col-act { width: 3rem; }
+
+.box-items-tbl td,
+.box-items-tbl th {
+    padding: 0.55rem 0.8rem;
+}
+
+.box-foot {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.625rem 1.5rem;
+    padding-top: 0.875rem;
+    margin-top: 0.75rem;
+    border-top: 1px dashed var(--border);
+}
+
+/* Estimated and volumetric are derived and sit as text; only the actual weight
+   is a field, because it is the only one that was measured. */
+.box-stat {
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.box-stat b {
+    color: var(--text-main);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+/* The one measured figure on the card, so it is the one that is a field. Laid
+   out on a line rather than stacked - a label above a 5rem input reads as a
+   stranded control, which is exactly how it looked. */
+.box-weigh {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-left: auto;
+    min-width: 0;
+}
+
+.box-weigh > span {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #94a3b8;
+    white-space: nowrap;
+}
+
+.box-weigh .cell-input {
+    width: 6.75rem;
+}
+
+.box-empty {
+    padding: 1.5rem;
+    text-align: center;
+    font-size: 0.875rem;
+    font-style: italic;
+    color: #94a3b8;
+    border: 1px dashed #cbd5e1;
+    border-radius: var(--radius);
+}
+
+/* The run's totals, under the cards rather than in a table foot - there is no
+   table left for them to sit under. */
+.box-totals {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.75rem;
+    padding: 1rem 0 0.25rem;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.box-totals b {
+    color: var(--text-main);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
 }
 
 /* ---------- footer of an open card ---------- */
@@ -345,7 +602,7 @@
 }
 
 .pack-picker > span {
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -385,7 +642,7 @@
 .pack-msg {
     flex: 1;
     min-width: 0;
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
     font-weight: 600;
     text-align: right;
 }
@@ -397,9 +654,9 @@
 /* ---------- hints ---------- */
 
 .pack-hint {
-    padding: 2rem 1.25rem;
+    padding: 2.25rem 1.5rem;
     text-align: center;
-    font-size: 0.875rem;
+    font-size: 0.9375rem;
     font-weight: 600;
     color: var(--text-main);
     background: var(--surface);
@@ -415,8 +672,8 @@
 
 .pack-hint span {
     display: block;
-    margin-top: 0.25rem;
-    font-size: 0.8125rem;
+    margin-top: 0.35rem;
+    font-size: 0.875rem;
     font-weight: 400;
     color: var(--text-muted);
 }
@@ -427,6 +684,21 @@
 }
 
 /* ---------- narrow screens ---------- */
+
+/* The two columns stack before either can be squeezed below the width its
+   controls need. The dimension row is the binding one: a label plus three
+   inputs and two multiplication signs does not fold, and it sets the 22rem
+   floor on the left column. */
+@media (max-width: 1080px) {
+    .box-card {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 1rem;
+    }
+
+    .box-weigh {
+        margin-left: 0;
+    }
+}
 
 @media (max-width: 760px) {
     .pack-foot {
@@ -450,18 +722,18 @@
 .inc-list {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.4rem 0.5rem;
+    gap: 0.5rem 0.6rem;
     padding: 0.25rem 0 0.875rem;
 }
 
 .inc-item {
     display: inline-flex;
     align-items: center;
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
     color: #475569;
     background: #f1f5f9;
     border-radius: 9999px;
-    padding: 0.2rem 0.7rem;
+    padding: 0.3rem 0.85rem;
 }
 
 /* ----------------------------------------------------------------------------
@@ -480,7 +752,7 @@
     display: inline-flex;
     align-items: baseline;
     gap: 0.25rem;
-    font-size: 0.9375rem;
+    font-size: 1.0625rem;
     font-weight: 700;
     color: var(--text-main);
     font-variant-numeric: tabular-nums;
@@ -488,7 +760,7 @@
 }
 
 .pack-charge .unit {
-    font-size: 0.6875rem;
+    font-size: 0.75rem;
     font-weight: 500;
     color: var(--text-muted);
 }
@@ -499,13 +771,88 @@
 .pack-hist-totals {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.4rem 1.25rem;
-    padding: 0.25rem 0 0.875rem;
-    font-size: 0.8125rem;
+    gap: 0.5rem 1.75rem;
+    padding: 0.35rem 0 1rem;
+    font-size: 0.875rem;
     color: var(--text-muted);
 }
 
 .pack-hist-totals b {
+    color: var(--text-main);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ONE BLOCK PER PHYSICAL BOX, drawn like the box card in the queue tab so the
+   thing he built and the thing he is reading back are recognisably the same
+   object. Every figure the record holds is here: a packed box is answered for
+   months later, and the answer is always about one box. */
+.hist-box {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: 0.875rem 1rem 1rem;
+    margin-bottom: 0.875rem;
+}
+
+.hist-box:last-child {
+    margin-bottom: 0;
+}
+
+.hist-box-head {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.hist-box-carton {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-main);
+}
+
+.hist-box-tag {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #047857;
+    background: var(--status-success-bg);
+    border-radius: 9999px;
+    padding: 0.15rem 0.6rem;
+}
+
+.hist-box-tag.is-outer {
+    color: #b45309;
+    background: var(--status-warning-bg);
+}
+
+/* A box packed before dimensions were stored on the row. What is shown is the
+   carton's size, which is where those numbers came from at the time - said out
+   loud rather than passed off as measured. */
+.hist-box-tag.is-legacy {
+    color: var(--text-muted);
+    background: #f1f5f9;
+}
+
+.hist-box-pieces {
+    margin-left: auto;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.hist-box-dims {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.5rem;
+    padding: 0.625rem 0 0.875rem;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.hist-box-dims b {
     color: var(--text-main);
     font-weight: 700;
     font-variant-numeric: tabular-nums;

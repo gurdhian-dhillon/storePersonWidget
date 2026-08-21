@@ -642,7 +642,7 @@ string getAdminCalculation(string salesOrderId)
 							liOn = mi.Issue_Date.toString("dd-MMM-yyyy");
 						}
 
-						oneIss = "{\"lot\":\"" + liLotNo + "\",\"qty\":" + lqS.toDecimal() + ",\"settled\":" + lsS.toDecimal() + ",\"on\":\"" + liOn + "\",\"overrideFrom\":\"" + liFromNo + "\",\"note\":\"" + ifnull(miL.Lot_Override_Note,"").toString().replaceAll("\"","'") + "\"}";
+						oneIss = "{\"lot\":\"" + liLotNo + "\",\"qty\":" + lqS.toDecimal() + ",\"settled\":" + lsS.toDecimal() + ",\"on\":\"" + liOn + "\",\"overrideFrom\":\"" + liFromNo + "\",\"note\":\"" + ifnull(miL.Lot_Override_Note,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
 
 						issKey = liItem + "|" + liMat;
 						prevIss = ifnull(issuedByKey.get(issKey),"").toString();

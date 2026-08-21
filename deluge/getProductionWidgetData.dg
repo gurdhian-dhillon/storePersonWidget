@@ -665,8 +665,32 @@ string getProductionWidgetData(string supervisorId, string planId)
 						agBack = "";
 						if(ag.Returned_On != null) { agBack = ag.Returned_On.toString("dd-MMM-yyyy"); }
 
+						//----------------------------------------------------
+						// REMARKS IS A MULTI LINE FIELD, SO IT IS FLATTENED
+						// BEFORE IT GOES INTO JSON.
+						//
+						// A raw newline inside a JSON string literal is not an
+						// escaping nicety - it is invalid JSON, and the widget
+						// gets "bad control character in string literal" with a
+						// column number and nothing else. Nothing on the Deluge
+						// side fails, so there is no error card and no 9430
+						// either; the whole tab simply will not parse.
+						//
+						// Two writers put newlines in here and BOTH are correct
+						// to: sendToThirdParty stores what the supervisor typed
+						// into a textarea, and receiveFromThirdParty appends its
+						// return note under it with a "\n" so the field reads as
+						// a log in Creator. The record keeps its line breaks -
+						// only the copy crossing JSON is flattened, because a
+						// JSON string is a single line by definition.
+						//
+						// " | " rather than a space: several appended notes run
+						// into one unreadable sentence otherwise.
+						//----------------------------------------------------
+						agRemTxt = ifnull(ag.Remarks,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
 						if(asgJson != "") { asgJson = asgJson + ","; }
-						asgJson = asgJson + "{\"id\":\"" + ag.ID + "\",\"operator\":\"" + agOp + "\",\"party\":\"" + agParty + "\",\"osRef\":\"" + ifnull(ag.Outsource_Ref,"").toString().replaceAll("\"","'") + "\",\"sentOn\":\"" + agSent + "\",\"returnedOn\":\"" + agBack + "\",\"assigned\":" + ifnull(ag.Assigned_Qty,0) + ",\"qtyOut\":" + ifnull(ag.Qty_Out,0) + ",\"start\":\"" + ifnull(ag.Start_Time,"") + "\",\"end\":\"" + ifnull(ag.End_Time,"") + "\",\"status\":\"" + ifnull(ag.Assignment_Status,"") + "\",\"remarks\":\"" + ifnull(ag.Remarks,"").toString().replaceAll("\"","'") + "\"}";
+						asgJson = asgJson + "{\"id\":\"" + ag.ID + "\",\"operator\":\"" + agOp + "\",\"party\":\"" + agParty + "\",\"osRef\":\"" + ifnull(ag.Outsource_Ref,"").toString().replaceAll("\"","'") + "\",\"sentOn\":\"" + agSent + "\",\"returnedOn\":\"" + agBack + "\",\"assigned\":" + ifnull(ag.Assigned_Qty,0) + ",\"qtyOut\":" + ifnull(ag.Qty_Out,0) + ",\"start\":\"" + ifnull(ag.Start_Time,"") + "\",\"end\":\"" + ifnull(ag.End_Time,"") + "\",\"status\":\"" + ifnull(ag.Assignment_Status,"") + "\",\"remarks\":\"" + agRemTxt + "\"}";
 					}
 
 					// Outsourcing rides on the SAME stage row. A stage sent out is
@@ -680,7 +704,13 @@ string getProductionWidgetData(string supervisorId, string planId)
 					trkBack = "";
 					if(trk.Returned_On != null) { trkBack = trk.Returned_On.toString("dd-MMM-yyyy"); }
 
-					logsJson = logsJson + "{\"id\":\"" + trk.ID + "\",\"phase\":\"" + trk.Phase_Name + "\",\"operator\":\"" + opId + "\",\"assigns\":[" + asgJson + "],\"outsourced\":" + ifnull(trk.Is_Outsourced,false) + ",\"party\":\"" + trkParty + "\",\"sentOn\":\"" + trkSent + "\",\"outsourceRef\":\"" + ifnull(trk.Outsource_Ref,"").toString().replaceAll("\"","'") + "\",\"returnedOn\":\"" + trkBack + "\",\"start\":\"" + ifnull(trk.Start_Time,"") + "\",\"end\":\"" + ifnull(trk.End_Time,"") + "\",\"qtyIn\":" + ifnull(trk.Qty_In,0) + ",\"qtyOut\":" + ifnull(trk.Qty_Out,0) + ",\"status\":\"" + ifnull(trk.Stage_Status,"") + "\",\"remarks\":\"" + ifnull(trk.Remarks,"").replaceAll("\"","'") + "\"}";
+					// Flattened for the same reason as the share's remarks above -
+					// saveProductionPhase and receiveFromThirdParty both write
+					// newlines into this one. Phase_Name is a picklist value, not
+					// typed, so it is left alone.
+					trkRemTxt = ifnull(trk.Remarks,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
+					logsJson = logsJson + "{\"id\":\"" + trk.ID + "\",\"phase\":\"" + trk.Phase_Name + "\",\"operator\":\"" + opId + "\",\"assigns\":[" + asgJson + "],\"outsourced\":" + ifnull(trk.Is_Outsourced,false) + ",\"party\":\"" + trkParty + "\",\"sentOn\":\"" + trkSent + "\",\"outsourceRef\":\"" + ifnull(trk.Outsource_Ref,"").toString().replaceAll("\"","'") + "\",\"returnedOn\":\"" + trkBack + "\",\"start\":\"" + ifnull(trk.Start_Time,"") + "\",\"end\":\"" + ifnull(trk.End_Time,"") + "\",\"qtyIn\":" + ifnull(trk.Qty_In,0) + ",\"qtyOut\":" + ifnull(trk.Qty_Out,0) + ",\"status\":\"" + ifnull(trk.Stage_Status,"") + "\",\"remarks\":\"" + trkRemTxt + "\"}";
 				}
 
 				if(itemsJson != "") { itemsJson = itemsJson + ","; }

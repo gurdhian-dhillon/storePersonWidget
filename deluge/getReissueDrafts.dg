@@ -100,7 +100,7 @@ string getReissueDrafts(string supervisorId)
 			}
 
 			reportedTxt = ifnull(dmg.Reported_On,"").toString();
-			noteTxt = ifnull(dmg.Note,"").toString().replaceAll("\"","'");
+			noteTxt = ifnull(dmg.Note,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
 			phaseTxt = ifnull(dmg.Phase_Name,"").toString().replaceAll("\"","'");
 			piecesLost = ifnull(dmg.Damaged_Pieces,0);
 

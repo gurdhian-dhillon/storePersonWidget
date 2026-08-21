@@ -227,7 +227,7 @@ string getStoreMaterialRequirements()
 				// One row per damage line, never summed, so this reason belongs
 				// to exactly one incident - which is the whole point of not
 				// merging them.
-				lnMap.put("reason",ifnull(mr.Reason,"").toString().replaceAll("\"","'").replaceAll("\n"," "));
+				lnMap.put("reason",ifnull(mr.Reason,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," "));
 				lnList = cur.get("lines");
 				lnList.add(lnMap);
 				cur.put("lines",lnList);

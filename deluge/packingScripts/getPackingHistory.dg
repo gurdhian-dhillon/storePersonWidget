@@ -6,7 +6,31 @@ string getPackingHistory(string payloadJson)
 	//
 	// Reads Packing, the record savePackingRecord writes. The sales order's
 	// status can say an order reached "Packed"; only this can say what went into
-	// which carton, what it weighed and who packed it.
+	// which carton, what it measured, what it weighed and who packed it.
+	//
+	// EVERYTHING THE RECORD HOLDS COMES BACK. A packed order is answered for
+	// months later - a customer query, a damage claim, a courier reweigh - and
+	// the answer is always about ONE BOX. So every box returns its carton, the
+	// six dimensions actually used, whether an inner carton went in, its three
+	// weights, and every item inside it with the unit weight the estimate was
+	// built from. Summarising any of that here would mean going to Creator to
+	// answer the question the screen exists to answer.
+	//
+	// TWO SUBFORMS, JOINED BY Box_No. Packed_Boxes is one row per physical box;
+	// Packed_Box_Items is one row per item in a box. Creator has no subform
+	// inside a subform, so the items are read ONCE into a map keyed by box number
+	// and the box loop reads from it - not a query per box, which is the shape
+	// that trips the uncatchable statement limit.
+	//
+	// LEGACY BOXES STILL RENDER, and there are two of them to handle:
+	//   - a box packed before the split has no Packed_Box_Items rows at all. Its
+	//     single item is still on the box row itself (SKU, Item_Name, Quantity,
+	//     Line_No), so it is read from there and shown as a one-item box.
+	//   - a box packed before the dimensions were editable stored none of them.
+	//     Its outer dimensions read as zero, so they fall back to Box_Master -
+	//     which is where they came from at the time, and is therefore the truth
+	//     about that box unless somebody has since edited the carton.
+	// Neither is a special case on screen. A box is a box.
 	//
 	// SHAPED ON getFinishingHistory, deliberately, because the two have the same
 	// problem and it is not the one getStoreIssueHistory has:
@@ -63,12 +87,29 @@ string getPackingHistory(string payloadJson)
 		// and fifty orders is fifteen hundred lookups, which is exactly the shape
 		// that trips the uncatchable limit. Box_Master is master data - a dozen
 		// rows that do not grow with trading.
+		//
+		// The dimensions come along for the LEGACY fallback below, pipe-joined
+		// into one value because a Deluge Map holds one thing per key:
+		//   outL|outW|outH|hasInner|innL|innW|innH
 		//------------------------------------------------------------------
 		boxNameMap = Map();
+		boxDimMap = Map();
 
 		for each  bmC in Box_Master[ID != 0]
 		{
-			boxNameMap.put(bmC.ID.toString(),ifnull(bmC.Box_Name,"").toString().trim().replaceAll("\"","'"));
+			bmKey = bmC.ID.toString();
+			boxNameMap.put(bmKey,ifnull(bmC.Box_Name,"").toString().trim().replaceAll("\"","'"));
+
+			bmHasInner = "false";
+			if(ifnull(bmC.Has_Inner_Carton,false) == true)
+			{
+				bmHasInner = "true";
+			}
+
+			// Started from an empty string deliberately - a concatenation whose
+			// FIRST term is a Decimal is a mixed-type expression, and those throw
+			// rather than coerce.
+			boxDimMap.put(bmKey,"" + ifnull(bmC.Outer_Length_Cm,0).toDecimal() + "|" + ifnull(bmC.Outer_Width_Cm,0).toDecimal() + "|" + ifnull(bmC.Outer_Height_Cm,0).toDecimal() + "|" + bmHasInner + "|" + ifnull(bmC.Inner_Length_Cm,0).toDecimal() + "|" + ifnull(bmC.Inner_Width_Cm,0).toDecimal() + "|" + ifnull(bmC.Inner_Height_Cm,0).toDecimal());
 		}
 
 		// sort by on its own assignment, never inline in a for-each header.
@@ -86,6 +127,7 @@ string getPackingHistory(string payloadJson)
 		for each  pk in packRuns
 		{
 			soNo = "";
+			soSrc = "";
 			planNo = "";
 			rowSupKey = "";
 			rowSupName = "";
@@ -105,6 +147,7 @@ string getPackingHistory(string payloadJson)
 				for each  so in Sales_Order[ID == pk.Sales_Order]
 				{
 					soNo = ifnull(so.Sales_Order,"").toString().replaceAll("\"","'");
+					soSrc = ifnull(so.Order_Source,"").toString().replaceAll("\"","'");
 				}
 
 				for each  pl in Production_Planning[Sales_Order == pk.Sales_Order]
@@ -166,12 +209,51 @@ string getPackingHistory(string payloadJson)
 				}
 
 				//----------------------------------------------------------
+				// THE CONTENTS, read ONCE into a map keyed by box number.
+				// Built as a JSON fragment per box as it goes, so the box loop
+				// below concatenates rather than re-walking.
+				//----------------------------------------------------------
+				itemsByBox = Map();
+				piecesByBox = Map();
+
+				for each  bi in pk.Packed_Box_Items
+				{
+					biKey = ifnull(bi.Box_No,0).toString();
+
+					uwS = ifnull(bi.Unit_Weight_Kg,"0").toString().trim();
+					if(uwS == "")
+					{
+						uwS = "0";
+					}
+
+					biQty = ifnull(bi.Quantity,0).toLong();
+
+					biJson = ifnull(itemsByBox.get(biKey),"").toString();
+					if(biJson != "")
+					{
+						biJson = biJson + ",";
+					}
+
+					biJson = biJson + "{\"lineNo\":" + ifnull(bi.Line_No,0) + ",\"sku\":\"" + ifnull(bi.SKU,"").toString().replaceAll("\"","'") + "\",\"itemName\":\"" + ifnull(bi.Item_Name,"").toString().replaceAll("\"","'") + "\",\"qty\":" + biQty + ",\"unitWeight\":" + uwS.toDecimal() + "}";
+
+					itemsByBox.put(biKey,biJson);
+
+					havePc = ifnull(piecesByBox.get(biKey),"0").toString().trim();
+					if(havePc == "")
+					{
+						havePc = "0";
+					}
+					piecesByBox.put(biKey,(havePc.toLong() + biQty).toString());
+				}
+
+				//----------------------------------------------------------
 				// ONE ROW PER PHYSICAL BOX, which is what Packed_Boxes holds and
-				// what answers "what is in box 3" months later. Not summarised -
-				// the totals are on the parent and are read from there.
+				// what answers "what is in box 3" months later.
 				//----------------------------------------------------------
 				boxesJson = "";
 				rowBoxes = 0;
+				rowInnerBoxes = 0;
+				rowPieces = 0;
 
 				for each  bx in pk.Packed_Boxes
 				{
@@ -201,13 +283,125 @@ string getPackingHistory(string payloadJson)
 					{
 						vwS = "0";
 					}
+					ewS = ifnull(bx.Estimated_Weight_Kg,"0").toString().trim();
+					if(ewS == "")
+					{
+						ewS = "0";
+					}
+
+					olS = ifnull(bx.Outer_Length_Cm,"0").toString().trim();
+					if(olS == "")
+					{
+						olS = "0";
+					}
+					owS = ifnull(bx.Outer_Width_Cm,"0").toString().trim();
+					if(owS == "")
+					{
+						owS = "0";
+					}
+					ohS = ifnull(bx.Outer_Height_Cm,"0").toString().trim();
+					if(ohS == "")
+					{
+						ohS = "0";
+					}
+					ilS = ifnull(bx.Inner_Length_Cm,"0").toString().trim();
+					if(ilS == "")
+					{
+						ilS = "0";
+					}
+					iwS = ifnull(bx.Inner_Width_Cm,"0").toString().trim();
+					if(iwS == "")
+					{
+						iwS = "0";
+					}
+					ihS = ifnull(bx.Inner_Height_Cm,"0").toString().trim();
+					if(ihS == "")
+					{
+						ihS = "0";
+					}
+
+					bxOutL = olS.toDecimal();
+					bxOutW = owS.toDecimal();
+					bxOutH = ohS.toDecimal();
+					bxInnL = ilS.toDecimal();
+					bxInnW = iwS.toDecimal();
+					bxInnH = ihS.toDecimal();
+
+					bxUsesInner = "false";
+					if(ifnull(bx.Uses_Inner,false) == true)
+					{
+						bxUsesInner = "true";
+					}
+
+					// LEGACY DIMENSIONS. A box packed before the fields existed
+					// stored none of them, and the carton it named is where they
+					// came from at the time.
+					bxLegacyDims = "false";
+
+					if(bxOutL <= 0 && bxOutW <= 0 && bxOutH <= 0 && bxTypeKey != "")
+					{
+						dimTxt = ifnull(boxDimMap.get(bxTypeKey),"").toString();
+
+						if(dimTxt != "")
+						{
+							bxLegacyDims = "true";
+							dimParts = dimTxt.toList("|");
+
+							bxOutL = dimParts.get(0).toDecimal();
+							bxOutW = dimParts.get(1).toDecimal();
+							bxOutH = dimParts.get(2).toDecimal();
+							bxUsesInner = dimParts.get(3);
+							bxInnL = dimParts.get(4).toDecimal();
+							bxInnW = dimParts.get(5).toDecimal();
+							bxInnH = dimParts.get(6).toDecimal();
+						}
+					}
+
+					bxKey = ifnull(bx.Box_No,0).toString();
+
+					bxItemsJson = ifnull(itemsByBox.get(bxKey),"").toString();
+					bxPieces = 0;
+
+					if(bxItemsJson == "")
+					{
+						// LEGACY CONTENTS. One item, on the box row itself.
+						legQty = ifnull(bx.Quantity,0).toLong();
+						legName = ifnull(bx.Item_Name,"").toString().replaceAll("\"","'");
+
+						if(legQty > 0 || legName != "")
+						{
+							bxItemsJson = "{\"lineNo\":" + ifnull(bx.Line_No,0) + ",\"sku\":\"" + ifnull(bx.SKU,"").toString().replaceAll("\"","'") + "\",\"itemName\":\"" + legName + "\",\"qty\":" + legQty + ",\"unitWeight\":0}";
+							bxPieces = legQty;
+						}
+					}
+					else
+					{
+						pcTxt = ifnull(piecesByBox.get(bxKey),"0").toString().trim();
+						if(pcTxt == "")
+						{
+							pcTxt = "0";
+						}
+						bxPieces = pcTxt.toLong();
+					}
 
 					if(boxesJson != "")
 					{
 						boxesJson = boxesJson + ",";
 					}
-					boxesJson = boxesJson + "{\"boxNo\":" + ifnull(bx.Box_No,0) + ",\"carton\":\"" + bxName + "\",\"lineNo\":" + ifnull(bx.Line_No,0) + ",\"sku\":\"" + ifnull(bx.SKU,"").toString().replaceAll("\"","'") + "\",\"itemName\":\"" + ifnull(bx.Item_Name,"").toString().replaceAll("\"","'") + "\",\"qty\":" + ifnull(bx.Quantity,0) + ",\"grossWeight\":" + gwS.toDecimal() + ",\"volumetricWeight\":" + vwS.toDecimal() + "}";
 
+					boxesJson = boxesJson + "{\"boxNo\":" + ifnull(bx.Box_No,0) + ",\"carton\":\"" + bxName + "\","
+						+ "\"usesInner\":" + bxUsesInner + ",\"legacyDims\":" + bxLegacyDims + ","
+						+ "\"innerLength\":" + bxInnL + ",\"innerWidth\":" + bxInnW + ",\"innerHeight\":" + bxInnH + ","
+						+ "\"outerLength\":" + bxOutL + ",\"outerWidth\":" + bxOutW + ",\"outerHeight\":" + bxOutH + ","
+						+ "\"pieces\":" + bxPieces + ",\"estimatedWeight\":" + ewS.toDecimal() + ",\"grossWeight\":" + gwS.toDecimal() + ",\"volumetricWeight\":" + vwS.toDecimal() + ","
+						+ "\"items\":[" + bxItemsJson + "]}";
+
+					if(bxUsesInner == "true")
+					{
+						rowInnerBoxes = rowInnerBoxes + 1;
+					}
+
+					rowPieces = rowPieces + bxPieces;
 					rowBoxes = rowBoxes + 1;
 					boxTotal = boxTotal + 1;
 				}
@@ -222,8 +416,14 @@ string getPackingHistory(string payloadJson)
 				{
 					tvS = "0";
 				}
+				teS = ifnull(pk.Total_Estimated_Weight_Kg,"0").toString().trim();
+				if(teS == "")
+				{
+					teS = "0";
+				}
 				totGross = tgS.toDecimal();
 				totVol = tvS.toDecimal();
+				totEst = teS.toDecimal();
 
 				// CHARGEABLE IS THE GREATER OF THE TWO - what the courier bills.
 				// Computed here rather than stored, the same way savePackingRecord
@@ -240,7 +440,7 @@ string getPackingHistory(string payloadJson)
 					rowsJson = rowsJson + ",";
 				}
 				// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-				rowsJson = rowsJson + "{\"id\":\"" + pk.ID + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"supervisorId\":\"" + rowSupKey + "\",\"supervisor\":\"" + rowSupName + "\",\"packedBy\":\"" + packedBy + "\",\"packedOn\":\"" + packedOn + "\",\"boxCount\":" + rowBoxes + ",\"grossWeight\":" + totGross + ",\"volumetricWeight\":" + totVol + ",\"chargeableWeight\":" + chargeable + ",\"boxes\":[" + boxesJson + "]}";
+				rowsJson = rowsJson + "{\"id\":\"" + pk.ID + "\",\"salesOrder\":\"" + soNo + "\",\"source\":\"" + soSrc + "\",\"planNo\":\"" + planNo + "\",\"supervisorId\":\"" + rowSupKey + "\",\"supervisor\":\"" + rowSupName + "\",\"packedBy\":\"" + packedBy + "\",\"packedOn\":\"" + packedOn + "\",\"boxCount\":" + rowBoxes + ",\"innerBoxCount\":" + rowInnerBoxes + ",\"pieces\":" + rowPieces + ",\"estimatedWeight\":" + totEst + ",\"grossWeight\":" + totGross + ",\"volumetricWeight\":" + totVol + ",\"chargeableWeight\":" + chargeable + ",\"boxes\":[" + boxesJson + "]}";
 
 				shownCount = shownCount + 1;
 			}

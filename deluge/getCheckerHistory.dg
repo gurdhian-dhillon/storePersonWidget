@@ -230,7 +230,7 @@ string getCheckerHistory(string supervisorId, string dateTxt)
 				if(fS == "") { fS = "0"; }
 
 				if(lineJson != "") { lineJson = lineJson + ","; }
-				lineJson = lineJson + "{\"type\":\"" + ifnull(clRow.Check_Type,"").toString().replaceAll("\"","'") + "\",\"passed\":" + pS.toDecimal().toLong() + ",\"failed\":" + fS.toDecimal().toLong() + ",\"note\":\"" + ifnull(clRow.Note,"").toString().replaceAll("\"","'") + "\"}";
+				lineJson = lineJson + "{\"type\":\"" + ifnull(clRow.Check_Type,"").toString().replaceAll("\"","'") + "\",\"passed\":" + pS.toDecimal().toLong() + ",\"failed\":" + fS.toDecimal().toLong() + ",\"note\":\"" + ifnull(clRow.Note,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
 			}
 
 			// Which stages the altered garments went back to. Empty on a check
@@ -277,7 +277,7 @@ string getCheckerHistory(string supervisorId, string dateTxt)
 
 			if(rowsJson != "") { rowsJson = rowsJson + ","; }
 			// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-			rowsJson = rowsJson + "{\"id\":\"" + icRow.ID + "\",\"itemId\":\"" + itemKey + "\",\"item\":\"" + itemNm + "\",\"sku\":\"" + itemSku + "\",\"batch\":\"" + itemKind + "\",\"salesOrder\":\"" + soNoTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"inspector\":\"" + inspName + "\",\"checkedOn\":\"" + chkDateTxt + "\",\"round\":" + rndS.toDecimal().toLong() + ",\"inspected\":" + insN + ",\"approved\":" + appN + ",\"rejected\":" + rejN + ",\"alteration\":" + altN + ",\"remarks\":\"" + ifnull(icRow.Remarks,"").toString().replaceAll("\"","'") + "\",\"lines\":[" + lineJson + "],\"alterationLines\":[" + altJson + "]}";
+			rowsJson = rowsJson + "{\"id\":\"" + icRow.ID + "\",\"itemId\":\"" + itemKey + "\",\"item\":\"" + itemNm + "\",\"sku\":\"" + itemSku + "\",\"batch\":\"" + itemKind + "\",\"salesOrder\":\"" + soNoTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"inspector\":\"" + inspName + "\",\"checkedOn\":\"" + chkDateTxt + "\",\"round\":" + rndS.toDecimal().toLong() + ",\"inspected\":" + insN + ",\"approved\":" + appN + ",\"rejected\":" + rejN + ",\"alteration\":" + altN + ",\"remarks\":\"" + ifnull(icRow.Remarks,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\",\"lines\":[" + lineJson + "],\"alterationLines\":[" + altJson + "]}";
 		}
 	}
 	}

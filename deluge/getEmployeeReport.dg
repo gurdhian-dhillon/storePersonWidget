@@ -458,7 +458,7 @@ string getEmployeeReport(string dateTxt)
 			// field can render as ("09:00", "09:00:00", "09:00 AM") can be parsed
 			// defensively and an unreadable one shown as a dash rather than
 			// turned into a confident wrong number.
-			rowJ = "{\"phase\":\"" + ifnull(wr.get("phase"),"").toString().replaceAll("\"","'") + "\",\"item\":\"" + itemTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"salesOrder\":\"" + soTxt + "\",\"salesOrderStatus\":\"" + soStatTxt + "\",\"qtyIn\":" + qIn + ",\"qtyOut\":" + qOut + ",\"start\":\"" + ifnull(wr.get("start"),"").toString() + "\",\"end\":\"" + ifnull(wr.get("end"),"").toString() + "\",\"status\":\"" + stat + "\",\"outsourced\":" + outsTxt + ",\"remarks\":\"" + ifnull(wr.get("remarks"),"").toString().replaceAll("\"","'") + "\"}";
+			rowJ = "{\"phase\":\"" + ifnull(wr.get("phase"),"").toString().replaceAll("\"","'") + "\",\"item\":\"" + itemTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"salesOrder\":\"" + soTxt + "\",\"salesOrderStatus\":\"" + soStatTxt + "\",\"qtyIn\":" + qIn + ",\"qtyOut\":" + qOut + ",\"start\":\"" + ifnull(wr.get("start"),"").toString() + "\",\"end\":\"" + ifnull(wr.get("end"),"").toString() + "\",\"status\":\"" + stat + "\",\"outsourced\":" + outsTxt + ",\"remarks\":\"" + ifnull(wr.get("remarks"),"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
 
 			prevRows = ifnull(opRows.get(oKey),"").toString();
 			if(prevRows != "")
