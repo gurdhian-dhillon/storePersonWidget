@@ -1,0 +1,643 @@
+string postTransferOrders(string dryRun)
+{
+	// Moves received material from Main Warehouse to Production in Zoho
+	// Inventory, one TRANSFER ORDER per store issue voucher, with the voucher
+	// number on the document.
+	//
+	// ONE ARGUMENT: dryRun. "true"/"yes"/"1" builds every request and reports it
+	// without posting anything - run it that way first. Anything else writes.
+	//
+	// WHY A SEPARATE FUNCTION AND NOT A POST TYPE ON postInventoryQueue.
+	// That queue batches BY TYPE: every pending Consumption row of a run is
+	// summed per item into ONE adjustment. Correct there, wrong here - a
+	// transfer order has to be one per voucher or the number on the document
+	// stops meaning anything, which is the whole point of putting it there. Its
+	// grouping would have to be re-cut to do this, and it is careful machinery
+	// with in-flight recovery in it. A new file cannot break it.
+	//
+	// THE TRIGGER IS THE LINE, NOT THE STATUS, AND THAT IS DELIBERATE.
+	// receiveMaterials flips Issue_Status for EVERY open handover on the plan,
+	// not just the one being received - so a voucher issued this morning reads
+	// "Received" the moment an older one is confirmed. Triggering on that would
+	// transfer cloth still sitting on the store counter.
+	//
+	// Issue_Lines.Settled_Qty is per line and is only ever written by an actual
+	// receipt, oldest line first. So what moves is Settled_Qty - Transferred_Qty:
+	// what the supervisor has confirmed, minus what has already gone across.
+	//
+	// PARTIAL RECEIPTS FALL OUT OF THAT FOR FREE. Receive 8 of 10 today and 8
+	// transfer; receive the last 2 tomorrow and 2 transfer, on a second order
+	// against the same voucher. Same shape receiveMaterials already uses to
+	// settle Settled_Qty against Qty.
+	//
+	// STOCK IS CONSUMED AT RECEIPT, NOT ISSUE - the rule this whole app is built
+	// on - and this is the Inventory half of it. Nothing moves warehouse when
+	// the cloth leaves the counter, because at that moment it is in transit and
+	// belongs to neither side.
+	//
+	// IDEMPOTENCY is Transferred_Qty itself: it is written in the same pass that
+	// posts, so a re-run sees the difference already closed and sends nothing.
+	// The window is a post that succeeds and a write that then fails, which
+	// leaves Transfer_Error set and the difference still open - visible, and
+	// recoverable by hand. A reference-number recovery check like the one in
+	// postInventoryQueue is the better answer and is worth adding if that ever
+	// actually happens.
+	//
+	// FIELDS THIS NEEDS ADDING:
+	//   Material_Issue.Transfer_Status      Dropdown - Pending / Done / Failed
+	//   Material_Issue.Transfer_Order_IDs   Multi Line
+	//   Material_Issue.Transfer_Error       Multi Line
+	//   Material_Issue.Transfer_Attempts    Number
+	//   Material_Issue.Issue_Lines.Transferred_Qty   Decimal
+
+	res = "{\"errors\":[\"Nothing ran\"]}";
+
+	try
+	{
+		//------------------------------------------------------------------
+		// CONFIG, and every value here was established against the live org
+		// rather than read off the docs:
+		//
+		//   /locations gave the two ids (getInventoryRefIds)
+		//   from_location_id / to_location_id is what a transfer order wants on
+		//     this org - from_warehouse_id came back 9163
+		//   transfer_order_number is MANDATORY here; Zoho does not auto-number
+		//   line_items need name as well as item_id, or "code 4"
+		//
+		// Proven end to end: SIV-00001 posted as transfer order
+		// 3955559000000295349, 13 lines, Main Warehouse -> Production.
+		//------------------------------------------------------------------
+		orgId = "60076905558";
+		toUrl = "https://www.zohoapis.in/inventory/v1/transferorders";
+		fromLoc = "3955559000000212001";
+		toLoc = "3955559000000219654";
+		maxAttempts = 5;
+		maxOrders = 10;
+		scanLimit = 50;
+
+		//------------------------------------------------------------------
+		// THREE MODES ON ONE ARGUMENT, so the Custom API's argument list never
+		// has to change - adding one is a Creator config change and every
+		// existing caller breaks until it is made.
+		//
+		//   "true" / "yes" / "1"   dry run, writes nothing anywhere
+		//   "one"                  writes, but ONE order and then stops
+		//   anything else          writes everything waiting
+		//
+		// "one" exists for the first real run against a live Inventory. A dry
+		// run proves the body is well formed; it cannot prove the API accepts
+		// it, that the source location actually holds the stock, or that the
+		// numbering series is happy. Posting one order and looking at it costs
+		// a minute and is recoverable; posting fourteen line items across three
+		// orders into the wrong warehouse is a manual unpick.
+		//------------------------------------------------------------------
+		writeAllowed = true;
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase().replaceAll("\"","").replaceAll("'","");
+
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			writeAllowed = false;
+		}
+		else if(dr == "one" || dr == "single" || dr == "first")
+		{
+			maxOrders = 1;
+		}
+		else if(dr == "auto")
+		{
+			//----------------------------------------------------------
+			// CALLED INLINE BY receiveMaterials, so it runs on the
+			// supervisor's own click and its cost is his waiting time.
+			//
+			// A TIGHT WINDOW, and not for tidiness. The statement-execution
+			// limit is NOT catchable: it kills the script outright and the
+			// widget gets a bare HTTP 500 with no error card - so a sweep of
+			// fifty vouchers bolted onto a receipt could take the RECEIPT
+			// down with it, and the receipt is the thing that must not fail.
+			//
+			// Ten is far more than one receipt can settle. Anything older is
+			// picked up by a manual run or the scheduler, and stillPending in
+			// the reply says so.
+			//----------------------------------------------------------
+			scanLimit = 10;
+			maxOrders = 3;
+		}
+
+		postedCount = 0;
+		skippedCount = 0;
+		failedCount = 0;
+		doneCount = 0;
+		reportJson = "";
+
+		//------------------------------------------------------------------
+		// THE ITEM CATALOGUE, fetched ONCE.
+		//
+		// Issue_Lines.Material is a lookup holding a record id; Inventory wants
+		// the Inventory_Item_ID off Raw_Material. A query per line is thirty
+		// lookups on a ten-line voucher and the statement-execution limit is
+		// NOT catchable - it kills the script and the caller gets a bare 500.
+		// Raw_Material is master data; it does not grow with trading.
+		//------------------------------------------------------------------
+		invItemMap = Map();
+
+		for each  rmRow in Raw_Material[ID != 0]
+		{
+			invTxt = ifnull(rmRow.Inventory_Item_ID,"").toString().trim();
+
+			if(invTxt != "")
+			{
+				invItemMap.put(rmRow.ID.toString(),invTxt);
+			}
+		}
+
+		//------------------------------------------------------------------
+		// THE STATUS IS NOT IN THE QUERY AT ALL, AND THIS COST TWO ROUNDS.
+		//
+		// First it asked for Transfer_Status == "Pending" and found nothing on
+		// the very first real handover - the voucher was there, numbered and
+		// received, with Transfer_Status EMPTY, because that depended on
+		// issueMaterials writing it at the insert and one Dropdown without
+		// "Pending" among its choices stores it as nothing, silently.
+		//
+		// Then it asked for Transfer_Status != "Done", on the reasoning that an
+		// empty field is not "Done" so nothing could hide from it. It found
+		// nothing either. **A CREATOR CRITERIA COMPARISON DOES NOT MATCH AN
+		// EMPTY FIELD, IN EITHER DIRECTION** - an empty row is excluded by "!="
+		// exactly as it is by "==", so the negative match was defeated by the
+		// precise case it existed to catch.
+		//
+		// So the query names no status. ID != 0 is the one shape this file
+		// already proves returns every row - it is what the voucher numberer
+		// runs, and SIV-00001 came out of it. The window is bounded and the
+		// status is read in CODE, through ifnull(), where empty is a value like
+		// any other rather than something the query engine can drop.
+		//
+		// NEWEST FIRST, not oldest. The window has to contain the work that has
+		// just arrived; a Done row that ages out of it has already been posted,
+		// and one that never posts becomes Failed after maxAttempts and is
+		// reported as needsHuman rather than sitting silently.
+		//
+		// THE REAL READINESS TEST WAS NEVER THE STATUS. It is
+		// Settled_Qty > Transferred_Qty, which only a receipt can make true. So
+		// none of this is a trigger, and it is deliberately NOT hooked into
+		// receiveMaterials: the block there that would do it flips Issue_Status
+		// for every open handover on the plan rather than the one being
+		// received, and a second writer of this field would inherit that.
+		//------------------------------------------------------------------
+		// sort by on its own assignment, never inline in a for-each header.
+		pendingRuns = Material_Issue[ID != 0] sort by ID desc range from 1 to scanLimit;
+
+		scannedCount = 0;
+		waitingCount = 0;
+		stuck = 0;
+
+		for each  mi in pendingRuns
+		{
+			scannedCount = scannedCount + 1;
+
+			// Read through ifnull, so an empty Dropdown reads as "" here rather
+			// than removing the row from consideration the way a criteria would.
+			trfStat = ifnull(mi.Transfer_Status,"").toString().trim();
+
+			if(trfStat == "Failed")
+			{
+				stuck = stuck + 1;
+			}
+			else if(trfStat != "Done")
+			{
+				waitingCount = waitingCount + 1;
+			}
+
+			// There is no reliable break in a Deluge for-each, so the batch
+			// ceiling guards the body instead. Done and Failed are filtered here
+			// BEFORE the subform is walked - fifty vouchers' worth of Issue_Lines
+			// on every run would be the expensive part of this function.
+			if(trfStat != "Done" && trfStat != "Failed" && postedCount + failedCount < maxOrders)
+			{
+				voucherTxt = ifnull(mi.Voucher_No,"").toString().trim();
+
+				if(voucherTxt == "")
+				{
+					voucherTxt = "issue " + mi.ID;
+				}
+
+				attS = ifnull(mi.Transfer_Attempts,"0").toString().trim();
+				if(attS == "")
+				{
+					attS = "0";
+				}
+				attNow = attS.toLong();
+
+				//----------------------------------------------------------
+				// WHAT IS CONFIRMED AND HAS NOT YET MOVED.
+				//
+				// Summed per Inventory item, because one voucher can carry the
+				// same material on two lines - one per requirement it fed - and
+				// a transfer order wants one row per item, not one per plan.
+				//----------------------------------------------------------
+				itemKeys = List();
+				itemQty = Map();
+				itemName = Map();
+				lineIds = List();
+				lineMove = Map();
+				stillOwed = false;
+				unmapped = "";
+
+				for each  ln in mi.Issue_Lines
+				{
+					setS = ifnull(ln.Settled_Qty,"0").toString().trim();
+					if(setS == "")
+					{
+						setS = "0";
+					}
+					trfS = ifnull(ln.Transferred_Qty,"0").toString().trim();
+					if(trfS == "")
+					{
+						trfS = "0";
+					}
+					qtyS = ifnull(ln.Qty,"0").toString().trim();
+					if(qtyS == "")
+					{
+						qtyS = "0";
+					}
+
+					setVal = setS.toDecimal();
+					trfVal = trfS.toDecimal();
+					moveVal = setVal - trfVal;
+
+					// Not everything on the voucher has been confirmed yet, so
+					// this voucher stays Pending after this run whatever moves.
+					if(setVal < qtyS.toDecimal())
+					{
+						stillOwed = true;
+					}
+
+					if(moveVal > 0)
+					{
+						matKey = ifnull(ln.Material,"").toString().trim();
+						invId = ifnull(invItemMap.get(matKey),"").toString();
+
+						if(invId == "")
+						{
+							// NAMED, NEVER SKIPPED SILENTLY. A material with no
+							// Inventory_Item_ID cannot be transferred, and a
+							// voucher that quietly moved four of its five lines
+							// is worse than one that moved none - the fifth
+							// would sit unmoved with the voucher marked Done.
+							if(unmapped != "")
+							{
+								unmapped = unmapped + ", ";
+							}
+							unmapped = unmapped + ifnull(ln.Material_Name,matKey).toString();
+						}
+						else
+						{
+							if(itemQty.get(invId) == null)
+							{
+								itemKeys.add(invId);
+								itemQty.put(invId,0.0);
+
+								// ZOHO WANTS THE NAME ON EVERY LINE, not just the
+								// id. A body carrying item_id alone comes back
+								// "code 4: Invalid value passed for name".
+								//
+								// Taken from the FIRST line for this item - two
+								// lines sharing an Inventory item share a name by
+								// definition - and escaped with the full chain,
+								// because a quote or a newline in a material name
+								// would break this hand-built JSON before it ever
+								// reached Zoho.
+								nmTxt = ifnull(ln.Material_Name,"").toString().trim();
+								nmTxt = nmTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," ");
+								itemName.put(invId,nmTxt);
+							}
+
+							itemQty.put(invId,itemQty.get(invId) + moveVal);
+							lineIds.add(ln.ID.toString());
+							lineMove.put(ln.ID.toString(),moveVal);
+						}
+					}
+				}
+
+				//----------------------------------------------------------
+				// NOTHING CONFIRMED YET, or everything already across.
+				//
+				// A voucher whose lines are all settled AND all transferred is
+				// finished with - marked Done so the query above stops finding
+				// it and the sweep stays bounded by what is actually waiting.
+				//----------------------------------------------------------
+				if(itemKeys.size() == 0)
+				{
+					skippedCount = skippedCount + 1;
+
+					if(stillOwed == false)
+					{
+						mi.Transfer_Status = "Done";
+						doneCount = doneCount + 1;
+						waitingCount = waitingCount - 1;
+					}
+				}
+				else if(unmapped != "")
+				{
+					// Refused whole. See the note where unmapped is built.
+					failedCount = failedCount + 1;
+					mi.Transfer_Attempts = attNow + 1;
+					mi.Transfer_Error = "No Inventory_Item_ID mapped for: " + unmapped;
+
+					if(attNow + 1 >= maxAttempts)
+					{
+						mi.Transfer_Status = "Failed";
+					}
+
+					if(reportJson != "")
+					{
+						reportJson = reportJson + ",";
+					}
+					reportJson = reportJson + "{\"voucher\":\"" + voucherTxt + "\",\"result\":\"unmapped\",\"detail\":\"" + unmapped.replaceAll("\"","'") + "\"}";
+				}
+				else
+				{
+					linesJson = "";
+					movedTotal = 0.0;
+
+					for each  ik in itemKeys
+					{
+						if(linesJson != "")
+						{
+							linesJson = linesJson + ",";
+						}
+
+						lnNameTxt = ifnull(itemName.get(ik),"").toString().trim();
+						if(lnNameTxt == "")
+						{
+							// A material with no name on the handover line still
+							// has to carry something - an empty name is what Zoho
+							// rejects, and refusing the whole voucher over a blank
+							// label would be worse than labelling it by its id.
+							lnNameTxt = "Item " + ik;
+						}
+
+						linesJson = linesJson + "{\"item_id\":\"" + ik + "\",\"name\":\"" + lnNameTxt + "\",\"quantity_transfer\":" + itemQty.get(ik) + "}";
+						movedTotal = movedTotal + itemQty.get(ik);
+					}
+
+					//--------------------------------------------------
+					// THE DOCUMENT.
+					//
+					// is_intransit_order false: the supervisor has the cloth in
+					// his hands, which is the whole trigger for this. An
+					// in-transit order would model it as still travelling and
+					// need a second confirmation nobody is going to give.
+					//--------------------------------------------------
+					reasonTxt = "Store issue voucher " + voucherTxt;
+					dateTxt = zoho.currentdate.toString("yyyy-MM-dd");
+
+					//--------------------------------------------------
+					// THE DOCUMENT NUMBER, AND IT IS THE VOUCHER NUMBER.
+					//
+					// This org does not auto-number transfer orders - a body
+					// without one comes back "code 6: It is mandatory to specify
+					// the Transfer Order Number". Since it has to be supplied,
+					// it may as well be the number that means something: the
+					// transfer order and the store issue voucher carry the SAME
+					// identifier, and reconciling one against the other stops
+					// being a lookup.
+					//
+					// A SUFFIX ONLY WHEN IT IS NOT THE FIRST. Zoho enforces
+					// uniqueness on document numbers, and a partial receipt
+					// produces a second order against the same voucher - so the
+					// second is SIV-00001-2, the third SIV-00001-3. The count
+					// comes off Transfer_Order_IDs, which already accumulates
+					// one id per order posted, so it cannot drift from the
+					// number of orders that actually exist.
+					//--------------------------------------------------
+					toNoTxt = voucherTxt;
+					prevIdsChk = ifnull(mi.Transfer_Order_IDs,"").toString().trim();
+
+					if(prevIdsChk != "")
+					{
+						toNoTxt = voucherTxt + "-" + (prevIdsChk.toList(",").size() + 1);
+					}
+
+					tailJson = "\",\"transfer_order_number\":\"" + toNoTxt + "\",\"is_intransit_order\":false,\"reason\":\"" + reasonTxt + "\",\"line_items\":[" + linesJson + "]}";
+
+					//--------------------------------------------------
+					// TWO SHAPES, BECAUSE ZOHO WILL NOT SAY WHICH IT WANTS.
+					//
+					// This org runs the LOCATIONS model - getInventoryRefIds
+					// reads /locations and postInventoryQueue passes those ids
+					// as location_id on adjustments, where they are accepted.
+					// The transfer order API documents from_warehouse_id /
+					// to_warehouse_id, and feeding it the same ids comes back
+					// "code 9163: Please select a valid warehouse".
+					//
+					// Which means one of two things, and the error distinguishes
+					// neither: either the FIELD NAMES want to be location ones on
+					// a locations org, or the ids want to be warehouse ids that
+					// Zoho keeps behind each location.
+					//
+					// ANSWERED: this org takes from_location_id / to_location_id.
+					// The warehouse naming came back 9163 and the location naming
+					// was accepted, so location goes FIRST and warehouse is the
+					// fallback - the other way round cost a guaranteed failing
+					// call on every single post, which on the receive path is the
+					// supervisor's own waiting time.
+					//
+					// The fallback is kept rather than deleted: it is two lines,
+					// and an org with Locations switched off would need exactly
+					// it. Only 9163 triggers it - a validation refusal, so
+					// nothing was created and there is nothing to double.
+					//--------------------------------------------------
+					bodyJson = "{\"date\":\"" + dateTxt + "\",\"from_location_id\":\"" + fromLoc + "\",\"to_location_id\":\"" + toLoc + tailJson;
+					bodyAlt = "{\"date\":\"" + dateTxt + "\",\"from_warehouse_id\":\"" + fromLoc + "\",\"to_warehouse_id\":\"" + toLoc + tailJson;
+
+					if(writeAllowed == false)
+					{
+						skippedCount = skippedCount + 1;
+
+						if(reportJson != "")
+						{
+							reportJson = reportJson + ",";
+						}
+						// The body itself, so the field names can be read
+						// against the API before anything moves.
+						reportJson = reportJson + "{\"voucher\":\"" + voucherTxt + "\",\"result\":\"dryRun\",\"lines\":" + itemKeys.size() + ",\"qty\":" + movedTotal + ",\"body\":\"" + bodyJson.replaceAll("\"","'") + "\"}";
+					}
+					else
+					{
+						errTxt = "";
+						newToId = "";
+						usedShape = "location";
+
+						try
+						{
+							hdrMap = Map();
+							hdrMap.put("content-type","application/json");
+
+							toResp = invokeurl
+							[
+								url :toUrl + "?organization_id=" + orgId
+								type :POST
+								parameters:bodyJson
+								headers:hdrMap
+								connection:"inventory_connection"
+							];
+
+							pCode = ifnull(toResp.get("code"),"-1").toString().trim();
+
+							// 9163 is "that is not a warehouse" and nothing else.
+							// Only that code earns the second shape - any other
+							// failure is reported as it stands rather than being
+							// retried into a second, differently wrong request.
+							if(pCode == "9163")
+							{
+								usedShape = "warehouse";
+
+								toResp = invokeurl
+								[
+									url :toUrl + "?organization_id=" + orgId
+									type :POST
+									parameters:bodyAlt
+									headers:hdrMap
+									connection:"inventory_connection"
+								];
+
+								pCode = ifnull(toResp.get("code"),"-1").toString().trim();
+							}
+
+							if(pCode == "0")
+							{
+								toObj = ifnull(toResp.get("transfer_order"),Map());
+								newToId = ifnull(toObj.get("transfer_order_id"),"").toString().trim();
+							}
+							else
+							{
+								errTxt = "code " + pCode + ": " + ifnull(toResp.get("message"),"").toString() + " (tried " + usedShape + " fields)";
+							}
+						}
+						catch (ePost)
+						{
+							errTxt = "invokeurl threw: " + ePost.toString();
+						}
+
+						if(errTxt == "")
+						{
+							//------------------------------------------
+							// STAMPED IN THE SAME PASS THAT POSTED, so a
+							// re-run sees the difference closed and sends
+							// nothing. This is the idempotency.
+							//------------------------------------------
+							for each  ln2 in mi.Issue_Lines
+							{
+								lnKey = ln2.ID.toString();
+
+								if(lineMove.get(lnKey) != null)
+								{
+									prevT = ifnull(ln2.Transferred_Qty,"0").toString().trim();
+									if(prevT == "")
+									{
+										prevT = "0";
+									}
+
+									ln2.Transferred_Qty = prevT.toDecimal() + lineMove.get(lnKey);
+								}
+							}
+
+							// Appended, not overwritten - a voucher received in
+							// two goes has two transfer orders and both ids
+							// matter when somebody reconciles it.
+							prevIds = ifnull(mi.Transfer_Order_IDs,"").toString().trim();
+							if(prevIds != "")
+							{
+								prevIds = prevIds + ", ";
+							}
+							mi.Transfer_Order_IDs = prevIds + newToId;
+							mi.Transfer_Error = "";
+
+							// Only finished when nothing is owed AND nothing is
+							// left to move. Anything else stays Pending for the
+							// next receipt.
+							if(stillOwed == false)
+							{
+								mi.Transfer_Status = "Done";
+								doneCount = doneCount + 1;
+
+								// Taken back off the waiting tally. That count is
+								// made at the TOP of the loop, before this voucher
+								// was worked on, so leaving it would report
+								// "markedDone 1, stillPending 1" about the same
+								// record - which reads as one posted and another
+								// still to go.
+								waitingCount = waitingCount - 1;
+							}
+
+							postedCount = postedCount + 1;
+
+							if(reportJson != "")
+							{
+								reportJson = reportJson + ",";
+							}
+							// WHICH SHAPE WON. The retry above tries two field
+							// namings; this says which one Zoho accepted, so the
+							// loser can be deleted and the guessing ends here.
+							reportJson = reportJson + "{\"voucher\":\"" + voucherTxt + "\",\"result\":\"posted\",\"transferOrderId\":\"" + newToId + "\",\"shape\":\"" + usedShape + "\",\"lines\":" + itemKeys.size() + ",\"qty\":" + movedTotal + "}";
+						}
+						else
+						{
+							failedCount = failedCount + 1;
+
+							// The body that actually went LAST. Reporting the
+							// first one built would describe a request that is
+							// not the one that failed.
+							shownBody = bodyJson;
+							if(usedShape == "warehouse")
+							{
+								shownBody = bodyAlt;
+							}
+
+							mi.Transfer_Attempts = attNow + 1;
+							mi.Transfer_Error = errTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
+							// Stops a permanently broken voucher retrying for
+							// ever and holding up the sweep behind it. Failed is
+							// a human's problem, and Transfer_Error says what.
+							if(attNow + 1 >= maxAttempts)
+							{
+								mi.Transfer_Status = "Failed";
+							}
+
+							if(reportJson != "")
+							{
+								reportJson = reportJson + ",";
+							}
+							// THE BODY TRAVELS WITH THE ERROR. "code 4: Invalid value
+						// passed for name" names the field Zoho disliked but not
+						// what was in it, and a second round trip to find that out
+						// is a round trip nobody has time for.
+						reportJson = reportJson + "{\"voucher\":\"" + voucherTxt + "\",\"result\":\"failed\",\"error\":\"" + errTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\",\"shape\":\"" + usedShape + "\",\"body\":\"" + shownBody.replaceAll("\"","'") + "\"}";
+						}
+					}
+				}
+			}
+		}
+
+		// COUNTED IN THE LOOP, never re-queried. A count() with a status in its
+		// criteria is what hid this bug twice - it silently drops empty rows, so
+		// "stillPending 0" read as "nothing to do" when the truth was "the query
+		// cannot see it". These are tallies of rows actually walked.
+		//
+		// scanned is reported for the same reason: a zero there means the fetch
+		// itself returned nothing, which is a completely different problem from
+		// a zero anywhere else, and telling them apart took two rounds.
+		info "postTransferOrders: scanned " + scannedCount + ", posted " + postedCount + ", failed " + failedCount + ", skipped " + skippedCount + ", done " + doneCount + ", still waiting " + waitingCount;
+
+		res = "{\"errors\":[],\"dryRun\":" + (!writeAllowed).toString() + ",\"scanned\":" + scannedCount + ",\"posted\":" + postedCount + ",\"failed\":" + failedCount + ",\"skipped\":" + skippedCount + ",\"markedDone\":" + doneCount + ",\"stillPending\":" + waitingCount + ",\"needsHuman\":" + stuck + ",\"detail\":[" + reportJson + "]}";
+	}
+	catch (e)
+	{
+		// Creator reports every runtime failure to a widget as code 9430, so the
+		// real message has to travel inside the payload.
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+
+	return res;
+}

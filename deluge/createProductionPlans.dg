@@ -76,13 +76,36 @@ string createProductionPlans()
 	pendingOrders = Sales_Order[Order_Status == "Pending"] sort by Added_Time;
 	// count(), not size() - size() is a List method and this is a query result.
 	logLines.add("Sales Orders waiting to be planned: " + pendingOrders.count());
-	allPlansDesc = Production_Planning[ID != 0] sort by Added_Time desc;
+	// THE TEN NEWEST, NEVER ALL OF THEM. This used to fetch every plan ever
+	// created and sort the lot to read one integer off the first row - the
+	// worst shape in the app, on the hot path of the function that creates all
+	// the work. The statement-execution limit is NOT catchable, so this would
+	// have died with a bare 500 and no error card.
+	//
+	// Ten rather than one, and the MAX rather than the first: a plan whose
+	// Plan_No never landed used to take the whole planner down with it -
+	// lastIndexOf("-") returns -1 on an empty string, substring(0) gives "",
+	// and "".toLong() throws. Now such a row is simply skipped and the run
+	// numbers off the newest plan that has a number.
+	//
+	// Sorted by Added_Time, not by Plan_No: a text sort would put PLAN-100000
+	// below PLAN-99999 once the width changed, which is the bug the voucher
+	// numberer in issueMaterials already guards against the same way.
+	allPlansDesc = Production_Planning[ID != 0] sort by Added_Time desc range from 1 to 10;
 	maxNum = 0;
 	for each  lp in allPlansDesc
 	{
-		lastNo = lp.Plan_No;
-		maxNum = lastNo.substring(lastNo.lastIndexOf("-") + 1).toLong();
-		break;
+		// There is no reliable break in a Deluge for-each, so this walks all
+		// ten and keeps the largest instead of stopping at the first.
+		lastNo = ifnull(lp.Plan_No,"").toString().trim();
+		if(lastNo != "" && lastNo.indexOf("-") >= 0)
+		{
+			thisNum = lastNo.substring(lastNo.lastIndexOf("-") + 1).toLong();
+			if(thisNum > maxNum)
+			{
+				maxNum = thisNum;
+			}
+		}
 	}
 	for each  so in pendingOrders
 	{

@@ -72,10 +72,15 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 
 	if(wSupId != 0 && itemIdTxt != "")
 	{
-		for each  lotRefW in Raw_Material_Lot[ID != 0]
-		{
-			lotNumById.put(lotRefW.ID + "",ifnull(lotRefW.Lot_Number,"").toString().replaceAll("\"","'"));
-		}
+		// The prefetch of every Raw_Material_Lot ever created used to sit here.
+		// Lots grow with every purchase and an emptied lot is never deleted, so
+		// that was thirteen thousand rows on the cutting screen to print a
+		// handful of lot numbers - and the statement-execution limit is NOT
+		// catchable, so it would have killed the script with a bare HTTP 500
+		// and no error card.
+		//
+		// lotNumById is now filled lazily at each of the three places that read
+		// it, one indexed query per DISTINCT lot, cached for the whole call.
 
 		// OLDEST HANDOVER FIRST - the same order issueMaterials spent them in, so
 		// the metres are attributed to the same lots it charged them to.
@@ -116,6 +121,19 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 								seqW = seqW + "~";
 							}
 							lotSeqByMat.put(lnMatW,seqW + lnLotW);
+
+							// Resolved once per distinct lot, then cached. The
+							// miss is cached too, so an unreadable lot is not
+							// re-queried by every handover that names it.
+							if(lotNumById.get(lnLotW) == null)
+							{
+								lotNumById.put(lnLotW,"");
+
+								for each  lotRefW in Raw_Material_Lot[ID == lnLotW.toLong()]
+								{
+									lotNumById.put(lnLotW,ifnull(lotRefW.Lot_Number,"").toString().replaceAll("\"","'"));
+								}
+							}
 
 							haveW = ifnull(lotsByMat.get(lnMatW),"").toString();
 							if(haveW != "")
@@ -232,6 +250,17 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 								wLotTxt = ifnull(wmRec.Lot,"").toString().trim();
 								if(wLotTxt != "")
 								{
+									// Same lazy resolve as above, cached for the call.
+									if(lotNumById.get(wLotTxt) == null)
+									{
+										lotNumById.put(wLotTxt,"");
+
+										for each  lotRefP in Raw_Material_Lot[ID == wLotTxt.toLong()]
+										{
+											lotNumById.put(wLotTxt,ifnull(lotRefP.Lot_Number,"").toString().replaceAll("\"","'"));
+										}
+									}
+
 									wLotJson = ",\"lotId\":\"" + wLotTxt + "\",\"lotNumber\":\"" + ifnull(lotNumById.get(wLotTxt),"").toString() + "\"";
 								}
 							}
@@ -404,6 +433,17 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 											lotIdJson = "";
 											if(lotCut != "")
 											{
+												// Same lazy resolve, cached for the call.
+												if(lotNumById.get(lotCut) == null)
+												{
+													lotNumById.put(lotCut,"");
+
+													for each  lotRefC in Raw_Material_Lot[ID == lotCut.toLong()]
+													{
+														lotNumById.put(lotCut,ifnull(lotRefC.Lot_Number,"").toString().replaceAll("\"","'"));
+													}
+												}
+
 												lotIdJson = ",\"lotId\":\"" + lotCut + "\",\"lotNumber\":\"" + ifnull(lotNumById.get(lotCut),"").toString() + "\"";
 											}
 

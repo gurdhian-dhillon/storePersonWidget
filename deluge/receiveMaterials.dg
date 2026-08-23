@@ -987,6 +987,44 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 		}
 	}
 
+	//--------------------------------------------------------------------
+	// MOVE THE CLOTH TO THE PRODUCTION WAREHOUSE IN ZOHO INVENTORY.
+	//
+	// STOCK IS CONSUMED AT RECEIPT, NOT ISSUE - the rule this whole app is
+	// built on - and this is the Inventory half of it. Nothing moved
+	// warehouse when the cloth left the counter, because at that moment it
+	// was in transit and belonged to neither side. It has now arrived, so
+	// Main Warehouse -> Production, one transfer order per store issue
+	// voucher with SIV-... on the document.
+	//
+	// IT IS NOT TOLD WHAT TO MOVE. postTransferOrders works it out from
+	// Settled_Qty - Transferred_Qty, which the settlement above has just
+	// written, and stamps Transferred_Qty in the same pass it posts. So a
+	// second receipt against the same voucher moves only the difference, and
+	// calling this twice moves nothing the second time.
+	//
+	// "auto" keeps its window to ten vouchers and three orders. The
+	// statement-execution limit is NOT catchable - it kills the script and
+	// the widget gets a bare 500 with no error card - and the receipt is the
+	// thing that must not fail.
+	//
+	// ITS OWN TRY/CATCH, and last inside the block. Stock has already moved,
+	// disputes have already been raised, Item_Status has already rolled. A
+	// transfer that fails - Inventory down, a quota, an unmapped item - must
+	// never make a completed receipt look failed and must never leave the
+	// supervisor confirming the same cloth twice. Nothing is lost by it: the
+	// voucher stays not-Done and the next receipt, or a manual run, picks it
+	// up.
+	//--------------------------------------------------------------------
+	try
+	{
+		info "transfer after receipt -> " + thisapp.postTransferOrders("auto");
+	}
+	catch (eTo)
+	{
+		info "postTransferOrders after receipt threw: " + eTo.toString();
+	}
+
 	}
 	catch (e)
 	{

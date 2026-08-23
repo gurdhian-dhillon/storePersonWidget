@@ -53,8 +53,11 @@ string getAdminCalculation(string salesOrderId)
 	try
 	{
 	// Newest first - the order somebody is asking about is almost always a
-	// recent one.
-	allOrders = Sales_Order[ID != 0] sort by Added_Time desc;
+	// recent one. THE RANGE MAKES THAT COMMENT TRUE rather than merely hopeful:
+	// this used to fetch the entire order book to draw a dropdown, and the
+	// order book only grows. Same bound and same reasoning as the picker in
+	// getOrderConsumption, which is the same screenful of orders.
+	allOrders = Sales_Order[ID != 0] sort by Added_Time desc range from 1 to 200;
 
 	//----------------------------------------------------------------------
 	// WHICH ORDERS ACTUALLY HAVE A PLAN.
@@ -72,8 +75,22 @@ string getAdminCalculation(string salesOrderId)
 	// Keyed on the id as STRING. The lookup holds a record id and comparing it
 	// to a number is the mixed-type comparison that throws.
 	//----------------------------------------------------------------------
+	// BOUNDED TO COVER THE PICKER ABOVE, with headroom, rather than every plan
+	// ever created.
+	//
+	// Four hundred against a two-hundred order window is not a guess. One order
+	// produces exactly one plan, and a plan can never predate its own order -
+	// so for a plan belonging to one of the newest 200 orders to fall outside
+	// the newest 400 plans, 400 later plans would have to exist, which would
+	// put its order outside the newest 200. It cannot happen. Plans belonging
+	// to older orders may appear in the window; they are harmless extra map
+	// entries that no order in the picker reads.
 	plannedMap = Map();
-	for each  pp in Production_Planning[ID != 0]
+
+	// sort by on its own assignment, never inline in a for each header.
+	recentPlans = Production_Planning[ID != 0] sort by Added_Time desc range from 1 to 400;
+
+	for each  pp in recentPlans
 	{
 		if(pp.Sales_Order != null)
 		{
@@ -546,11 +563,17 @@ string getAdminCalculation(string salesOrderId)
 	// fetch per reference inside a loop, which is the shape that blows the
 	// statement-execution limit, and that limit is not catchable.
 	//--------------------------------------------------------------------
+	// The paragraph above is right that a fetch per reference inside a loop is
+	// what blows the statement limit - but prefetching every Raw_Material_Lot
+	// ever created was not the answer either. Lots grow with every purchase and
+	// an emptied lot is never deleted, so this audit screen paid for the whole
+	// purchase history of the factory to print a few lot numbers.
+	//
+	// Filled lazily at the three places below that read it, one indexed query
+	// per DISTINCT lot, cached for the whole call - so a lot named on twenty
+	// handover lines is still read exactly once, which is the property the
+	// prefetch was really after.
 	lotNoById = Map();
-	for each  lotRow in Raw_Material_Lot[ID != 0]
-	{
-		lotNoById.put(lotRow.ID + "",ifnull(lotRow.Lot_Number,"").toString().trim().replaceAll("\"","'"));
-	}
 
 	for each  plan in orderPlans
 	{
@@ -612,6 +635,19 @@ string getAdminCalculation(string salesOrderId)
 						}
 
 						liLot = ifnull(miL.Lot,"").toString().trim();
+
+						// Resolved once per distinct lot, then cached; the miss
+						// is cached too so an unreadable lot is not re-queried.
+						if(liLot != "" && lotNoById.get(liLot) == null)
+						{
+							lotNoById.put(liLot,"");
+
+							for each  lotRowA in Raw_Material_Lot[ID == liLot.toLong()]
+							{
+								lotNoById.put(liLot,ifnull(lotRowA.Lot_Number,"").toString().trim().replaceAll("\"","'"));
+							}
+						}
+
 						liLotNo = ifnull(lotNoById.get(liLot),"").toString();
 						if(liLotNo == "")
 						{
@@ -629,6 +665,17 @@ string getAdminCalculation(string salesOrderId)
 						liFromNo = "";
 						if(liFrom != "")
 						{
+							// Same lazy resolve, sharing the same cache.
+							if(lotNoById.get(liFrom) == null)
+							{
+								lotNoById.put(liFrom,"");
+
+								for each  lotRowB in Raw_Material_Lot[ID == liFrom.toLong()]
+								{
+									lotNoById.put(liFrom,ifnull(lotRowB.Lot_Number,"").toString().trim().replaceAll("\"","'"));
+								}
+							}
+
 							liFromNo = ifnull(lotNoById.get(liFrom),"").toString();
 						}
 
@@ -795,6 +842,17 @@ string getAdminCalculation(string salesOrderId)
 					mPinId = ifnull(mr2.Issued_Lot,"").toString().trim();
 					if(mPinId != "")
 					{
+						// Same lazy resolve, sharing the same cache.
+						if(lotNoById.get(mPinId) == null)
+						{
+							lotNoById.put(mPinId,"");
+
+							for each  lotRowC in Raw_Material_Lot[ID == mPinId.toLong()]
+							{
+								lotNoById.put(mPinId,ifnull(lotRowC.Lot_Number,"").toString().trim().replaceAll("\"","'"));
+							}
+						}
+
 						mPinLot = ifnull(lotNoById.get(mPinId),"").toString();
 					}
 

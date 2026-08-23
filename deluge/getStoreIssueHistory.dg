@@ -173,12 +173,25 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	// lot record - .toString() on the lookup gives an 18-digit id, which is
 	// exactly how those ids ended up under every material name before.
 	//--------------------------------------------------------------------------
+	// LOTS ARE NOT MASTER DATA, WHICH IS WHAT THE PARAGRAPH ABOVE ASSUMED.
+	//
+	// This used to prefetch every Raw_Material_Lot ever created on the
+	// reasoning that lots are "a few hundred rows that do not grow with
+	// trading". They do: a lot is created on every purchase and an emptied one
+	// is never deleted - it stays as a zero row so history still resolves.
+	// At ~13 lots a material and a thousand materials that is thirteen
+	// thousand rows, and it was fetched on every page of an otherwise
+	// correctly paged function - so page 200 cost the same as page 1 only
+	// because both were already paying for the whole form.
+	//
+	// Filled lazily instead, one indexed query per DISTINCT lot actually on
+	// the page. The map survives the whole call, so a lot appearing on ten
+	// lines is read once. Same shape as piCache in
+	// getStoreMaterialRequirements, and for the same reason.
+	//
+	// Raw_Material below IS master data - 250 rows today, a thousand at the
+	// outside - so that one stays a single fetch.
 	lotNumMap = Map();
-
-	for each  ltC in Raw_Material_Lot[ID != 0]
-	{
-		lotNumMap.put(ltC.ID.toString(),ifnull(ltC.Lot_Number,"").toString().trim().replaceAll("\"","'"));
-	}
 
 	for each  rmC in Raw_Material[ID != 0]
 	{
@@ -272,6 +285,19 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 			lnLot = "";
 			if(lnLotKey != "")
 			{
+				// Read once per distinct lot on this page, then cached. The
+				// miss is cached too, as an empty string - a lot that cannot
+				// be read must not be re-queried on every line that names it.
+				if(lotNumMap.get(lnLotKey) == null)
+				{
+					lotNumMap.put(lnLotKey,"");
+
+					for each  ltC in Raw_Material_Lot[ID == lnLotKey.toLong()]
+					{
+						lotNumMap.put(lnLotKey,ifnull(ltC.Lot_Number,"").toString().trim().replaceAll("\"","'"));
+					}
+				}
+
 				lnLot = ifnull(lotNumMap.get(lnLotKey),"").toString();
 			}
 

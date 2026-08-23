@@ -35,18 +35,20 @@ string getPackingQueue(string payloadJson)
 
 	try
 	{
-		doneChecks = List();
-
-		for each  fd in Finishing_Data[ID != 0]
-		{
-			if(fd.Item_Check != null)
-			{
-				if(ifnull(fd.Finishing_Status,"").toString().trim() == "Done")
-				{
-					doneChecks.add(fd.Item_Check.toString());
-				}
-			}
-		}
+		// ASKED PER CHECK, not by scanning the whole form. Same change and same
+		// reasoning as getPackingDetails and savePackingRecord.
+		//
+		// The cache is declared HERE, outside the per-order loop below, on
+		// purpose: the two passes inside it ask about overlapping checks - one
+		// keyed on Item_Check.Sales_Order, one falling back through the plan -
+		// so a check reached both ways is read once for the whole call rather
+		// than once per pass, per order.
+		//
+		// "1" finished, "0" not, absent means not yet asked. DONE MEANS DONE:
+		// a row carrying neither status does not match, so the batch reads as
+		// unfinished and its order stays off the packing queue where somebody
+		// can still see it.
+		doneByCheck = Map();
 
 		//------------------------------------------------------------------
 		// WHAT GOES IN THE BOX BESIDES THE GARMENTS - the care card, the
@@ -112,7 +114,17 @@ string getPackingQueue(string payloadJson)
 			{
 				chkKey = chk.ID.toString();
 
-				if(doneChecks.contains(chkKey) == true && countedChecks.contains(chkKey) == false)
+				if(doneByCheck.get(chkKey) == null)
+				{
+					doneByCheck.put(chkKey,"0");
+
+					for each  fd in Finishing_Data[Item_Check == chk.ID && Finishing_Status == "Done"]
+					{
+						doneByCheck.put(chkKey,"1");
+					}
+				}
+
+				if(ifnull(doneByCheck.get(chkKey),"0").toString() == "1" && countedChecks.contains(chkKey) == false)
 				{
 					countedChecks.add(chkKey);
 					totalFinished = totalFinished + ifnull(chk.Qty_Approved,0).toLong();
@@ -132,7 +144,20 @@ string getPackingQueue(string payloadJson)
 				{
 					chkKey2 = chk2.ID.toString();
 
-					if(doneChecks.contains(chkKey2) == true && countedChecks.contains(chkKey2) == false)
+					// Shares the cache with the pass above - a check reached
+					// both ways is read once, which is what the old whole-form
+					// scan was really buying.
+					if(doneByCheck.get(chkKey2) == null)
+					{
+						doneByCheck.put(chkKey2,"0");
+
+						for each  fd2 in Finishing_Data[Item_Check == chk2.ID && Finishing_Status == "Done"]
+						{
+							doneByCheck.put(chkKey2,"1");
+						}
+					}
+
+					if(ifnull(doneByCheck.get(chkKey2),"0").toString() == "1" && countedChecks.contains(chkKey2) == false)
 					{
 						countedChecks.add(chkKey2);
 						totalFinished = totalFinished + ifnull(chk2.Qty_Approved,0).toLong();

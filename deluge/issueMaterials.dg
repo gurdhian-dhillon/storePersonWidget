@@ -1913,11 +1913,23 @@ string issueMaterials(string supervisorId, string issuesJson)
 
 			voucherNo = "SIV-" + vPad;
 
+			// Transfer_Status is set so the state is READABLE on the record.
+			// Nothing depends on it: postTransferOrders reads every recent
+			// handover and filters in code, because a Creator criteria drops an
+			// empty field whether the test is "==" or "!=" - which is how a
+			// voucher with a blank status stayed invisible to two different
+			// queries in a row.
+			//
+			// NO COMMENTS INSIDE THE BLOCK BELOW. A Deluge insert-into field
+			// list is parsed specially and a "//" line in it is a syntax error -
+			// reported against the "try" a thousand lines above, with no hint
+			// that an insert is involved at all.
 			newIssueId = insert into Material_Issue
 			[
 				Voucher_No=voucherNo
 				Issue_Date=zoho.currentdate
 				Issue_Status="Issued"
+				Transfer_Status="Pending"
 				Added_User=zoho.loginuser
 			];
 

@@ -1,0 +1,184 @@
+string probeWarehouses()
+{
+	// READ ONLY. Run from Creator's Execute. Writes nothing, creates nothing.
+	//
+	// Answers the one question behind "code 9163: Please select a valid
+	// warehouse": what id does a TRANSFER ORDER want for a warehouse, and is it
+	// the same id /locations hands out?
+	//
+	// getInventoryRefIds reads /locations, and those ids work for inventory
+	// ADJUSTMENTS - postInventoryQueue passes them as location_id and they are
+	// accepted. Transfer orders name their fields from_warehouse_id and
+	// to_warehouse_id, and on an org where Locations is switched on Zoho keeps a
+	// warehouse record behind each location with an id of its OWN. Passing a
+	// location id into a warehouse field is what 9163 means.
+	//
+	// So this fetches BOTH and prints them side by side. If the ids match, the
+	// field NAMES are the problem and the body wants from_location_id /
+	// to_location_id instead. If they differ, the ids are the problem and the
+	// warehouse ids below are what postTransferOrders should carry.
+	//
+	// Either way the answer is in the output and nothing has to be guessed.
+
+	res = "{\"errors\":[\"Nothing ran\"]}";
+
+	try
+	{
+		orgId = "60076905558";
+		baseUrl = "https://www.zohoapis.in/inventory/v1/";
+
+		//------------------------------------------------------------------
+		// WAREHOUSES. The endpoint may not exist on a locations org at all -
+		// that is itself an answer, so it gets its own try/catch rather than
+		// taking the whole probe down.
+		//------------------------------------------------------------------
+		whJson = "";
+		whNote = "";
+
+		try
+		{
+			whResp = invokeurl
+			[
+				url :baseUrl + "warehouses?organization_id=" + orgId
+				type :GET
+				connection:"inventory_connection"
+			];
+
+			whCode = ifnull(whResp.get("code"),"none").toString().trim();
+
+			if(whCode == "0")
+			{
+				for each  wRow in ifnull(whResp.get("warehouses"),List())
+				{
+					if(whJson != "")
+					{
+						whJson = whJson + ",";
+					}
+
+					// warehouse_id is the field a transfer order wants. is_primary
+					// and status are carried because an INACTIVE warehouse is also
+					// refused with 9163, and that reads identically to a wrong id.
+					whJson = whJson + "{\"name\":\"" + ifnull(wRow.get("warehouse_name"),"").toString().replaceAll("\"","'") + "\","
+						+ "\"warehouse_id\":\"" + ifnull(wRow.get("warehouse_id"),"").toString() + "\","
+						+ "\"status\":\"" + ifnull(wRow.get("status"),"").toString() + "\","
+						+ "\"isPrimary\":\"" + ifnull(wRow.get("is_primary"),"").toString() + "\"}";
+				}
+
+				whNote = "warehouses endpoint answered";
+			}
+			else
+			{
+				whNote = "warehouses code " + whCode + ": " + ifnull(whResp.get("message"),"").toString().replaceAll("\"","'");
+			}
+		}
+		catch (eW)
+		{
+			whNote = "warehouses threw: " + eW.toString().replaceAll("\"","'");
+		}
+
+		//------------------------------------------------------------------
+		// LOCATIONS, so the two id sets can be read against each other in one
+		// glance rather than against a previous run's output.
+		//------------------------------------------------------------------
+		locJson = "";
+		locNote = "";
+
+		try
+		{
+			locResp = invokeurl
+			[
+				url :baseUrl + "locations?organization_id=" + orgId
+				type :GET
+				connection:"inventory_connection"
+			];
+
+			locCode = ifnull(locResp.get("code"),"none").toString().trim();
+
+			if(locCode == "0")
+			{
+				for each  lRow in ifnull(locResp.get("locations"),List())
+				{
+					if(locJson != "")
+					{
+						locJson = locJson + ",";
+					}
+
+					locJson = locJson + "{\"name\":\"" + ifnull(lRow.get("location_name"),"").toString().replaceAll("\"","'") + "\","
+						+ "\"location_id\":\"" + ifnull(lRow.get("location_id"),"").toString() + "\","
+						+ "\"type\":\"" + ifnull(lRow.get("type"),"").toString() + "\","
+						+ "\"status\":\"" + ifnull(lRow.get("status"),"").toString() + "\"}";
+				}
+
+				locNote = "locations endpoint answered";
+			}
+			else
+			{
+				locNote = "locations code " + locCode + ": " + ifnull(locResp.get("message"),"").toString().replaceAll("\"","'");
+			}
+		}
+		catch (eL)
+		{
+			locNote = "locations threw: " + eL.toString().replaceAll("\"","'");
+		}
+
+		//------------------------------------------------------------------
+		// AN EXISTING TRANSFER ORDER IS THE BEST ANSWER OF ALL, because it is
+		// Zoho's OWN body rather than anybody's reading of the docs - it names
+		// the fields and shows which ids go in them. Empty if none has ever
+		// been made, which is the case here until one posts.
+		//------------------------------------------------------------------
+		toJson = "";
+		toNote = "";
+
+		try
+		{
+			toResp = invokeurl
+			[
+				url :baseUrl + "transferorders?organization_id=" + orgId + "&per_page=1"
+				type :GET
+				connection:"inventory_connection"
+			];
+
+			toCode = ifnull(toResp.get("code"),"none").toString().trim();
+
+			if(toCode == "0")
+			{
+				toRows = ifnull(toResp.get("transfer_orders"),List());
+
+				if(toRows.size() == 0)
+				{
+					toNote = "no transfer order exists yet - nothing to copy field names from";
+				}
+				else
+				{
+					for each  tRow in toRows
+					{
+						toJson = tRow.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ");
+					}
+					toNote = "one existing transfer order returned - read its warehouse fields";
+				}
+			}
+			else
+			{
+				toNote = "transferorders code " + toCode + ": " + ifnull(toResp.get("message"),"").toString().replaceAll("\"","'");
+			}
+		}
+		catch (eT)
+		{
+			toNote = "transferorders threw: " + eT.toString().replaceAll("\"","'");
+		}
+
+		info "probeWarehouses | " + whNote + " | " + locNote + " | " + toNote;
+
+		res = "{\"errors\":[],"
+			+ "\"warehouseNote\":\"" + whNote + "\",\"warehouses\":[" + whJson + "],"
+			+ "\"locationNote\":\"" + locNote + "\",\"locations\":[" + locJson + "],"
+			+ "\"transferOrderNote\":\"" + toNote + "\",\"existingTransferOrder\":\"" + toJson + "\"}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ") + "\"]}";
+	}
+
+	return res;
+}

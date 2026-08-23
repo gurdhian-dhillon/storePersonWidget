@@ -37,8 +37,17 @@ string getOrderConsumption(string salesOrderId)
 	try
 	{
 	// Newest first - the order somebody is asking about is almost always a
-	// recent one.
-	allOrders = Sales_Order[ID != 0] sort by Added_Time desc;
+	// recent one. THE RANGE MAKES THAT COMMENT TRUE rather than merely hopeful:
+	// this used to fetch the entire order book to draw a dropdown, and the
+	// order book only grows. The statement-execution limit is NOT catchable -
+	// it kills the script and the widget gets a bare HTTP 500 with no error
+	// card - so a picker had to stop being proportional to trading history.
+	//
+	// Two hundred, not paged: this is a no-argument Custom API and adding a
+	// page argument is a Creator config change that breaks every caller until
+	// it is made by hand. If somebody genuinely needs an older order here, a
+	// date filter on the query is the next step, not a bigger number.
+	allOrders = Sales_Order[ID != 0] sort by Added_Time desc range from 1 to 200;
 
 	for each  so in allOrders
 	{
