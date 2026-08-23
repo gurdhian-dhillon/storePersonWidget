@@ -396,7 +396,46 @@ string getSupervisorMaterials(string supervisorId)
 	lineLotByMat = Map();
 	lineQtyByMat = Map();
 
+	//------------------------------------------------------------------------
+	// BOUNDED BY THE OLDEST OPEN PLAN, and the bound is provable.
+	//
+	// This walked every handover ever made to this supervisor, and its
+	// Issue_Lines subform with it. Material_Issue grows one row per press of
+	// Issue for ever, so this screen's cost tracked his whole career rather
+	// than his open work. The statement-execution limit is NOT catchable - it
+	// kills the script and he gets a bare HTTP 500 with no error card.
+	//
+	// WHY IT IS SAFE: every line this loop wants is material still owed on one
+	// of livePlans - the open plans fetched above - and material cannot have
+	// been issued against a plan before that plan existed. So no wanted line
+	// sits on a voucher older than the earliest open plan's start date.
+	//
+	// A plan with NO start date makes the whole bound unsafe, not just its own
+	// row, because it could be older than anything measured - so a single
+	// empty one falls the query back to the old unbounded form. Slower on
+	// those, and it cannot be wrong.
+	//------------------------------------------------------------------------
+	oldestOpenStart = null;
+	startMissing = false;
+
+	for each  lpDate in livePlans
+	{
+		if(lpDate.Plan_Start_Date == null)
+		{
+			startMissing = true;
+		}
+		else if(oldestOpenStart == null || lpDate.Plan_Start_Date < oldestOpenStart)
+		{
+			oldestOpenStart = lpDate.Plan_Start_Date;
+		}
+	}
+
 	supIssues = Material_Issue[Issued_To == supId] sort by Added_Time desc;
+
+	if(oldestOpenStart != null && startMissing == false)
+	{
+		supIssues = Material_Issue[Issued_To == supId && Issue_Date >= oldestOpenStart] sort by Added_Time desc;
+	}
 
 	for each  miRec in supIssues
 	{

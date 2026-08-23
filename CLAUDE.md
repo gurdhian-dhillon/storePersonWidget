@@ -40,7 +40,7 @@ These are not style preferences. Each one caused a real bug in this app.
   > extreme case. Put the comment immediately **above** the `insert into`.
   >
   > Sixty-odd `.dg` files and not one of them had a comment in an insert block; that uniformity was
-  > the evidence that found it. `scratchpad/dgscan.js` now checks for it.
+  > the evidence that found it. `tools/dgscan.js` now checks for it.
 - `sort by` goes on its **own assignment**, never inline in a `for each` header.
 - There is no reliable `break` in a `for each` — guard the body with an `if` instead.
 

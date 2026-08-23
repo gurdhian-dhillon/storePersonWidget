@@ -72,7 +72,53 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	// would be one query per line on the receipt, which is the shape that blows
 	// the statement-execution limit - and that limit is not catchable.
 	//------------------------------------------------------------------------
+	//------------------------------------------------------------------------
+	// BOUNDED BY THE OLDEST OPEN PLAN, THE SAME BOUND getSupervisorMaterials
+	// USES, AND THEY HAVE TO MATCH.
+	//
+	// The walk below settles Settled_Qty against the quantity the supervisor
+	// typed - and that figure comes off getSupervisorMaterials, which is now
+	// bounded this way. Settling it against vouchers older than any open plan
+	// would spend his confirmation on cloth that screen never showed him,
+	// which is the same class of divergence the dispute-netting note further
+	// down was written about: the two functions must read the same set.
+	//
+	// The four statuses are getSupervisorMaterials' set, deliberately WIDER
+	// than the three in the plans query above. Narrowing it here would give a
+	// later cutoff than the screen used, so the receive would see fewer
+	// vouchers than the screen did - the exact mismatch this is avoiding.
+	//
+	// WHY NOT Issue_Status, which looks like the natural bound: STEP 4 of this
+	// same function flips it to "Received" for EVERY open handover on the
+	// plan, not just the one being received - so a voucher can read Received
+	// with lines still unsettled. postTransferOrders refuses to trigger on it
+	// for exactly that reason, and filtering on it here would silently stop
+	// settling those lines.
+	//
+	// A plan with no start date falls the query back to its old unbounded
+	// form. Slower, and it cannot be wrong.
+	//------------------------------------------------------------------------
+	oldestOpenStart = null;
+	startMissing = false;
+
+	for each  lpDate in Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Material Ready" || Order_Status == "Partially Received" || Order_Status == "In Progress")]
+	{
+		if(lpDate.Plan_Start_Date == null)
+		{
+			startMissing = true;
+		}
+		else if(oldestOpenStart == null || lpDate.Plan_Start_Date < oldestOpenStart)
+		{
+			oldestOpenStart = lpDate.Plan_Start_Date;
+		}
+	}
+
 	supIssues = Material_Issue[Issued_To == supId] sort by Added_Time;
+
+	if(oldestOpenStart != null && startMissing == false)
+	{
+		supIssues = Material_Issue[Issued_To == supId && Issue_Date >= oldestOpenStart] sort by Added_Time;
+	}
 
 	//------------------------------------------------------------------------
 	// Which order each plan belongs to, resolved ONCE.

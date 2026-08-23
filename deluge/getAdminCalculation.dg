@@ -611,8 +611,34 @@ string getAdminCalculation(string salesOrderId)
 		issuedByKey = Map();
 		if(supId2 != null)
 		{
+			//--------------------------------------------------------
+			// BOUNDED BY THIS PLAN'S START DATE. Same bound and same
+			// reasoning as getExpectedWaste and saveWasteFromCutting -
+			// see the long note in getExpectedWaste.
+			//
+			// This walked every handover ever made to the supervisor, plus
+			// its Issue_Lines subform, once per plan on the order, to build
+			// a map keyed by Plan_Item. Material_Issue grows one row per
+			// press of Issue for ever.
+			//
+			// The lines this wants all carry a Plan_Item of THIS plan, and
+			// an item cannot be issued before the plan that created it
+			// existed - so nothing wanted sits on a voucher older than
+			// Plan_Start_Date. An empty one falls back to the unbounded
+			// query rather than to a date.
+			//
 			// sort by on its own assignment, never inline in the for each header.
 			supHandovers = Material_Issue[Issued_To == supId2] sort by Added_Time;
+
+			// Read into a local first rather than reaching into the record
+			// from inside the criteria, which is how the other four sites do
+			// it and one less thing for Creator to resolve at query time.
+			planStartA = plan.Plan_Start_Date;
+
+			if(planStartA != null)
+			{
+				supHandovers = Material_Issue[Issued_To == supId2 && Issue_Date >= planStartA] sort by Added_Time;
+			}
 
 			for each  mi in supHandovers
 			{
