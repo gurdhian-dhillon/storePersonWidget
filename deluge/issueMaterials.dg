@@ -70,6 +70,56 @@ string issueMaterials(string supervisorId, string issuesJson)
 	issueLines = List();
 	primaryPlanId = 0;
 
+	//------------------------------------------------------------------------
+	// WHICH PLANS CARRY WHICH MATERIAL, INDEXED ONCE.
+	//
+	// Three loops below - pass 1, the pin-lefts read, and the fan - each walked
+	// EVERY open plan of this supervisor and fetched every one of its
+	// Material_Requirement rows. All three sit INSIDE the per-material loop, so
+	// one press of Issue cost 3 x materials x plans queries and
+	// 3 x materials x plans x rows row-visits. Thirteen materials against twenty
+	// open plans is ~780 queries for one button. The statement-execution limit
+	// is NOT catchable: it kills the script and the store person gets a bare
+	// HTTP 500 with no error card.
+	//
+	// SKIPPING A PLAN IS A PROVABLE NO-OP, not a behaviour change. Every one of
+	// those three loops opens by testing row.Material against matId, so a plan
+	// carrying nothing of this material contributes exactly nothing to any of
+	// them.
+	//
+	// ORDER IS PRESERVED. This walks `plans` in its own Priority_Key order and
+	// appends, so the ids come back out in that same sequence - and that
+	// sequence is what decides which order gets scarce offcuts first.
+	//
+	// IT NARROWS WHICH PLANS ARE LOOKED AT, AND NOTHING ELSE. No row and no
+	// field is cached here. The three loops still query Material_Requirement
+	// live inside themselves, which is required: the pin-lefts loop and the fan
+	// both have to see the writes that earlier passes made to those same rows.
+	//------------------------------------------------------------------------
+	matPlanIdx = Map();
+
+	for each  ixPlan in plans
+	{
+		for each  ixRow in Material_Requirement[Plan == ixPlan.ID]
+		{
+			if(ixRow.Material != null)
+			{
+				ixKey = ixRow.Material.toString();
+				ixPrev = ifnull(matPlanIdx.get(ixKey),"").toString();
+				ixTok = ixPlan.ID + "";
+
+				if(ixPrev == "")
+				{
+					matPlanIdx.put(ixKey,ixTok);
+				}
+				else if(ixPrev.toList(",").contains(ixTok) == false)
+				{
+					matPlanIdx.put(ixKey,ixPrev + "," + ixTok);
+				}
+			}
+		}
+	}
+
 	for each  issue in issues
 	{
 		// toJSONList() yields JSON objects, NOT Deluge Maps - .get() silently
@@ -77,6 +127,18 @@ string issueMaterials(string supervisorId, string issuesJson)
 		im = issue.toMap();
 
 		matId = im.get("materialId").toString();
+
+		// The plans that actually carry this material, off the index built
+		// above. Empty when no open plan wants it, in which case all three
+		// loops below simply do not run - which is what they already did, one
+		// wasted query per plan at a time.
+		matPlanTxt = ifnull(matPlanIdx.get(matId),"").toString().trim();
+		matPlanFor = List();
+
+		if(matPlanTxt != "")
+		{
+			matPlanFor = matPlanTxt.toList(",");
+		}
 
 		// NOTE: two more traps stacked here.
 		//  1. ifnull() only guards null - a Creator field that was never
@@ -208,9 +270,10 @@ string issueMaterials(string supervisorId, string issuesJson)
 			//--------------------------------------------------------------
 			outstanding = 0.0;
 			outPieces = 0;
-			for each  plan in plans
+			// Narrowed to the plans carrying this material - see matPlanIdx.
+			for each  planTok in matPlanFor
 			{
-				for each  row in Material_Requirement[Plan == plan.ID]
+				for each  row in Material_Requirement[Plan == planTok.toLong()]
 				{
 					if(row.Material != null && row.Material.toString() == matId)
 					{
@@ -725,6 +788,106 @@ string issueMaterials(string supervisorId, string issuesJson)
 			}
 
 			//--------------------------------------------------------------
+			// THE PIECES THEMSELVES, VALIDATED HERE - BEFORE ANYTHING IS
+			// WRITTEN.
+			//
+			// These four tests already existed, at :1137-1152, under a
+			// comment reading "EVERY ONE OF THESE IS A REFUSAL, NOT A TRIM".
+			// They refused nothing. They sit inside the write branch, ~370
+			// lines PAST the gate that reads lotErr, and lotErr is never read
+			// again and is reset per material - so what they actually did was
+			// worse than no check at all:
+			//
+			//   EVERY PIECE FAILS -> passIsPieces stays false, so the
+			//     thisQty = pcMetres override at :1265 never fires and the
+			//     pass falls through to the ROLL path. The lot's
+			//     Wash_Quantity is decremented anyway - :1690 is
+			//     unconditional - while the piece decrement is skipped,
+			//     because :1708 is guarded on passIsPieces. Metres leave the
+			//     lot and NO PIECE LEAVES THE RACK. The header and its
+			//     Fabric_Piece rows then disagree, which is precisely what
+			//     the comment at :1697 says that block exists to prevent, and
+			//     the pieces stay Available to be offered again next render.
+			//
+			//   SOME FAIL -> passIsPieces is true and thisQty is the metres of
+			//     the survivors only. A silent trim: the handover records less
+			//     cloth than he handed over, the requirement never closes, and
+			//     the item sits at Awaiting_Material with nothing saying why.
+			//
+			// A PIECE THAT NO LONGER EXISTS is refused too. The write-side
+			// loop cannot see that case at all - its for-each simply does not
+			// run - so a deleted piece took the same roll-path fall as a
+			// failing one.
+			//
+			// PURELY ADDITIVE. The checks at :1137-1152 are left exactly where
+			// they are. They become unreachable in the failing cases because
+			// this refuses the whole material line first, and they stay as a
+			// defensive guard against anything this loop does not model.
+			//
+			// passOrder / lotOf / passPieces are all built above, and passIds
+			// below is passOrder itself for fabric - so this validates exactly
+			// the passes that would execute, never a pass that would not.
+			//--------------------------------------------------------------
+			for each  pvKey in passOrder
+			{
+				pvSpec = ifnull(passPieces.get(pvKey),"").toString().trim();
+
+				if(pvSpec != "" && cutW > 0 && cutL > 0)
+				{
+					pvLot = ifnull(lotOf.get(pvKey),"").toString().trim();
+
+					for each  pvTok in pvSpec.toList(",")
+					{
+						pvBits = pvTok.toString().trim().toList(":");
+
+						if(pvBits.size() == 2)
+						{
+							pvId = pvBits.get(0).toString().trim();
+							pvN = pvBits.get(1).toString().trim().toDecimal();
+
+							if(pvId != "" && pvN > 0)
+							{
+								pvFound = false;
+
+								for each  pvRec in Fabric_Piece[ID == pvId.toLong()]
+								{
+									pvFound = true;
+
+									pvPcS = ifnull(pvRec.Piece_Count,"0").toString().trim();
+									if(pvPcS == "")
+									{
+										pvPcS = "0";
+									}
+
+									if(ifnull(pvRec.Lot,"").toString().trim() != pvLot)
+									{
+										lotErr = matName + ": a piece in this handover is not on the lot it names";
+									}
+									else if(ifnull(pvRec.Piece_Status,"").toString().trim() != "Available")
+									{
+										lotErr = matName + ": a piece in this handover is no longer available";
+									}
+									else if(ifnull(pvRec.State,"").toString().trim() != "Wash")
+									{
+										lotErr = matName + ": a greige piece cannot be issued - it has to be washed first";
+									}
+									else if(pvN > pvPcS.toDecimal())
+									{
+										lotErr = matName + ": only " + pvPcS.toDecimal() + " of that piece are on the rack";
+									}
+								}
+
+								if(pvFound == false)
+								{
+									lotErr = matName + ": a piece in this handover no longer exists";
+								}
+							}
+						}
+					}
+				}
+			}
+
+			//--------------------------------------------------------------
 			// FOR FABRIC THE LOTS ARE THE ASK. The payload's qty is advisory
 			// and is overridden, for the same reason Pieces_From_Raw is
 			// recomputed rather than trusted: this function is the ledger.
@@ -860,9 +1023,21 @@ string issueMaterials(string supervisorId, string issuesJson)
 				passIds = List();
 				if(isFab == true)
 				{
+					// Which PINS already own a pass. A pinned pass only ever visits its
+					// own item's rows, so a pin with no pass is an item the fan never
+					// reaches - and its waste credit has nowhere to land.
+					pinSeen = List();
+
 					for each  lpId in passOrder
 					{
 						passIds.add(lpId);
+
+						lpPin = ifnull(pinOf.get(lpId),"").toString().trim();
+
+						if(pinSeen.contains(lpPin) == false)
+						{
+							pinSeen.add(lpPin);
+						}
 					}
 
 					// A FABRIC LINE COVERED ENTIRELY BY OFFCUTS HAS NO LOT LINE,
@@ -879,9 +1054,60 @@ string issueMaterials(string supervisorId, string issuesJson)
 					// One pass carrying no lot moves no cloth - thisQty comes out
 					// 0 and the stock block below is skipped - and lets the waste
 					// credit land where it belongs.
-					if(passIds.size() == 0 && picks.size() > 0)
+					// AN ITEM COVERED ENTIRELY BY OFFCUTS HAS NO LOT LINE, SO IT HAS NO
+					// PASS - AND WITHOUT A PASS IT IS NEVER FANNED.
+					//
+					// This guard used to be `passIds.size() == 0`, which caught only the
+					// case where the whole LINE had no lot at all. On a card holding two
+					// orders it is false: order A is offcut-complete and contributes no
+					// lot line, order B draws fresh cloth from the same lot and
+					// contributes one. Every executed pass is then pinned to B, the fan
+					// visits only B's rows, and A's Pieces_From_Waste credit is never
+					// made.
+					//
+					// A's remnants have ALREADY moved to In_Transit_Count by this point,
+					// so they leave the rack booking nothing and A's requirement stays
+					// open at its full piece count for ever. The next press is worse:
+					// those remnants now fail validation as "no longer available", so the
+					// store is asked for REAL cloth to cover pieces the offcuts already
+					// covered. Silent loss, then over-issue.
+					//
+					// So every pin holding waste credit gets a pass of its own when it
+					// has none - an empty lot with that pin, keyed the same "lot|pin" way
+					// as a real pass. It moves no cloth: lotWant has no entry, thisQty
+					// comes out 0 and the stock block is skipped. It exists purely so the
+					// fan reaches those rows.
+					for each  wpPinRaw in wPinTot.keys()
+					{
+						wpPin = ifnull(wpPinRaw,"").toString().trim();
+						wpHaveS = ifnull(wPinTot.get(wpPin),"0").toString().trim();
+
+						if(wpHaveS == "")
+						{
+							wpHaveS = "0";
+						}
+
+						if(wpPin != "" && wpHaveS.toLong() > 0 && pinSeen.contains(wpPin) == false)
+						{
+							synKey = "|" + wpPin;
+
+							// Registered in the same maps the pass loop reads, so it is
+							// indistinguishable from a real pass except that it names no lot.
+							lotOf.put(synKey,"");
+							pinOf.put(synKey,wpPin);
+
+							passIds.add(synKey);
+							pinSeen.add(wpPin);
+						}
+					}
+
+					// UNPINNED credit needs an UNPINNED pass - only a pass with no pin
+					// visits every row. Tested on wFree, not picks.size(): a pick
+					// allocated to an item is already covered by the pinned passes above.
+					if(wFree > 0 && pinSeen.contains("") == false)
 					{
 						passIds.add("");
+						pinSeen.add("");
 					}
 				}
 				else
@@ -962,9 +1188,10 @@ string issueMaterials(string supervisorId, string issuesJson)
 					pinQtyLeft = 0.0;
 					if(passPin != "")
 					{
-						for each  plan in plans
+						// Narrowed to the plans carrying this material - see matPlanIdx.
+						for each  planTok in matPlanFor
 						{
-							for each  row in Material_Requirement[Plan == plan.ID]
+							for each  row in Material_Requirement[Plan == planTok.toLong()]
 							{
 								if(row.Material != null && row.Material.toString() == matId)
 								{
@@ -1342,9 +1569,10 @@ string issueMaterials(string supervisorId, string issuesJson)
 				//----------------------------------------------------------
 				toFan = thisQty;
 				fanRaw = piecesFromRaw;
-				for each  plan in plans
+				// Narrowed to the plans carrying this material - see matPlanIdx.
+				for each  planTok in matPlanFor
 				{
-					for each  row in Material_Requirement[Plan == plan.ID]
+					for each  row in Material_Requirement[Plan == planTok.toLong()]
 					{
 						if(row.Material != null && row.Material.toString() == matId)
 						{
@@ -1475,7 +1703,7 @@ string issueMaterials(string supervisorId, string issuesJson)
 										{
 											if(primaryPlanId == 0)
 											{
-												primaryPlanId = plan.ID;
+												primaryPlanId = planTok.toLong();
 											}
 
 											//--------------------------------------
@@ -1637,7 +1865,7 @@ string issueMaterials(string supervisorId, string issuesJson)
 														for each  mv in Waste_Movement[ID == newMvId.toLong()]
 														{
 															mv.Waste_Piece = wId3.toLong();
-															mv.Plan = plan.ID;
+															mv.Plan = planTok.toLong();
 															mv.Plan_Item = row.Plan_Item;
 															mv.Moved_By = supId;
 														}

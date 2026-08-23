@@ -838,6 +838,15 @@ Deluge cannot be run here, so:
   skips comments and strings, and scan for the loop-variable/scalar name clash above — both are
   comment- and string-aware text passes, so they cost nothing and catch what Deluge only reports
   at runtime, at the wrong line.
+- **Language semantics CAN be settled, at <https://deluge.zoho.com/tryout>.** No login, no token,
+  and it really executes — so any question of the form *"does Deluge do X"* is a two-minute answer
+  instead of a hedge in a comment. It has **no forms, no `thisapp`, no records**, so it cannot run
+  anything in this repo; it answers about the *language*, not about the app. `return` is rejected
+  there ("VOID function can not return any value") — build a string and `info` it.
+  > Settled this way, and each one was load-bearing: **`Map.get()` on a missing key returns
+  > `null`** (every lazy per-id cache tests exactly this), **relational operators work on dates**
+  > (the `Plan_Start_Date` bounds compare with `<`), and **`substring` is valid lowercase**
+  > — both spellings appear in this repo and both work.
 - **Never claim a Deluge change is verified.** Say what was checked and what needs an Execute.
 - **Deluge's reported line number is a hint, not a fact.** It points at the statement that
   *failed*, which is often not the statement that is *wrong*. Isolate first — a per-row
