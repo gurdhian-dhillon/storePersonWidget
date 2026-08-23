@@ -196,6 +196,8 @@ string createProductionPlans()
 
 	for each  so in pendingOrders
 	{
+		try
+		{
 		// THE BUDGET GUARD. There is no reliable break in a Deluge for each, so
 		// the body is guarded instead - the same shape postTransferOrders uses.
 		//
@@ -628,6 +630,37 @@ string createProductionPlans()
 			supPush.put("orderNo",so.Sales_Order);
 			supPush.put("pieces",totalProduceQty);
 			supervisorPushList.add(supPush);
+		}
+		}
+		catch (eOrder)
+		{
+			// ONE ORDER MUST NEVER TAKE THE RUN DOWN WITH IT.
+			//
+			// This loop had no try/catch at all. The only two in this function
+			// guard the mail and the push, and both sit AFTER it - so a single
+			// order that threw killed the whole run. Nothing after it was planned,
+			// and because a failed order keeps Order_Status "Pending" the next run
+			// reached the same order and died in the same place: a permanent poison
+			// pill blocking every order behind it. With two scheduled runs a day,
+			// each occurrence costs a whole window, silently.
+			//
+			// AN EXCEPTION IS NOT A REJECTION, and they are reported apart on
+			// purpose. A REJECT is missing data and tells somebody what to go and
+			// fix - no BOM, no assignment rule. An ERROR is a BUG in this function.
+			// Folding them into one list would bury the bug among routine data
+			// problems and nobody would look at it twice.
+			//
+			// The order keeps "Pending", so it retries exactly as a rejection does.
+			// If the throw landed AFTER the plan insert, the resume path at the top
+			// of this loop finds that plan on the next run and moves the order on
+			// rather than planning it twice - Deluge has no transaction to roll
+			// back, and that check IS the recovery.
+			errTxt = eOrder.toString().replaceAll("<","&lt;").replaceAll("\"","'");
+			soNoTxt = ifnull(so.Sales_Order,"(no number)").toString();
+
+			failedCount = failedCount + 1;
+			failedList.add("<tr><td style='" + mTd + ";white-space:nowrap'><b>" + soNoTxt + "</b></td><td style='" + mTdBad + "'>ERROR: " + errTxt + "</td></tr>");
+			logLines.add("ERROR -> SO " + soNoTxt + " | " + errTxt);
 		}
 	}
 
