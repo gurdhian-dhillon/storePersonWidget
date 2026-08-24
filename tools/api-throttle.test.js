@@ -1,16 +1,21 @@
 #!/usr/bin/env node
-// installApiThrottle, driven by a virtual clock so a rolling-minute window can
-// be tested without waiting a minute.
+// installApiThrottle, driven by a virtual clock.
 //
 //   usage: node tools/api-throttle.test.js
 //
-// What is being protected:
+// What is being protected. The first three are the data-loss argument and are
+// the reason the allowlist exists at all:
 //
-//   - a burst is PACED, not refused (the bug: code 2955 on fast working)
-//   - a 2955 is retried; ANYTHING ELSE is not, because a retried save is a
-//     save that might happen twice
-//   - order is preserved, including across a retry
-//   - the window ROLLS - calls are not blocked for ever after one burst
+//   - a WRITE is never dropped, however many identical ones are queued
+//   - only a WAITING read is dropped, never one in flight - dropping the older
+//     for the newer hands the caller fresher data; merging into an in-flight
+//     call would hand it data from before a save that landed in between
+//   - every caller of a dropped call is still settled, including one that was
+//     itself superseded earlier
+//   - nothing is PACED: a burst goes straight out, because holding calls back
+//     that Creator would have accepted is what hung the screen
+//   - a 2955 is retried (it was refused before executing, so it repeats no
+//     work); anything else rejects unchanged
 
 'use strict';
 const fs = require('fs');
@@ -28,31 +33,34 @@ function test(name, fn) {
 // ---- load the real function (skip its self-install IIFE) --------------------
 const src = fs.readFileSync(
   path.join(__dirname, '..', 'app', 'supervisor', 'js', 'api-throttle.js'), 'utf8');
-const i = src.indexOf('function installApiThrottle(');
-if (i < 0) throw new Error('api-throttle.js no longer defines installApiThrottle');
-let depth = 0, end = src.indexOf('{', i);
-for (let k = end; k < src.length; k++) {
-  if (src[k] === '{') depth++;
-  else if (src[k] === '}') { depth--; if (depth === 0) { end = k + 1; break; } }
+function grab(decl) {
+  const i = src.indexOf(decl);
+  if (i < 0) throw new Error('api-throttle.js no longer has: ' + decl);
+  let depth = 0, end = src.indexOf('{', i);
+  for (let k = end; k < src.length; k++) {
+    if (src[k] === '{') depth++;
+    else if (src[k] === '}') { depth--; if (depth === 0) { end = k + 1; break; } }
+  }
+  return src.slice(i, end);
 }
-const ctx = { Promise: Promise, Date: Date, console: { log() {}, warn() {} }, setTimeout: setTimeout };
+const listSrc = src.slice(src.indexOf('var COALESCE_SAFE'), src.indexOf('];', src.indexOf('var COALESCE_SAFE')) + 2);
+const ctx = { Promise, Date, console: { log() {}, warn() {} }, setTimeout, JSON };
 vm.createContext(ctx);
-vm.runInContext(src.slice(i, end), ctx);
+vm.runInContext(listSrc + '\n' + grab('function installApiThrottle('), ctx);
 const installApiThrottle = ctx.installApiThrottle;
+const COALESCE_SAFE = ctx.COALESCE_SAFE;
 
 // ---- virtual clock ---------------------------------------------------------
+function settle() { return new Promise(r => setImmediate(r)); }
 function makeClock() {
   let t = 0;
   const pending = [];
   return {
     now: () => t,
     setTimeout: (fn, ms) => { pending.push({ at: t + ms, fn }); },
-    // Advance time, firing timers, then let the microtask queue drain.
-    //
-    // SETTLES FIRST, and that is not a detail: a rejection already sitting in
-    // the microtask queue has to be handled at the time it happened. Moving the
-    // clock before draining it made the throttle compute its retry wait from a
-    // moment in the future, and the test read that as the retry never firing.
+    // SETTLES FIRST: a rejection already in the microtask queue has to be
+    // handled at the time it happened, or the retry wait is computed from a
+    // moment in the future and reads as the retry never firing.
     async advance(ms) {
       await settle();
       const target = t + ms;
@@ -69,180 +77,246 @@ function makeClock() {
     }
   };
 }
-function settle() { return new Promise(r => setImmediate(r)); }
 
-// A fake invokeCustomApi. `plan` maps call index -> 'ok' | rate-limit | error.
+// A fake invokeCustomApi. Calls stay pending until released, so "in flight"
+// is something the test controls.
 function makeTarget(plan) {
   const seen = [];
-  return {
+  const open = [];
+  const t = {
     seen,
+    open,
+    releaseAll() { while (open.length) open.shift()(); },
     invokeCustomApi(opts) {
       const n = seen.length;
       seen.push(opts.api_name);
       const outcome = plan ? plan(n, opts) : 'ok';
-      if (outcome === 'ok') return Promise.resolve({ result: '{}' });
+      if (outcome === 'auto') return Promise.resolve({ result: '{"n":' + n + '}' });
+      if (outcome === 'ok') return new Promise((res) => open.push(() => res({ result: '{"n":' + n + '}' })));
       return Promise.reject(outcome);
     }
   };
+  return t;
 }
 
 function run(name, fn) {
-  // Each async test is run to completion before the next starts.
   return fn().then(
     () => { passed++; console.log('  ok  ' + name); },
     (e) => { failed++; failures.push({ name, msg: e.message }); console.log('FAIL  ' + name + '\n      ' + e.message); }
   );
 }
 
-// ---- tests -----------------------------------------------------------------
+const READ = { api_name: 'getProductionWidgetData', payload: { supervisorId: '1', planId: '9' } };
+function read(over) { return Object.assign({}, READ, over || {}); }
+function write(name) { return { api_name: name || 'saveStageAssignment', payload: { payloadJson: '{}' } }; }
 
 (async function () {
-  console.log('\nAPI throttle\n');
+  console.log('\nAPI call wrapper\n');
 
-  test('it refuses to wrap twice - double wrapping would halve the rate', () => {
-    const t = makeTarget();
-    const first = installApiThrottle(t, {});
-    const second = installApiThrottle(t, {});
-    assert.strictEqual(first, second);
+  test('the allowlist holds only functions verified to have no writes', () => {
+    // A name creeping onto this list without its .dg being checked is the one
+    // way this can lose data, so the list itself is asserted.
+    // Copied into this realm first - an array from the vm context has a
+    // different Array prototype and deepStrictEqual compares those.
+    assert.deepStrictEqual([].concat(COALESCE_SAFE).sort(), [
+      'getDamageProposal', 'getExpectedWaste', 'getProductionWidgetData',
+      'getReissueDrafts', 'getSupervisorCounts', 'getSupervisorDisputes',
+      'getSupervisorMaterials', 'getSupervisorProductionHistory',
+      'getSupervisorWasteReturns'
+    ]);
+    COALESCE_SAFE.forEach(function (n) {
+      assert.ok(n.indexOf('get') === 0, n + ' is on the drop list but is not a getter');
+    });
   });
 
-  test('it declines a target with no invokeCustomApi rather than throwing', () => {
+  test('it refuses to wrap twice', () => {
+    const t = makeTarget();
+    assert.strictEqual(installApiThrottle(t, {}), installApiThrottle(t, {}));
+  });
+
+  test('it declines a bad target rather than throwing', () => {
     assert.strictEqual(installApiThrottle(null, {}), null);
     assert.strictEqual(installApiThrottle({}, {}), null);
   });
 
-  await run('THE BUG: a burst past the limit is paced, not refused', async () => {
+  await run('NO DATA LOSS: identical writes are all sent, never coalesced', async () => {
     const clock = makeClock();
-    const t = makeTarget();
-    installApiThrottle(t, { maxPerMin: 10, maxInflight: 3, now: clock.now, setTimeout: clock.setTimeout });
+    const t = makeTarget(() => 'auto');
+    installApiThrottle(t, { maxInflight: 1, now: clock.now, setTimeout: clock.setTimeout });
 
-    const done = [];
-    for (let n = 0; n < 16; n++) {
-      t.invokeCustomApi({ api_name: 'call' + n }).then(() => done.push(n));
-    }
+    for (let n = 0; n < 4; n++) t.invokeCustomApi(write());
     await clock.advance(0);
 
-    assert.strictEqual(t.seen.length, 10, 'expected the first 10 through, got ' + t.seen.length);
-    assert.strictEqual(done.length, 10);
-
-    // The window has not rolled yet, so nothing more may go.
-    await clock.advance(30000);
-    assert.strictEqual(t.seen.length, 10, 'went early - the window had not rolled');
-
-    // Past 60s from the first call, the rest follow.
-    await clock.advance(31000);
-    assert.strictEqual(t.seen.length, 16, 'the queue never drained');
-    assert.strictEqual(done.length, 16, 'callers were left hanging');
+    assert.strictEqual(t.seen.length, 4, 'a dropped save is a lost save');
   });
 
-  await run('the queue drains in order', async () => {
+  await run('an unknown api is never dropped - forgetting one costs a call, not a write', async () => {
+    const clock = makeClock();
+    const t = makeTarget(() => 'auto');
+    installApiThrottle(t, { maxInflight: 1, now: clock.now, setTimeout: clock.setTimeout });
+
+    for (let n = 0; n < 3; n++) t.invokeCustomApi({ api_name: 'somethingNew', payload: {} });
+    await clock.advance(0);
+    assert.strictEqual(t.seen.length, 3);
+  });
+
+  await run('THE FIX: four identical queued refetches become one call', async () => {
     const clock = makeClock();
     const t = makeTarget();
-    installApiThrottle(t, { maxPerMin: 3, maxInflight: 3, now: clock.now, setTimeout: clock.setTimeout });
+    installApiThrottle(t, { maxInflight: 1, now: clock.now, setTimeout: clock.setTimeout });
 
-    for (let n = 0; n < 6; n++) t.invokeCustomApi({ api_name: 'c' + n });
+    // One occupies the single in-flight slot; three more queue behind it.
+    const results = [];
+    for (let n = 0; n < 4; n++) t.invokeCustomApi(read()).then((r) => results.push(r.result));
     await clock.advance(0);
-    await clock.advance(61000);
 
-    assert.deepStrictEqual(t.seen, ['c0', 'c1', 'c2', 'c3', 'c4', 'c5'],
-      'two saves fired in sequence must reach the server in that sequence');
+    assert.strictEqual(t.seen.length, 1, 'only the first should have gone out yet');
+    t.releaseAll();
+    await settle();
+    t.releaseAll();
+    await settle();
+
+    assert.strictEqual(t.seen.length, 2, 'the three queued reads should have collapsed into one');
+    assert.strictEqual(results.length, 4, 'every caller must still be settled');
   });
 
-  await run('a 2955 is retried, and keeps its place at the front', async () => {
+  await run('reads with DIFFERENT payloads are not confused for one another', async () => {
     const clock = makeClock();
-    // First attempt at c0 is rate limited; everything after succeeds.
-    let limited = false;
-    const t = makeTarget((n, opts) => {
-      if (opts.api_name === 'c0' && !limited) { limited = true; return { code: 2955, description: 'You have reached your API call limit for a minute.' }; }
-      return 'ok';
+    const t = makeTarget();
+    installApiThrottle(t, { maxInflight: 1, now: clock.now, setTimeout: clock.setTimeout });
+
+    // A write holds the only slot so the four reads all queue and can be seen
+    // coalescing against each other rather than being dispatched one by one.
+    t.invokeCustomApi(write());
+    t.invokeCustomApi(read({ payload: { supervisorId: '1', planId: '9' } }));
+    t.invokeCustomApi(read({ payload: { supervisorId: '1', planId: '9' } }));
+    t.invokeCustomApi(read({ payload: { supervisorId: '2', planId: '9' } }));
+    t.invokeCustomApi(read({ payload: { supervisorId: '2', planId: '9' } }));
+    await clock.advance(0);
+    assert.strictEqual(t.seen.length, 1, 'only the write should have gone out');
+
+    for (let i = 0; i < 4; i++) { t.releaseAll(); await settle(); }
+
+    assert.strictEqual(t.seen.length, 3,
+      'plan 9 for two different supervisors are two questions, not one');
+  });
+
+  await run('a caller superseded twice over is still settled', async () => {
+    const clock = makeClock();
+    const t = makeTarget();
+    installApiThrottle(t, { maxInflight: 1, now: clock.now, setTimeout: clock.setTimeout });
+
+    const settled = [];
+    t.invokeCustomApi(write()).then(() => settled.push('w'));   // occupies the slot
+    t.invokeCustomApi(read()).then(() => settled.push('r1'));
+    t.invokeCustomApi(read()).then(() => settled.push('r2'));
+    t.invokeCustomApi(read()).then(() => settled.push('r3'));
+    await clock.advance(0);
+
+    t.releaseAll();
+    await settle();
+    t.releaseAll();
+    await settle();
+
+    assert.deepStrictEqual(settled.sort(), ['r1', 'r2', 'r3', 'w'],
+      'a chain of supersessions must not strand the earliest caller');
+  });
+
+  await run('an IN-FLIGHT read is never merged into - that would serve pre-save data', async () => {
+    const clock = makeClock();
+    const t = makeTarget();
+    installApiThrottle(t, { maxInflight: 4, now: clock.now, setTimeout: clock.setTimeout });
+
+    t.invokeCustomApi(read());          // goes out immediately, stays open
+    await clock.advance(0);
+    assert.strictEqual(t.seen.length, 1);
+
+    // A save lands, then the screen asks again. The second read must be its
+    // own call, or it is answered with data from before the save.
+    t.invokeCustomApi(read());
+    await clock.advance(0);
+    assert.strictEqual(t.seen.length, 2, 'the second read was merged into one already in flight');
+  });
+
+  await run('NOTHING IS PACED: a burst goes straight out', async () => {
+    const clock = makeClock();
+    const t = makeTarget(() => 'auto');
+    installApiThrottle(t, { maxInflight: 4, now: clock.now, setTimeout: clock.setTimeout });
+
+    for (let n = 0; n < 30; n++) t.invokeCustomApi(write('save' + n));
+    await clock.advance(0);
+
+    assert.strictEqual(t.seen.length, 30,
+      'holding back calls Creator would have accepted is what hung the screen');
+  });
+
+  await run('concurrency is capped', async () => {
+    const clock = makeClock();
+    const t = makeTarget();
+    installApiThrottle(t, { maxInflight: 4, now: clock.now, setTimeout: clock.setTimeout });
+
+    for (let n = 0; n < 10; n++) t.invokeCustomApi(write('save' + n));
+    await clock.advance(0);
+    assert.strictEqual(t.seen.length, 4, 'in flight at once: ' + t.seen.length);
+
+    t.releaseAll();
+    await settle();
+    assert.ok(t.seen.length > 4, 'the queue never drained');
+  });
+
+  await run('a 2955 is retried - it was refused before executing, so nothing repeats', async () => {
+    const clock = makeClock();
+    let once = false;
+    const t = makeTarget(() => {
+      if (!once) { once = true; return { code: 2955, description: 'You have reached your API call limit for a minute.' }; }
+      return 'auto';
     });
-    installApiThrottle(t, { maxPerMin: 50, maxInflight: 1, retryWaitMs: 5000, now: clock.now, setTimeout: clock.setTimeout });
+    installApiThrottle(t, { maxInflight: 1, retryWaitMs: 5000, now: clock.now, setTimeout: clock.setTimeout });
 
     let ok = false;
-    t.invokeCustomApi({ api_name: 'c0' }).then(() => { ok = true; });
-    t.invokeCustomApi({ api_name: 'c1' });
-    await clock.advance(0);
+    t.invokeCustomApi(write()).then(() => { ok = true; });
     await clock.advance(6000);
 
-    assert.deepStrictEqual(t.seen, ['c0', 'c0', 'c1'],
-      'the retry must go before the call queued behind it');
+    assert.strictEqual(t.seen.length, 2);
     assert.strictEqual(ok, true, 'the caller never saw its result');
   });
 
   await run('a bare 429 counts as the same condition', async () => {
     const clock = makeClock();
     let once = false;
-    const t = makeTarget(() => { if (!once) { once = true; return { status: 429 }; } return 'ok'; });
-    installApiThrottle(t, { maxPerMin: 50, maxInflight: 1, retryWaitMs: 1000, now: clock.now, setTimeout: clock.setTimeout });
+    const t = makeTarget(() => { if (!once) { once = true; return { status: 429 }; } return 'auto'; });
+    installApiThrottle(t, { maxInflight: 1, retryWaitMs: 1000, now: clock.now, setTimeout: clock.setTimeout });
 
     let ok = false;
-    t.invokeCustomApi({ api_name: 'c0' }).then(() => { ok = true; });
+    t.invokeCustomApi(read()).then(() => { ok = true; });
     await clock.advance(2000);
     assert.strictEqual(ok, true);
-    assert.strictEqual(t.seen.length, 2);
   });
 
-  await run('ANY OTHER ERROR IS NOT RETRIED - a retried save may happen twice', async () => {
+  await run('ANY OTHER ERROR IS NOT RETRIED - a repeated save may happen twice', async () => {
     const clock = makeClock();
     const t = makeTarget(() => ({ code: 9430, description: 'something threw' }));
-    installApiThrottle(t, { maxPerMin: 50, maxInflight: 1, retryWaitMs: 1000, now: clock.now, setTimeout: clock.setTimeout });
+    installApiThrottle(t, { maxInflight: 1, retryWaitMs: 1000, now: clock.now, setTimeout: clock.setTimeout });
 
     let err = null;
-    t.invokeCustomApi({ api_name: 'save' }).catch((e) => { err = e; });
+    t.invokeCustomApi(write()).catch((e) => { err = e; });
     await clock.advance(5000);
 
-    assert.strictEqual(t.seen.length, 1, 'a failed save must not be repeated');
+    assert.strictEqual(t.seen.length, 1);
     assert.ok(err && err.code === 9430, 'the real error must reach the caller unchanged');
   });
 
-  await run('a call that keeps being rate limited eventually gives up', async () => {
+  await run('a call rate-limited past its retries gives up rather than hanging', async () => {
     const clock = makeClock();
     const t = makeTarget(() => ({ code: 2955 }));
-    installApiThrottle(t, { maxPerMin: 50, maxInflight: 1, maxRetries: 2, retryWaitMs: 1000, now: clock.now, setTimeout: clock.setTimeout });
+    installApiThrottle(t, { maxInflight: 1, maxRetries: 2, retryWaitMs: 1000, now: clock.now, setTimeout: clock.setTimeout });
 
     let err = null;
-    t.invokeCustomApi({ api_name: 'c0' }).catch((e) => { err = e; });
+    t.invokeCustomApi(write()).catch((e) => { err = e; });
     await clock.advance(10000);
 
-    assert.strictEqual(t.seen.length, 3, 'expected the first try plus 2 retries');
-    assert.ok(err && String(err.code) === '2955', 'the caller must be told, not left hanging');
-  });
-
-  await run('concurrency is capped', async () => {
-    const clock = makeClock();
-    let peak = 0, live = 0;
-    const resolvers = [];
-    const t = {
-      seen: [],
-      invokeCustomApi(opts) {
-        t.seen.push(opts.api_name);
-        live++; peak = Math.max(peak, live);
-        return new Promise((res) => resolvers.push(() => { live--; res({ result: '{}' }); }));
-      }
-    };
-    installApiThrottle(t, { maxPerMin: 50, maxInflight: 3, now: clock.now, setTimeout: clock.setTimeout });
-
-    for (let n = 0; n < 9; n++) t.invokeCustomApi({ api_name: 'c' + n });
-    await clock.advance(0);
-    assert.strictEqual(peak, 3, 'peak in flight was ' + peak);
-
-    while (resolvers.length) { resolvers.shift()(); await settle(); }
-    assert.strictEqual(t.seen.length, 9, 'the rest never went');
-  });
-
-  await run('the window rolls - a second burst a minute later is not blocked', async () => {
-    const clock = makeClock();
-    const t = makeTarget();
-    installApiThrottle(t, { maxPerMin: 5, maxInflight: 5, now: clock.now, setTimeout: clock.setTimeout });
-
-    for (let n = 0; n < 5; n++) t.invokeCustomApi({ api_name: 'a' + n });
-    await clock.advance(0);
-    assert.strictEqual(t.seen.length, 5);
-
-    await clock.advance(61000);
-    for (let n = 0; n < 5; n++) t.invokeCustomApi({ api_name: 'b' + n });
-    await clock.advance(0);
-    assert.strictEqual(t.seen.length, 10, 'the second burst was held although the window had rolled');
+    assert.strictEqual(t.seen.length, 3, 'first try plus 2 retries');
+    assert.ok(err && String(err.code) === '2955', 'the caller must be told, not left waiting');
   });
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
