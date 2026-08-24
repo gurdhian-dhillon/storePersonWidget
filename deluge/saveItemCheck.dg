@@ -926,6 +926,245 @@ string saveItemCheck(string payloadJson)
 	}
 
 	//----------------------------------------------------------------------
+	// EMAIL NOTIFICATION: REJECTION / ALTERATION ALERT
+	//
+	// Fires ONLY when the check produced a rejection or an alteration, and
+	// AFTER Processed is true, so every record the check owes already
+	// exists. Wrapped in its own try/catch because a mail failure must
+	// never make a finished check report itself failed — the user would
+	// retry and the one-round-per-batch guard would refuse it.
+	//
+	// Both the ADMIN and the SUPERVISOR receive the same mail. There is no
+	// Email field on Employee yet, so both go to the admin address and the
+	// supervisor's name is printed in the body so nothing is ambiguous.
+	// When Employee.Email exists, swap `to` for the supervisor's address
+	// and keep the admin in CC.
+	//----------------------------------------------------------------------
+	if(rejected > 0 || alteration > 0)
+	{
+		chkSupEmail = "";
+		chkSoNumber = "";
+		try
+		{
+			chkNotifyTo = "gurdhian.helios@gmail.com";
+
+			// Supervisor name from the plan's Assigned_To lookup
+			chkSupName = "";
+			for each  plSupN in Production_Planning[ID == planId]
+			{
+				if(plSupN.Assigned_To != null)
+				{
+					for each  empSupN in Employee[ID == plSupN.Assigned_To]
+					{
+						chkSupName = ifnull(empSupN.Employee_Name,"").toString();
+						chkSupEmail = ifnull(empSupN.Email,"").toString().trim().toLowerCase();
+					}
+				}
+			}
+			if(chkSupName == "")
+			{
+				chkSupName = "Unassigned";
+			}
+
+			// Inspector name
+			chkInspName = "";
+			if(inspIdTxt != "" && inspIdTxt.isNumber())
+			{
+				for each  empInspN in Employee[ID == inspIdTxt.toLong()]
+				{
+					chkInspName = ifnull(empInspN.Employee_Name,"").toString();
+				}
+			}
+			if(chkInspName == "")
+			{
+				chkInspName = "Unknown";
+			}
+
+			// Sales Order number (display value, not the id)
+			if(orderId != null)
+			{
+				for each  soMailRec in Sales_Order[ID == orderId]
+				{
+					chkSoNumber = ifnull(soMailRec.Sales_Order,"").toString();
+				}
+			}
+			if(chkSoNumber == "")
+			{
+				chkSoNumber = "N/A";
+			}
+
+			// ---- Build the HTML email ----
+			mFont = "-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif";
+			mTh = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:left;font-weight:600";
+			mTd = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a";
+			mTdB = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a;font-weight:600";
+
+			// Header colour: red for rejections, amber for alteration-only
+			hdrColour = "#dc2626";
+			hdrLabel = "Quality Check Alert";
+			if(rejected == 0 && alteration > 0)
+			{
+				hdrColour = "#d97706";
+			}
+
+			chkBody = "<div style='background:#f8fafc;padding:24px 12px;font-family:" + mFont + "'>";
+			chkBody = chkBody + "<table role='presentation' width='640' cellpadding='0' cellspacing='0' border='0' style='width:640px;max-width:100%;background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;margin:0 auto;overflow:hidden;'>";
+
+			// Coloured header bar
+			chkBody = chkBody + "<tr><td style='background:" + hdrColour + ";padding:18px 24px;'>";
+			chkBody = chkBody + "<div style='font-size:18px;font-weight:700;color:#ffffff'>" + hdrLabel + "</div>";
+			chkBody = chkBody + "</td></tr>";
+
+			// Summary line
+			chkBody = chkBody + "<tr><td style='padding:24px 24px 16px 24px'>";
+			chkBody = chkBody + "<div style='font-size:14px;color:#334155;margin-bottom:8px'>";
+			chkBody = chkBody + "A quality check on <b>" + itemName.replaceAll("\"","'") + "</b> from Sales Order <b>" + chkSoNumber.replaceAll("\"","'") + "</b> has recorded ";
+			if(rejected > 0)
+			{
+				chkBody = chkBody + "<span style='color:#dc2626;font-weight:700'>" + rejected + " rejected</span>";
+			}
+			if(rejected > 0 && alteration > 0)
+			{
+				chkBody = chkBody + " and ";
+			}
+			if(alteration > 0)
+			{
+				chkBody = chkBody + "<span style='color:#d97706;font-weight:700'>" + alteration + " for alteration</span>";
+			}
+			chkBody = chkBody + " out of " + inspected + " inspected.</div>";
+			chkBody = chkBody + "</td></tr>";
+
+			// Details table
+			chkBody = chkBody + "<tr><td style='padding:0 24px 24px 24px'>";
+			chkBody = chkBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;'>";
+			chkBody = chkBody + "<tr><td style='" + mTh + "'>Detail</td><td style='" + mTh + "'>Value</td></tr>";
+			chkBody = chkBody + "<tr><td style='" + mTd + "'>Item</td><td style='" + mTdB + "'>" + itemName.replaceAll("\"","'") + "</td></tr>";
+			chkBody = chkBody + "<tr><td style='" + mTd + "'>Sales Order</td><td style='" + mTdB + "'>" + chkSoNumber.replaceAll("\"","'") + "</td></tr>";
+			chkBody = chkBody + "<tr><td style='" + mTd + "'>Supervisor</td><td style='" + mTdB + "'>" + chkSupName.replaceAll("\"","'") + "</td></tr>";
+			chkBody = chkBody + "<tr><td style='" + mTd + "'>Inspector</td><td style='" + mTdB + "'>" + chkInspName.replaceAll("\"","'") + "</td></tr>";
+
+			chkBody = chkBody + "<tr><td style='" + mTd + "'>Inspected</td><td style='" + mTdB + "'>" + inspected + "</td></tr>";
+			chkBody = chkBody + "<tr><td style='" + mTd + "'>Approved</td><td style='" + mTdB + ";color:#059669'>" + approved + "</td></tr>";
+			if(rejected > 0)
+			{
+				chkBody = chkBody + "<tr><td style='" + mTd + "'>Rejected</td><td style='" + mTdB + ";color:#dc2626'>" + rejected + "</td></tr>";
+			}
+			if(alteration > 0)
+			{
+				chkBody = chkBody + "<tr><td style='" + mTd + "'>Alteration</td><td style='" + mTdB + ";color:#d97706'>" + alteration + "</td></tr>";
+			}
+			chkBody = chkBody + "</table>";
+
+			// Remarks section (only if any were written)
+			chkHasRemarks = false;
+			if(rejectionRemarksTxt != "" || alterationRemarksTxt != "" || remarksTxt != "")
+			{
+				chkHasRemarks = true;
+			}
+			if(chkHasRemarks)
+			{
+				chkBody = chkBody + "<div style='margin-top:16px;'>";
+				if(rejectionRemarksTxt != "")
+				{
+					chkBody = chkBody + "<div style='margin-bottom:10px;'><span style='font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:#dc2626'>Rejection Remarks</span><div style='font-size:13px;color:#334155;margin-top:4px;padding:8px 12px;background:#fef2f2;border-radius:6px;border:1px solid #fecaca;'>" + rejectionRemarksTxt.replaceAll("\"","'") + "</div></div>";
+				}
+				if(alterationRemarksTxt != "")
+				{
+					chkBody = chkBody + "<div style='margin-bottom:10px;'><span style='font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:#d97706'>Alteration Remarks</span><div style='font-size:13px;color:#334155;margin-top:4px;padding:8px 12px;background:#fffbeb;border-radius:6px;border:1px solid #fde68a;'>" + alterationRemarksTxt.replaceAll("\"","'") + "</div></div>";
+				}
+				if(remarksTxt != "")
+				{
+					chkBody = chkBody + "<div style='margin-bottom:10px;'><span style='font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:#64748b'>General Remarks</span><div style='font-size:13px;color:#334155;margin-top:4px;padding:8px 12px;background:#f8fafc;border-radius:6px;border:1px solid #e2e8f0;'>" + remarksTxt.replaceAll("\"","'") + "</div></div>";
+				}
+				chkBody = chkBody + "</div>";
+			}
+
+			chkBody = chkBody + "</td></tr>";
+
+			// Footer
+			chkBody = chkBody + "<tr><td style='padding:16px 24px 20px 24px'>";
+			chkBody = chkBody + "<div style='border-top:1px solid #eef2f6;padding-top:12px;font-size:11px;color:#94a3b8'>Gad Fashions Manufacturing &middot; Quality checking notification. Sent automatically when a check records a rejection or alteration.</div>";
+			chkBody = chkBody + "</td></tr>";
+
+			chkBody = chkBody + "</table></div>";
+
+			// Subject line — per item, with the Sales Order it belongs to
+			chkSubject = "Quality Alert: " + itemName.replaceAll("\"","'") + " (" + chkSoNumber.replaceAll("\"","'") + ")";
+			if(rejected > 0 && alteration > 0)
+			{
+				chkSubject = chkSubject + " — " + rejected + " rejected, " + alteration + " alteration";
+			}
+			else if(rejected > 0)
+			{
+				chkSubject = chkSubject + " — " + rejected + " rejected";
+			}
+			else
+			{
+				chkSubject = chkSubject + " — " + alteration + " for alteration";
+			}
+
+			// Send to admin
+			sendmail
+			[
+				from :zoho.adminuserid
+				to :chkNotifyTo
+				subject :chkSubject
+				message :chkBody
+			]
+			logLines.add("MAIL accepted, to " + chkNotifyTo + ", subject '" + chkSubject + "'");
+		}
+		catch (eChkMail)
+		{
+			logLines.add("MAIL FAILED: " + eChkMail.toString());
+		}
+
+		// PUSH NOTIFICATION: ADMIN and SUPERVISOR
+		adminPushSent = false;
+		supPushSent = false;
+		pushNotifyTo = "livelinenstore@gmail.com";
+		pushReportLink = "Production_Planning_Report";
+		pushMsg = itemName.replaceAll("\"","'") + " (" + chkSoNumber.replaceAll("\"","'") + ") — ";
+		if(rejected > 0 && alteration > 0)
+		{
+			pushMsg = pushMsg + rejected + " rejected, " + alteration + " alteration";
+		}
+		else if(rejected > 0)
+		{
+			pushMsg = pushMsg + rejected + " rejected";
+		}
+		else
+		{
+			pushMsg = pushMsg + alteration + " for alteration";
+		}
+
+		// 1. Send to Admin (livelinenstore@gmail.com)
+		try
+		{
+			zoho.pushNotification(pushNotifyTo, "Quality Check Alert", pushMsg, pushReportLink, planId.toLong());
+			adminPushSent = true;
+		}
+		catch (ePush)
+		{
+			logLines.add("ADMIN PUSH FAILED - " + ePush.toString());
+		}
+
+		// 2. Send to Supervisor (chkSupEmail)
+		if(chkSupEmail != "")
+		{
+			try
+			{
+				zoho.pushNotification(chkSupEmail, "Quality Check Alert", pushMsg, pushReportLink, planId.toLong());
+				supPushSent = true;
+			}
+			catch (eSupPush)
+			{
+				logLines.add("SUPERVISOR PUSH FAILED (" + chkSupEmail + ") - " + eSupPush.toString());
+			}
+		}
+		logLines.add("PUSH STATUS -> Admin: " + adminPushSent + " | Supervisor (" + chkSupEmail + "): " + supPushSent);
+	}
+
+	//----------------------------------------------------------------------
 	// AND THE ORDER VERDICT.
 	//
 	// recheckOrderComplete is the one writer of "Checking Passed" and it never
@@ -961,7 +1200,7 @@ string saveItemCheck(string payloadJson)
 		altTxt = altItemId.toString();
 	}
 
-	res = "{\"success\":true,\"checkId\":\"" + checkId + "\",\"remakeItem\":\"" + remakeTxt + "\",\"alterationItem\":\"" + altTxt + "\",\"orderVerdict\":\"" + verdict.replaceAll("\"","'") + "\"}";
+	res = "{\"success\":true,\"checkId\":\"" + checkId + "\",\"remakeItem\":\"" + remakeTxt + "\",\"alterationItem\":\"" + altTxt + "\",\"orderVerdict\":\"" + verdict.replaceAll("\"","'") + "\",\"logs\":\"" + logLines.toString().replaceAll("\"","'") + "\"}";
 	}
 	catch (e)
 	{

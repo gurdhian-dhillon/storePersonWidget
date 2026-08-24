@@ -21,7 +21,8 @@
 // told so after typing five check rows is a bad way to find out.
 
 var QUEUE = { inspectors: [], supervisors: [], items: [] };
-// Which card is expanded. One at a time — see scrollCardIntoView.
+// Which card/sales order/item is expanded. One at a time.
+var openSalesOrder = null;
 var openItemId = null;
 var saving = false;
 
@@ -188,28 +189,54 @@ function renderQueue() {
         return;
     }
 
-    // An open card whose item has left the queue — just checked, or checked
-    // by somebody else since — cannot stay open over nothing.
-    if (openItemId !== null && !items.some(function (i) { return String(i.id) === String(openItemId); })) {
-        openItemId = null;
+    // Sync open state flags
+    if (openItemId !== null) {
+        var openItemObj = items.filter(function (i) { return String(i.id) === String(openItemId); })[0];
+        if (openItemObj) {
+            openSalesOrder = openItemObj.salesOrder;
+        } else {
+            openItemId = null;
+        }
     }
+    if (openSalesOrder !== null && !items.some(function (i) { return String(i.salesOrder) === String(openSalesOrder); })) {
+        openSalesOrder = null;
+    }
+
+    // Group items by salesOrder
+    var groupsMap = {};
+    var groupsList = [];
+
+    items.forEach(function (item) {
+        var so = item.salesOrder || '—';
+        if (!groupsMap[so]) {
+            groupsMap[so] = [];
+            groupsList.push(so);
+        }
+        groupsMap[so].push(item);
+    });
 
     var openItem = null;
     var openCard = null;
 
-    items.forEach(function (item, idx) {
-        var card = renderItemCard(item, idx);
+    groupsList.forEach(function (so, idx) {
+        var groupItems = groupsMap[so];
+        var card = renderSalesOrderCard(so, groupItems, idx);
         root.appendChild(card);
-        if (String(item.id) === String(openItemId)) {
-            openItem = item;
-            openCard = card;
-        }
+
+        groupItems.forEach(function (item) {
+            if (String(item.id) === String(openItemId)) {
+                openItem = item;
+                openCard = card;
+            }
+        });
     });
 
     // AFTER every card is in the document. The form reads its own fields through
     // document.getElementById, which cannot find an element that has been built
     // but not yet appended.
-    if (openCard) wireCheckForm(openCard, openItem, num(openItem.produced));
+    if (openCard && openItem) {
+        wireCheckForm(openCard, openItem, num(openItem.produced));
+    }
 }
 
 function batchTag(item) {
@@ -225,10 +252,6 @@ function batchTag(item) {
     return '';
 }
 
-// The order position, spelled out. Without it he approves 85 with no idea
-// whether that finishes the order or leaves it fifteen short — and that is
-// exactly the moment the decision matters, because a rejection here is what
-// opens the next batch.
 function linePosition(item) {
     var ordered = num(item.lineOrdered);
     var accepted = num(item.lineAccepted);
@@ -242,28 +265,17 @@ function linePosition(item) {
         ' accepted · <b>' + out + ' still to come</b></span>';
 }
 
-// The coloured badge on the card header, inline-styled exactly as the packing
-// card does it so the two lists read as one product. What it carries is the
-// BATCH, because that is the only thing that differs between two cards sitting
-// in this queue — everything here is waiting to be checked, so an original batch
-// says just that.
-//
-// batchTag() is deliberately left alone: the History tab still draws its own
-// pill with it, and that card is a different shape.
 function batchBadge(item) {
     var colour = '#059669';
     var text = 'Ready to check';
 
     if (item.batch === 'Alteration') {
-        // Teal, not amber — the garment is being saved rather than scrapped,
-        // the same reason an offcut is green throughout the app.
         colour = '#0d9488';
         text = 'Alteration batch';
     } else if (item.batch === 'Remake') {
         colour = '#d97706';
         text = 'Remake — failed checking';
     } else if (item.batch === 'Replacement') {
-        // Muted. Nothing failed a check, so it must not wear a quality colour.
         colour = '#64748b';
         text = 'Replacement — spoiled in production';
     }
@@ -273,44 +285,31 @@ function batchBadge(item) {
         '15; padding:0.1rem 0.5rem; border-radius:1rem;">' + escapeHtml(text) + '</span>';
 }
 
-// Same card as the packing and store screens: numbered circle, title, one meta
-// line, chevron. Nothing here decides anything — it is the identical set of
-// facts the two stacked meta lines used to carry, laid out the way every other
-// list in the app lays them out.
-function renderItemCard(item, index) {
-    var isOpen = String(item.id) === String(openItemId);
-    var produced = num(item.produced);
-
+function renderSalesOrderCard(so, groupItems, index) {
+    var isOpen = (String(so) === String(openSalesOrder));
     var card = document.createElement('div');
     card.className = 'item-card' + (isOpen ? ' is-open' : '');
-    card.setAttribute('data-item-id', item.id);
+    card.setAttribute('data-so-id', so);
+
+    // List unique item names
+    var itemNames = groupItems.map(function (it) { return it.name; }).filter(function (v, i, self) {
+        return self.indexOf(v) === i;
+    }).join(', ');
+
+    var totalPcs = groupItems.reduce(function (sum, it) { return sum + num(it.produced); }, 0);
 
     var header =
         '<div class="item-header">' +
         '<div class="item-title-row">' +
         '<div class="item-serial">' + (num(index) + 1) + '</div>' +
         '<div class="item-header-info">' +
-        '<h2><span class="mat-name">' + escapeHtml(item.name) + '</span></h2>' +
-        '<div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">' +
-        (item.sku ? '<span class="mat-sku">' + escapeHtml(item.sku) + '</span>' : '') +
-        '<span class="item-qty">' + produced + ' pcs to inspect</span>' +
-        batchBadge(item) +
-        // The round stays, as a quiet chip. It is the difference between a first
-        // look and a fourth attempt at the same line.
-        '<span class="round-tag">Round ' + num(item.round) + '</span>' +
-        // True, needed, but not what he is deciding — so it trails the badge
-        // rather than owning a line of its own.
-        '<span class="chk-secondary">' +
-        '<span class="so-ref">' + escapeHtml(item.salesOrder || '—') + ' · ' +
-        escapeHtml(item.planNo || '') + '</span>' +
-        linePosition(item) +
-        '</span>' +
+        '<h2><span class="mat-name">' + escapeHtml(so) + '</span></h2>' +
+        '<div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.25rem;">' +
+        '<span class="item-qty" style="font-weight: 500; color: var(--text-dark);">' + escapeHtml(itemNames) + '</span>' +
+        '<span class="round-tag" style="background-color: #f1f5f9; color: #475569;">' + totalPcs + ' pcs total</span>' +
         '</div>' +
         '</div>' +
         '</div>' +
-        // The chevron alone, exactly as the production screen does it. A Check
-        // button beside it was a second control doing the same job — the whole
-        // header already toggles, so the button could only ever agree with it.
         '<div class="item-header-right">' +
         '<span class="chevron">' +
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
@@ -319,22 +318,84 @@ function renderItemCard(item, index) {
         '</div>' +
         '</div>';
 
-    card.innerHTML = header + (isOpen ? checkFormHtml(item, produced) : '');
+    card.innerHTML = header;
 
-    // The whole header toggles, not just the button — the production screen
-    // behaves that way, and a card that only opens from one small target is a
-    // different interaction for no reason.
-    card.querySelector('.item-header').addEventListener('click', function () {
-        openItemId = isOpen ? null : item.id;
+    card.querySelector('.item-header').addEventListener('click', function (e) {
+        if (isOpen) {
+            openSalesOrder = null;
+            openItemId = null;
+        } else {
+            openSalesOrder = so;
+            openItemId = null;
+        }
         renderQueue();
-        if (!isOpen) scrollCardIntoView(item.id);
     });
 
-    // NOT wired here. The form is wired by renderQueue AFTER the card is in the
-    // document, because refreshTotals reads #disp-total through
-    // document.getElementById — and an element that has been built but not yet
-    // appended is not findable that way. Wiring here threw, renderQueue died
-    // mid-loop, and the whole list vanished the moment a card was clicked.
+    if (isOpen) {
+        var bodyContainer = document.createElement('div');
+        bodyContainer.className = 'so-items-container';
+
+        groupItems.forEach(function (item, subIdx) {
+            var subIsOpen = (String(item.id) === String(openItemId));
+            var subRow = document.createElement('div');
+            subRow.className = 'sub-item-row' + (subIsOpen ? ' is-open' : '');
+            subRow.setAttribute('data-item-id', item.id);
+
+            var subHeader = document.createElement('div');
+            subHeader.className = 'sub-item-header';
+
+            var titleHtml =
+                '<div class="item-title-row" style="display: flex; gap: 1rem; align-items: center;">' +
+                '<div class="item-serial sub-serial">' + (subIdx + 1) + '</div>' +
+                '<div class="item-header-info">' +
+                '<h3 style="margin: 0 0 0.25rem 0; font-size: 1rem; color: var(--text-dark); font-weight: 600;">' + escapeHtml(item.name) + '</h3>' +
+                '<div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">' +
+                (item.sku ? '<span class="mat-sku">' + escapeHtml(item.sku) + '</span>' : '') +
+                '<span class="item-qty">' + num(item.produced) + ' pcs to inspect</span>' +
+                batchBadge(item) +
+                '<span class="round-tag">Round ' + num(item.round) + '</span>' +
+                '<span class="chk-secondary">' +
+                escapeHtml(item.planNo || '') +
+                linePosition(item) +
+                '</span>' +
+                '</div>' +
+                '</div>' +
+                '</div>';
+
+            var chevronHtml =
+                '<div class="item-header-right">' +
+                '<span class="chevron">' +
+                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+                '<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>' +
+                '</span>' +
+                '</div>';
+
+            subHeader.innerHTML = titleHtml + chevronHtml;
+            subHeader.addEventListener('click', function () {
+                openItemId = subIsOpen ? null : item.id;
+                renderQueue();
+                if (!subIsOpen) {
+                    setTimeout(function () {
+                        subRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    }, 50);
+                }
+            });
+
+            subRow.appendChild(subHeader);
+
+            if (subIsOpen) {
+                var formWrapper = document.createElement('div');
+                formWrapper.className = 'check-form-wrapper';
+                formWrapper.innerHTML = checkFormHtml(item, num(item.produced));
+                subRow.appendChild(formWrapper);
+            }
+
+            bodyContainer.appendChild(subRow);
+        });
+
+        card.appendChild(bodyContainer);
+    }
+
     return card;
 }
 

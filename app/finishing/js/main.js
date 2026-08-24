@@ -33,6 +33,7 @@ var SELECTED_OPERATOR = '';
 
 var JOBS_QUEUE = [];
 var COMPLETED_HISTORY = [];
+var ACTIVE_SO = null;
 var ACTIVE_JOB_ID = null;
 var ACTIVE_STAGE = 0;
 
@@ -358,37 +359,110 @@ function renderQueue() {
         return;
     }
 
-    container.innerHTML = JOBS_QUEUE.map(function (job, i) {
-        var open = (String(job.id) === String(ACTIVE_JOB_ID));
-        var started = job.status === 'In_Progress';
+    // Sync open state flags
+    if (ACTIVE_JOB_ID !== null) {
+        var openJobObj = JOBS_QUEUE.filter(function (j) { return String(j.id) === String(ACTIVE_JOB_ID); })[0];
+        if (openJobObj) {
+            ACTIVE_SO = openJobObj.salesOrder;
+        } else {
+            ACTIVE_JOB_ID = null;
+        }
+    }
+    if (ACTIVE_SO !== null && !JOBS_QUEUE.some(function (j) { return String(j.salesOrder) === String(ACTIVE_SO); })) {
+        ACTIVE_SO = null;
+    }
 
-        // Only two states a card can be in, and they are the only two that change
-        // what he does next: nobody has started it, or somebody has.
-        var colour = started ? '#2563eb' : '#64748b';
-        var badge = started ? 'In progress' : 'Not started';
+    // Group jobs by salesOrder
+    var groupsMap = {};
+    var groupsList = [];
 
-        return '<div class="item-card' + (open ? ' open' : '') + '">' +
-            '<div class="item-header" onclick="selectJob(\'' + escapeHtml(job.id) + '\')">' +
+    JOBS_QUEUE.forEach(function (job) {
+        var so = job.salesOrder || '—';
+        if (!groupsMap[so]) {
+            groupsMap[so] = [];
+            groupsList.push(so);
+        }
+        groupsMap[so].push(job);
+    });
+
+    container.innerHTML = groupsList.map(function (so, idx) {
+        var groupJobs = groupsMap[so];
+        var isOpen = (String(so) === String(ACTIVE_SO));
+
+        // Get unique item names in this sales order
+        var itemNames = groupJobs.map(function (j) { return j.itemName; }).filter(function (v, i, self) {
+            return self.indexOf(v) === i;
+        }).join(', ');
+
+        var totalQty = groupJobs.reduce(function (sum, j) { return sum + n(j.qty); }, 0);
+
+        // Header for Sales Order card
+        var cardHtml = '<div class="item-card' + (isOpen ? ' open' : '') + '">' +
+            '<div class="item-header" onclick="selectSalesOrder(\'' + escapeHtml(so) + '\')">' +
                 '<div class="item-title-row">' +
-                    '<div class="item-serial">' + (i + 1) + '</div>' +
+                    '<div class="item-serial">' + (idx + 1) + '</div>' +
                     '<div class="item-header-info">' +
-                        '<h2>' + escapeHtml(job.itemName) + '</h2>' +
+                        '<h2>' + escapeHtml(so) + '</h2>' +
                         '<div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">' +
-                            (job.sku ? '<span class="fin-sku">' + escapeHtml(job.sku) + '</span>' : '') +
-                            '<span class="item-qty">' + plural(job.qty, 'pc') + '</span>' +
-                            '<span class="item-status-badge" style="color:' + colour + '; font-weight:600; font-size:0.8rem; background:' + colour + '15; padding:0.1rem 0.5rem; border-radius:1rem;">' + badge + '</span>' +
-                            '<span class="fin-order">' + escapeHtml(job.salesOrder || '') +
-                                (job.planNo ? ' · ' + escapeHtml(job.planNo) : '') + '</span>' +
+                            '<span class="item-qty" style="font-weight: 500; color: var(--text-dark);">' + escapeHtml(itemNames) + '</span>' +
+                            '<span class="round-tag" style="background-color: #f1f5f9; color: #475569;">' + totalQty + ' pcs total</span>' +
                         '</div>' +
                     '</div>' +
                 '</div>' +
                 '<div class="item-header-right"><span class="chevron">' +
                     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>' +
                 '</span></div>' +
-            '</div>' +
-            (open ? '<div class="item-body">' + jobBody(job) + '</div>' : '') +
             '</div>';
+
+        if (isOpen) {
+            cardHtml += '<div class="so-items-container">';
+
+            groupJobs.forEach(function (job, subIdx) {
+                var subIsOpen = (String(job.id) === String(ACTIVE_JOB_ID));
+                var started = job.status === 'In_Progress';
+                var colour = started ? '#2563eb' : '#64748b';
+                var badge = started ? 'In progress' : 'Not started';
+
+                cardHtml += '<div class="sub-item-row' + (subIsOpen ? ' open' : '') + '">' +
+                    '<div class="sub-item-header" onclick="selectJob(\'' + escapeHtml(job.id) + '\'); event.stopPropagation();">' +
+                        '<div class="item-title-row" style="display: flex; gap: 1rem; align-items: center;">' +
+                            '<div class="item-serial sub-serial">' + (subIdx + 1) + '</div>' +
+                            '<div class="item-header-info">' +
+                                '<h3 style="margin: 0 0 0.25rem 0; font-size: 1rem; color: var(--text-dark); font-weight: 600;">' + escapeHtml(job.itemName) + '</h3>' +
+                                '<div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">' +
+                                    (job.sku ? '<span class="fin-sku">' + escapeHtml(job.sku) + '</span>' : '') +
+                                    '<span class="item-qty">' + plural(job.qty, 'pc') + '</span>' +
+                                    '<span class="item-status-badge" style="color:' + colour + '; font-weight:600; font-size:0.8rem; background:' + colour + '15; padding:0.1rem 0.5rem; border-radius:1rem;">' + badge + '</span>' +
+                                    (job.planNo ? '<span class="fin-order">' + escapeHtml(job.planNo) + '</span>' : '') +
+                                '</div>' +
+                            '</div>' +
+                        '</div>' +
+                        '<div class="item-header-right"><span class="chevron">' +
+                            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>' +
+                        '</span></div>' +
+                    '</div>' +
+                    (subIsOpen ? '<div class="item-body">' + jobBody(job) + '</div>' : '') +
+                    '</div>';
+            });
+
+            cardHtml += '</div>';
+        }
+
+        cardHtml += '</div>';
+        return cardHtml;
     }).join('');
+}
+
+function selectSalesOrder(so) {
+    if (STAGE_BUSY) return;
+    if (String(so) === String(ACTIVE_SO)) {
+        ACTIVE_SO = null;
+        ACTIVE_JOB_ID = null;
+    } else {
+        ACTIVE_SO = so;
+        ACTIVE_JOB_ID = null;
+    }
+    renderQueue();
 }
 
 function selectJob(jobId) {
@@ -405,7 +479,12 @@ function selectJob(jobId) {
 
     ACTIVE_JOB_ID = jobId;
     var job = activeJob();
-    ACTIVE_STAGE = job ? firstOpenStageIndex(job) : 0;
+    if (job) {
+        ACTIVE_SO = job.salesOrder;
+        ACTIVE_STAGE = firstOpenStageIndex(job);
+    } else {
+        ACTIVE_STAGE = 0;
+    }
     renderQueue();
 }
 
