@@ -103,6 +103,7 @@ body {
 }
 
 .empty-state.hidden { display: none; }
+.hidden { display: none !important; }
 
 .empty-state .icon {
     font-size: 3rem;
