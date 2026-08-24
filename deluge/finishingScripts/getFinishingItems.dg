@@ -101,50 +101,19 @@ string getFinishingItems(string payloadJson)
 		brandStartByCheck = Map();
 		brandEndByCheck = Map();
 
-		for each  fd in Finishing_Data[ID != 0]
-		{
-			if(fd.Item_Check != null)
-			{
-				fdKey = fd.Item_Check.toString();
-
-				if(ifnull(fd.Finishing_Status,"").toString().trim() == "Done")
-				{
-					doneChecks.add(fdKey);
-				}
-				else
-				{
-					// startFinishingJob reuses any non-Done row rather than
-					// adding a second one next to it, so there is at most one
-					// open row per batch and this put cannot fight itself.
-					openIdByCheck.put(fdKey,fd.ID.toString());
-
-					if(fd.Folding_Start_Time != null)
-					{
-						foldStartByCheck.put(fdKey,fd.Folding_Start_Time.toString());
-					}
-					if(fd.Folding_End_Time != null)
-					{
-						foldEndByCheck.put(fdKey,fd.Folding_End_Time.toString());
-					}
-					if(fd.Pressing_Start_Time != null)
-					{
-						pressStartByCheck.put(fdKey,fd.Pressing_Start_Time.toString());
-					}
-					if(fd.Pressing_End_Time != null)
-					{
-						pressEndByCheck.put(fdKey,fd.Pressing_End_Time.toString());
-					}
-					if(fd.Branding_Start_Time != null)
-					{
-						brandStartByCheck.put(fdKey,fd.Branding_Start_Time.toString());
-					}
-					if(fd.Branding_End_Time != null)
-					{
-						brandEndByCheck.put(fdKey,fd.Branding_End_Time.toString());
-					}
-				}
-			}
-		}
+		// THE PASS THAT USED TO BE HERE READ THE WHOLE FORM.
+		//
+		// It walked every Finishing_Data row ever written to fill these seven
+		// maps. The form grows one row per inspected batch for ever, and the
+		// statement-execution limit is NOT catchable - it kills the script, so
+		// the finisher would have got a bare HTTP 500 with no error card.
+		//
+		// The maps are filled one check at a time now, at the point each check
+		// is reached below, with the body of that pass moved there UNCHANGED -
+		// same Done test in code, same else branch, same puts. fdSeen records
+		// which checks have been asked about, so a check reached twice is read
+		// once and a check with no Finishing_Data row at all is not re-queried.
+		fdSeen = List();
 
 		//------------------------------------------------------------------
 		// His plans, with their plan number and order number resolved once
@@ -219,6 +188,57 @@ string getFinishingItems(string payloadJson)
 				// rest of them. Cheap test, and it is the one saveItemCheck's own
 				// header names as the pair to look for.
 				chkDone = ifnull(chk.Processed,false);
+
+				//------------------------------------------------------
+				// THIS CHECK'S FINISHING ROW, read once. The body below is
+				// the old whole-form pass, moved here and scoped to one
+				// check - see the note where fdSeen is declared.
+				//------------------------------------------------------
+				if(fdSeen.contains(chkKey) == false)
+				{
+					fdSeen.add(chkKey);
+
+					for each  fd in Finishing_Data[Item_Check == chk.ID]
+					{
+						if(ifnull(fd.Finishing_Status,"").toString().trim() == "Done")
+						{
+							doneChecks.add(chkKey);
+						}
+						else
+						{
+							// startFinishingJob reuses any non-Done row rather
+							// than adding a second one next to it, so there is
+							// at most one open row per batch and this put
+							// cannot fight itself.
+							openIdByCheck.put(chkKey,fd.ID.toString());
+
+							if(fd.Folding_Start_Time != null)
+							{
+								foldStartByCheck.put(chkKey,fd.Folding_Start_Time.toString());
+							}
+							if(fd.Folding_End_Time != null)
+							{
+								foldEndByCheck.put(chkKey,fd.Folding_End_Time.toString());
+							}
+							if(fd.Pressing_Start_Time != null)
+							{
+								pressStartByCheck.put(chkKey,fd.Pressing_Start_Time.toString());
+							}
+							if(fd.Pressing_End_Time != null)
+							{
+								pressEndByCheck.put(chkKey,fd.Pressing_End_Time.toString());
+							}
+							if(fd.Branding_Start_Time != null)
+							{
+								brandStartByCheck.put(chkKey,fd.Branding_Start_Time.toString());
+							}
+							if(fd.Branding_End_Time != null)
+							{
+								brandEndByCheck.put(chkKey,fd.Branding_End_Time.toString());
+							}
+						}
+					}
+				}
 
 				if(doneChecks.contains(chkKey) == false && chkDone == true)
 				{

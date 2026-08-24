@@ -435,19 +435,41 @@ string getStoreMaterialRequirements()
 		}
 	}
 
-	allLotRows = Raw_Material_Lot[ID != 0] sort by Added_Time;
-
-	for each  lotR in allLotRows
+	//------------------------------------------------------------------------
+	// ONE INDEXED QUERY PER MATERIAL IN PLAY, never the whole form.
+	//
+	// This used to fetch every Raw_Material_Lot ever created and test each row
+	// against neededMats in code. The test was cheap per row; the FETCH was
+	// not. Lots accumulate with every purchase for ever and an emptied lot is
+	// never deleted - it stays as a zero row so history still resolves - so the
+	// cost grew with purchase history on the screen the store person reloads
+	// all day. At ~13 lots a material and a thousand materials that is thirteen
+	// thousand rows fetched to use a few dozen, and the statement-execution
+	// limit is NOT catchable: it kills the script and the widget gets a bare
+	// 500 with no error card.
+	//
+	// neededMats is built above from the requirements actually on this screen,
+	// so it is bounded by OPEN WORK rather than by history - the same property
+	// that makes the rest of this function scale. Creator filters on the
+	// indexed lookup before it fetches, so cost now tracks what is on screen.
+	//
+	// ORDERING IS UNCHANGED WHERE IT CAN BE OBSERVED. Everything below is
+	// grouped by material into lotJsonByMat, so within-material Added_Time
+	// order is the only order the widget ever sees, and the inner query still
+	// carries it. The old global sort across materials was never visible.
+	//
+	// The lotNameById write below still happens BEFORE the Blocked and
+	// empty-lot filters, exactly as it did, so an offcut can still name its lot
+	// after that lot has dropped off the picker.
+	//------------------------------------------------------------------------
+	for each  lotMatId in neededMats
 	{
-		lrMat = ifnull(lotR.Material,"").toString().trim();
+		lrMat = lotMatId.toString().trim();
 
-		// THE CHEAP TEST FIRST. A lot belonging to a material nobody is asking
-		// for costs two statements and stops here; only the handful this screen
-		// is actually about goes through the reads and the string building
-		// below. Same discipline as grouping the waste by SKU, and for the same
-		// reason - the statement-execution limit is not catchable, so the
-		// function has to stay cheap rather than be made to fail politely.
-		if(lrMat != "" && neededMats.contains(lrMat) == true)
+		// sort by on its own assignment, never inline in a for each header.
+		matLotRows = Raw_Material_Lot[Material == lrMat.toLong()] sort by Added_Time;
+
+		for each  lotR in matLotRows
 		{
 
 		// Before the Blocked and empty-lot filters, so an offcut can still name
@@ -540,8 +562,9 @@ string getStoreMaterialRequirements()
 		}
 
 		}
-		// end of the "is anyone asking about this material" guard
+		// end of the lots for this material
 	}
+	// end of the per-material loop
 
 
 	//------------------------------------------------------------------------

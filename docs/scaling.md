@@ -1,262 +1,282 @@
-# Scaling debt — queries that grow with history
+# Scaling — queries that grew with history, and what was done about them
 
-**Status: found, deliberately NOT fixed.** Recorded 2026-08-16 while answering "how future
-proof is the split-form model". Nothing here is broken today. Every item gets slowly worse as
-records accumulate, and the failure they all lead to is the same one: the
-**statement-execution limit, which is NOT catchable** — it kills the script, so the try/catch
-never runs and the widget sees a bare HTTP 500 with no error card.
+**Status: 22 sites across 17 functions FIXED, 2026-08-23.** Rewritten from the 2026-08-16
+version, which recorded the same debt as *"found, deliberately NOT fixed"*. That document is
+superseded, and two of its rules were wrong — see **Corrections** below before trusting anything
+you remember from it.
 
-Fix these after the app is feature-complete. Read *What is already right* first, so nothing on
-that list gets "fixed" by mistake.
+Everything here leads to one failure: the **statement-execution limit, which is NOT catchable**.
+It kills the script, so the try/catch never runs and the widget sees a bare HTTP 500 with no
+error card. These do not get slow. They die silently, and only once there is enough data.
 
 ---
 
-## The volume, per sales order
+## The scale this is now built for
 
-| Form | Rows per order | Driver |
-|---|---|---|
-| `Production_Planning` | 1 | one order produces exactly one plan |
-| `Plan_Item` | ~5 | order lines |
-| `Material_Requirement` | ~30 | items × materials, plus reissues, remakes, alterations |
-| `Stage_Log` | ~40 | items × stages |
-| `Stage_Assignment` | 40+ | one per operator per stage — **no ceiling**, a stage split four ways is four rows |
+Established 2026-08-23, and it is the reason the old document's advice no longer held.
 
-`Material_Requirement` is not the fastest-growing form, though it is the one that looks
-alarming. `Stage_Log` and `Stage_Assignment` grow faster, and `Stage_Assignment` is unbounded
-per stage.
+| Form | Today | Planned | Driver |
+|---|---|---|---|
+| `Item_Master` | ~1,940 | **20,000–25,000** | one per finished SKU; 16k already on Shopify |
+| `BOM` | — | **one per SKU** | `syncSingleSalesOrder` requires exactly one |
+| `Raw_Material` | ~250 | **≤1,000** | fabric variety (pattern × colour), NOT the SKU count |
+| `Raw_Material_Lot` | 308 for 23 materials | **~13 × materials** | one per purchase, and an emptied lot is never deleted |
+| `Material_Issue` | — | one per press of Issue, for ever | trading volume |
+| `Finishing_Data` | — | one per inspected batch, for ever | trading volume |
 
-At 200 orders/month that is roughly 72k `Material_Requirement` and 96k `Stage_Log` per year.
-Whether that approaches the account's record cap is a Subscription-page question, not a code
-one.
+**`Raw_Material` scaling with *fabric* rather than with the catalogue is the fact that saved
+eleven query sites.** A raw material is `Linen Fabric / Solid / Cinnamon Brown` — size and style
+variants of a finished SKU cut from one cloth are one row here.
+
+### Per sales order, unchanged from the old document
+
+| Form | Rows per order |
+|---|---|
+| `Production_Planning` | 1 |
+| `Plan_Item` | ~5 |
+| `Material_Requirement` | ~30 |
+| `Stage_Log` | ~40 |
+| `Stage_Assignment` | 40+, **no ceiling** |
+
+---
+
+## Corrections to the 2026-08-16 document
+
+**1. "Master-data fetch-alls are fine … `Raw_Material` … tens to low hundreds."**
+Half right, and the wrong half was load-bearing. `Employee`, `Third_Party`, `Box_Master` and
+`Raw_Material` are genuinely bounded and were left alone — 20 sites, no work. But the same
+paragraph was being used to justify `Raw_Material_Lot[ID != 0]` in six functions, and
+`getStoreIssueHistory` said so in as many words:
+
+> *"lots are master data, a few hundred rows that do not grow with trading"*
+
+**Lots grow with every purchase, and an emptied lot is never deleted** — it stays as a zero row so
+history still resolves. That comment was deleted where it stood, because a wrong comment
+re-justifies the mistake to the next reader.
+
+**2. `Raw_Material_Lot` was ranked "slowest burn", seventh of eight.** It was the worst thing in
+the app. The estimate behind that ranking assumed ~20 lots a month against 210 materials; at 1,000
+materials it is ~13,000 rows, **fetched whole on every store screen load**, from day one rather
+than in year ten. It is not driven by elapsed time at all — it is driven by how many materials
+exist.
+
+**3. `Finishing_Data` was not in the document at all.** Four unbounded scans, one of them in
+`savePackingRecord`, a **write path**.
+
+---
+
+## The rule
+
+> **A query's cost must track what is on screen, not how much history exists.**
+
+`Form[criteria]` is evaluated server-side and returns only matches. `[ID != 0]` matches
+everything, so the whole form is pulled in and every row costs statements.
+
+**Filtering in code does not help.** `getStoreMaterialRequirements` had a comment proudly
+explaining "THE CHEAP TEST FIRST" — a guard costing two statements per unwanted lot. The guard was
+cheap; the fetch it guarded was not. You pay for the rows either way.
+
+---
+
+## The four techniques
+
+Each fix is one of these. Reuse them rather than inventing a fifth.
+
+### 1. Push the filter into the query
+
+When the wanted set is already known and **bounded by open work**.
+
+```
+- allLotRows = Raw_Material_Lot[ID != 0] sort by Added_Time;   // 13,000 rows
+- for each lotR in allLotRows { if(neededMats.contains(lrMat)) { … } }
++ for each  lotMatId in neededMats                             // ~30 materials on screen
++ {
++     matLotRows = Raw_Material_Lot[Material == lrMat.toLong()] sort by Added_Time;
+```
+
+Used in `getStoreMaterialRequirements`. **13,000 rows → ~390.**
+
+### 2. Ask for only the rows you need
+
+```
+- allPlansDesc = Production_Planning[ID != 0] sort by Added_Time desc;
++ allPlansDesc = Production_Planning[ID != 0] sort by Added_Time desc range from 1 to 10;
+```
+
+Used in `createProductionPlans` (every plan ever → 10), `getRecentActivities` (every `Stage_Log`
+ever → 10), and both `Sales_Order` pickers (→ 200).
+
+### 3. Lazy per-id cache
+
+When ids are only discovered as the function runs. Replaces a prefetch with one indexed query per
+**distinct** id actually used.
+
+```
+if(lotNumById.get(lotKey) == null)
+{
+    lotNumById.put(lotKey,"");            // cache the MISS too
+    for each  lotRef in Raw_Material_Lot[ID == lotKey.toLong()]
+    {
+        lotNumById.put(lotKey,ifnull(lotRef.Lot_Number,"").toString());
+    }
+}
+```
+
+**Caching the miss is not optional.** Without it an unreadable lot is re-queried by every line
+naming it, turning the fix into an N+1. Used in `getStoreIssueHistory`,
+`getSupervisorMaterials`, `getExpectedWaste` (×3), `getAdminCalculation` (×3), `getPrintData`.
+
+### 4. Bound by open work plus a fixed window
+
+```
+excs = Material_Exception[Status == "Open" || Added_Time > washCutoff] sort by Added_Time desc;
+```
+
+**An OR, never a date window alone.** A request still outstanding must appear however old it is —
+that is the tab's whole job. The date half only supplies the recently-closed tail so a completed
+request does not vanish and read as lost. Used in `getStoreRequests`.
+
+### Choosing between 1/3 and a single fetch
+
+Techniques 1 and 3 swap one big fetch for N small queries. **Only a win when N is bounded by what
+is displayed rather than by history**, and a loss otherwise.
+
+`getStoreLots` is the counter-example and its header says so: it lists **every** fabric material,
+so per-material querying would be hundreds of queries. It got a row filter instead. Do not
+"consistency-fix" it into the shape used elsewhere.
 
 ---
 
 ## What is already right — do NOT "fix" these
 
-**`Material_Requirement` is never scanned.** Every read is a criteria query on an indexed
-lookup — `Material_Requirement[Plan == plan.ID]` or `[Plan_Item == itm.ID]`. Creator filters
-before it fetches, so 500,000 rows in the form cost what 500 do. The form growing is not an
-event.
+**`Material_Requirement` is never scanned.** Every read is a criteria query on an indexed lookup.
+Creator filters before it fetches, so 500,000 rows cost what 500 do.
 
-**The hot path is bounded by open work, not by history.** The driving query in
-`getStoreMaterialRequirements`, `getSupervisorMaterials`, `getAdminCalculation` and
-`getProductionWidgetData` is:
+**The hot path is bounded by open work.** The driving query in `getStoreMaterialRequirements`,
+`getSupervisorMaterials`, `getAdminCalculation` and `getProductionWidgetData` is
+`Production_Planning[Order_Status == "Pending" || "Partially Received" || "In Progress"]`. A plan
+leaves that set at `Production Complete` and **never comes back**, so cost tracks WIP, which is
+flat in year ten as in year one. This is why the records-not-subforms architecture scales, and it
+was designed in.
 
-```
-Production_Planning[Order_Status == "Pending" || "Partially Received" || "In Progress"]
-```
+**Master-data fetch-alls on `Employee`, `Third_Party`, `Box_Master`, `Raw_Material`.** 20 sites,
+bounded by headcount, vendors, carton types and fabric variety. `Raw_Material` at ≤1,000 is
+confirmed, not assumed. Leave them.
 
-A plan leaves that set at `Production Complete` and **never comes back** — the plan picklist
-ends there and the order mirror is forward-only. So the cost tracks WIP, which is roughly flat
-in year ten as in year one. `Plan_Item[Item_Status == "Awaiting_Check"]` in `getCheckingQueue`
-has the same property.
+**The paged history functions are the model.** `getStoreIssueHistory`, `getStoreWasteHistory`,
+`getSupervisorProductionHistory`: `range from A to B` on the query, date filter inside the query
+rather than in code, `limit` clamped server-side because a Custom API is callable from anywhere,
+`.count()` for the pager total.
 
-This is the property that makes the whole records-not-subforms architecture scale, and it was
-designed in. A subform would force loading a parent and its entire history of lines to read one
-open row.
+**`piCache` in `getStoreMaterialRequirements`** is the original of technique 3.
 
-**Master-data fetch-alls are fine.** `Employee[ID != 0]`, `Raw_Material[ID != 0]`,
-`Third_Party[ID != 0]` appear in about ten functions. These are bounded by how many people and
-materials the company has — tens to low hundreds, growing at the rate of hiring. Leave them.
-
-**The paged history functions are the model to copy.** `getStoreIssueHistory`,
-`getStoreWasteHistory` and `getSupervisorProductionHistory` already do it properly:
-`range from A to B` on the query so Creator returns only the page, the date filter inside the
-query rather than in code, `limit` clamped server-side because a Custom API is callable from
-anywhere, and a `.count()` for the pager total. Cost per call is flat — page 1 and page 200 are
-the same work. Anything fixed below should end up looking like these.
-
-**`piCache` in `getStoreMaterialRequirements`**
-([getStoreMaterialRequirements.dg:167-181](../deluge/getStoreMaterialRequirements.dg#L167-L181))
-is the right answer to an N+1: query once per *distinct* `Plan_Item`, not once per
-requirement row. Reuse this shape rather than inventing another.
+**The one-off scripts stay one-off.** `auditOrderSources`, `backfillPriorityKey`,
+`migrateOpeningLots`, `seedTestLots`, `seedOpeningLots`, `reconcileRawMaterial`,
+`mapInventoryItemIds` all fetch whole forms and are correct as written. **Scheduling one, or
+wiring it to a widget button, promotes it to the worst item on this list.**
 
 ---
 
-## A. Unbounded fetch on a transactional form
+## Three traps that shaped the fixes
 
-These fetch every record ever written. They grow monotonically and never recover.
+**A Creator criteria comparison matches NO empty field, in either direction.** `Status == "Open"`
+misses an empty row; `Status != "Open"` misses it too. So "find the unmapped/unfinished ones"
+cannot be expressed as a query against an unwritten field — it needs a **positive marker written
+at insert**. `postTransferOrders` records the two rounds this cost with `Transfer_Status`.
 
-### A1. `createProductionPlans` — every plan ever, to read one integer
+**`Material_Issue.Plan` names only ONE plan.** One press of Issue can cover several plans and the
+voucher is stamped with the older one. It looks like the natural bound for "handovers for this
+plan" and would silently drop every other plan's lines.
 
-[deluge/createProductionPlans.dg:70](../deluge/createProductionPlans.dg#L70)
-
-```
-allPlansDesc = Production_Planning[ID != 0] sort by Added_Time desc;
-```
-
-Fetches **every plan ever created**, sorts them, then reads `Plan_No` off the first row to work
-out the next plan number. At 5,000 plans that is a 5,000-row fetch plus a full sort to obtain
-one integer.
-
-**Worst of the list** — it is on the hot path of the function that creates all the work, and it
-is the one most likely to be put on a schedule.
-
-*Fix:* a singleton counter record, or a `Plan_Seq` number field bumped on insert. Do not try to
-date-bound it — a gap in planning would restart the numbering.
-
-*Also here:* lines 72–77 use `break` inside a `for each`, which CLAUDE.md says is not reliable.
-It is harmless today because the body is idempotent and only the first row matters, but it is
-not doing what it looks like it is doing. Fold it into the fix.
-
-### A2. `getRecentActivities` — every stage log ever, to show ten rows
-
-[deluge/anotherPageScripts/getRecentActivities.dg:4](../deluge/anotherPageScripts/getRecentActivities.dg#L4)
-
-```
-recentLogs = Stage_Log[ID != 0] sort by Added_Time desc;
-```
-
-Then counts to 10 and stops. `Stage_Log` is the fastest-growing form in the app.
-
-*Fix:* one line — `Stage_Log[Added_Time > zoho.currentdate.subDay(7)]`, or `range from 1 to 10`.
-
-### A3. `getStoreRequests` — no pagination at all
-
-[deluge/getStoreRequests.dg:34](../deluge/getStoreRequests.dg#L34) and
-[:61](../deluge/getStoreRequests.dg#L61)
-
-```
-washes = Wash_Request[ID != 0] sort by Added_Time desc;
-excs   = Material_Exception[ID != 0] sort by Added_Time desc;
-```
-
-Two unbounded fetches in one call, and `excs` is then iterated with a nested loop over
-`ex.Exception_Lines`. Every wash ticket and every exception ever raised, on a screen that only
-ever shows recent ones.
-
-*Fix:* page it like `getStoreWasteHistory`. This is the closest of the lot to a real user-facing
-screen, so it is the one that will bite first.
-
-### A4. `getAdminCalculation` — two unbounded fetches
-
-[deluge/getAdminCalculation.dg:57](../deluge/getAdminCalculation.dg#L57) —
-`Sales_Order[ID != 0] sort by Added_Time desc` (for the order picker)
-[deluge/getAdminCalculation.dg:76](../deluge/getAdminCalculation.dg#L76) —
-`Production_Planning[ID != 0]`
-
-An audit screen, used rarely, so low urgency — but it is also the function that already leans
-hardest on cross-function calls and replays allocation globally, which makes it the least
-comfortable place to be close to the statement limit.
-
-*Fix:* date-bound or page the picker; the picker does not need orders from three years ago.
-
-### A5. `getOrderConsumption` — every sales order for the picker
-
-[deluge/getOrderConsumption.dg:41](../deluge/getOrderConsumption.dg#L41)
-
-```
-allOrders = Sales_Order[ID != 0] sort by Added_Time desc;
-```
-
-Same shape as A4, same fix.
-
-### A6. `Raw_Material_Lot[ID != 0]` — four functions, grows with purchase history
-
-- [getStoreMaterialRequirements.dg:365](../deluge/getStoreMaterialRequirements.dg#L365)
-- [getSupervisorMaterials.dg:379](../deluge/getSupervisorMaterials.dg#L379)
-- [getExpectedWaste.dg:75](../deluge/getExpectedWaste.dg#L75)
-- [getStoreLots.dg:23](../deluge/getStoreLots.dg#L23)
-
-Lots accumulate with every purchase for ever, and **an emptied lot is never deleted** — it stays
-as a zero row so history still resolves. At ~20 lots/month that is 2,400 rows in ten years,
-fetched on every store screen load.
-
-Slowest-burning item on the list, but three of the four are in functions that already sit close
-to the limit.
-
-> **Careful with the obvious fix.** The map in `getStoreMaterialRequirements` is built
-> **before** the Blocked/empty filters *on purpose*, so an old offcut can still name a lot that
-> has dropped off the picker. Filtering to lots with stock breaks that. Filter by the set of
-> materials actually in play instead.
-
-### A7. Admin and one-off scripts
-
-`backfillPriorityKey.dg:55`, `auditOrderSources.dg:36`, `migrateOpeningLots.dg:91/164`,
-`seedTestLots.dg:57` all fetch whole transactional forms.
-
-Correct as written — they are manual, run-once tools. **The rule is that they stay manual.**
-Wiring any of them to a schedule or a widget button turns each into an A1.
+**`Issue_Status` is flipped for every open handover on the plan**, not just the one being
+received (`receiveMaterials` STEP 4) — so a voucher can read `Received` with lines still
+unsettled. `postTransferOrders` refuses to trigger on it for this reason. Filtering the
+settlement walk on it would silently stop settling those lines.
 
 ---
 
-## B. A set bounded by a policy that does not exist
+## The handover walk, and why the bound is provable
 
-### B1. `Waste_Master[Status == "Available"]` never drains
+Five functions walked **every handover ever made to a supervisor**, plus its `Issue_Lines`
+subform, to find the few lines carrying one plan or item: `receiveMaterials`,
+`saveWasteFromCutting`, `getSupervisorMaterials`, `getExpectedWaste`, `getAdminCalculation`. Two
+are write paths. This class is invisible to a grep for `[ID != 0]`.
 
-[getStoreMaterialRequirements.dg:276](../deluge/getStoreMaterialRequirements.dg#L276),
-[getAdminCalculation.dg:189](../deluge/getAdminCalculation.dg#L189)
+`Material_Issue.Issue_Date` and `Production_Planning.Plan_Start_Date` are both plain dates written
+with `zoho.currentdate`. So:
 
-Sounds self-limiting — offcuts get consumed. They do not all get consumed. A remnant too small
-or too odd for any order sits at `Available` for ever, and there is no ageing sweep and no
-periodic scrap. `waste-master.md` records the decision that there is **no minimum usable size**
-— the supervisor deletes what is not worth keeping — which is exactly the gap: nothing makes him
-do it, and nothing does it for him.
+> A handover can only carry a line for an item of plan P if that item existed, and the item cannot
+> predate the plan that created it. **No wanted line sits on a voucher issued before
+> `Plan_Start_Date`.**
 
-This is a **business-policy gap surfacing as a query cost**, not an indexing problem. It also
-quietly degrades the allocator, which scans available remnants per material.
+Nothing the existing `Plan_Item` test would have kept is filtered out, and `getExpectedWaste`'s
+oldest-first ordering is untouched — the bound removes only vouchers that predate the plan.
+**Every site falls back to the old unbounded query when the date is missing.**
 
-*Fix:* a rack policy first — scrap below a size, or older than N months — then the query follows.
-Worth raising with the client before it is worth coding.
-
----
-
-## C. Loop-invariant query inside a loop
-
-### C1. `getSupervisorMaterials` re-queries requirements per waste movement
-
-[deluge/getSupervisorMaterials.dg:341](../deluge/getSupervisorMaterials.dg#L341)
-
-```
-for each wi in issuedMoves            // per plan
-    for each mr2 in Material_Requirement[Plan == plan.ID]   // <- invariant
-```
-
-The inner query depends only on `plan.ID`, which does not change inside the loop, so it is
-re-run once per issued waste movement per plan. Worst nesting found: plans × movements ×
-requirements.
-
-*Fix:* hoist it. The same function already fetches `Material_Requirement[Plan == plan.ID]` at
-[:205](../deluge/getSupervisorMaterials.dg#L205) — build the material-owner map once there and
-read it here.
-
-### C2. The waste-movement pair, repeated in five functions
-
-```
-for each rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
-for each wmRec in Waste_Master[ID == wi.Waste_Piece]
-```
-
-Two queries per issued movement, in `getExpectedWaste` (:217, :229),
-`getAdminCalculation` (:702, :709), `getProductionWidgetData` (:580, :588),
-`getSupervisorMaterials` (:307, :330) and `getOrderConsumption` (:342).
-
-Individually small — bounded by movements on one plan. Listed because it is five copies of one
-shape, so it is one helper's worth of work to fix all five, and because it multiplies against
-everything else in the same function.
-
-*Fix:* fetch the plan's `Received` movements once, group by `Parent_Movement` into a Map; same
-for the `Waste_Master` rows. The `piCache` pattern.
+**`receiveMaterials` and `getSupervisorMaterials` deliberately use the SAME bound.** The quantity
+the supervisor types comes off that screen; settling it against vouchers older than any open plan
+would spend his confirmation on cloth the screen never showed him — the same class of divergence
+the dispute-netting note in `receiveMaterials` was written about. `receiveMaterials` uses the
+**wider** four-status plan set (including `Material Ready`), never its own three, so the receive
+can never see fewer vouchers than the screen did.
 
 ---
 
-## Order to fix
+## Two changes that are visible on screen
 
-1. **A1** — hot path, worst shape, and it carries the `break` bug with it
-2. **A3** — the only one on a screen a user opens all day
-3. **A2** — one line
-4. **C1** — one hoist, meaningful nesting removed
-5. **C2** — one helper, five call sites
-6. **A4, A5** — rare screens, easy once the paging helper from A3 exists
-7. **A6** — slowest burn, and needs care over the naming caveat
-8. **B1** — needs a client decision before any code
+Everything else preserves output exactly. These two do not.
 
-## Rules to hold while the app is still being built
+**`getStoreLots` no longer lists fully emptied lots** (all five quantities zero), and the lot count
+beside each material drops. It was the only bound available — see *Choosing* above. It also makes
+the two store screens agree: `getStoreMaterialRequirements` already applies this rule to the issue
+picker (*"An empty lot is not a choice"*). Cloth at the wash, in transit or disputed still shows.
+Revert instructions are in the comment at the query.
 
-- **A new fetch-all on a transactional form is a bug**, even if it is fast today. Master data
-  (`Employee`, `Raw_Material`, `Third_Party`) is the only exception.
+**`getExpectedWaste` now shows lot numbers where they were blank.** Two of its three lot lookups
+sit outside the `wSupId != 0 && itemIdTxt != ""` guard that used to fill the map, so they rendered
+an empty string whenever that guard was false. The lazy resolve does not care about the guard.
+This is a fix, but it is a change.
+
+---
+
+## Still open
+
+**`Waste_Master[Status == "Available"]` never drains** — `getStoreMaterialRequirements`,
+`getAdminCalculation`. A remnant too small or too odd for any order sits at `Available` for ever;
+there is no ageing sweep and no periodic scrap. This is a **business-policy gap surfacing as a
+query cost**, and it also quietly degrades the allocator. *Needs a rack policy from the client —
+scrap below a size, or older than N months — before any code.*
+
+**`getProductionWidgetData` has three inline `sort by` in `for each` headers** (lines 53, 141,
+619), which CLAUDE.md forbids. All on master data, works today, so it is a rule violation rather
+than a scaling problem. Fold it into the next change to that file.
+
+**`getSupervisorCounts` counts with `Issue_Status != "Received"`.** A `.count()`, so not a scaling
+problem — but per the empty-field trap above, if the `Issue_Status` dropdown ever lacks `Issued`
+as a choice, `issueMaterials` stores empty and **this badge reads 0 with handovers pending**.
+Exactly the `Transfer_Status` bug. If that badge is ever wrongly 0, this is why.
+
+**The real fix for the handover walk is `Issue_Lines` as its own form.** The date bound is sound
+but it is a bound, not an index: "handovers touching item X" is not expressible because the lines
+live in a subform. Making them records is the same records-not-subforms migration already done for
+`Plan_Item`, `Stage_Log` and `Material_Requirement`. Not before the catalogue work, and not
+before there is a reason.
+
+---
+
+## Rules to hold
+
+- **A new fetch-all on a transactional form is a bug**, even if it is fast today. `Employee`,
+  `Third_Party`, `Box_Master` and `Raw_Material` are the only exceptions.
 - **Anything a user opens repeatedly gets `range from A to B`** and a server-side `limit` clamp,
   because a Custom API is callable from anywhere.
-- **Filter in the query, never in the loop.** Dropping rows in code after the fetch also breaks
-  paging — page 1 returns 17 of 20 and page 2 starts in the wrong place.
-- **The one-off scripts stay one-off.** Scheduling one promotes it to A1.
+- **Filter in the query, never in the loop.** Filtering in code also breaks paging — page 1
+  returns 17 of 20 and page 2 starts in the wrong place.
+- **Cache the miss as well as the hit** in any lazy lookup.
+- **A signature change is a Creator config change.** Adding an argument to a Custom API breaks
+  every caller until the argument list is edited by hand. Prefer a bounded criteria over a new
+  `limit` parameter when the deadline is short.
+- **Verify with `node tools/dgscan.js deluge/**/*.dg`** — brace/paren balance, comments inside `insert into` field lists,
+  loop-variable/scalar clashes, inline `sort by`, `break`. It is comment- and string-aware, and it
+  found two pre-existing faults on its first run. **It proves none of this executes**; only a
+  Creator Execute does that.

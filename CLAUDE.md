@@ -32,6 +32,15 @@ These are not style preferences. Each one caused a real bug in this app.
 
 **Formatting**
 - **No comments outside the function body.** Nothing above `string fn(...)`. User's rule.
+- **No comments INSIDE an `insert into X [ ... ]` field list either**, and this one is not a style
+  rule — the field list is parsed specially and a `//` line in it is a **syntax error**.
+  > It reports as *"Improper Statement… missing ';' at end of the line"* against the function's
+  > opening **`try`**, which in `issueMaterials` was **1,870 lines** from the insert and said nothing
+  > about an insert being involved. Deluge's reported line is a hint, not a fact — this is the
+  > extreme case. Put the comment immediately **above** the `insert into`.
+  >
+  > Sixty-odd `.dg` files and not one of them had a comment in an insert block; that uniformity was
+  > the evidence that found it. `tools/dgscan.js` now checks for it.
 - `sort by` goes on its **own assignment**, never inline in a `for each` header.
 - There is no reliable `break` in a `for each` — guard the body with an `if` instead.
 
@@ -203,6 +212,65 @@ Conflating them is the most common way to conclude the maths is broken when it i
 
 **Stock is consumed at RECEIPT, not issue.** Issuing moves quantity to `In_Transit_Qty`;
 receipt settles it. A shortfall goes to `Disputed_Qty` and raises a `Stock_Dispute`.
+
+> **THE ZOHO INVENTORY TRANSFER ORDER API, AS THIS ORG ACTUALLY ANSWERED IT.** Four rounds of
+> trial to establish, none of it guessable from the docs, and `postTransferOrders` is the only
+> place that knows it:
+>
+> | | |
+> |---|---|
+> | `from_location_id` / `to_location_id` | **not** `from_warehouse_id` — that returns `9163 Please select a valid warehouse`, even though every location on this org is type Warehouse |
+> | `transfer_order_number` | **mandatory.** This org does not auto-number transfer orders — omit it and you get `code 6` |
+> | `line_items[].name` | required beside `item_id`, or `code 4: Invalid value passed for name` |
+> | `is_intransit_order: false` | the supervisor already has the cloth; an in-transit order needs a second confirmation nobody will give |
+>
+> The warehouse naming is kept as a fallback on `9163` only — two lines, and an org with Locations
+> switched off would need exactly it. **Locations:** Main Warehouse `3955559000000212001`,
+> Production `3955559000000219654`, Finished Goods Store `3955559000000227307`, Head Office
+> `3955559000000032097`. Read them again with `getInventoryRefIds`; probe endpoints with
+> `probeInventoryEndpoints` and `probeWarehouses`.
+>
+> **The document number IS the voucher number.** Since one has to be supplied it may as well mean
+> something, so the transfer order and the store issue voucher share an identifier and reconciling
+> them is not a lookup. A partial receipt makes a second order, so it suffixes: `SIV-00001`,
+> `SIV-00001-2`. The count comes off `Transfer_Order_IDs`, which accumulates one id per order
+> posted and so cannot drift from how many exist.
+>
+> **`postTransferOrders("true")` is a dry run** that builds every body and posts nothing, and
+> `("one")` writes exactly one order. Use them in that order against a live org — a dry run proves
+> the body is well formed and nothing else.
+
+> **ZOHO INVENTORY IS MOVED AT RECEIPT TOO, AND THAT IS THE SAME RULE.**
+> `postTransferOrders` posts one **transfer order per store issue voucher**, Main Warehouse
+> (`3955559000000212001`) to Production (`3955559000000219654`), with `SIV-…` in the order's
+> `reason` so the document says which handover it is. Nothing moves warehouse when cloth leaves the
+> counter — at that moment it is in transit and belongs to neither side.
+>
+> **`Material_Issue` IS the store issue voucher**, one record per press of Issue, numbered
+> `SIV-00001` upward by `issueMaterials` at the insert. The number is built in Deluge, **not** by an
+> "on add" form workflow — `input.Voucher_No` fires only when a human opens the Creator form, and
+> nothing ever does. It is generated off `sort by ID desc range from 1 to 10`, keeping the largest
+> parsed number: sorting on `Voucher_No` is a *text* sort and would issue `SIV-100000` twice once
+> the width changed.
+>
+> **THE TRIGGER IS `Issue_Lines.Settled_Qty`, NEVER `Issue_Status`.** `receiveMaterials` flips
+> `Issue_Status` for *every* open handover on the plan rather than the one being received
+> (`receiveMaterials.dg:979`), so a voucher issued this morning reads `Received` the moment an older
+> one is confirmed — triggering on it would transfer cloth still on the store counter. `Settled_Qty`
+> is per line and only ever written by an actual receipt.
+>
+> **What moves is `Settled_Qty − Transferred_Qty`**, which is also the idempotency: it is stamped in
+> the same pass that posts, so a re-run finds the difference closed. Partial receipts fall out for
+> free — 8 of 10 today is one order, the last 2 tomorrow is a second, both carrying the same voucher
+> number. A voucher goes `Done` only when nothing is owed *and* nothing is left to move; anything
+> else stays `Pending`, which is what bounds the sweep.
+>
+> **A material with no `Inventory_Item_ID` refuses the WHOLE voucher.** Moving four of five lines
+> and marking it Done would strand the fifth silently.
+>
+> Run it with **`true` first** — dry run builds every request body and reports it without posting.
+> Transfer orders are the one thing in this app that moves stock in a system this repo cannot read
+> back.
 
 **The same rule runs backwards for offcuts.** A declared remnant is not stock: while
 `Waste_Master.Status` is `Pending_Receipt`, `Piece_Count` holds what the supervisor *declared*,
@@ -770,6 +838,15 @@ Deluge cannot be run here, so:
   skips comments and strings, and scan for the loop-variable/scalar name clash above — both are
   comment- and string-aware text passes, so they cost nothing and catch what Deluge only reports
   at runtime, at the wrong line.
+- **Language semantics CAN be settled, at <https://deluge.zoho.com/tryout>.** No login, no token,
+  and it really executes — so any question of the form *"does Deluge do X"* is a two-minute answer
+  instead of a hedge in a comment. It has **no forms, no `thisapp`, no records**, so it cannot run
+  anything in this repo; it answers about the *language*, not about the app. `return` is rejected
+  there ("VOID function can not return any value") — build a string and `info` it.
+  > Settled this way, and each one was load-bearing: **`Map.get()` on a missing key returns
+  > `null`** (every lazy per-id cache tests exactly this), **relational operators work on dates**
+  > (the `Plan_Start_Date` bounds compare with `<`), and **`substring` is valid lowercase**
+  > — both spellings appear in this repo and both work.
 - **Never claim a Deluge change is verified.** Say what was checked and what needs an Execute.
 - **Deluge's reported line number is a hint, not a fact.** It points at the statement that
   *failed*, which is often not the statement that is *wrong*. Isolate first — a per-row

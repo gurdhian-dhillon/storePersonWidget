@@ -22,7 +22,18 @@ string getPrintData()
 		// Oldest first, which is the order the store person walks the rack in -
 		// and sort by has to be its own assignment, never inline in a for each
 		// header.
-		allLots = Raw_Material_Lot[ID != 0] sort by Added_Time;
+		//------------------------------------------------------------------
+		// LOTS THAT STILL HOLD SOMETHING. Same bound and same reasoning as
+		// getStoreLots - see the long note there. Cloth with nothing on it
+		// cannot be sent to a printer, so an emptied lot has no business in
+		// the sendable list, and this form grows with every purchase for ever.
+		//
+		// THE PRINT-JOB LOOP FURTHER DOWN IS NOT COVERED BY THIS and must not
+		// be: a job sent months ago can name a lot that has since been emptied,
+		// and its lot number still has to print. That one lookup is resolved
+		// lazily at the point of use instead - bounded by jobs on screen.
+		//------------------------------------------------------------------
+		allLots = Raw_Material_Lot[Wash_Quantity > 0 || Unwash_Quantity > 0 || In_Print_Qty > 0] sort by Added_Time;
 
 		lotJsonByMat = Map();
 		lotNumById = Map();
@@ -266,6 +277,21 @@ string getPrintData()
 
 			pjPlainName = ifnull(matNameById.get(pjPlainId),"").toString();
 			pjPlainSku = ifnull(matSkuById.get(pjPlainId),"").toString();
+			// A job can name a lot the sendable query above no longer returns,
+			// because the cloth left the rack when it was sent. Resolved once
+			// per distinct lot and cached, so the map still answers for every
+			// job without the fetch being proportional to purchase history.
+			// The miss is cached too - a deleted lot is not re-queried.
+			if(pjPlainLotId != "" && lotNumById.get(pjPlainLotId) == null)
+			{
+				lotNumById.put(pjPlainLotId,"");
+
+				for each  lotRefJ in Raw_Material_Lot[ID == pjPlainLotId.toLong()]
+				{
+					lotNumById.put(pjPlainLotId,ifnull(lotRefJ.Lot_Number,"").toString().replaceAll("\"","'"));
+				}
+			}
+
 			pjPlainLotNum = ifnull(lotNumById.get(pjPlainLotId),"").toString();
 			pjPrintedName = ifnull(matNameById.get(pjPrintedId),"").toString();
 			pjPrintedSku = ifnull(matSkuById.get(pjPrintedId),"").toString();

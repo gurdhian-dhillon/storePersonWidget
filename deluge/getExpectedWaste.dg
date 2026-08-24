@@ -65,21 +65,71 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 	lotNumById = Map();
 
 	wSupId = 0;
+	wPlanStart = null;
 	for each  wPlan in Production_Planning[ID == pid]
 	{
 		wSupId = ifnull(wPlan.Assigned_To,0);
+
+		// The date this plan was created, used below to bound the handover
+		// scan. createProductionPlans writes it as zoho.currentdate at the
+		// insert, so it is a plain Date and compares with Issue_Date directly.
+		wPlanStart = wPlan.Plan_Start_Date;
 	}
 
 	if(wSupId != 0 && itemIdTxt != "")
 	{
-		for each  lotRefW in Raw_Material_Lot[ID != 0]
-		{
-			lotNumById.put(lotRefW.ID + "",ifnull(lotRefW.Lot_Number,"").toString().replaceAll("\"","'"));
-		}
+		// The prefetch of every Raw_Material_Lot ever created used to sit here.
+		// Lots grow with every purchase and an emptied lot is never deleted, so
+		// that was thirteen thousand rows on the cutting screen to print a
+		// handful of lot numbers - and the statement-execution limit is NOT
+		// catchable, so it would have killed the script with a bare HTTP 500
+		// and no error card.
+		//
+		// lotNumById is now filled lazily at each of the three places that read
+		// it, one indexed query per DISTINCT lot, cached for the whole call.
 
-		// OLDEST HANDOVER FIRST - the same order issueMaterials spent them in, so
-		// the metres are attributed to the same lots it charged them to.
-		supIssuesW = Material_Issue[Issued_To == wSupId] sort by Added_Time;
+		//--------------------------------------------------------------
+		// BOUNDED BY THE PLAN'S OWN START DATE, and the bound is provable
+		// rather than a guess.
+		//
+		// This walked EVERY handover ever made to this supervisor, and its
+		// Issue_Lines subform with it, to find the few lines carrying this
+		// one Plan_Item. Material_Issue grows one row per press of Issue for
+		// ever, so at a few hundred handovers a month per supervisor that is
+		// tens of thousands of subform rows on a cutting screen. The
+		// statement-execution limit is NOT catchable - it kills the script
+		// and the widget gets a bare HTTP 500 with no error card.
+		//
+		// WHY THE DATE IS SAFE: a handover can only carry a line for an item
+		// of THIS plan if that item existed, and the item cannot predate the
+		// plan that created it. So no line this loop wants can sit on a
+		// voucher issued before Plan_Start_Date. Nothing is filtered out that
+		// the Plan_Item test below would have kept.
+		//
+		// WHY NOT Material_Issue.Plan, which looks like the obvious bound:
+		// one press of Issue can cover several plans and the voucher is
+		// stamped with only ONE of them - "the handover is recorded against
+		// the older one". Querying on it would silently drop the lines of
+		// every plan that was not the one stamped.
+		//
+		// AN EMPTY Plan_Start_Date FALLS BACK to the old unbounded query
+		// rather than to a date. A Creator field that was never written is
+		// EMPTY, and comparing an empty date would drop rows this needs;
+		// falling back is slower on those plans and cannot be wrong.
+		//
+		// OLDEST HANDOVER FIRST - the same order issueMaterials spent them in,
+		// so the metres are attributed to the same lots it charged them to.
+		// The bound removes only vouchers that predate the plan; it does not
+		// reorder what is left.
+		//--------------------------------------------------------------
+		if(wPlanStart != null)
+		{
+			supIssuesW = Material_Issue[Issued_To == wSupId && Issue_Date >= wPlanStart] sort by Added_Time;
+		}
+		else
+		{
+			supIssuesW = Material_Issue[Issued_To == wSupId] sort by Added_Time;
+		}
 
 		for each  wIssW in supIssuesW
 		{
@@ -116,6 +166,19 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 								seqW = seqW + "~";
 							}
 							lotSeqByMat.put(lnMatW,seqW + lnLotW);
+
+							// Resolved once per distinct lot, then cached. The
+							// miss is cached too, so an unreadable lot is not
+							// re-queried by every handover that names it.
+							if(lotNumById.get(lnLotW) == null)
+							{
+								lotNumById.put(lnLotW,"");
+
+								for each  lotRefW in Raw_Material_Lot[ID == lnLotW.toLong()]
+								{
+									lotNumById.put(lnLotW,ifnull(lotRefW.Lot_Number,"").toString().replaceAll("\"","'"));
+								}
+							}
 
 							haveW = ifnull(lotsByMat.get(lnMatW),"").toString();
 							if(haveW != "")
@@ -232,6 +295,17 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 								wLotTxt = ifnull(wmRec.Lot,"").toString().trim();
 								if(wLotTxt != "")
 								{
+									// Same lazy resolve as above, cached for the call.
+									if(lotNumById.get(wLotTxt) == null)
+									{
+										lotNumById.put(wLotTxt,"");
+
+										for each  lotRefP in Raw_Material_Lot[ID == wLotTxt.toLong()]
+										{
+											lotNumById.put(wLotTxt,ifnull(lotRefP.Lot_Number,"").toString().replaceAll("\"","'"));
+										}
+									}
+
 									wLotJson = ",\"lotId\":\"" + wLotTxt + "\",\"lotNumber\":\"" + ifnull(lotNumById.get(wLotTxt),"").toString() + "\"";
 								}
 							}
@@ -404,6 +478,17 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 											lotIdJson = "";
 											if(lotCut != "")
 											{
+												// Same lazy resolve, cached for the call.
+												if(lotNumById.get(lotCut) == null)
+												{
+													lotNumById.put(lotCut,"");
+
+													for each  lotRefC in Raw_Material_Lot[ID == lotCut.toLong()]
+													{
+														lotNumById.put(lotCut,ifnull(lotRefC.Lot_Number,"").toString().replaceAll("\"","'"));
+													}
+												}
+
 												lotIdJson = ",\"lotId\":\"" + lotCut + "\",\"lotNumber\":\"" + ifnull(lotNumById.get(lotCut),"").toString() + "\"";
 											}
 

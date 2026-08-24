@@ -1,20 +1,25 @@
 string Admin_Space.getRecentActivities()
 {
 	activityList = List();
-	recentLogs = Stage_Log[ID != 0] sort by Added_Time desc;
-	count = 0;
+
+	// TEN ROWS, ASKED FOR AS TEN. This used to fetch every Stage_Log ever
+	// written and sort the lot, then count to ten in code - on the
+	// fastest-growing form in the app, one row per item per stage. The
+	// statement-execution limit is NOT catchable: it kills the script, so this
+	// would have died with a bare HTTP 500 and no error card rather than
+	// getting gradually slower.
+	//
+	// The break went with it. There is no reliable break in a Deluge for each,
+	// and once the query returns ten rows there is nothing to break out of.
+	recentLogs = Stage_Log[ID != 0] sort by Added_Time desc range from 1 to 10;
+
 	for each  log in recentLogs
 	{
-		if(count >= 10)
-		{
-			break;
-		}
 		tempMap = Map();
 		tempMap.put("User",ifnull(log.Operator,"System").toString());
 		tempMap.put("Time",log.Added_Time.toString("hh:mm a"));
 		tempMap.put("Desc","Produced " + ifnull(log.Qty_Out,0) + " pieces");
 		activityList.add(tempMap);
-		count = count + 1;
 	}
 	return activityList.toString();
 }

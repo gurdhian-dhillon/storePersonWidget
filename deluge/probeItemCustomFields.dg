@@ -1,0 +1,176 @@
+string probeItemCustomFields()
+{
+	// READ ONLY. Run from Creator's Execute. Writes nothing, creates nothing.
+	//
+	// ONE QUESTION: what are the customfield_id values behind Product Type, Type,
+	// Fabric Width, GSM, Quality, Pattern and Color on Inventory's items?
+	//
+	// syncPurchaseInflow needs them to decide whether an unknown purchased item
+	// is raw material at all, and whether it is fabric. It cannot match on the
+	// LABEL: custom fields come back only inside a custom_fields array of
+	// {customfield_id, label, value} - there are no cf_ keys - and matching on
+	// the label means renaming the field in Inventory silently unclassifies
+	// every item, with the first symptom being purchases that quietly stop
+	// landing. inventory-integration.md settled this as assumption A3.
+	//
+	// So the ids get hardcoded as constants, the same way the account and
+	// location ids are in postInventoryQueue, and this is where they come from.
+	//
+	// It picks its own subjects rather than taking ids to type: the first mapped
+	// FABRIC raw material, the first mapped NON-FABRIC one, and the first mapped
+	// Item_Master. Three items is enough to see both Product Type values and
+	// both Type values, which is what makes the constants safe to trust.
+	//
+	// extraItemId below is for an item Creator does not know - paste the
+	// Inventory_Item_ID off an Unmapped Inventory_Inflow row to see exactly what
+	// the auto-create would have had to work with.
+
+	res = "{\"errors\":[\"Nothing ran\"]}";
+
+	try
+	{
+		orgId = "60076905558";
+		baseUrl = "https://www.zohoapis.in/inventory/v1/";
+
+		// Paste an unmapped Inventory_Item_ID here when investigating one.
+		extraItemId = "3955559000000262008";
+
+		wantIds = List();
+		labelByItem = Map();
+
+		//------------------------------------------------------------------
+		// Subjects, chosen off Creator so nothing has to be looked up by hand.
+		// One of each kind, and the guard on each is that the id is not already
+		// in the list - the same material must not be probed twice.
+		//------------------------------------------------------------------
+		gotFabric = false;
+		gotPlain = false;
+
+		for each  rmRow in Raw_Material[ID != 0]
+		{
+			rmInv = ifnull(rmRow.Inventory_Item_ID,"").toString().trim();
+
+			if(rmInv != "" && !wantIds.contains(rmInv))
+			{
+				// As TEXT, never against the boolean true - a Decision box gives
+				// a boolean, a yes/no dropdown gives the string "Yes", and an
+				// untouched field gives EMPTY.
+				rmFab = ifnull(rmRow.Is_Fabric,"").toString().trim().toLowerCase();
+				isFab = false;
+
+				if(rmFab == "true" || rmFab == "yes" || rmFab == "1" || rmFab == "y")
+				{
+					isFab = true;
+				}
+
+				// No reliable break in a for each - the body is guarded so only
+				// the first of each kind is taken.
+				if(isFab == true && gotFabric == false)
+				{
+					wantIds.add(rmInv);
+					labelByItem.put(rmInv,"Raw_Material FABRIC " + ifnull(rmRow.SKU,"").toString().trim());
+					gotFabric = true;
+				}
+
+				if(isFab == false && gotPlain == false)
+				{
+					wantIds.add(rmInv);
+					labelByItem.put(rmInv,"Raw_Material NON-FABRIC " + ifnull(rmRow.SKU,"").toString().trim());
+					gotPlain = true;
+				}
+			}
+		}
+
+		gotFinished = false;
+
+		for each  imRow in Item_Master[ID != 0]
+		{
+			imInv = ifnull(imRow.Inventory_Item_ID,"").toString().trim();
+
+			if(imInv != "" && gotFinished == false && !wantIds.contains(imInv))
+			{
+				wantIds.add(imInv);
+				labelByItem.put(imInv,"Item_Master FINISHED " + ifnull(imRow.SKU,"").toString().trim());
+				gotFinished = true;
+			}
+		}
+
+		if(extraItemId != "" && !wantIds.contains(extraItemId))
+		{
+			wantIds.add(extraItemId);
+			labelByItem.put(extraItemId,"UNMAPPED - not in Creator");
+		}
+
+		//------------------------------------------------------------------
+		// One call each. custom_fields only comes back on the single-item read.
+		//------------------------------------------------------------------
+		itemJson = "";
+		callsUsed = 0;
+
+		for each  wId in wantIds
+		{
+			callsUsed = callsUsed + 1;
+
+			itmResp = invokeurl
+			[
+				url :baseUrl + "items/" + wId + "?organization_id=" + orgId
+				type :GET
+				connection:"inventory_connection"
+			];
+
+			whoTxt = ifnull(labelByItem.get(wId),"").toString().replaceAll("\"","'");
+
+			if(ifnull(itmResp.get("code"),"-1").toString().trim() != "0")
+			{
+				if(itemJson != "")
+				{
+					itemJson = itemJson + ",";
+				}
+				itemJson = itemJson + "{\"who\":\"" + whoTxt + "\",\"itemId\":\"" + wId + "\",\"error\":\"" + ifnull(itmResp.get("message"),"").toString().replaceAll("\"","'") + "\"}";
+			}
+			else
+			{
+				itmBlock = itmResp.get("item");
+
+				if(itmBlock != null)
+				{
+					cfJson = "";
+
+					for each  cfRow in ifnull(itmBlock.get("custom_fields"),List())
+					{
+						if(cfJson != "")
+						{
+							cfJson = cfJson + ",";
+						}
+
+						// THE ID IS THE ANSWER. The label is printed beside it
+						// only so a human can tell which is which - nothing
+						// should ever match on it.
+						cfJson = cfJson + "{\"customfield_id\":\"" + ifnull(cfRow.get("customfield_id"),"").toString() + "\",\"label\":\"" + ifnull(cfRow.get("label"),"").toString().replaceAll("\"","'") + "\",\"apiName\":\"" + ifnull(cfRow.get("api_name"),"").toString().replaceAll("\"","'") + "\",\"value\":\"" + ifnull(cfRow.get("value"),"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
+					}
+
+					if(itemJson != "")
+					{
+						itemJson = itemJson + ",";
+					}
+
+					// product_type here is ZOHO'S OWN goods/service field, not
+					// the custom Product Type - both are in the same payload and
+					// they read almost identically. Printed side by side so the
+					// two can never be confused when the constants are set.
+					itemJson = itemJson + "{\"who\":\"" + whoTxt + "\",\"itemId\":\"" + wId + "\",\"sku\":\"" + ifnull(itmBlock.get("sku"),"").toString().replaceAll("\"","'") + "\",\"name\":\"" + ifnull(itmBlock.get("name"),"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\",\"unit\":\"" + ifnull(itmBlock.get("unit"),"").toString().replaceAll("\"","'") + "\",\"status\":\"" + ifnull(itmBlock.get("status"),"").toString() + "\",\"nativeProductType\":\"" + ifnull(itmBlock.get("product_type"),"").toString() + "\",\"itemType\":\"" + ifnull(itmBlock.get("item_type"),"").toString() + "\",\"stockOnHand\":\"" + ifnull(itmBlock.get("stock_on_hand"),"").toString() + "\",\"customFields\":[" + cfJson + "]}";
+				}
+			}
+		}
+
+		info "probeItemCustomFields | probed " + callsUsed + " item(s) - read customfield_id off each, never the label";
+
+		res = "{\"errors\":[],\"callsUsed\":" + callsUsed + ",\"items\":[" + itemJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ") + "\"]}";
+	}
+
+	return res;
+}

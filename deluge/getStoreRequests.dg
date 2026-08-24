@@ -31,7 +31,32 @@ string getStoreRequests()
 	washStatusByExc = Map();
 	washGotByExc = Map();
 
-	washes = Wash_Request[ID != 0] sort by Added_Time desc;
+	//--------------------------------------------------------------------
+	// BOUNDED BY OPEN WORK PLUS A FIXED WINDOW, never the whole form.
+	//
+	// This and the exception fetch below were two unbounded fetches in one
+	// call, on a tab the store person keeps open all day. Both forms grow
+	// monotonically - a resolved ticket is never deleted - so the cost tracked
+	// the whole history of the factory. The statement-execution limit is NOT
+	// catchable: it kills the script and the widget gets a bare HTTP 500 with
+	// no error card, so this had to stop being proportional to history.
+	//
+	// The criteria is an OR rather than a date window alone, and that matters:
+	// a job still outstanding must appear however old it is, because the whole
+	// point of the tab is "what am I still waiting on". The date half only
+	// supplies the recently-closed tail, which is there so a request that
+	// completes does not silently vanish and read as lost.
+	//
+	// No range/limit argument, deliberately - this is a no-argument Custom API
+	// and adding one is a Creator config change that breaks every caller until
+	// it is made by hand.
+	//
+	// A row whose Status was never written still appears while it is inside
+	// the window: a Creator criteria comparison matches no empty field in
+	// EITHER direction, so such a row can only be reached by the date half.
+	//--------------------------------------------------------------------
+	washCutoff = zoho.currentdate.subMonth(3);
+	washes = Wash_Request[Status == "Pending" || Status == "In_Progress" || Added_Time > washCutoff] sort by Added_Time desc;
 
 	for each  wr0 in washes
 	{
@@ -58,7 +83,11 @@ string getStoreRequests()
 	//--------------------------------------------------------------------
 	// Pass 2 - the exceptions themselves. Shortage and wash tickets both.
 	//--------------------------------------------------------------------
-	excs = Material_Exception[ID != 0] sort by Added_Time desc;
+	// Same shape as the wash fetch above - every open ticket however old, plus
+	// a three-month tail of closed ones. "Open" is the only status
+	// raiseMaterialException writes, and getStoreCounts and
+	// getStoreMaterialRequirements both already query on exactly that string.
+	excs = Material_Exception[Status == "Open" || Added_Time > washCutoff] sort by Added_Time desc;
 
 	for each  ex in excs
 	{

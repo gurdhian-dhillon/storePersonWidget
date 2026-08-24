@@ -374,18 +374,19 @@ string savePackingRecord(string payloadJson)
 		// flat pass. "Finished" is Finishing_Status == "Done" - done means done,
 		// anything else means the job is still open.
 		//------------------------------------------------------------------
-		doneChecks = List();
-
-		for each  fd in Finishing_Data[ID != 0]
-		{
-			if(fd.Item_Check != null)
-			{
-				if(ifnull(fd.Finishing_Status,"").toString().trim() == "Done")
-				{
-					doneChecks.add(fd.Item_Check.toString());
-				}
-			}
-		}
+		// ASKED PER CHECK, not by scanning the whole form. Same change and same
+		// reasoning as getPackingDetails, which runs the identical walk - and it
+		// matters more here, because THIS IS A WRITE PATH. The
+		// statement-execution limit is NOT catchable: it kills the script
+		// outright, so a guard that died on a big Finishing_Data would take the
+		// packing save down with it and the packer would see a bare HTTP 500
+		// with no error card, mid-save.
+		//
+		// "1" finished, "0" not, absent means not yet asked. DONE MEANS DONE:
+		// a row carrying neither status does not match and the batch reads as
+		// unfinished, which is the direction that stops an order short of
+		// packing rather than walking it through with a batch nobody folded.
+		doneByCheck = Map();
 
 		lineByItem = Map();
 		finByLine = Map();
@@ -431,7 +432,19 @@ string savePackingRecord(string payloadJson)
 
 			for each  chk in Item_Check[Plan == plan.ID && Qty_Approved > 0]
 			{
-				if(chk.Plan_Item != null && doneChecks.contains(chk.ID.toString()) == true)
+				chkKeyD = chk.ID.toString();
+
+				if(doneByCheck.get(chkKeyD) == null)
+				{
+					doneByCheck.put(chkKeyD,"0");
+
+					for each  fd in Finishing_Data[Item_Check == chk.ID && Finishing_Status == "Done"]
+					{
+						doneByCheck.put(chkKeyD,"1");
+					}
+				}
+
+				if(chk.Plan_Item != null && ifnull(doneByCheck.get(chkKeyD),"0").toString() == "1")
 				{
 					lineKeyTxt = ifnull(lineByItem.get(chk.Plan_Item.toString()),"").toString();
 

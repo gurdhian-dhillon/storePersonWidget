@@ -92,6 +92,11 @@
 
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
 
+    <!-- BEFORE EVERY TAB SCRIPT. It wraps ZOHO.CREATOR.DATA.invokeCustomApi to
+         stay under Creator's per-minute limit, and a script that loaded first
+         would keep the unwrapped function for the life of the page. -->
+    <script src="js/api-throttle.js"></script>
+
     <!-- Shell first: it owns the tabs, the shared picker and Refresh. The two
          tab scripts then attach their own listeners to those shared controls. -->
     <script src="js/shell.js"></script>

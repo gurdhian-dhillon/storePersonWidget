@@ -1,0 +1,1340 @@
+string syncPurchaseInflow(string dryRun)
+{
+	// PURCHASED MATERIAL ARRIVING IN ZOHO INVENTORY, LANDED IN CREATOR.
+	//
+	// Purchase happens entirely in Inventory. This is the one thing that tells
+	// Creator about it:
+	//
+	//   fabric      -> Raw_Material.Unallocated_Qty
+	//   everything  -> Raw_Material.Quantity
+	//   else
+	//
+	// Fabric goes to Unallocated_Qty and NOT into a lot, because a lot is a tone
+	// and nobody has looked at the cloth yet. The store person drains it from the
+	// "Unallocated quantity" tab, which is what assigns the tone. saveStockInward
+	// already takes its quantity out of Unallocated_Qty before raising the parent
+	// total, so that half needs no change at all - this function is only the
+	// feeder the seam was built for.
+	//
+	// dryRun "true" computes every figure and writes NOTHING - not a ledger row,
+	// not a quantity. Run it that way first; it is the only way to see what a
+	// first run would do before it has done it.
+	//
+	//------------------------------------------------------------------------
+	// WHY A LEDGER FORM AND NOT A last-synced TIMESTAMP.
+	//
+	// Inventory_Inflow holds one row per (document, line), with what the document
+	// says now and what Creator has taken in. Everything difficult falls out of
+	// that one shape:
+	//
+	//   - APPLIED EXACTLY ONCE. The row is the record that it landed. No window,
+	//     no clock skew, no "did the last run finish".
+	//   - AN EDITED RECEIVE IS A DELTA. 200 corrected to 180 applies -20, because
+	//     the row remembers the 200. Posting the total instead would add 180 on
+	//     top of 200. Same rule as the finished-goods post in the build plan, for
+	//     the same reason.
+	//   - A DELETED LINE REVERSES. It is a key the ledger has and the document no
+	//     longer does.
+	//   - PROVENANCE. "Where did these 200 metres come from" is answerable, which
+	//     it is not once a number has been added to a field.
+	//
+	//------------------------------------------------------------------------
+	// WHY NOT JUST COMPARE TOTALS. reconcileRawMaterial already reads
+	// stock_on_hand per SKU and knows the difference against Creator. Turning it
+	// into a writer would be a dozen lines and it is the WORST thing that could
+	// be built here.
+	//
+	// Consumption posting is switched off today - receiveMaterials no longer
+	// enqueues one. So every supervisor receipt lowers Creator and leaves
+	// Inventory untouched, and a balance-driven sync would read that growing gap
+	// as material that had arrived and credit it to Unallocated_Qty. Cloth that
+	// was cut last week would come back as new stock, silently, for ever.
+	//
+	// So: DOCUMENT DRIVEN. Only an actual purchase document moves anything, and
+	// only the part of it Creator has not already taken.
+	//
+	//------------------------------------------------------------------------
+	// THE CUTOVER DATE IS NOT OPTIONAL. Creator's opening balances were seeded
+	// from Creator's own figures, and Inventory already holds purchase documents
+	// from before this function existed. Without a floor, the first run would
+	// read every one of them as an arrival and add stock that has been on the
+	// rack for months. Nothing dated before cutoverDate is ever opened, so it
+	// costs no call either - the floor is applied to the LIST, not to the line.
+	//
+	//------------------------------------------------------------------------
+	// CALL COST. A run is ONE list call in the steady state. A document is only
+	// opened up line by line when the ledger has never seen it, or when its
+	// last_modified_time has moved since - so an unchanged history costs nothing
+	// however long it gets. maxDetail bounds a bad day; the rest waits for the
+	// next run rather than risking the statement limit, which is not catchable
+	// and shows as a bare 500 with no error card.
+
+	res = "";
+	errTxt = "";
+
+	try
+	{
+		orgId = "60076905558";
+		baseUrl = "https://www.zohoapis.in/inventory/v1/";
+
+		//------------------------------------------------------------------
+		// EVERY LOCATION COUNTS, AND THAT IS NOT AN OVERSIGHT.
+		//
+		// This was written to accept Main Warehouse only, on the reasoning that
+		// a receive into Production is not cloth at the store counter. The first
+		// real purchase receive on this org landed at HEAD OFFICE
+		// (3955559000000032097), so that filter would have silently dropped a
+		// genuine arrival - the worst shape this can fail in, because a skipped
+		// arrival looks exactly like no arrival.
+		//
+		// The deeper reason is the reconciliation identity. reconcileRawMaterial
+		// compares Creator against item.stock_on_hand, which is the ORG-WIDE
+		// total across every location - Creator has no location concept anywhere
+		// in it. So cloth received at any location is inside the number Creator
+		// is measured against, and ignoring some locations guarantees permanent
+		// drift that nothing can explain.
+		//
+		// A purchase receive only ever exists against a purchase order, so it is
+		// always newly bought stock whatever door it came through. Where it
+		// landed is recorded on the ledger row instead of being acted on, so if
+		// this turns out to need the distinction the data is already there.
+		//------------------------------------------------------------------
+
+		//------------------------------------------------------------------
+		// WHICH DOCUMENT IS THE ARRIVAL. Zoho raises stock on ONE of the two,
+		// never both: a purchase receive if receives are switched on, otherwise
+		// the bill. Reading both double-counts every arrival.
+		//
+		// SET FROM probePurchaseInflow's verdict, once, and left alone. It is a
+		// constant on purpose - auto-detecting per run would let the mode flip
+		// underneath live data, which is the same silent corruption one level up.
+		//------------------------------------------------------------------
+		inflowSource = "Receive";
+
+		//------------------------------------------------------------------
+		// SET THIS TO THE DAY THE SYNC GOES LIVE, BEFORE THE FIRST REAL RUN.
+		//
+		// Nothing dated before it is ever looked at. Every purchase document
+		// already in Inventory describes stock that is ALREADY inside Creator's
+		// opening balances, so a floor that is too early adds months of history
+		// to the rack a second time - and the first symptom is a store person
+		// holding an Unallocated figure with no cloth behind it.
+		//
+		// Too late is the harmless direction: an arrival is simply not seen, the
+		// store person says so, the date moves back.
+		//------------------------------------------------------------------
+		cutoverDate = '24-Aug-2026';
+
+		// How far back the ledger is read and documents are considered. A
+		// document older than this that is edited will be missed;
+		// reconcileRawMaterial is the backstop that reports the gap.
+		windowDays = 60;
+
+		// Documents opened up line by line in one run.
+		maxDetail = 12;
+
+		//------------------------------------------------------------------
+		// CREATING A Raw_Material FOR A PURCHASED ITEM CREATOR DOES NOT KNOW.
+		//
+		// Set autoCreate to false to go back to only reporting Unmapped rows.
+		//
+		// THE customfield_id VALUES COME FROM probeItemCustomFields AND MUST BE
+		// MATCHED BY ID, NEVER BY LABEL. Custom fields come back only inside a
+		// custom_fields array of {customfield_id, label, value} - there are no
+		// cf_ keys - so matching on the label means renaming the field in
+		// Inventory silently unclassifies every item, and the first symptom is
+		// purchases quietly no longer landing. Settled as A3 in
+		// inventory-integration.md.
+		//
+		// While cfProductType is empty nothing is ever created: an item that
+		// cannot be classified is refused and says why, rather than being
+		// guessed at. Only Product Type is load-bearing - the rest are
+		// descriptive and an empty id simply leaves that column blank.
+		//------------------------------------------------------------------
+		autoCreate = true;
+		cfProductType = "";
+		cfTypeField = "";
+		cfFabricWidth = "";
+		cfGsmField = "";
+		cfQualityField = "";
+		cfPatternField = "";
+		cfColorField = "";
+
+		writeAllowed = true;
+		drTxt = ifnull(dryRun,"").toString().trim().toLowerCase();
+		if(drTxt == "true" || drTxt == "yes" || drTxt == "1")
+		{
+			writeAllowed = false;
+			dryTxtOut = "true";
+		}
+
+		cutoffDate = zoho.currentdate.subDay(windowDays);
+		if(cutoffDate < cutoverDate)
+		{
+			cutoffDate = cutoverDate;
+		}
+
+		listedCount = 0;
+		detailCount = 0;
+		appliedLines = 0;
+		reversedLines = 0;
+		unchangedDocs = 0;
+		skippedDocs = 0;
+		skippedLines = 0;
+		deferredDocs = 0;
+		unmappedLines = 0;
+		blockedLines = 0;
+		createdMats = 0;
+		mappedNow = 0;
+		widthMissing = 0;
+		notRawLines = 0;
+
+		// Emitted into the response rather than concatenated as a boolean -
+		// building the JSON by hand means every value has to be a string this
+		// function chose.
+		dryTxtOut = "false";
+
+		callsUsed = 0;
+		netFabric = 0.0;
+		netOther = 0.0;
+		rowsJson = "";
+		noteJson = "";
+		listNote = "";
+
+		//------------------------------------------------------------------
+		// The map every arriving line has to resolve through. Keyed on the
+		// Inventory id as TEXT - these are 18-digit values and a mixed-type
+		// comparison throws.
+		//------------------------------------------------------------------
+		matByInv = Map();
+		skuByInv = Map();
+		fabByInv = Map();
+
+		// Materials that already exist under a SKU but carry no
+		// Inventory_Item_ID - the mapInventoryItemIds leftovers. Built in the
+		// same pass rather than scanned per unknown item, which would be a full
+		// walk of Raw_Material inside the line loop.
+		//
+		// Keyed UPPER-CASED and trimmed, the same way lot numbers are compared,
+		// so RM-00011 cannot slip in beside rm-00011 and mint a duplicate.
+		unmappedIdBySku = Map();
+		unmappedFabBySku = Map();
+
+		for each  rmRow in Raw_Material[ID != 0]
+		{
+			rmInv = ifnull(rmRow.Inventory_Item_ID,"").toString().trim();
+			rmSkuTxt = ifnull(rmRow.SKU,"").toString().trim();
+
+			if(rmInv == "" && rmSkuTxt != "")
+			{
+				rmSkuUp = rmSkuTxt.toUpperCase();
+
+				if(unmappedIdBySku.get(rmSkuUp) == null)
+				{
+					rmFabU = ifnull(rmRow.Is_Fabric,"").toString().trim().toLowerCase();
+					unmappedIdBySku.put(rmSkuUp,rmRow.ID + "");
+
+					if(rmFabU == "true" || rmFabU == "yes" || rmFabU == "1" || rmFabU == "y")
+					{
+						unmappedFabBySku.put(rmSkuUp,"yes");
+					}
+					else
+					{
+						unmappedFabBySku.put(rmSkuUp,"no");
+					}
+				}
+			}
+
+			if(rmInv != "")
+			{
+				matByInv.put(rmInv,rmRow.ID + "");
+				skuByInv.put(rmInv,ifnull(rmRow.SKU,"").toString().trim());
+
+				// As TEXT, never against the boolean true. A Decision box gives a
+				// boolean, a yes/no dropdown gives the string "Yes", an untouched
+				// field gives EMPTY - and only the first matches == true. Reading
+				// it wrong sends fabric into Quantity, where the lots can never
+				// find it and no screen in the app reads it.
+				rmFab = ifnull(rmRow.Is_Fabric,"").toString().trim().toLowerCase();
+
+				if(rmFab == "true" || rmFab == "yes" || rmFab == "1" || rmFab == "y")
+				{
+					fabByInv.put(rmInv,"yes");
+				}
+				else
+				{
+					fabByInv.put(rmInv,"no");
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// The ledger, bounded by the same window. Three indexes off one scan:
+		// what each line has already taken in, which Creator row holds it, and
+		// which version of each document was last read.
+		//------------------------------------------------------------------
+		appliedByKey = Map();
+		rowIdByKey = Map();
+		modByDoc = Map();
+		keysByDoc = Map();
+		retryDocs = List();
+
+		for each  lgRow in Inventory_Inflow[Doc_Date >= cutoffDate]
+		{
+			lgDoc = ifnull(lgRow.Doc_ID,"").toString().trim();
+			lgLine = ifnull(lgRow.Line_ID,"").toString().trim();
+
+			if(lgDoc != "")
+			{
+				lgKey = lgDoc + "|" + lgLine;
+
+				//----------------------------------------------------------
+				// A DOCUMENT HOLDING UNFINISHED WORK MUST BE RE-OPENED EVEN
+				// THOUGH INVENTORY HAS NOT TOUCHED IT.
+				//
+				// Unmapped waits on somebody stamping Inventory_Item_ID;
+				// Blocked_Reduction waits on cloth coming back to Unallocated.
+				// Neither changes last_modified_time, so the unchanged-document
+				// shortcut below would skip them for ever and the line would sit
+				// unapplied with the ledger cheerfully saying it had been seen.
+				//----------------------------------------------------------
+				lgStat = ifnull(lgRow.Sync_Status,"").toString().trim();
+
+				if(lgStat == "Unmapped" || lgStat == "Blocked_Reduction")
+				{
+					if(!retryDocs.contains(lgDoc))
+					{
+						retryDocs.add(lgDoc);
+					}
+				}
+
+				lgAppS = ifnull(lgRow.Applied_Qty,"0").toString().trim();
+				if(lgAppS == "")
+				{
+					lgAppS = "0";
+				}
+
+				appliedByKey.put(lgKey,lgAppS.toDecimal());
+				rowIdByKey.put(lgKey,lgRow.ID + "");
+				modByDoc.put(lgDoc,ifnull(lgRow.Doc_Modified,"").toString().trim());
+
+				lgList = keysByDoc.get(lgDoc);
+				if(lgList == null)
+				{
+					lgList = List();
+				}
+				if(!lgList.contains(lgKey))
+				{
+					lgList.add(lgKey);
+				}
+				keysByDoc.put(lgDoc,lgList);
+			}
+		}
+
+		//------------------------------------------------------------------
+		// THE LIST. No date or sort parameter: a filter this org does not
+		// accept fails the whole call, and a failed call reads exactly like an
+		// endpoint that is not there. The window is applied in code instead,
+		// and fullPage below says when pagination has become necessary.
+		//------------------------------------------------------------------
+		listUrl = baseUrl + "purchasereceives?organization_id=" + orgId + "&per_page=200";
+		listKey = "purchasereceives";
+
+		if(inflowSource == "Bill")
+		{
+			listUrl = baseUrl + "bills?organization_id=" + orgId + "&per_page=200";
+			listKey = "bills";
+		}
+
+		//------------------------------------------------------------------
+		// ZOHO HANDS DATES BACK AS yyyy-MM-dd AND DELUGE HERE READS dd-MMM-yyyy.
+		//
+		// Not a formatting preference - toDate() is parsed against the org's own
+		// format, and the store widget already converts every date it sends into
+		// dd-MMM-yyyy for exactly this reason (toDeluge, app/js/main.js). An ISO
+		// string put through toDate() unconverted either throws or silently
+		// resolves to the wrong day, and a wrong day here means an arrival falls
+		// the wrong side of the cutover.
+		//
+		// Converted ONCE, in the list loop, and carried forward as dd-MMM-yyyy.
+		//------------------------------------------------------------------
+		monNames = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+
+		docIds = List();
+		docNoByDoc = Map();
+		docDateByDoc = Map();
+		docModByDoc = Map();
+		docLocByDoc = Map();
+
+		callsUsed = callsUsed + 1;
+		listResp = invokeurl
+		[
+			url :listUrl
+			type :GET
+			connection:"inventory_connection"
+		];
+
+		listCode = ifnull(listResp.get("code"),"-1").toString().trim();
+
+		if(listCode != "0")
+		{
+			errTxt = listKey + " code " + listCode + ": " + ifnull(listResp.get("message"),"").toString();
+		}
+		else
+		{
+			listRows = ifnull(listResp.get(listKey),List());
+			listedCount = listRows.size();
+
+			if(listedCount >= 200)
+			{
+				listNote = "The list came back full at 200 rows - pagination is now needed and the oldest documents on this page may be missing.";
+			}
+
+			for each  dRow in listRows
+			{
+				dId = "";
+				dNo = "";
+				dDateTxt = "";
+				dStatus = ifnull(dRow.get("status"),"").toString().trim().toLowerCase();
+
+				// A receive carries BOTH, and they answer different questions:
+				// status runs on to "billed" once the money side happens, so it
+				// stops saying whether the cloth arrived. received_status is the
+				// one that does. The probe's live receive read status "billed"
+				// with received_status "received".
+				dRcvStatus = ifnull(dRow.get("received_status"),"").toString().trim().toLowerCase();
+				dLoc = ifnull(dRow.get("location_id"),"").toString().trim();
+				dMod = ifnull(dRow.get("last_modified_time"),"").toString().trim();
+
+				if(inflowSource == "Bill")
+				{
+					dId = ifnull(dRow.get("bill_id"),"").toString().trim();
+					dNo = ifnull(dRow.get("bill_number"),"").toString().trim();
+					dDateTxt = ifnull(dRow.get("date"),"").toString().trim();
+				}
+				else
+				{
+					dId = ifnull(dRow.get("purchasereceive_id"),"").toString().trim();
+					dNo = ifnull(dRow.get("purchasereceive_number"),"").toString().trim();
+					dDateTxt = ifnull(dRow.get("receive_date"),"").toString().trim();
+				}
+
+				keep = true;
+
+				if(dId == "" || dDateTxt == "")
+				{
+					keep = false;
+				}
+
+				//----------------------------------------------------------
+				// yyyy-MM-dd -> dd-MMM-yyyy. A timestamp field would carry a
+				// time after the day, so only the first ten characters are
+				// read; substring is valid lowercase in Deluge and both
+				// spellings appear in this repo.
+				//----------------------------------------------------------
+				if(keep == true)
+				{
+					isoTxt = dDateTxt;
+					if(isoTxt.length() > 10)
+					{
+						isoTxt = isoTxt.substring(0,10);
+					}
+
+					isoParts = isoTxt.toList("-");
+
+					if(isoParts.size() != 3)
+					{
+						keep = false;
+						if(noteJson != "")
+						{
+							noteJson = noteJson + ",";
+						}
+						noteJson = noteJson + "\"" + dNo.replaceAll("\"","'") + ": could not read the date '" + dDateTxt.replaceAll("\"","'") + "' - skipped\"";
+					}
+					else
+					{
+						monIdx = isoParts.get(1).toString().toNumber() - 1;
+
+						if(monIdx < 0 || monIdx > 11)
+						{
+							keep = false;
+						}
+						else
+						{
+							dDateTxt = isoParts.get(2).toString() + "-" + monNames.get(monIdx) + "-" + isoParts.get(0).toString();
+						}
+					}
+				}
+
+				//----------------------------------------------------------
+				// AN IN-TRANSIT RECEIVE HAS NOT MOVED STOCK. Zoho holds it
+				// against the order until it is marked received; crediting it
+				// would put cloth on the rack that is on a lorry - the same
+				// distinction this app already makes between issue and receipt.
+				//
+				// A void or draft bill is the same case on the other branch.
+				//----------------------------------------------------------
+				if(keep == true && (dStatus == "in_transit" || dStatus == "draft" || dStatus == "void" || dStatus == "cancelled"))
+				{
+					keep = false;
+					skippedDocs = skippedDocs + 1;
+				}
+
+				// Tested only when the field is actually present. Requiring it
+				// outright would skip every document on a build of the API that
+				// does not send it, which is the failure that looks like the
+				// sync doing nothing at all.
+				if(keep == true && dRcvStatus != "" && dRcvStatus != "received")
+				{
+					keep = false;
+					skippedDocs = skippedDocs + 1;
+				}
+
+				if(keep == true)
+				{
+					// Relational operators work on dates - settled on the Deluge
+					// tryout, and the same comparison createProductionPlans makes
+					// on Plan_Start_Date.
+					dDate = dDateTxt.toDate();
+
+					if(dDate < cutoffDate)
+					{
+						keep = false;
+					}
+				}
+
+				if(keep == true)
+				{
+					// Nothing changed since the ledger last read this document,
+					// so it costs no call. This test is what keeps a run at one
+					// call however long the purchase history gets.
+					seenMod = ifnull(modByDoc.get(dId),"").toString();
+
+					if(seenMod != "" && seenMod == dMod && !retryDocs.contains(dId))
+					{
+						keep = false;
+						unchangedDocs = unchangedDocs + 1;
+					}
+				}
+
+				if(keep == true)
+				{
+					if(docIds.size() >= maxDetail)
+					{
+						// No reliable break in a for each - counted and left for
+						// the next run rather than pushed through this one.
+						deferredDocs = deferredDocs + 1;
+					}
+					else
+					{
+						docIds.add(dId);
+						docNoByDoc.put(dId,dNo);
+						docDateByDoc.put(dId,dDateTxt);
+						docModByDoc.put(dId,dMod);
+						docLocByDoc.put(dId,dLoc);
+					}
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// The documents that have moved. One call each, and only these.
+		//------------------------------------------------------------------
+		for each  wDoc in docIds
+		{
+			if(errTxt == "")
+			{
+				detUrl = baseUrl + "purchasereceives/" + wDoc + "?organization_id=" + orgId;
+				detKey = "purchasereceive";
+
+				if(inflowSource == "Bill")
+				{
+					detUrl = baseUrl + "bills/" + wDoc + "?organization_id=" + orgId;
+					detKey = "bill";
+				}
+
+				callsUsed = callsUsed + 1;
+				detResp = invokeurl
+				[
+					url :detUrl
+					type :GET
+					connection:"inventory_connection"
+				];
+
+				if(ifnull(detResp.get("code"),"-1").toString().trim() != "0")
+				{
+					// Reported, not fatal. One unreadable document must not stop
+					// the others landing, and it will be retried next run because
+					// its ledger rows were never written.
+					if(noteJson != "")
+					{
+						noteJson = noteJson + ",";
+					}
+					noteJson = noteJson + "\"" + ifnull(docNoByDoc.get(wDoc),wDoc).toString().replaceAll("\"","'") + ": detail call failed, left for the next run\"";
+				}
+				else
+				{
+					detBlock = detResp.get(detKey);
+
+					if(detBlock != null)
+					{
+						detailCount = detailCount + 1;
+
+						docNoTxt = ifnull(docNoByDoc.get(wDoc),"").toString();
+						docDateTxt = ifnull(docDateByDoc.get(wDoc),"").toString();
+						docModTxt = ifnull(docModByDoc.get(wDoc),"").toString();
+						docLocTxt = ifnull(docLocByDoc.get(wDoc),"").toString();
+
+						// The header carries the location on a receive; a bill
+						// has none, so the line's warehouse is read instead
+						// further down and this stays empty.
+						if(docLocTxt == "")
+						{
+							docLocTxt = ifnull(detBlock.get("location_id"),"").toString().trim();
+						}
+
+						// No pre-cutover test here: cutoffDate is never earlier
+						// than cutoverDate, so anything that reached this point
+						// is already on the right side of it.
+						docDate = docDateTxt.toDate();
+
+						seenKeys = List();
+
+						for each  dLine in ifnull(detBlock.get("line_items"),List())
+						{
+							lineId = ifnull(dLine.get("line_item_id"),"").toString().trim();
+							invItem = ifnull(dLine.get("item_id"),"").toString().trim();
+
+							lQtyS = ifnull(dLine.get("quantity"),"0").toString().trim();
+							if(lQtyS == "")
+							{
+								lQtyS = "0";
+							}
+							docQty = lQtyS.toDecimal();
+
+							lineKey = wDoc + "|" + lineId;
+							seenKeys.add(lineKey);
+
+							haveS = ifnull(appliedByKey.get(lineKey),"0").toString().trim();
+							if(haveS == "")
+							{
+								haveS = "0";
+							}
+							haveQty = haveS.toDecimal();
+
+							creatorMat = ifnull(matByInv.get(invItem),"").toString();
+							isFabTxt = ifnull(fabByInv.get(invItem),"").toString();
+							skuTxt = ifnull(skuByInv.get(invItem),"").toString();
+
+							lineLoc = ifnull(dLine.get("warehouse_id"),"").toString().trim();
+							if(lineLoc == "")
+							{
+								lineLoc = docLocTxt;
+							}
+
+							//==================================================
+							// A PURCHASED ITEM CREATOR HAS NEVER HEARD OF.
+							//
+							// Without this the store is blocked on somebody
+							// noticing an Unmapped ledger row and hand-building a
+							// Raw_Material before any of that cloth can be given
+							// a tone. Purchasing buys new materials routinely, so
+							// that is the normal case, not the exception.
+							//
+							// It resolves in three ways, in this order, and only
+							// the last one writes a new record:
+							//
+							//   1. A Raw_Material already carries this SKU but no
+							//      Inventory_Item_ID. Stamp it and use it. This
+							//      is the mapInventoryItemIds case arriving one
+							//      material at a time, and creating a second row
+							//      here would split one material in two - two
+							//      SKUs, two stock balances, and every BOM
+							//      pointing at the empty one.
+							//   2. Inventory says it is not raw material. Refuse.
+							//   3. Create it.
+							//
+							// ONE EXTRA CALL, ONCE PER NEW ITEM EVER. custom_fields
+							// only comes back on the single-item read, and the
+							// item is only read when the id is unknown.
+							//==================================================
+							//
+							// Which way this line ends. Set BEFORE the auto-create
+							// below, not after it - the auto-create writes lineNote
+							// and can flip isFabTxt, and initialising afterwards
+							// wiped both. targetTxt is therefore decided further
+							// down, once isFabTxt is final.
+							statusTxt = "Applied";
+							targetTxt = "Quantity";
+							wantDelta = docQty - haveQty;
+							moveQty = wantDelta;
+							lineNote = "";
+							notRawItem = false;
+
+							if(creatorMat == "" && autoCreate == true)
+							{
+								callsUsed = callsUsed + 1;
+
+								itmResp = invokeurl
+								[
+									url :baseUrl + "items/" + invItem + "?organization_id=" + orgId
+									type :GET
+									connection:"inventory_connection"
+								];
+
+								if(ifnull(itmResp.get("code"),"-1").toString().trim() != "0")
+								{
+									lineNote = "Could not read Inventory item " + invItem + " to create it: " + ifnull(itmResp.get("message"),"").toString();
+								}
+								else
+								{
+									itmBlock = itmResp.get("item");
+
+									if(itmBlock != null)
+									{
+										newSku = ifnull(itmBlock.get("sku"),"").toString().trim();
+										newName = ifnull(itmBlock.get("name"),"").toString().trim();
+										newUnit = ifnull(itmBlock.get("unit"),"").toString().trim();
+
+										//------------------------------------------
+										// READ BY customfield_id, NEVER BY LABEL.
+										// Renaming the field in Inventory would
+										// otherwise unclassify every item at once,
+										// and the first symptom is purchases quietly
+										// no longer landing. Settled as A3 in
+										// inventory-integration.md.
+										//------------------------------------------
+										cvProduct = "";
+										cvType = "";
+										cvWidth = "";
+										cvGsm = "";
+										cvQuality = "";
+										cvPattern = "";
+										cvColor = "";
+
+										for each  cfRow in ifnull(itmBlock.get("custom_fields"),List())
+										{
+											cfId = ifnull(cfRow.get("customfield_id"),"").toString().trim();
+											cfVal = ifnull(cfRow.get("value"),"").toString().trim();
+
+											if(cfId != "" && cfId == cfProductType)
+											{
+												cvProduct = cfVal;
+											}
+											if(cfId != "" && cfId == cfTypeField)
+											{
+												cvType = cfVal;
+											}
+											if(cfId != "" && cfId == cfFabricWidth)
+											{
+												cvWidth = cfVal;
+											}
+											if(cfId != "" && cfId == cfGsmField)
+											{
+												cvGsm = cfVal;
+											}
+											if(cfId != "" && cfId == cfQualityField)
+											{
+												cvQuality = cfVal;
+											}
+											if(cfId != "" && cfId == cfPatternField)
+											{
+												cvPattern = cfVal;
+											}
+											if(cfId != "" && cfId == cfColorField)
+											{
+												cvColor = cfVal;
+											}
+										}
+
+										//------------------------------------------
+										// 1. ALREADY IN CREATOR UNDER THIS SKU.
+										//------------------------------------------
+										bySku = "";
+										bySkuFab = "no";
+
+										if(newSku != "")
+										{
+											skuUp = newSku.toUpperCase();
+											bySku = ifnull(unmappedIdBySku.get(skuUp),"").toString();
+											bySkuFab = ifnull(unmappedFabBySku.get(skuUp),"no").toString();
+										}
+
+										// contains, not ==, and deliberately: the
+										// Type field carries both "Fabric" and
+										// "Printed fabric" and both ARE fabric. This
+										// is not the stage-name case where substrings
+										// collide - there are two values and one is
+										// inside the other by design.
+										isFabNew = false;
+
+										if(cvType.toLowerCase().contains("fabric"))
+										{
+											isFabNew = true;
+										}
+
+										if(bySku != "")
+										{
+											if(writeAllowed == true)
+											{
+												for each  rmStamp in Raw_Material[ID == bySku.toLong()]
+												{
+													rmStamp.Inventory_Item_ID = invItem;
+												}
+											}
+
+											creatorMat = bySku;
+											skuTxt = newSku;
+											isFabTxt = bySkuFab;
+											matByInv.put(invItem,bySku);
+											skuByInv.put(invItem,newSku);
+											fabByInv.put(invItem,bySkuFab);
+
+											// Off the unmapped index too, or a second
+											// Inventory item with the same SKU would
+											// be pointed at the same material.
+											unmappedIdBySku.remove(newSku.toUpperCase());
+											mappedNow = mappedNow + 1;
+											lineNote = "Raw_Material " + newSku + " already existed and carried no Inventory_Item_ID - stamped it rather than creating a second material.";
+										}
+										else if(cfProductType == "")
+										{
+											lineNote = "Cannot classify Inventory item " + invItem + ": cfProductType is not set. Run probeItemCustomFields and put the customfield_id at the top of this function.";
+										}
+										else if(cvProduct == "")
+										{
+											lineNote = "Inventory item " + invItem + " (" + newSku + ") has no Product Type set, so there is nothing saying it is raw material. Set it in Inventory and this lands on the next run.";
+										}
+										else if(cvProduct.toLowerCase() != "raw material")
+										{
+											notRawItem = true;
+											lineNote = "Inventory item " + invItem + " (" + newSku + ") is Product Type '" + cvProduct + "', not Raw Material. A finished good belongs to Item_Master, and creating it here would put it on the store's issue screen as cloth.";
+										}
+										else if(newSku == "")
+										{
+											lineNote = "Inventory item " + invItem + " has no SKU. SKU is the join key everywhere in this app and a Raw_Material without one cannot be found again - set it in Inventory and this lands on the next run.";
+										}
+										else if(newName == "")
+										{
+											lineNote = "Inventory item " + invItem + " has no name, and Name is mandatory on Raw_Material.";
+										}
+										else
+										{
+											//----------------------------------
+											// 3. MINT IT. Same field list
+											// sendToPrint uses, and Name is in
+											// the block because it is MANDATORY -
+											// setting it after the insert fails
+											// the whole block with a message
+											// reported thirty lines away.
+											//
+											// Every quantity starts at zero. The
+											// arrival is applied by the ordinary
+											// path below, so a material minted
+											// here and one mapped by hand land
+											// their stock through exactly the
+											// same code.
+											//----------------------------------
+											wNew = 0.0;
+
+											if(cvWidth != "")
+											{
+												wNew = cvWidth.toDecimal();
+											}
+
+											gNew = 0.0;
+
+											if(cvGsm != "")
+											{
+												gNew = cvGsm.toDecimal();
+											}
+
+											// A DRY RUN LEAVES creatorMat AS "0", not as
+											// a made-up id. Raw_Material[ID == 0]
+											// matches nothing, so the reads below
+											// find zero on hand and no write is
+											// attempted - where a placeholder string
+											// would throw on .toLong() and take the
+											// whole run down.
+											if(writeAllowed == true)
+											{
+												newMatId = insert into Raw_Material
+												[
+													Name=newName
+													Material_Display_Name=newName
+													SKU=newSku
+													Is_Fabric=isFabNew
+													Type_field=cvType
+													Pattern=cvPattern
+													Color=cvColor
+													Quality=cvQuality
+													Unit=newUnit
+													Fabric_Width_Inches=wNew
+													Fabric_Gsm=gNew
+													Inventory_Item_ID=invItem
+													Quantity=0
+													Wash_Quantity=0
+													Unwash_Quantity=0
+													In_Wash_Qty=0
+													In_Print_Qty=0
+													In_Transit_Qty=0
+													Disputed_Qty=0
+													Unallocated_Qty=0
+													Added_User=zoho.loginuser
+												];
+
+												creatorMat = newMatId.toString();
+											}
+											else
+											{
+												creatorMat = "0";
+											}
+
+											skuTxt = newSku;
+											createdMats = createdMats + 1;
+
+											if(isFabNew == true)
+											{
+												isFabTxt = "yes";
+											}
+											else
+											{
+												isFabTxt = "no";
+											}
+
+											if(writeAllowed == true)
+											{
+												matByInv.put(invItem,creatorMat);
+												skuByInv.put(invItem,newSku);
+												fabByInv.put(invItem,isFabTxt);
+											}
+
+											lineNote = "Raw_Material " + newSku + " created automatically from Inventory.";
+
+											//----------------------------------
+											// A FABRIC WITH NO WIDTH IS NOT A
+											// REASON TO REFUSE THE CLOTH - it is
+											// really on the rack and saying so is
+											// right. But the cut maths divides by
+											// the width, so it has to be filled in
+											// before this material can be planned.
+											// Said here and in the run report,
+											// because nothing downstream will.
+											//----------------------------------
+											if(isFabNew == true && wNew <= 0)
+											{
+												lineNote = lineNote + " NO FABRIC WIDTH - the cut calculation needs Fabric_Width_Inches and this material cannot be planned until it is set by hand.";
+												widthMissing = widthMissing + 1;
+
+												if(noteJson != "")
+												{
+													noteJson = noteJson + ",";
+												}
+												noteJson = noteJson + "\"" + newSku.replaceAll("\"","'") + " was created as fabric with NO width - set Fabric_Width_Inches before it is used in a BOM\"";
+											}
+										}
+									}
+								}
+							}
+
+							//--------------------------------------------------
+							// A BILL LINE THAT NAMES A RECEIVE HAS ALREADY MOVED
+							// STOCK. It can only appear when inflowSource says
+							// Bill while the org is in fact using receives -
+							// i.e. the setting changed underneath this constant.
+							// Applying it would double every arrival, so it is
+							// refused and named rather than trusted.
+							//--------------------------------------------------
+							dupRcv = ifnull(dLine.get("receive_item_id"),"").toString().trim();
+
+							if(isFabTxt == "yes")
+							{
+								targetTxt = "Unallocated";
+							}
+
+							if(creatorMat == "" && notRawItem == true)
+							{
+								//------------------------------------------
+								// NOT RAW MATERIAL, AND NEVER RETRIED.
+								// Unmapped re-opens its document every run
+								// because it is waiting on somebody. This is
+								// not waiting on anybody - Inventory has
+								// answered, and the answer is that this is not
+								// the store's cloth. Retrying it would open the
+								// document and read the item for ever.
+								//------------------------------------------
+								statusTxt = "Skipped_Not_Raw_Material";
+								moveQty = 0;
+								notRawLines = notRawLines + 1;
+							}
+							else if(creatorMat == "")
+							{
+								statusTxt = "Unmapped";
+								moveQty = 0;
+
+								// Whatever the auto-create found is far more use
+								// than the generic line, so it is only used when
+								// nothing else was said.
+								if(lineNote == "")
+								{
+									lineNote = "No Raw_Material carries Inventory_Item_ID " + invItem + " - map it and this lands on the next run.";
+								}
+
+								unmappedLines = unmappedLines + 1;
+							}
+							else if(inflowSource == "Bill" && dupRcv != "")
+							{
+								statusTxt = "Skipped_Duplicate";
+								moveQty = 0;
+								lineNote = "This bill line came from purchase receive item " + dupRcv + ", which already moved the stock. inflowSource says Bill but this org is using receives - check probePurchaseInflow again.";
+								skippedLines = skippedLines + 1;
+							}
+
+							//--------------------------------------------------
+							// A REDUCTION STOPS AT ZERO AND NEVER TOUCHES A LOT.
+							//
+							// Once the store person has given cloth a tone it is
+							// in a lot, and which lot loses metres when a receive
+							// is corrected downwards is a decision only he can
+							// make - he can see the rack. Taking it off a lot
+							// here would be the system choosing a tone, which is
+							// the one thing lots exist to prevent.
+							//
+							// So the reduction takes what Unallocated_Qty still
+							// holds and the remainder is recorded at
+							// Blocked_Reduction for a person to settle. The
+							// ledger keeps the unapplied part, so nothing is
+							// quietly forgotten and reconcileRawMaterial will
+							// name the SKU.
+							//--------------------------------------------------
+							haveNow = 0.0;
+
+							if(statusTxt == "Applied" && moveQty != 0)
+							{
+								for each  rmRead in Raw_Material[ID == creatorMat.toLong()]
+								{
+									if(targetTxt == "Unallocated")
+									{
+										rdS = ifnull(rmRead.Unallocated_Qty,"0").toString().trim();
+									}
+									else
+									{
+										rdS = ifnull(rmRead.Quantity,"0").toString().trim();
+									}
+									if(rdS == "")
+									{
+										rdS = "0";
+									}
+									haveNow = rdS.toDecimal();
+								}
+
+								if(moveQty < 0 && (haveNow + moveQty) < 0)
+								{
+									shortfallQty = 0 - (haveNow + moveQty);
+									moveQty = 0 - haveNow;
+									statusTxt = "Blocked_Reduction";
+
+									whereGone = "has already been put into lots and must be taken off one by hand";
+									if(targetTxt == "Quantity")
+									{
+										whereGone = "has already been issued or consumed and must be corrected by hand";
+									}
+
+									lineNote = "Corrected downwards by " + (0 - wantDelta) + " but only " + haveNow + " was still available to take back. " + shortfallQty + " " + whereGone + ".";
+									blockedLines = blockedLines + 1;
+								}
+							}
+
+							if(writeAllowed == true && statusTxt != "Unmapped" && moveQty != 0)
+							{
+								for each  rmUpd in Raw_Material[ID == creatorMat.toLong()]
+								{
+									if(targetTxt == "Unallocated")
+									{
+										uwS = ifnull(rmUpd.Unallocated_Qty,"0").toString().trim();
+										if(uwS == "")
+										{
+											uwS = "0";
+										}
+										rmUpd.Unallocated_Qty = uwS.toDecimal() + moveQty;
+									}
+									else
+									{
+										qwS = ifnull(rmUpd.Quantity,"0").toString().trim();
+										if(qwS == "")
+										{
+											qwS = "0";
+										}
+										rmUpd.Quantity = qwS.toDecimal() + moveQty;
+									}
+								}
+							}
+
+							if(moveQty != 0)
+							{
+								appliedLines = appliedLines + 1;
+
+								if(targetTxt == "Unallocated")
+								{
+									netFabric = netFabric + moveQty;
+								}
+								else
+								{
+									netOther = netOther + moveQty;
+								}
+							}
+
+							newApplied = haveQty + moveQty;
+
+							if(writeAllowed == true)
+							{
+								existRow = ifnull(rowIdByKey.get(lineKey),"").toString();
+
+								if(existRow != "")
+								{
+									for each  lgUpd in Inventory_Inflow[ID == existRow.toLong()]
+									{
+										lgUpd.Doc_Qty = docQty;
+										lgUpd.Applied_Qty = newApplied;
+										lgUpd.Doc_Modified = docModTxt;
+										lgUpd.Sync_Status = statusTxt;
+										lgUpd.Note = lineNote;
+									}
+								}
+								else
+								{
+									// No comment may appear inside this field list -
+									// the block is parsed specially and a // line in
+									// it is a syntax error reported against the
+									// function's opening try, thousands of lines away.
+									newLg = insert into Inventory_Inflow
+									[
+										Doc_Type=inflowSource
+										Doc_ID=wDoc
+										Doc_No=docNoTxt
+										Doc_Date=docDate
+										Doc_Modified=docModTxt
+										Line_ID=lineId
+										Inventory_Item_ID=invItem
+										Doc_Qty=docQty
+										Applied_Qty=newApplied
+										Target=targetTxt
+										Location_ID=lineLoc
+										Sync_Status=statusTxt
+										Note=lineNote
+										Added_User=zoho.loginuser
+									];
+
+									// The lookup goes on after the insert - a null
+									// cannot go into the block, and an unmapped line
+									// legitimately has no material behind it.
+									if(creatorMat != "")
+									{
+										for each  lgNew in Inventory_Inflow[ID == newLg.toLong()]
+										{
+											lgNew.Material = creatorMat.toLong();
+										}
+									}
+								}
+							}
+
+							if(rowsJson != "")
+							{
+								rowsJson = rowsJson + ",";
+							}
+
+							// Free text through the whole chain, not just the
+							// quote. A raw newline inside a JSON string literal is
+							// invalid JSON and Deluge does not throw on it - the
+							// widget gets "bad control character" and nothing
+							// renders.
+							rowsJson = rowsJson + "{\"doc\":\"" + docNoTxt.replaceAll("\"","'") + "\",\"date\":\"" + docDateTxt + "\",\"sku\":\"" + skuTxt.replaceAll("\"","'") + "\",\"itemId\":\"" + invItem + "\",\"target\":\"" + targetTxt + "\",\"docQty\":" + docQty + ",\"alreadyApplied\":" + haveQty + ",\"applying\":" + moveQty + ",\"status\":\"" + statusTxt + "\",\"note\":\"" + lineNote.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
+						}
+
+						//------------------------------------------------------
+						// A LINE THE DOCUMENT NO LONGER HAS. Deleting a line off
+						// a receive is a correction like any other, and the only
+						// place it exists is as a ledger key with nothing
+						// matching it. Reversed by exactly what it took in.
+						//------------------------------------------------------
+						oldKeys = keysByDoc.get(wDoc);
+
+						if(oldKeys != null)
+						{
+							for each  oldKey in oldKeys
+							{
+								gonRow = ifnull(rowIdByKey.get(oldKey),"").toString().trim();
+
+								// Guarded on the row id as well as the key. An
+								// empty id makes .toLong() throw "Error while
+								// fetching record", which says nothing about the
+								// real problem.
+								if(!seenKeys.contains(oldKey) && gonRow != "")
+								{
+									backS = ifnull(appliedByKey.get(oldKey),"0").toString().trim();
+									if(backS == "")
+									{
+										backS = "0";
+									}
+									backQty = backS.toDecimal();
+
+									gonMat = "";
+									gonTarget = "Quantity";
+
+									for each  gonRead in Inventory_Inflow[ID == gonRow.toLong()]
+									{
+										gonMat = ifnull(gonRead.Material,"").toString().trim();
+
+										// ifnull does not catch EMPTY, and a
+										// Target read as "" would send a fabric
+										// reversal at Quantity, which nothing
+										// reads and which leaves Unallocated_Qty
+										// overstated for ever.
+										gonTgtTxt = ifnull(gonRead.Target,"").toString().trim();
+										if(gonTgtTxt != "")
+										{
+											gonTarget = gonTgtTxt;
+										}
+									}
+
+									gonMove = 0.0;
+
+									if(backQty > 0 && gonMat != "")
+									{
+										gonHave = 0.0;
+
+										for each  gonMatRead in Raw_Material[ID == gonMat.toLong()]
+										{
+											if(gonTarget == "Unallocated")
+											{
+												ghS = ifnull(gonMatRead.Unallocated_Qty,"0").toString().trim();
+											}
+											else
+											{
+												ghS = ifnull(gonMatRead.Quantity,"0").toString().trim();
+											}
+											if(ghS == "")
+											{
+												ghS = "0";
+											}
+											gonHave = ghS.toDecimal();
+										}
+
+										gonMove = backQty;
+										if(gonMove > gonHave)
+										{
+											gonMove = gonHave;
+										}
+
+										if(writeAllowed == true && gonMove > 0)
+										{
+											for each  gonUpd in Raw_Material[ID == gonMat.toLong()]
+											{
+												if(gonTarget == "Unallocated")
+												{
+													guS = ifnull(gonUpd.Unallocated_Qty,"0").toString().trim();
+													if(guS == "")
+													{
+														guS = "0";
+													}
+													gonUpd.Unallocated_Qty = guS.toDecimal() - gonMove;
+												}
+												else
+												{
+													gqS = ifnull(gonUpd.Quantity,"0").toString().trim();
+													if(gqS == "")
+													{
+														gqS = "0";
+													}
+													gonUpd.Quantity = gqS.toDecimal() - gonMove;
+												}
+											}
+										}
+									}
+
+									gonStatus = "Applied";
+									gonNote = "The line was removed from " + ifnull(docNoByDoc.get(wDoc),wDoc).toString() + " - what it had taken in was reversed.";
+
+									if(gonMove < backQty)
+									{
+										gonStatus = "Blocked_Reduction";
+										gonNote = "The line was removed from " + ifnull(docNoByDoc.get(wDoc),wDoc).toString() + " but only " + gonMove + " of " + backQty + " was still unallocated. The rest is in lots and must be taken off one by hand.";
+										blockedLines = blockedLines + 1;
+									}
+
+									if(writeAllowed == true)
+									{
+										for each  gonWrite in Inventory_Inflow[ID == gonRow.toLong()]
+										{
+											gonWrite.Doc_Qty = 0;
+											gonWrite.Applied_Qty = backQty - gonMove;
+											gonWrite.Doc_Modified = ifnull(docModByDoc.get(wDoc),"").toString();
+											gonWrite.Sync_Status = gonStatus;
+											gonWrite.Note = gonNote;
+										}
+									}
+
+									if(gonMove > 0)
+									{
+										reversedLines = reversedLines + 1;
+
+										if(gonTarget == "Unallocated")
+										{
+											netFabric = netFabric - gonMove;
+										}
+										else
+										{
+											netOther = netOther - gonMove;
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if(listNote != "")
+		{
+			if(noteJson != "")
+			{
+				noteJson = noteJson + ",";
+			}
+			noteJson = noteJson + "\"" + listNote + "\"";
+		}
+
+		errJson = "";
+		if(errTxt != "")
+		{
+			errJson = "\"" + errTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ") + "\"";
+		}
+
+		info "syncPurchaseInflow | dryRun=" + dryTxtOut + " source=" + inflowSource + " listed=" + listedCount + " opened=" + detailCount + " appliedLines=" + appliedLines + " reversed=" + reversedLines + " unmapped=" + unmappedLines + " blocked=" + blockedLines + " created=" + createdMats + " stamped=" + mappedNow + " notRaw=" + notRawLines + " noWidth=" + widthMissing + " calls=" + callsUsed;
+
+		// Built by hand - Map.toString() does not emit valid JSON once the
+		// structure nests, and List.toString() does not wrap in [].
+		res = "{\"errors\":[" + errJson + "],\"dryRun\":" + dryTxtOut + ",\"source\":\"" + inflowSource + "\",\"callsUsed\":" + callsUsed + ",\"listed\":" + listedCount + ",\"opened\":" + detailCount + ",\"unchanged\":" + unchangedDocs + ",\"skippedDocs\":" + skippedDocs + ",\"skippedLines\":" + skippedLines + ",\"deferred\":" + deferredDocs + ",\"appliedLines\":" + appliedLines + ",\"reversedLines\":" + reversedLines + ",\"unmappedLines\":" + unmappedLines + ",\"blockedLines\":" + blockedLines + ",\"materialsCreated\":" + createdMats + ",\"materialsStamped\":" + mappedNow + ",\"notRawMaterialLines\":" + notRawLines + ",\"createdWithoutWidth\":" + widthMissing + ",\"netToUnallocated\":" + netFabric + ",\"netToQuantity\":" + netOther + ",\"notes\":[" + noteJson + "],\"lines\":[" + rowsJson + "]}";
+	}
+	catch (e)
+	{
+		// Creator reports every runtime failure as a generic code 9430, so the
+		// real message has to travel back inside the payload.
+		errTxt = "DELUGE: " + e.toString();
+	}
+
+	// ONE EXIT, AT THE BOTTOM. Deluge's "all paths return" check does not count
+	// a return that lives inside try/catch, and a function whose every return
+	// sits in the try fails to save with "Missing return statement" reported
+	// against the first line of the body. Same shape as issueMaterials.
+	if(res == "")
+	{
+		if(errTxt == "")
+		{
+			errTxt = "Nothing ran";
+		}
+		res = "{\"errors\":[\"" + errTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ") + "\"]}";
+	}
+
+	return res;
+}

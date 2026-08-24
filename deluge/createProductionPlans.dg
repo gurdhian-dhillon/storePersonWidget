@@ -73,19 +73,144 @@ string createProductionPlans()
 	// Oldest first - an order that has been waiting longest gets planned first,
 	// and that ordering carries through to the store's issue screen, where it is
 	// the priority for allocating scarce offcuts.
-	pendingOrders = Sales_Order[Order_Status == "Pending"] sort by Added_Time;
+	//------------------------------------------------------------------------
+	// A CAPPED BATCH, and the cap is the whole point of this block.
+	//
+	// This drained the ENTIRE queue in one execution. Per order the run does
+	// roughly 115 record operations - one Production_Planning, ~5 Plan_Item,
+	// ~30 Material_Requirement, and every insert followed by a re-query
+	// because a null lookup inside an insert block throws. So a backlog of 500
+	// orders, which is one Shopify import or one weekend of a dead scheduler,
+	// is around 57,000 operations in a single script.
+	//
+	// The statement-execution limit is NOT catchable. It kills the run
+	// outright, so there is no error card, no summary mail and no log line -
+	// the failure is indistinguishable from "the scheduler never fired".
+	//
+	// CAPPING IS SAFE BECAUSE THE RESUME PATH ALREADY EXISTS. An order that
+	// already has a plan is detected below and moved out of Pending, so the
+	// next run passes over it for one query. A backlog drains across several
+	// runs instead of killing one, and nothing is planned twice.
+	//
+	// THE TOTAL IS COUNTED BEFORE THE CAP. Reporting the capped number would
+	// log "25 waiting" for ever while the real backlog grew behind it, which
+	// is the one thing this log line exists to make visible.
+	//
+	// TWO LIMITS, NOT ONE, AND THE SECOND ONE EXISTS TO PREVENT STARVATION.
+	//
+	// A rejected order KEEPS Order_Status "Pending" - that is the retry, and it
+	// is deliberate (see the note at the reject below). So an order that can
+	// never be planned, because its item has no BOM or its source has no
+	// Order_Assignment rule, stays in this queue for ever until a human fixes
+	// it. Sorted oldest first, those stuck orders sit at the FRONT of the
+	// window on every single run.
+	//
+	// A single cap of 25 would therefore be spent re-rejecting the same 25
+	// hopeless orders, and no new order would ever be planned again. That is
+	// not a remote case: missing BOMs across a 20-25k SKU catalogue is the
+	// normal launch condition, and one missing supervisor rule rejects every
+	// order from that source.
+	//
+	// So the SCAN is wide and the BUDGET is what is capped. A rejection costs a
+	// handful of queries and does not spend the budget, so the loop walks past
+	// any number of stuck orders to reach the plannable ones behind them. Only
+	// a plan actually created counts against maxPerRun, and that is where the
+	// ~115 record operations per order are.
+	//------------------------------------------------------------------------
+	maxPerRun = 25;
+	scanLimit = 100;
+	deferredCount = 0;
+
 	// count(), not size() - size() is a List method and this is a query result.
-	logLines.add("Sales Orders waiting to be planned: " + pendingOrders.count());
-	allPlansDesc = Production_Planning[ID != 0] sort by Added_Time desc;
+	pendingTotal = Sales_Order[Order_Status == "Pending"].count();
+
+	pendingOrders = Sales_Order[Order_Status == "Pending"] sort by Added_Time range from 1 to scanLimit;
+
+	logLines.add("Sales Orders waiting to be planned: " + pendingTotal);
+
+	if(pendingTotal > maxPerRun)
+	{
+		logLines.add("Scanning the oldest " + scanLimit + " of them, planning at most " + maxPerRun + " this run.");
+	}
+	// THE TEN NEWEST, NEVER ALL OF THEM. This used to fetch every plan ever
+	// created and sort the lot to read one integer off the first row - the
+	// worst shape in the app, on the hot path of the function that creates all
+	// the work. The statement-execution limit is NOT catchable, so this would
+	// have died with a bare 500 and no error card.
+	//
+	// Ten rather than one, and the MAX rather than the first: a plan whose
+	// Plan_No never landed used to take the whole planner down with it -
+	// lastIndexOf("-") returns -1 on an empty string, substring(0) gives "",
+	// and "".toLong() throws. Now such a row is simply skipped and the run
+	// numbers off the newest plan that has a number.
+	//
+	// Sorted by Added_Time, not by Plan_No: a text sort would put PLAN-100000
+	// below PLAN-99999 once the width changed, which is the bug the voucher
+	// numberer in issueMaterials already guards against the same way.
+	allPlansDesc = Production_Planning[ID != 0] sort by Added_Time desc range from 1 to 10;
 	maxNum = 0;
 	for each  lp in allPlansDesc
 	{
-		lastNo = lp.Plan_No;
-		maxNum = lastNo.substring(lastNo.lastIndexOf("-") + 1).toLong();
-		break;
+		// There is no reliable break in a Deluge for-each, so this walks all
+		// ten and keeps the largest instead of stopping at the first.
+		lastNo = ifnull(lp.Plan_No,"").toString().trim();
+		if(lastNo != "" && lastNo.indexOf("-") >= 0)
+		{
+			thisNum = lastNo.substring(lastNo.lastIndexOf("-") + 1).toLong();
+			if(thisNum > maxNum)
+			{
+				maxNum = thisNum;
+			}
+		}
 	}
+	//------------------------------------------------------------------------
+	// THE SUPERVISOR RULES, READ ONCE.
+	//
+	// This was Order_Assignment[Order_Source == orderSource] inside the order
+	// loop below - a query whose only input is the order's SOURCE, of which
+	// there are four (Shopify / Faire / Custom / PR). One per order meant 500
+	// queries to answer four questions.
+	//
+	// Order_Assignment is a rule table: one row per source, master data by any
+	// reading, so fetching it whole is the exception the scaling rules allow.
+	//
+	// FIRST ROW PER SOURCE WINS, which is what .Employee.getAll().get(0) did.
+	// Both walk in id order, so a source carrying two rules resolves to the
+	// same employee it resolved to before.
+	//
+	// A rule with an EMPTY Order_Source is skipped, exactly as the criteria
+	// query skipped it - a Creator comparison matches no empty field in either
+	// direction, so such a row could never have been found by the old code.
+	//------------------------------------------------------------------------
+	assignBySource = Map();
+
+	for each  oaRec in Order_Assignment[ID != 0]
+	{
+		oaSrc = ifnull(oaRec.Order_Source,"").toString().trim();
+
+		if(oaSrc != "" && oaRec.Employee != null && assignBySource.get(oaSrc) == null)
+		{
+			assignBySource.put(oaSrc,oaRec.Employee);
+		}
+	}
+
 	for each  so in pendingOrders
 	{
+		try
+		{
+		// THE BUDGET GUARD. There is no reliable break in a Deluge for each, so
+		// the body is guarded instead - the same shape postTransferOrders uses.
+		//
+		// Left Pending and untouched, so the next run takes it from the front of
+		// the queue. Counted separately from a REJECT: nothing is wrong with
+		// this order, it simply did not fit in this run, and reporting it as a
+		// failure would send the admin chasing a problem that does not exist.
+		if(createdCount >= maxPerRun)
+		{
+			deferredCount = deferredCount + 1;
+			continue;
+		}
+
 		soId = so.ID;
 		existingIds = Production_Planning[Sales_Order == soId].ID.getAll();
 		if(existingIds.size() > 0)
@@ -125,11 +250,8 @@ string createProductionPlans()
 		assignedEmpId = null;
 		if(orderSource != null && orderSource != "")
 		{
-			ruleEmps = Order_Assignment[Order_Source == orderSource].Employee.getAll();
-			if(ruleEmps.size() > 0)
-			{
-				assignedEmpId = ruleEmps.get(0);
-			}
+			// Read off the map built once above, not queried per order.
+			assignedEmpId = assignBySource.get(orderSource.toString().trim());
 		}
 		if(assignedEmpId == null)
 		{
@@ -509,7 +631,56 @@ string createProductionPlans()
 			supPush.put("pieces",totalProduceQty);
 			supervisorPushList.add(supPush);
 		}
+		}
+		catch (eOrder)
+		{
+			// ONE ORDER MUST NEVER TAKE THE RUN DOWN WITH IT.
+			//
+			// This loop had no try/catch at all. The only two in this function
+			// guard the mail and the push, and both sit AFTER it - so a single
+			// order that threw killed the whole run. Nothing after it was planned,
+			// and because a failed order keeps Order_Status "Pending" the next run
+			// reached the same order and died in the same place: a permanent poison
+			// pill blocking every order behind it. With two scheduled runs a day,
+			// each occurrence costs a whole window, silently.
+			//
+			// AN EXCEPTION IS NOT A REJECTION, and they are reported apart on
+			// purpose. A REJECT is missing data and tells somebody what to go and
+			// fix - no BOM, no assignment rule. An ERROR is a BUG in this function.
+			// Folding them into one list would bury the bug among routine data
+			// problems and nobody would look at it twice.
+			//
+			// The order keeps "Pending", so it retries exactly as a rejection does.
+			// If the throw landed AFTER the plan insert, the resume path at the top
+			// of this loop finds that plan on the next run and moves the order on
+			// rather than planning it twice - Deluge has no transaction to roll
+			// back, and that check IS the recovery.
+			errTxt = eOrder.toString().replaceAll("<","&lt;").replaceAll("\"","'");
+			soNoTxt = ifnull(so.Sales_Order,"(no number)").toString();
+
+			failedCount = failedCount + 1;
+			failedList.add("<tr><td style='" + mTd + ";white-space:nowrap'><b>" + soNoTxt + "</b></td><td style='" + mTdBad + "'>ERROR: " + errTxt + "</td></tr>");
+			logLines.add("ERROR -> SO " + soNoTxt + " | " + errTxt);
+		}
 	}
+
+	// DEFERRED IS NOT FAILED, and the log has to keep them apart. A deferred
+	// order is a healthy order that did not fit in this run's budget; a rejected
+	// one needs a human to add a BOM or an assignment rule. Reporting them
+	// together would send somebody looking for a fault that is not there.
+	if(deferredCount > 0)
+	{
+		logLines.add("DEFERRED -> " + deferredCount + " order(s) left for the next run - budget of " + maxPerRun + " plans was reached.");
+	}
+
+	// The backlog beyond the scan window. Only reported when the window was
+	// actually full, because otherwise every order was looked at this run and
+	// there is nothing behind it to mention.
+	if(pendingTotal > scanLimit)
+	{
+		logLines.add("BACKLOG -> " + pendingTotal + " orders are Pending, more than the " + scanLimit + " scanned. If this does not fall, some are stuck and need a BOM or an assignment rule.");
+	}
+
 	//------------------------------------------------------------------------
 	// ONE MAIL PER RUN, covering both halves of what happened: the plans that
 	// were created and the orders that could not be. Not one mail per order -

@@ -63,18 +63,24 @@ string getPackingDetails(string payloadJson)
 		// ONE PASS: which batches are finished, which item each batch belongs
 		// to, and which original line each item rolls up to.
 		//------------------------------------------------------------------
-		doneChecks = List();
-
-		for each  fd in Finishing_Data[ID != 0]
-		{
-			if(fd.Item_Check != null)
-			{
-				if(ifnull(fd.Finishing_Status,"").toString().trim() == "Done")
-				{
-					doneChecks.add(fd.Item_Check.toString());
-				}
-			}
-		}
+		// ASKED PER CHECK, not by scanning the whole form.
+		//
+		// This used to read every Finishing_Data row ever written to build a
+		// list of finished batches, on a screen about ONE order. The form grows
+		// one row per inspected batch for ever, and the statement-execution
+		// limit is NOT catchable - it kills the script and the widget gets a
+		// bare HTTP 500 with no error card.
+		//
+		// Resolved lazily below instead, one indexed query per check on this
+		// order, cached so a check consulted twice is read once. "1" means
+		// finished, "0" means not; a key that is absent has not been asked yet.
+		//
+		// DONE MEANS DONE, and the query says so directly. A row carrying
+		// neither Done nor In_Progress - hand-made, a mistyped dropdown, a
+		// write that half landed - does not match, so the batch reads as
+		// UNFINISHED and the order stops short of packing. That is the same
+		// way round the old in-code test failed, and the safe direction.
+		doneByCheck = Map();
 
 		// Map values kept as STRINGS throughout - a Map holding a mix of Decimal
 		// and String is one more chance at a mixed-type comparison further down.
@@ -122,7 +128,19 @@ string getPackingDetails(string payloadJson)
 
 			for each  chk in Item_Check[Plan == plan.ID && Qty_Approved > 0]
 			{
-				if(chk.Plan_Item != null && doneChecks.contains(chk.ID.toString()) == true)
+				chkKeyD = chk.ID.toString();
+
+				if(doneByCheck.get(chkKeyD) == null)
+				{
+					doneByCheck.put(chkKeyD,"0");
+
+					for each  fd in Finishing_Data[Item_Check == chk.ID && Finishing_Status == "Done"]
+					{
+						doneByCheck.put(chkKeyD,"1");
+					}
+				}
+
+				if(chk.Plan_Item != null && ifnull(doneByCheck.get(chkKeyD),"0").toString() == "1")
 				{
 					lineKeyTxt = ifnull(lineByItem.get(chk.Plan_Item.toString()),"").toString();
 

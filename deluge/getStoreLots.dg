@@ -20,7 +20,43 @@ string getStoreLots()
 		// Lots first, grouped by material as JSON fragments. Oldest first, which
 		// is the order the store person sees them in - and sort by has to be its
 		// own assignment, never inline in a for each header.
-		allLots = Raw_Material_Lot[ID != 0] sort by Added_Time;
+		//------------------------------------------------------------------
+		// LOTS THAT STILL HOLD SOMETHING, not every lot ever created.
+		//
+		// THIS IS THE ONE FIX ON THIS SCREEN THAT CHANGES WHAT IS DISPLAYED,
+		// so it is worth being clear about. A fully emptied lot - all five
+		// figures zero - no longer appears under its material, and the lot
+		// count beside the material drops accordingly.
+		//
+		// Why it cannot be fixed the way the other screens were: the header
+		// above is right that looping materials and querying each one's lots
+		// is wrong HERE. That shape is only safe when the material list is
+		// bounded by open work, which is what neededMats is in
+		// getStoreMaterialRequirements - a few dozen. This screen lists EVERY
+		// fabric material, so per-material querying would be hundreds of
+		// queries. Filtering the rows themselves is the only bound available.
+		//
+		// Why it is the right filter anyway: an emptied lot is kept as a zero
+		// row so history still resolves elsewhere - that is about other
+		// functions resolving a lot NUMBER, not about this tab drawing a lot
+		// with nothing on it. getStoreMaterialRequirements already applies
+		// exactly this rule to the issue picker ("An empty lot is not a
+		// choice"), so the two store screens now agree rather than disagree.
+		//
+		// In_Wash_Qty is in the OR deliberately: cloth at the wash house is
+		// off the rack but still ours, and a lot that looks empty because its
+		// greige is out being washed is precisely what the store person needs
+		// told. Disputed and In_Transit likewise - still ours, still shown.
+		//
+		// An EMPTY field is not matched by any Creator criteria, in either
+		// direction - but a lot whose every quantity is empty holds nothing,
+		// so excluding it is the intended answer rather than an accident. A
+		// lot with one figure written and the rest empty still matches on the
+		// figure that was written.
+		//
+		// TO REVERT: put back Raw_Material_Lot[ID != 0] sort by Added_Time.
+		//------------------------------------------------------------------
+		allLots = Raw_Material_Lot[Unwash_Quantity > 0 || Wash_Quantity > 0 || In_Transit_Qty > 0 || Disputed_Qty > 0 || In_Wash_Qty > 0] sort by Added_Time;
 
 		lotJsonByMat = Map();
 		lotCountByMat = Map();

@@ -77,6 +77,26 @@ function wastePicks(material) {
     return (material.isFabric && material.wastePicks) ? material.wastePicks : [];
 }
 
+// WHETHER THE CHECKBOX TICKS for this pick, derived — never hardcoded. A
+// declined remnant must render UNTICKED: the tick IS the feedback for the
+// decline, and a box that stays ticked over a 0-pcs input contradicts the
+// state the allocator is acting on.
+function wasteCheckedFor(pick) {
+    var cap = wasteDeclined[String(pick.wasteId)];
+    return cap === undefined || cap > 0;
+}
+
+// WHAT THE RACK HOLDS for this remnant — the full figure from wasteStock, not
+// the pick's post-allocation count. The pcs input clamps against THIS: a
+// declined pick carries 0, and clamping typed values against 0 makes the box
+// unusable exactly when he is trying to bring pieces back.
+function rackCountFor(m, pick) {
+    var r = (m.wasteStock || []).filter(function (x) {
+        return String(x.wasteId) === String(pick.wasteId);
+    })[0];
+    return r ? (Number(r.pieces) || 0) : (Number(pick.pieces) || 0);
+}
+
 // ---- Lots ----
 //
 // THE ALLOCATOR LIVES IN app/js/lot-allocator.js AND NOWHERE ELSE.
@@ -434,7 +454,12 @@ function setWasteChecked(supIdx, matIdx, pickIdx, checked) {
     var checkbox = document.getElementById(wasteCheckboxId(supIdx, matIdx, pickIdx));
     var input = document.getElementById(wasteInputId(supIdx, matIdx, pickIdx));
     if (!checkbox || !input) return;
-    var pick = window.__reqData[supIdx].materials[matIdx].wastePicks[pickIdx];
+    var m = window.__reqData[supIdx].materials[matIdx];
+    var pick = m.wastePicks[pickIdx];
+    // STATE, not just paint — the master checkbox reaches this path too, and a
+    // decline that lives only in the DOM would be lost on the next render.
+    if (checked) delete wasteDeclined[String(pick.wasteId)];
+    else wasteDeclined[String(pick.wasteId)] = 0;
     checkbox.checked = checked;
     input.value = checked ? pick.pieces : 0;
     var row = document.getElementById(wasteRowId(supIdx, matIdx, pickIdx));
@@ -461,14 +486,18 @@ function onWasteCheckboxChange(supIdx, matIdx, pickIdx) {
 }
 
 function onWasteInputChange(supIdx, matIdx, pickIdx) {
+    var m = window.__reqData[supIdx].materials[matIdx];
     var input = document.getElementById(wasteInputId(supIdx, matIdx, pickIdx));
     var checkbox = document.getElementById(wasteCheckboxId(supIdx, matIdx, pickIdx));
-    var pick = window.__reqData[supIdx].materials[matIdx].wastePicks[pickIdx];
+    var pick = m.wastePicks[pickIdx];
+    var rack = rackCountFor(m, pick);
     var val = parseInt(input.value, 10);
 
     // Pieces are whole things — you cannot hand over 1.5 of a cut piece.
+    // Clamped against the RACK, never against pick.pieces: a declined pick
+    // carries 0, and clamping against it made the box refuse every keystroke.
     if (isNaN(val) || val < 0) val = 0;
-    if (val > pick.pieces) val = pick.pieces;
+    if (val > rack) val = rack;
     input.value = val;
 
     checkbox.checked = val > 0;
@@ -476,14 +505,18 @@ function onWasteInputChange(supIdx, matIdx, pickIdx) {
     if (row) row.classList.toggle('row-selected', val > 0);
 
     // Taking FEWER pieces off a remnant is the same question as taking none:
-    // the cloth has to cover what they would have. Re-allocated only when the
-    // figure actually changed, so ordinary typing does not redraw the card.
-    if (val !== pick.pieces) {
-        wasteDeclined[String(pick.wasteId)] = val;
+    // the cloth has to cover what they would have. Compared against the CURRENT
+    // effective take — the decline when there is one, the pick otherwise — so
+    // re-typing the same figure never falls through to a silent un-decline.
+    // The full rack count IS no decline: same thing wasteAllowed does.
+    var currentTake = wasteDeclined[String(pick.wasteId)] !== undefined
+        ? wasteDeclined[String(pick.wasteId)] : pick.pieces;
+    if (val !== currentTake) {
+        if (val >= rack) delete wasteDeclined[String(pick.wasteId)];
+        else wasteDeclined[String(pick.wasteId)] = val;
         render(window.__rawData || window.__reqData);
         return;
     }
-    delete wasteDeclined[String(pick.wasteId)];
     refreshCardState(supIdx);
 }
 
@@ -506,7 +539,11 @@ function onSelectAllChange(supIdx, section) {
             setWasteChecked(supIdx, i, pickIdx, master.checked);
         });
     });
-    refreshCardState(supIdx);
+    // The sweep above changed DECLINES, and declines re-size the fresh metres.
+    // A full re-render, same as the single-checkbox path — refreshCardState
+    // alone would leave the metres box holding a figure the offcuts no longer
+    // cover.
+    render(window.__rawData || window.__reqData);
 }
 
 // Four sections, not two: a reissue never shares a table with the plan's own
@@ -1404,11 +1441,12 @@ function renderFabricRows(m, supIdx, matIdx) {
         picks.forEach(function (p, pickIdx) {
             issueCell +=
                 '<div class="issue-cell issue-cell-waste" id="' + wasteRowId(supIdx, matIdx, pickIdx) + '">' +
-                '<input type="checkbox" class="issue-checkbox" id="' + wasteCheckboxId(supIdx, matIdx, pickIdx) + '" checked ' +
+                '<input type="checkbox" class="issue-checkbox" id="' + wasteCheckboxId(supIdx, matIdx, pickIdx) + '" ' +
+                (wasteCheckedFor(p) ? 'checked ' : '') +
                 'aria-label="Issue waste pieces of ' + escapeHtml(m.material) + '" ' +
                 'onchange="onWasteCheckboxChange(' + supIdx + ',' + matIdx + ',' + pickIdx + ')" />' +
                 '<span class="issue-input-group">' +
-                '<input type="number" step="1" min="0" max="' + p.pieces + '" ' +
+                '<input type="number" step="1" min="0" max="' + rackCountFor(m, p) + '" ' +
                 'class="issue-input" id="' + wasteInputId(supIdx, matIdx, pickIdx) + '" value="' + p.pieces + '" ' +
                 'oninput="onWasteInputChange(' + supIdx + ',' + matIdx + ',' + pickIdx + ')" />' +
                 '<span class="issue-unit">pcs</span>' +
@@ -4080,8 +4118,96 @@ function renderStockIn() {
         '<div class="stockin-search">' +
         '<input type="text" id="stockin-filter" class="note-input" ' +
         'placeholder="Search SKU or material…" oninput="onStockFilter()" />' +
+        // The store person is standing at the rack with the cloth in their
+        // hands when they want this — waiting on a webhook they cannot see is
+        // the wrong shape. Pressing it is the same call the webhook makes.
+        '<button type="button" class="ghost-btn" id="stockin-check" ' +
+        'onclick="checkForArrivals()">Check for arrivals</button>' +
+        '<span id="stockin-check-msg" class="stockin-check-msg"></span>' +
         '</div>' +
         '<div id="stockin-list">' + stockInListHtml() + '</div>';
+}
+
+// Asks Inventory for purchase receives it has not seen yet, then reloads the
+// list so anything that landed is on screen without a manual refresh.
+//
+// It calls runPurchaseInflow, NOT syncPurchaseInflow — the wrapper takes the
+// lock. Pressing this at the moment material arrives is exactly when the
+// purchase-order webhook is also firing, and two runs applying the same receive
+// line would credit the cloth twice.
+function checkForArrivals() {
+    var btn = document.getElementById('stockin-check');
+    var msg = document.getElementById('stockin-check-msg');
+    if (!btn) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Checking…';
+    if (msg) {
+        msg.textContent = '';
+        msg.className = 'stockin-check-msg';
+    }
+
+    function done(text, cls) {
+        btn.disabled = false;
+        btn.textContent = 'Check for arrivals';
+        if (msg) {
+            msg.textContent = text;
+            msg.className = 'stockin-check-msg' + (cls ? ' ' + cls : '');
+        }
+    }
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'runPurchaseInflow',
+        http_method: 'POST',
+        payload: {}
+    }).then(function (response) {
+        var parsed;
+        try {
+            parsed = JSON.parse(response.result);
+        } catch (e) {
+            console.error('runPurchaseInflow parse failed:', e, response.result);
+            done('Could not read the reply — check the console.', 'is-bad');
+            return;
+        }
+        console.log('runPurchaseInflow:', parsed);
+
+        if (!parsed.ran) {
+            // runPurchaseInflow only reports this when it could not run the
+            // sync at all, so it is a failure and not news. Nothing was
+            // written, so there is nothing to redraw.
+            done(parsed.reason || 'Did not run.', 'is-bad');
+            return;
+        }
+
+        var r = parsed.result || {};
+        if ((r.errors || []).length) {
+            console.error('syncPurchaseInflow:', r.errors);
+            done(r.errors[0], 'is-bad');
+            return;
+        }
+
+        // The number that answers "did anything arrive" is what went to
+        // Unallocated. Everything else is diagnostics and belongs in the
+        // console, not on the counter.
+        var landed = Number(r.netToUnallocated || 0);
+        var other = Number(r.netToQuantity || 0);
+        var parts = [];
+        if (landed) parts.push(fmt(landed) + ' to unallocated');
+        if (other) parts.push(fmt(other) + ' to accessory stock');
+
+        if (parts.length) {
+            done(parts.join(' · '), 'is-good');
+        } else if (Number(r.unmappedLines || 0) > 0) {
+            done(Number(r.unmappedLines) + ' arrived on an item that is not set up yet — see the console.', 'is-bad');
+        } else {
+            done('Nothing new.', 'is-muted');
+        }
+
+        loadStockIn();
+    }).catch(function (err) {
+        console.error('runPurchaseInflow error:', err);
+        done('Failed to reach the server — check the console.', 'is-bad');
+    });
 }
 
 function renderStockInList() {

@@ -1,0 +1,155 @@
+string debugIssueVouchers()
+{
+	// READ ONLY. Run from Creator's Execute. Not a Custom API, writes nothing.
+	//
+	// Answers, in one call, why postTransferOrders found nothing to post:
+	//
+	//   1. Are there any Material_Issue records AT ALL? If the count is 0 and a
+	//      handover really was made, the insert in issueMaterials failed - and
+	//      that write sits inside a try/catch that deliberately swallows, so the
+	//      handover would have succeeded with no record of it. Check Creator's
+	//      Application Logs for "Material_Issue not written:".
+	//
+	//   2. What is Transfer_Status actually set to? If it is EMPTY on a record
+	//      created after the redeploy, either the field was not on the form when
+	//      the insert ran, or it is a Dropdown that has no "Pending" choice - a
+	//      value the code writes but the picklist lacks is stored as nothing, and
+	//      the failure is silent. That is the one that also loses the record.
+	//
+	//   3. Has anything been RECEIVED? postTransferOrders moves
+	//      Settled_Qty - Transferred_Qty, so a voucher nobody has confirmed has
+	//      nothing to move however correct its status is.
+	//
+	// Every field is read through ifnull().toString() so a field that does not
+	// exist yet reports as empty rather than throwing and hiding the rest.
+
+	res = "{\"errors\":[\"Nothing ran\"]}";
+
+	try
+	{
+		totalIssues = Material_Issue[ID != 0].count();
+		pendingCount = Material_Issue[Transfer_Status == "Pending"].count();
+		doneCount = Material_Issue[Transfer_Status == "Done"].count();
+		failedCount = Material_Issue[Transfer_Status == "Failed"].count();
+
+		// sort by on its own assignment, never inline in a for-each header.
+		recent = Material_Issue[ID != 0] sort by ID desc range from 1 to 10;
+
+		rowsJson = "";
+
+		for each  mi in recent
+		{
+			lineCount = 0;
+			totQty = 0.0;
+			totSettled = 0.0;
+			totTransferred = 0.0;
+			matsTxt = "";
+
+			for each  ln in mi.Issue_Lines
+			{
+				lineCount = lineCount + 1;
+
+				// A Creator numeric never written is an EMPTY STRING, not null,
+				// and toDecimal() throws on it.
+				qS = ifnull(ln.Qty,"0").toString().trim();
+				if(qS == "")
+				{
+					qS = "0";
+				}
+				sS = ifnull(ln.Settled_Qty,"0").toString().trim();
+				if(sS == "")
+				{
+					sS = "0";
+				}
+				tS = ifnull(ln.Transferred_Qty,"0").toString().trim();
+				if(tS == "")
+				{
+					tS = "0";
+				}
+
+				totQty = totQty + qS.toDecimal();
+				totSettled = totSettled + sS.toDecimal();
+				totTransferred = totTransferred + tS.toDecimal();
+
+				// Whether the material behind the line is mapped to Inventory at
+				// all - an unmapped one refuses the whole voucher.
+				mKey = ifnull(ln.Material,"").toString().trim();
+				invTxt = "";
+
+				if(mKey != "")
+				{
+					for each  rmChk in Raw_Material[ID == mKey.toLong()]
+					{
+						invTxt = ifnull(rmChk.Inventory_Item_ID,"").toString().trim();
+					}
+				}
+
+				if(matsTxt != "")
+				{
+					matsTxt = matsTxt + "; ";
+				}
+				matsTxt = matsTxt + ifnull(ln.Material_Name,"?").toString() + " inv=" + invTxt;
+			}
+
+			addedTxt = "";
+			if(mi.Added_Time != null)
+			{
+				addedTxt = mi.Added_Time.toString("dd-MMM-yyyy HH:mm");
+			}
+
+			if(rowsJson != "")
+			{
+				rowsJson = rowsJson + ",";
+			}
+
+			// Free text flattened - a raw newline in a JSON string literal is
+			// invalid JSON and the caller gets a control-character error with a
+			// column number and nothing else.
+			rowsJson = rowsJson + "{\"id\":\"" + mi.ID + "\","
+				+ "\"voucherNo\":\"" + ifnull(mi.Voucher_No,"").toString().trim() + "\","
+				+ "\"addedOn\":\"" + addedTxt + "\","
+				+ "\"issueStatus\":\"" + ifnull(mi.Issue_Status,"").toString().trim() + "\","
+				+ "\"transferStatus\":\"" + ifnull(mi.Transfer_Status,"").toString().trim() + "\","
+				+ "\"transferAttempts\":\"" + ifnull(mi.Transfer_Attempts,"").toString().trim() + "\","
+				+ "\"transferError\":\"" + ifnull(mi.Transfer_Error,"").toString().trim().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\","
+				+ "\"transferOrderIds\":\"" + ifnull(mi.Transfer_Order_IDs,"").toString().trim() + "\","
+				+ "\"lines\":" + lineCount + ",\"issuedQty\":" + totQty + ",\"settledQty\":" + totSettled + ",\"transferredQty\":" + totTransferred + ","
+				+ "\"readyToMove\":" + (totSettled - totTransferred) + ","
+				+ "\"materials\":\"" + matsTxt.replaceAll("\"","'") + "\"}";
+		}
+
+		//------------------------------------------------------------------
+		// THE VERDICT, so the answer is readable without adding the numbers up.
+		//------------------------------------------------------------------
+		verdict = "";
+
+		if(totalIssues == 0)
+		{
+			verdict = "No Material_Issue records exist at all. Either no handover has been made since the records were cleared, or the insert in issueMaterials is failing - check Application Logs for 'Material_Issue not written:'.";
+		}
+		else if(pendingCount == 0 && doneCount == 0 && failedCount == 0)
+		{
+			verdict = "Records exist but NONE has a Transfer_Status. Either issueMaterials was not redeployed before these were created, or Transfer_Status is a Dropdown with no 'Pending' choice - Creator stores an unlisted choice as nothing, silently.";
+		}
+		else if(pendingCount == 0)
+		{
+			verdict = "Every voucher is already Done or Failed - nothing is waiting.";
+		}
+		else
+		{
+			verdict = pendingCount + " voucher(s) Pending. If postTransferOrders still posts nothing, look at readyToMove below: it is settledQty - transferredQty, and a voucher nobody has RECEIVED yet has nothing to move.";
+		}
+
+		info "debugIssueVouchers: total " + totalIssues + ", pending " + pendingCount + ", done " + doneCount + ", failed " + failedCount + " | " + verdict;
+
+		res = "{\"errors\":[],\"totalIssues\":" + totalIssues + ",\"pending\":" + pendingCount + ",\"done\":" + doneCount + ",\"failed\":" + failedCount + ",\"verdict\":\"" + verdict.replaceAll("\"","'") + "\",\"recent\":[" + rowsJson + "]}";
+	}
+	catch (e)
+	{
+		// A field that does not exist on the form throws here, and the message
+		// names it - which is itself the answer.
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"]}";
+	}
+
+	return res;
+}
