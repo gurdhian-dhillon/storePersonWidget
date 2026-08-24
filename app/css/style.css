@@ -347,9 +347,7 @@ tbody tr.row-selected td {
 
 .material-name-cell .mat-name {
     font-weight: 600;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
+    display: block;
     white-space: normal;
     word-break: break-word;
 }
@@ -1173,6 +1171,8 @@ th.col-num {
 /* "incl. waste" on the name, rather than a badge per supply row — the row is
    the material now, not one of its sources. */
 .waste-badge {
+    display: inline-block;
+    vertical-align: middle;
     margin-left: 0.5rem;
     padding: 0.1rem 0.45rem;
     border-radius: 999px;
@@ -1190,6 +1190,8 @@ th.col-num {
    what the eye should land on first. Green is the offcut colour throughout, so
    the inbound one borrows it and the outbound one stays neutral. */
 .dir-badge {
+    display: inline-block;
+    vertical-align: middle;
     margin-left: 0.4rem;
     padding: 0.1rem 0.45rem;
     border-radius: 999px;
@@ -1540,6 +1542,31 @@ th.col-num {
     display: flex;
     flex-direction: column;
     gap: 1rem;
+}
+
+/* Disputes Table Layout and Alignment */
+#panel-disputes td {
+    vertical-align: top;
+    padding-top: 0.75rem;
+}
+
+#panel-disputes .col-num {
+    width: 7rem;
+}
+
+#panel-disputes .col-supervisor {
+    width: 8.5rem;
+    white-space: normal;
+    word-break: break-word;
+}
+
+#panel-disputes .col-raised {
+    width: 7.5rem;
+}
+
+#panel-disputes .col-action {
+    vertical-align: top;
+    padding-top: 0.75rem;
 }
 
 /* ---- Material used ---- */

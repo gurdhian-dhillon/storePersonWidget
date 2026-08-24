@@ -103,6 +103,8 @@ string saveItemCheck(string payloadJson)
 	}
 
 	remarksTxt = ifnull(inp.get("remarks"),"").toString().trim();
+	rejectionRemarksTxt = ifnull(inp.get("rejectionRemarks"),"").toString().trim();
+	alterationRemarksTxt = ifnull(inp.get("alterationRemarks"),"").toString().trim();
 
 	//----------------------------------------------------------------------
 	// THE ITEM, READ OFF THE RECORD.
@@ -510,6 +512,8 @@ string saveItemCheck(string payloadJson)
 		Qty_Rejected=rejected
 		Qty_Alteration=alteration
 		Remarks=remarksTxt
+		Rejection_Remarks=rejectionRemarksTxt
+		Alteration_Remarks=alterationRemarksTxt
 		Processed=false
 	];
 

@@ -140,7 +140,7 @@ function renderSupDisputes(openCount) {
             '<td class="col-num">' + fmt(d.received) + '<span class="unit">' + escapeHtml(d.unit || '') + '</span></td>' +
             '<td class="col-num col-strong"><span class="qty-big">' + fmt(d.remaining) +
                 '<span class="unit">' + escapeHtml(d.unit || '') + '</span></span></td>' +
-            '<td>' + escapeHtml(d.raisedOn || '—') + '</td>' +
+            '<td class="col-raised">' + escapeHtml(d.raisedOn || '—') + '</td>' +
             '<td class="col-action">' +
                 // Two answers, because those are the only two he can give. He
                 // cannot know what the store did with its own stock, and nobody
@@ -202,7 +202,7 @@ function renderSupDisputes(openCount) {
                             '<th class="col-num">Handed over</th>' +
                             '<th class="col-num">Confirmed</th>' +
                             '<th class="col-num">Missing</th>' +
-                            '<th>Raised</th>' +
+                            '<th class="col-raised">Raised</th>' +
                             '<th class="col-action">Your answer</th>' +
                         '</tr></thead><tbody>' + rows + '</tbody></table>' +
                     '</div>' +

@@ -411,9 +411,9 @@ var PackingScreen = (function () {
                     { lineNo: 2, sku: 'LN-002', itemName: 'Linen Napkin Set', qty: 24, unitWeight: 0.32 }
                 ],
                 boxes: [
-                    { id: '1', name: 'Box 1', outerLength: 35, outerWidth: 35, outerHeight: 10, hasInner: true, innerLength: 32.5, innerWidth: 32.5, innerHeight: 7.5 },
-                    { id: '3', name: 'Box 3', outerLength: 35, outerWidth: 28, outerHeight: 5, hasInner: true, innerLength: 32.5, innerWidth: 26.5, innerHeight: 4 },
-                    { id: '6', name: 'Box 6', outerLength: 30, outerWidth: 58, outerHeight: 22, hasInner: false, innerLength: 0, innerWidth: 0, innerHeight: 0 }
+                    { id: '1', name: 'Box 1', outerLength: 35, outerWidth: 35, outerHeight: 10, hasInner: true, innerLength: 32.5, innerWidth: 32.5, innerHeight: 7.5, outerWeight: 0.35, innerWeight: 0.15 },
+                    { id: '3', name: 'Box 3', outerLength: 35, outerWidth: 28, outerHeight: 5, hasInner: true, innerLength: 32.5, innerWidth: 26.5, innerHeight: 4, outerWeight: 0.25, innerWeight: 0.10 },
+                    { id: '6', name: 'Box 6', outerLength: 30, outerWidth: 58, outerHeight: 22, hasInner: false, innerLength: 0, innerWidth: 0, innerHeight: 0, outerWeight: 0.50, innerWeight: 0.00 }
                 ]
             });
             return;
@@ -453,19 +453,26 @@ var PackingScreen = (function () {
         return hit.length ? hit[0] : null;
     }
 
-    // The carton's six numbers, copied onto the box. From here on they belong to
-    // the box: editing one changes this box and nothing else, and Box_Master is
-    // never written back to.
+    // The carton's six numbers and two weights, copied onto the box. From here on
+    // they belong to the box: editing one changes this box and nothing else, and
+    // Box_Master is never written back to.
     function applyCartonTo(box, carton) {
         if (!carton) return;
         box.boxTypeId = carton.id;
         box.outerLength = cm(carton.outerLength);
         box.outerWidth = cm(carton.outerWidth);
         box.outerHeight = cm(carton.outerHeight);
+        box.outerWeight = carton.outerWeight !== undefined ? cm(carton.outerWeight) : '0';
         box.usesInner = !!carton.hasInner;
         box.innerLength = carton.hasInner ? cm(carton.innerLength) : '';
         box.innerWidth = carton.hasInner ? cm(carton.innerWidth) : '';
         box.innerHeight = carton.hasInner ? cm(carton.innerHeight) : '';
+        box.innerWeight = (carton.hasInner && carton.innerWeight !== undefined) ? cm(carton.innerWeight) : '';
+
+        // Auto-populate actual weight
+        if (!box.grossWeightEdited) {
+            box.grossWeight = kg(estimatedFor(box));
+        }
     }
 
     // Pre-filled with whatever is still outstanding on the line he pressed,
@@ -487,7 +494,7 @@ var PackingScreen = (function () {
         }
         if (!target) return;
 
-        var box = { grossWeight: '', items: [{ lineNo: target.lineNo, qty: Math.max(remainingFor(target.lineNo), 1) }] };
+        var box = { grossWeight: '', grossWeightEdited: false, items: [{ lineNo: target.lineNo, qty: Math.max(remainingFor(target.lineNo), 1) }] };
         applyCartonTo(box, ACTIVE_ORDER.cartons[0]);
         ACTIVE_ORDER.boxes.push(box);
 
@@ -498,19 +505,22 @@ var PackingScreen = (function () {
         if (ACTIVE_ORDER) { ACTIVE_ORDER.boxes.splice(i, 1); renderBody(); }
     }
 
-    // Changing the carton re-seeds all six dimensions and the inner/outer choice.
-    // It is the one control on the card that is allowed to overwrite what he
-    // typed, because picking a different carton is saying the box is a different
-    // box.
+    // Changing the carton re-seeds all six dimensions, the two carton weights,
+    // and the inner/outer choice. It is the one control on the card that is
+    // allowed to overwrite what he typed, because picking a different carton is
+    // saying the box is a different box.
     function setBoxCarton(i, v) {
         if (!ACTIVE_ORDER) return;
-        applyCartonTo(ACTIVE_ORDER.boxes[i], cartonById(v));
+        var box = ACTIVE_ORDER.boxes[i];
+        box.grossWeightEdited = false; // Reset override on carton change
+        applyCartonTo(box, cartonById(v));
         renderBody();
     }
 
-    // Outer only clears the inner dimensions rather than hiding them - the record
-    // has to say what went out, and zeroes left behind a disabled field are the
-    // kind of thing that turns up on a packing list a year later.
+    // Outer only clears the inner dimensions and inner weight rather than hiding
+    // them - the record has to say what went out, and zeroes left behind a
+    // disabled field are the kind of thing that turns up on a packing list a
+    // year later.
     function setBoxPackaging(i, v) {
         if (!ACTIVE_ORDER) return;
         var box = ACTIVE_ORDER.boxes[i];
@@ -526,11 +536,18 @@ var PackingScreen = (function () {
                 box.innerWidth = cm(carton.innerWidth);
                 box.innerHeight = cm(carton.innerHeight);
             }
+            if (!n(box.innerWeight) && carton && carton.hasInner) {
+                box.innerWeight = cm(carton.innerWeight || 0);
+            }
         } else {
             box.usesInner = false;
             box.innerLength = '';
             box.innerWidth = '';
             box.innerHeight = '';
+            box.innerWeight = '';
+        }
+        if (!box.grossWeightEdited) {
+            box.grossWeight = kg(estimatedFor(box));
         }
         renderBody();
     }
@@ -540,13 +557,29 @@ var PackingScreen = (function () {
     // packer's fingers and the field does not lose focus mid-keystroke.
     function setBoxDim(i, field, v) {
         if (!ACTIVE_ORDER) return;
-        ACTIVE_ORDER.boxes[i][field] = v;
+        var box = ACTIVE_ORDER.boxes[i];
+        box[field] = v;
+        if (!box.grossWeightEdited) {
+            box.grossWeight = kg(estimatedFor(box));
+        }
         renderLive();
     }
 
     function setBoxWeight(i, v) {
         if (!ACTIVE_ORDER) return;
-        ACTIVE_ORDER.boxes[i].grossWeight = v;
+        var box = ACTIVE_ORDER.boxes[i];
+        box.grossWeight = v;
+        box.grossWeightEdited = true; // Mark as manually overridden
+        renderLive();
+    }
+
+    function setBoxCartonWeight(i, prefix, v) {
+        if (!ACTIVE_ORDER) return;
+        var box = ACTIVE_ORDER.boxes[i];
+        box[prefix + 'Weight'] = v;
+        if (!box.grossWeightEdited) {
+            box.grossWeight = kg(estimatedFor(box));
+        }
         renderLive();
     }
 
@@ -570,12 +603,19 @@ var PackingScreen = (function () {
         });
 
         box.items.push({ lineNo: pick.lineNo, qty: Math.max(remainingFor(pick.lineNo), 1) });
+        if (!box.grossWeightEdited) {
+            box.grossWeight = kg(estimatedFor(box));
+        }
         renderBody();
     }
 
     function removeItem(i, j) {
         if (!ACTIVE_ORDER) return;
-        ACTIVE_ORDER.boxes[i].items.splice(j, 1);
+        var box = ACTIVE_ORDER.boxes[i];
+        box.items.splice(j, 1);
+        if (!box.grossWeightEdited) {
+            box.grossWeight = kg(estimatedFor(box));
+        }
         renderBody();
     }
 
@@ -598,12 +638,19 @@ var PackingScreen = (function () {
         } else {
             box.items[j].lineNo = newLine;
         }
+        if (!box.grossWeightEdited) {
+            box.grossWeight = kg(estimatedFor(box));
+        }
         renderBody();
     }
 
     function setItemQty(i, j, v) {
         if (!ACTIVE_ORDER) return;
-        ACTIVE_ORDER.boxes[i].items[j].qty = v;
+        var box = ACTIVE_ORDER.boxes[i];
+        box.items[j].qty = v;
+        if (!box.grossWeightEdited) {
+            box.grossWeight = kg(estimatedFor(box));
+        }
         renderLive();
     }
 
@@ -639,14 +686,14 @@ var PackingScreen = (function () {
     }
 
     // ESTIMATED WEIGHT is Item_Master.Weight, kilograms for one saleable unit,
-    // times the pieces in the box. Nothing is added for the cardboard - the gap
-    // between this and the scale IS the packaging, and burying an allowance in
-    // here would hide it. savePackingRecord resolves the same figure from the
-    // master rather than trusting what this sends.
+    // times the pieces in the box plus the outer carton weight and optionally
+    // the inner packaging weight.
     function estimatedFor(box) {
-        return box.items.reduce(function (sum, it) {
+        var itemsEst = box.items.reduce(function (sum, it) {
             return sum + unitWeightFor(it.lineNo) * n(it.qty);
         }, 0);
+        var boxEst = n(box.outerWeight) + (box.usesInner ? n(box.innerWeight) : 0);
+        return itemsEst + boxEst;
     }
 
     function volumetricFor(box) {
@@ -719,12 +766,20 @@ var PackingScreen = (function () {
                 ' oninput="PackingScreen.setBoxDim(' + i + ', \'' + prefix + part + '\', this.value)"' + off + '>';
         }
 
+        var wtVal = (box[prefix + 'Weight'] === undefined || box[prefix + 'Weight'] === null) ? '' : box[prefix + 'Weight'];
+        var wtField = '<input type="number" class="dim-input' + (disabled ? ' is-derived' : '') + '" min="0" step="0.01"' +
+            ' aria-label="' + esc(label + ' Weight') + '" title="' + esc(label + ' Weight') + '"' +
+            ' value="' + esc(wtVal) + '"' +
+            ' oninput="PackingScreen.setBoxCartonWeight(' + i + ', \'' + prefix + '\', this.value)"' + off + '>' +
+            '<span class="dim-unit">kg</span>';
+
         return '<div class="dim-row">' +
             '<span class="dim-label">' + esc(label) + '</span>' +
             field('Length', 'Length') + '<span class="dim-x">×</span>' +
             field('Width', 'Width') + '<span class="dim-x">×</span>' +
             field('Height', 'Height') +
             '<span class="dim-unit">cm</span>' +
+            wtField +
             (disabled ? '<span class="dim-note">no inner carton used</span>' : '') +
             '</div>';
     }
@@ -802,7 +857,7 @@ var PackingScreen = (function () {
                 '<span class="box-stat">Estimated <b id="pack-est-' + i + '">—</b> kg</span>' +
                 '<span class="box-stat">Volumetric <b id="pack-vol-' + i + '">—</b> kg</span>' +
                 '<label class="box-weigh"><span>Actual kg</span>' +
-                    '<input type="number" class="cell-input" min="0" step="0.01" placeholder="—" value="' + esc(box.grossWeight) + '" oninput="PackingScreen.setBoxWeight(' + i + ', this.value)">' +
+                    '<input type="number" class="cell-input" id="pack-gross-' + i + '" min="0" step="0.01" placeholder="—" value="' + esc(box.grossWeight) + '" oninput="PackingScreen.setBoxWeight(' + i + ', this.value)">' +
                 '</label>' +
             '</div>' +
             '</div>';
@@ -929,6 +984,11 @@ var PackingScreen = (function () {
             var pcEl = el('boxpieces-' + i);
             if (pcEl) pcEl.innerText = plural(bPieces, 'piece');
 
+            var grossInput = el('gross-' + i);
+            if (grossInput) {
+                grossInput.value = b.grossWeight === undefined ? '' : b.grossWeight;
+            }
+
             pieces += bPieces;
             est += bEst;
             gross += n(b.grossWeight);
@@ -1046,9 +1106,11 @@ var PackingScreen = (function () {
                     innerLength: b.usesInner ? n(b.innerLength) : 0,
                     innerWidth: b.usesInner ? n(b.innerWidth) : 0,
                     innerHeight: b.usesInner ? n(b.innerHeight) : 0,
+                    innerWeight: b.usesInner ? n(b.innerWeight) : 0,
                     outerLength: n(b.outerLength),
                     outerWidth: n(b.outerWidth),
                     outerHeight: n(b.outerHeight),
+                    outerWeight: n(b.outerWeight),
                     grossWeight: n(b.grossWeight),
                     items: b.items.map(function (bi) {
                         return { lineNo: n(bi.lineNo), qty: n(bi.qty) };
@@ -1332,6 +1394,7 @@ var PackingScreen = (function () {
         setBoxPackaging: setBoxPackaging,
         setBoxDim: setBoxDim,
         setBoxWeight: setBoxWeight,
+        setBoxCartonWeight: setBoxCartonWeight,
         addItem: addItem,
         removeItem: removeItem,
         setItemLine: setItemLine,

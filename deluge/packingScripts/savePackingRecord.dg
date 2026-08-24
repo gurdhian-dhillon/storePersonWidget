@@ -192,10 +192,12 @@ string savePackingRecord(string payloadJson)
 			outLen = ifnull(boxMap.get("outerLength"),"0").toString().toDecimal();
 			outWid = ifnull(boxMap.get("outerWidth"),"0").toString().toDecimal();
 			outHgt = ifnull(boxMap.get("outerHeight"),"0").toString().toDecimal();
+			outWeight = ifnull(boxMap.get("outerWeight"),"0").toString().toDecimal();
 
 			innLen = ifnull(boxMap.get("innerLength"),"0").toString().toDecimal();
 			innWid = ifnull(boxMap.get("innerWidth"),"0").toString().toDecimal();
 			innHgt = ifnull(boxMap.get("innerHeight"),"0").toString().toDecimal();
+			innWeight = ifnull(boxMap.get("innerWeight"),"0").toString().toDecimal();
 
 			usesInner = false;
 			if(ifnull(boxMap.get("usesInner"),"false").toString().trim().toLowerCase() == "true")
@@ -316,6 +318,13 @@ string savePackingRecord(string payloadJson)
 
 				boxPieces = boxPieces + qtyVal;
 				boxEstimated = boxEstimated + (unitWt * qtyVal);
+			}
+
+			// Add carton packaging weights
+			boxEstimated = boxEstimated + outWeight;
+			if(usesInner == true)
+			{
+				boxEstimated = boxEstimated + innWeight;
 			}
 
 			if(boxPieces <= 0)

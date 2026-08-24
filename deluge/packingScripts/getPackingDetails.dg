@@ -230,6 +230,7 @@ string getPackingDetails(string payloadJson)
 			boxesJson = boxesJson + "{\"id\":\"" + bm.ID + "\","
 				+ "\"name\":\"" + ifnull(bm.Box_Name,"").toString().replaceAll("\"","'") + "\","
 				+ "\"outerLength\":" + ifnull(bm.Outer_Length_Cm,0).toDecimal() + ",\"outerWidth\":" + ifnull(bm.Outer_Width_Cm,0).toDecimal() + ",\"outerHeight\":" + ifnull(bm.Outer_Height_Cm,0).toDecimal() + ","
+				+ "\"outerWeight\":" + ifnull(bm.Outer_Weight_Kg,0).toDecimal() + ",\"innerWeight\":" + ifnull(bm.Inner_Weight_Kg,0).toDecimal() + ","
 				+ "\"hasInner\":" + hasInnerTxt + ","
 				+ "\"innerLength\":" + ifnull(bm.Inner_Length_Cm,0).toDecimal() + ","
 				+ "\"innerWidth\":" + ifnull(bm.Inner_Width_Cm,0).toDecimal() + ","

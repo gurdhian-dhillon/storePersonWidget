@@ -457,3 +457,71 @@ body {
     padding: 0.3rem 0.6rem; border-radius: 6px;
 }
 .chk-actions { margin-top: 1.2rem; }
+
+/* Layout for vertical decision inputs and right-side dynamic remarks */
+.decision-section {
+    display: flex;
+    gap: 1.5rem;
+    margin-top: 0.4rem;
+    align-items: stretch;
+}
+.decision-left {
+    flex: 0 0 12rem;
+}
+.disp-row-vertical {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    padding: 0.8rem 1rem;
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    height: 100%;
+}
+.disp-row-vertical label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.disp-row-vertical input {
+    width: 100%;
+    font-family: inherit;
+    font-size: 0.95rem;
+    font-weight: 600;
+    padding: 0.35rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text-main);
+    text-align: right;
+}
+.decision-right {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+}
+.decision-right #remarks-container {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+}
+.decision-right .rem-label {
+    margin-top: 0 !important;
+    height: 100%;
+}
+.decision-right .rem-label textarea {
+    height: 100%;
+    min-height: 5rem;
+}
+.rem-label textarea:disabled {
+    background: #f1f5f9;
+    color: var(--text-muted);
+    cursor: not-allowed;
+}

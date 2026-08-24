@@ -209,11 +209,26 @@ function switchTab(tab) {
 }
 
 function onRefreshClicked() {
+    var refreshBtn = document.getElementById('refresh-btn');
+    if (refreshBtn) {
+        refreshBtn.disabled = true;
+        refreshBtn.innerText = 'Refreshing…';
+    }
+
+    var cleanUp = function () {
+        if (refreshBtn) {
+            refreshBtn.disabled = false;
+            refreshBtn.innerText = 'Refresh';
+        }
+    };
+
     if (ACTIVE_TAB === 'history') {
-        loadHistory();
+        loadHistory().then(cleanUp).catch(cleanUp);
         return;
     }
-    loadQueue();
+
+    // Refresh staff/supervisors and queue together
+    loadPeople().then(cleanUp).catch(cleanUp);
 }
 
 function loadPeople() {
@@ -222,20 +237,20 @@ function loadPeople() {
         OPERATORS_LIST = [{ id: '1', name: 'Aniket' }, { id: '2', name: 'Sambhav' }];
         SELECTED_OPERATOR = OPERATORS_LIST[0].name;
         renderSupervisorPicker();
-        loadQueue();
-        return;
+        return loadQueue();
     }
 
-    callApi('getStorePackingStaff', {}).then(function (parsed) {
+    return callApi('getStorePackingStaff', {}).then(function (parsed) {
         SUPERVISORS = parsed.supervisors || [];
         OPERATORS_LIST = (parsed.staff && parsed.staff.length) ? parsed.staff : SUPERVISORS.slice();
         if (OPERATORS_LIST.length) SELECTED_OPERATOR = OPERATORS_LIST[0].name;
         renderSupervisorPicker();
-        loadQueue();
+        return loadQueue();
     }).catch(function (err) {
         console.error('getStorePackingStaff failed:', err);
         var sel = document.getElementById('sup-select');
         if (sel) sel.innerHTML = '<option value="">Could not load staff</option>';
+        return loadQueue();
     });
 }
 
@@ -281,12 +296,12 @@ function loadQueue() {
             { id: '2', finishingId: null, salesOrder: 'SO-00008', planNo: 'PLAN-00016', itemName: 'Linen Maize Duvet Cover', sku: 'SKU-00005', qty: 10, status: 'Pending', stages: hydrateStages(null) }
         ];
         renderQueue();
-        return;
+        return Promise.resolve();
     }
 
     if (container) container.innerHTML = '<div class="fin-hint">Loading&hellip;</div>';
 
-    callApi('getFinishingItems', { supervisorId: SELECTED_SUP }).then(function (parsed) {
+    return callApi('getFinishingItems', { supervisorId: SELECTED_SUP }).then(function (parsed) {
         JOBS_QUEUE = (parsed.queue || []).map(function (row) {
             return {
                 id: String(row.id),
@@ -311,6 +326,7 @@ function loadQueue() {
     }).catch(function (err) {
         console.error('getFinishingItems failed:', err);
         if (container) container.innerHTML = '<div class="fin-hint is-bad">' + escapeHtml(err.message) + '</div>';
+        throw err;
     });
 }
 
@@ -659,18 +675,19 @@ function loadHistory() {
         }];
         HISTORY_LOADED = true;
         renderHistory();
-        return;
+        return Promise.resolve();
     }
 
     if (container) container.innerHTML = '<div class="fin-hint">Loading&hellip;</div>';
 
-    callApi('getFinishingHistory', { supervisorId: SELECTED_SUP }).then(function (parsed) {
+    return callApi('getFinishingHistory', { supervisorId: SELECTED_SUP }).then(function (parsed) {
         COMPLETED_HISTORY = parsed.history || [];
         HISTORY_LOADED = true;
         renderHistory();
     }).catch(function (err) {
         console.error('getFinishingHistory failed:', err);
         if (container) container.innerHTML = '<div class="fin-hint is-bad">' + escapeHtml(err.message) + '</div>';
+        throw err;
     });
 }
 

@@ -58,7 +58,10 @@ function setTodayLabel() {
 
 function loadQueue() {
     var btn = el('refresh-btn');
-    if (btn) btn.disabled = true;
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Refreshing…';
+    }
     el('queue-root').innerHTML = '<p class="empty-note">Loading…</p>';
 
     ZOHO.CREATOR.DATA.invokeCustomApi({
@@ -67,7 +70,10 @@ function loadQueue() {
         payload: { supervisorId: currentSupervisorId() || '' }
     }).then(function (response) {
         console.log('getCheckingQueue raw:', response);
-        if (btn) btn.disabled = false;
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Refresh';
+        }
 
         var parsed;
         try {
@@ -105,7 +111,10 @@ function loadQueue() {
         renderQueue();
     }).catch(function (err) {
         console.error('getCheckingQueue failed:', err);
-        if (btn) btn.disabled = false;
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Refresh';
+        }
         el('queue-root').innerHTML =
             '<p class="empty-note error-note">Could not reach the server. ' + escapeHtml(String(err)) + '</p>';
     });
@@ -403,10 +412,20 @@ function checkFormHtml(item, produced) {
         '</div>' +
 
         '<div class="section-title">Decision</div>' +
-        '<div class="disp-row">' +
-        '<label>Approved<input type="number" min="0" step="1" id="disp-approved" value="' + produced + '"></label>' +
-        '<label>Rejected<input type="number" min="0" step="1" id="disp-rejected" value="0"></label>' +
-        '<label>Alteration<input type="number" min="0" step="1" id="disp-alteration" value="0"></label>' +
+        '<div class="decision-section">' +
+        '  <div class="decision-left">' +
+        '    <div class="disp-row-vertical">' +
+        '      <label>Approved<input type="number" min="0" step="1" id="disp-approved" value="' + produced + '"></label>' +
+        '      <label>Rejected<input type="number" min="0" step="1" id="disp-rejected" value="0"></label>' +
+        '      <label>Alteration<input type="number" min="0" step="1" id="disp-alteration" value="0"></label>' +
+        '    </div>' +
+        '  </div>' +
+        '  <div class="decision-right">' +
+        '    <div id="remarks-container">' +
+        '      <label id="lbl-remarks-rejected" class="rem-label">Rejection Remarks<textarea id="chk-remarks-rejected" rows="3" placeholder="Why were these rejected?" disabled></textarea></label>' +
+        '      <label id="lbl-remarks-alteration" class="rem-label">Alteration Remarks<textarea id="chk-remarks-alteration" rows="3" placeholder="What needs to be altered?" disabled></textarea></label>' +
+        '    </div>' +
+        '  </div>' +
         '</div>' +
         '<p class="disp-total" id="disp-total"></p>' +
 
@@ -420,7 +439,7 @@ function checkFormHtml(item, produced) {
         '</div>' +
         '</div>' +
 
-        '<label class="rem-label">Remarks<textarea id="chk-remarks" rows="2"></textarea></label>' +
+        '<label id="lbl-remarks-common" class="rem-label">Remarks<textarea id="chk-remarks-common" rows="2" placeholder="General remarks..."></textarea></label>' +
 
         '<p class="chk-error hidden" id="chk-error"></p>' +
 
@@ -451,6 +470,10 @@ function wireCheckForm(card, item, produced) {
         });
     });
 
+    var prevA = produced;
+    var prevR = 0;
+    var prevX = 0;
+
     function refreshTotals() {
         var a = num(el('disp-approved').value);
         var r = num(el('disp-rejected').value);
@@ -468,11 +491,119 @@ function wireCheckForm(card, item, produced) {
         }
 
         el('alt-block').classList.toggle('hidden', x <= 0);
+
+        var hasRej = r > 0;
+        var hasAlt = x > 0;
+
+        var txtRejected = el('chk-remarks-rejected');
+        var txtAlteration = el('chk-remarks-alteration');
+
+        if (txtRejected) {
+            txtRejected.disabled = !hasRej;
+            if (!hasRej) {
+                txtRejected.value = '';
+            }
+        }
+        if (txtAlteration) {
+            txtAlteration.disabled = !hasAlt;
+            if (!hasAlt) {
+                txtAlteration.value = '';
+            }
+        }
     }
 
-    ['disp-approved', 'disp-rejected', 'disp-alteration'].forEach(function (id) {
-        el(id).addEventListener('input', refreshTotals);
+    el('disp-approved').addEventListener('input', function () {
+        var valStr = el('disp-approved').value;
+        var a = num(valStr);
+        if (a < 0) {
+            a = 0;
+            el('disp-approved').value = a;
+        }
+        if (a > produced) {
+            a = produced;
+            el('disp-approved').value = a;
+        }
+
+        var diff = a - prevA;
+        if (diff > 0) {
+            // Approved increased: decrease Rejected and/or Alteration to balance.
+            var r = prevR;
+            var x = prevX;
+
+            var decR = Math.min(r, diff);
+            r -= decR;
+            diff -= decR;
+
+            if (diff > 0) {
+                var decX = Math.min(x, diff);
+                x -= decX;
+                diff -= decX;
+            }
+
+            el('disp-rejected').value = r;
+            el('disp-alteration').value = x;
+            prevR = r;
+            prevX = x;
+            prevA = a;
+        } else if (diff < 0) {
+            // Approved decreased: increase Rejected to balance.
+            var r = prevR;
+            var toIncrease = -diff;
+            r += toIncrease;
+
+            el('disp-rejected').value = r;
+            prevR = r;
+            prevA = a;
+        } else {
+            prevA = a;
+        }
+        refreshTotals();
     });
+
+    el('disp-rejected').addEventListener('input', function () {
+        var valStr = el('disp-rejected').value;
+        var r = num(valStr);
+        if (r < 0) {
+            r = 0;
+            el('disp-rejected').value = r;
+        }
+
+        // Rejected only connects with Approved.
+        var a = prevA - (r - prevR);
+        if (a < 0) {
+            r = prevA + prevR;
+            a = 0;
+            el('disp-rejected').value = r;
+        }
+        el('disp-approved').value = a;
+
+        prevR = r;
+        prevA = a;
+        refreshTotals();
+    });
+
+    el('disp-alteration').addEventListener('input', function () {
+        var valStr = el('disp-alteration').value;
+        var x = num(valStr);
+        if (x < 0) {
+            x = 0;
+            el('disp-alteration').value = x;
+        }
+
+        // Alteration only connects with Approved.
+        var a = prevA - (x - prevX);
+        if (a < 0) {
+            x = prevA + prevX;
+            a = 0;
+            el('disp-alteration').value = x;
+        }
+        el('disp-approved').value = a;
+
+        prevX = x;
+        prevA = a;
+        refreshTotals();
+    });
+
     refreshTotals();
 
     el('chk-cancel').addEventListener('click', function () {
@@ -575,7 +706,9 @@ function saveCheck(item, produced) {
         rejected: rejected,
         alteration: alteration,
         alterationLines: lines,
-        remarks: el('chk-remarks').value || ''
+        remarks: el('chk-remarks-common') ? el('chk-remarks-common').value.trim() : '',
+        rejectionRemarks: (rejected > 0 && el('chk-remarks-rejected')) ? el('chk-remarks-rejected').value.trim() : '',
+        alterationRemarks: (alteration > 0 && el('chk-remarks-alteration')) ? el('chk-remarks-alteration').value.trim() : ''
     };
 
     saving = true;
@@ -749,6 +882,11 @@ function loadHistory() {
         return;
     }
 
+    var btn = el('refresh-btn');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Refreshing…';
+    }
     el('history-root').innerHTML = '<p class="empty-note">Loading…</p>';
     el('hist-totals').textContent = '';
 
@@ -760,6 +898,10 @@ function loadHistory() {
         // checked this" is exactly the question a disputed rejection turns into.
         payload: { supervisorId: currentSupervisorId() || '', dateTxt: dayTxt }
     }).then(function (response) {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Refresh';
+        }
         console.log('getCheckerHistory raw:', response);
         var parsed;
         try {
@@ -780,6 +922,10 @@ function loadHistory() {
         renderHistory(parsed);
     }).catch(function (err) {
         console.error('getCheckerHistory failed:', err);
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Refresh';
+        }
         el('history-root').innerHTML =
             '<p class="empty-note error-note">Could not reach the server. ' + escapeHtml(String(err)) + '</p>';
     });
@@ -915,6 +1061,7 @@ el('refresh-btn').addEventListener('click', function () {
     if (activeTab() === 'history') {
         loadHistory();
     } else {
+        openItemId = null; // Reset expanded card on refresh
         loadQueue();
     }
 });

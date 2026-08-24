@@ -3302,7 +3302,7 @@ function renderDisputes() {
             '<div class="mat-sku">' + escapeHtml(d.salesOrder || '') +
             (d.planNo ? ' · ' + escapeHtml(d.planNo) : '') + '</div>' +
             '</td>' +
-            '<td>' + escapeHtml(d.supervisor || '—') + '</td>' +
+            '<td class="col-supervisor">' + escapeHtml(d.supervisor || '—') + '</td>' +
             '<td class="col-num">' + fmt(d.issued) + '<span class="unit">' + escapeHtml(d.unit || '') + '</span></td>' +
             '<td class="col-num">' + fmt(d.received) + '<span class="unit">' + escapeHtml(d.unit || '') + '</span></td>' +
             '<td class="col-num col-strong">' +
@@ -3312,7 +3312,7 @@ function renderDisputes() {
                 ? '<div class="qty-sub">' + fmt(d.resolved) + ' already settled</div>'
                 : '') +
             '</td>' +
-            '<td>' + escapeHtml(d.raisedOn || '—') + '</td>' +
+            '<td class="col-raised">' + escapeHtml(d.raisedOn || '—') + '</td>' +
             '<td class="col-action">' +
             // The supervisor's answer belongs on the row, not buried in
             // the dialog. A denial resolves nothing on its own, so a
@@ -3345,7 +3345,7 @@ function renderDisputes() {
         '<div class="table-wrapper">' +
         '<table><thead><tr>' +
         '<th>Material</th>' +
-        '<th>Supervisor</th>' +
+        '<th class="col-supervisor">Supervisor</th>' +
         // Not "Issued"/"Received": on an inbound row the
         // supervisor is the one who handed over and the store
         // is the one who confirmed. A column has to mean the
@@ -3353,7 +3353,7 @@ function renderDisputes() {
         '<th class="col-num">Handed over</th>' +
         '<th class="col-num">Confirmed</th>' +
         '<th class="col-num">Outstanding</th>' +
-        '<th>Raised</th>' +
+        '<th class="col-raised">Raised</th>' +
         '<th class="col-action"></th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table>' +
         '</div>' +
