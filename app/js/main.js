@@ -3340,7 +3340,7 @@ function renderDisputes() {
             '<div class="mat-sku">' + escapeHtml(d.salesOrder || '') +
             (d.planNo ? ' · ' + escapeHtml(d.planNo) : '') + '</div>' +
             '</td>' +
-            '<td>' + escapeHtml(d.supervisor || '—') + '</td>' +
+            '<td class="col-supervisor">' + escapeHtml(d.supervisor || '—') + '</td>' +
             '<td class="col-num">' + fmt(d.issued) + '<span class="unit">' + escapeHtml(d.unit || '') + '</span></td>' +
             '<td class="col-num">' + fmt(d.received) + '<span class="unit">' + escapeHtml(d.unit || '') + '</span></td>' +
             '<td class="col-num col-strong">' +
@@ -3350,7 +3350,7 @@ function renderDisputes() {
                 ? '<div class="qty-sub">' + fmt(d.resolved) + ' already settled</div>'
                 : '') +
             '</td>' +
-            '<td>' + escapeHtml(d.raisedOn || '—') + '</td>' +
+            '<td class="col-raised">' + escapeHtml(d.raisedOn || '—') + '</td>' +
             '<td class="col-action">' +
             // The supervisor's answer belongs on the row, not buried in
             // the dialog. A denial resolves nothing on its own, so a
@@ -3383,7 +3383,7 @@ function renderDisputes() {
         '<div class="table-wrapper">' +
         '<table><thead><tr>' +
         '<th>Material</th>' +
-        '<th>Supervisor</th>' +
+        '<th class="col-supervisor">Supervisor</th>' +
         // Not "Issued"/"Received": on an inbound row the
         // supervisor is the one who handed over and the store
         // is the one who confirmed. A column has to mean the
@@ -3391,7 +3391,7 @@ function renderDisputes() {
         '<th class="col-num">Handed over</th>' +
         '<th class="col-num">Confirmed</th>' +
         '<th class="col-num">Outstanding</th>' +
-        '<th>Raised</th>' +
+        '<th class="col-raised">Raised</th>' +
         '<th class="col-action"></th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table>' +
         '</div>' +
@@ -4467,6 +4467,7 @@ document.getElementById('refresh-btn').addEventListener('click', function () {
 var MATERIALS_DATA = null;
 var RAW_MATERIAL_FILTER = 'fabric'; // 'fabric' or 'other'
 var EXPANDED_PATTERNS = {}; // grpName -> boolean
+var EXPANDED_MATERIALS = {}; // materialId -> boolean
 var MATERIAL_SEARCH_TERM = '';
 
 // Helper to get base group name
@@ -4488,6 +4489,7 @@ function loadMaterials() {
 
     // Clear expanded states so everything collapses by default on refresh or initial load
     EXPANDED_PATTERNS = {};
+    EXPANDED_MATERIALS = {};
 
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getRawMaterialsList',
@@ -4595,10 +4597,31 @@ function renderMaterials() {
                 var widthLabel = rm.isFabric ? (rm.width ? (escapeHtml(rm.width) + '"') : '<span class="muted">—</span>') : '<span class="muted">—</span>';
                 var gsmLabel = rm.isFabric ? (rm.gsm ? escapeHtml(rm.gsm) : '<span class="muted">—</span>') : '<span class="muted">—</span>';
                 var qualityLabel = rm.quality ? escapeHtml(rm.quality) : '<span class="muted">—</span>';
+                var hasLots = rm.lots && rm.lots.length > 0;
+                var isExpanded = hasLots && !!EXPANDED_MATERIALS[rm.id];
+                var nameCell = '<td style="font-weight:700;">' +
+                    '<div style="display:flex; align-items:center; gap:6px;">' +
+                    (hasLots ? '<span class="mat-chevron ' + (isExpanded ? 'expanded' : '') + '">' +
+                    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="12" height="12" style="color:var(--text-muted);"><path d="M9 5l7 7-7 7"/></svg>' +
+                    '</span>' : '') +
+                    '<span>' + escapeHtml(rm.name) + '</span>' +
+                    '</div>';
+                if (hasLots) {
+                    var lotsTextList = rm.lots.map(function (l) {
+                        var lotQty = (Number(l.wash) || 0) + (Number(l.unwash) || 0);
+                        var statusText = l.status === 'Blocked' ? ' (Blocked)' : '';
+                        return escapeHtml(l.lotNumber) + ' - qty=' + fmt(lotQty) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + statusText;
+                    }).join(', ');
+                    nameCell += '<div style="font-weight:normal; font-size:11px; color:var(--text-muted); margin-top:4px; padding-left:18px;">Lots: ' + lotsTextList + '</div>';
+                }
+                nameCell += '</td>';
 
-                return '<tr>' +
+                var rowClass = hasLots ? ('mat-row-clickable' + (isExpanded ? ' is-expanded' : '')) : '';
+                var dataAttr = hasLots ? (' data-material-id="' + rm.id + '"') : '';
+
+                var mainRowHtml = '<tr class="' + rowClass + '"' + dataAttr + '>' +
                     '<td style="font-weight:600; white-space:nowrap;">' + escapeHtml(rm.sku) + '</td>' +
-                    '<td style="font-weight:700;">' + escapeHtml(rm.name) + '</td>' +
+                    nameCell +
                     '<td>' + (escapeHtml(rm.type) || '<span class="muted">—</span>') + '</td>' +
                     '<td>' + (escapeHtml(rm.pattern) || '<span class="muted">—</span>') + '</td>' +
                     '<td>' + (escapeHtml(rm.color) || '<span class="muted">—</span>') + '</td>' +
@@ -4609,6 +4632,69 @@ function renderMaterials() {
                     '<td class="r" style="font-variant-numeric:tabular-nums; font-weight:600;">' + unwashLabel + '</td>' +
                     '<td class="r ' + stockClass + '" style="font-variant-numeric:tabular-nums; font-weight:600;">' + stockLabel + unitLabel + '</td>' +
                     '</tr>';
+
+                var detailRowHtml = '';
+                if (isExpanded) {
+                    var lotRows = '';
+                    var totalWash = 0;
+                    var totalUnwash = 0;
+                    var totalCombined = 0;
+
+                    if (rm.lots && rm.lots.length > 0) {
+                        lotRows = rm.lots.map(function (l) {
+                            var w = Number(l.wash) || 0;
+                            var u = Number(l.unwash) || 0;
+                            var tot = w + u;
+
+                            totalWash += w;
+                            totalUnwash += u;
+                            totalCombined += tot;
+
+                            var statusPill = l.status === 'Blocked'
+                                ? '<span class="status-pill status-danger" style="padding:2px 6px; font-size:10px; font-weight:700; border-radius:4px; background:#fee2e2; color:#991b1b;">Blocked</span>'
+                                : '<span class="status-pill status-sufficient" style="padding:2px 6px; font-size:10px; font-weight:700; border-radius:4px; background:#d1fae5; color:#065f46;">Active</span>';
+
+                            return '<tr>' +
+                                '<td style="font-weight:600; padding:6px 12px;">' + escapeHtml(l.lotNumber) + '</td>' +
+                                '<td class="r" style="font-variant-numeric:tabular-nums; text-align:right; padding:6px 12px;">' + fmt(w) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + '</td>' +
+                                '<td class="r" style="font-variant-numeric:tabular-nums; text-align:right; padding:6px 12px;">' + fmt(u) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + '</td>' +
+                                '<td class="r" style="font-variant-numeric:tabular-nums; font-weight:600; text-align:right; padding:6px 12px;">' + fmt(tot) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + '</td>' +
+                                '<td style="padding:6px 12px;">' + statusPill + '</td>' +
+                                '</tr>';
+                        }).join('');
+
+                        lotRows += '<tr style="font-weight:700; background-color:#f1f5f9; border-top:2px solid #cbd5e1;">' +
+                            '<td style="padding:8px 12px;">Total for all lots</td>' +
+                            '<td class="r" style="font-variant-numeric:tabular-nums; text-align:right; padding:8px 12px;">' + fmt(totalWash) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + '</td>' +
+                            '<td class="r" style="font-variant-numeric:tabular-nums; text-align:right; padding:8px 12px;">' + fmt(totalUnwash) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + '</td>' +
+                            '<td class="r" style="font-variant-numeric:tabular-nums; text-align:right; padding:8px 12px;">' + fmt(totalCombined) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + '</td>' +
+                            '<td style="padding:8px 12px;"></td>' +
+                            '</tr>';
+                    } else {
+                        lotRows = '<tr><td colspan="5" style="text-align:center; padding:12px; color:var(--text-muted);">No lots found for this material.</td></tr>';
+                    }
+
+                    detailRowHtml = '<tr class="lots-detail-row" style="background:#f8fafc;">' +
+                        '<td></td>' +
+                        '<td colspan="10" style="padding:10px 16px 16px 16px; border-bottom:1px solid var(--border);">' +
+                        '<div style="font-weight:700; font-size:12px; color:var(--text-main); margin-bottom:8px;">Lot breakdown details</div>' +
+                        '<div class="table-wrapper" style="box-shadow:none; border:1px solid #e2e8f0; border-radius:6px; background:#ffffff; max-width:800px; overflow:hidden; margin-top:0;">' +
+                        '<table class="rep-table" style="margin-bottom:0; width:100%;">' +
+                        '<thead><tr>' +
+                        '<th style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px;">Lot Number</th>' +
+                        '<th class="r" style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; text-align:right; width:22%;">Wash Qty</th>' +
+                        '<th class="r" style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; text-align:right; width:22%;">Unwash Qty</th>' +
+                        '<th class="r" style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; text-align:right; width:22%;">Total Qty</th>' +
+                        '<th style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; width:15%;">Status</th>' +
+                        '</tr></thead>' +
+                        '<tbody>' + lotRows + '</tbody>' +
+                        '</table>' +
+                        '</div>' +
+                        '</td>' +
+                        '</tr>';
+                }
+
+                return mainRowHtml + detailRowHtml;
             }).join('');
 
             tableHtml = '<div class="item-body">' +
@@ -4700,6 +4786,16 @@ function setupAccordionListeners() {
                 EXPANDED_PATTERNS[pat] = true;
             }
             renderMaterials();
+        });
+    });
+
+    container.querySelectorAll('.mat-row-clickable').forEach(function (row) {
+        row.addEventListener('click', function () {
+            var matId = row.getAttribute('data-material-id');
+            if (matId) {
+                EXPANDED_MATERIALS[matId] = !EXPANDED_MATERIALS[matId];
+                renderMaterials();
+            }
         });
     });
 }

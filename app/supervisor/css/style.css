@@ -373,9 +373,7 @@ tbody tr.row-selected td:first-child {
 
 .material-name-cell .mat-name {
     font-weight: 600;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
+    display: block;
 }
 .material-name-cell .mat-sku {
     color: var(--text-muted);
@@ -2106,6 +2104,25 @@ th.col-num {
     gap: 1rem;
 }
 
+/* Disputes Table Layout and Alignment */
+#panel-disputes td {
+    vertical-align: top;
+    padding-top: 0.75rem;
+}
+
+#panel-disputes .col-num {
+    width: 7rem;
+}
+
+#panel-disputes .col-raised {
+    width: 7.5rem;
+}
+
+#panel-disputes .col-action {
+    vertical-align: top;
+    padding-top: 0.75rem;
+}
+
 .prod-toolbar {
     margin-bottom: 1rem;
 }
@@ -2375,6 +2392,7 @@ th.col-num {
    one is about a specific remnant. Same green pill as everywhere else. */
 .waste-badge {
     display: inline-block;
+    vertical-align: middle;
     margin-left: 0.4rem;
     padding: 0.1rem 0.5rem;
     border-radius: 9999px;
@@ -2392,6 +2410,7 @@ th.col-num {
    pieces-coming-back one borrows it and the issued-out one stays neutral. */
 .dir-badge {
     display: inline-block;
+    vertical-align: middle;
     margin-left: 0.4rem;
     padding: 0.1rem 0.45rem;
     border-radius: 9999px;
