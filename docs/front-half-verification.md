@@ -10,8 +10,9 @@ out of scope.
 ```
 node tools/deluge-maths.test.js    43 passed   (user-extended B14b-g piece-validation set)
 node tools/allocator.test.js       31 passed   (real widget allocator in a VM)
-node tools/pipeline.test.js        30 passed   NEW - planner + sync ports, cap starvation,
-                                               screen-to-ledger end-to-end parity sweep
+node tools/pipeline.test.js        34 passed   NEW - planner + sync ports, cap starvation,
+                                               screen-to-ledger end-to-end parity sweep,
+                                               per-order try/catch semantics (P18-P21)
 node tools/dgscan.js deluge/*.dg   clean except the 3 known inline sorts
                                    in getProductionWidgetData (documented debt)
 ```
@@ -23,7 +24,59 @@ priority key maths, rules-index build (empty-source / null-Employee skipping),
 the TWO-LIMIT CAP including the starvation regression, `syncSingleSalesOrder`
 (dup-check before API, draft/void skip, SKU resolution, exactly-one-BOM advisory,
 source resolution incl. custom-field label precedence, customer miss advisory, mail guard),
-and an end-to-end parity sweep: server payload → real allocator → Issue payload → ledger.
+an end-to-end parity sweep: server payload → real allocator → Issue payload → ledger,
+and the PER-ORDER TRY/CATCH added to the planner loop (below).
+
+## Verified 2026-08-23 (later pass): per-order try/catch in createProductionPlans
+
+`createProductionPlans.dg:199` opens a `try` around the whole per-order body; `:634-666`
+catches, logs `ERROR ->`, and counts into `failedCount`. Ported faithfully and covered by
+four tests:
+
+- **P18 — poison-pill containment**: one throwing order mid-queue; both healthy orders
+  behind it planned in the SAME run. ERROR logged apart from REJECT (`ERROR -> SO …` vs
+  `REJECT -> SO …`); the throwing order keeps Pending.
+- **P19 — the regression this kills**: before the change a throw killed the whole run and,
+  because failures stay Pending, every later run died at the identical order — one full
+  scheduling window lost per occurrence, silently. Now two consecutive runs each complete:
+  run 1 plans five orders past the throw, run 2 completes again with the same error reported.
+- **P20 — post-insert recovery**: a throw between the header insert (:475) and the
+  queue-exit write (:559-567) leaves plan + Pending order. Deluge has no transaction to roll
+  back; next run the RESUME PATH finds the plan and moves the order to In Progress without
+  planning twice or duplicating the header. Verified across two simulated runs.
+- **P21 — accounting**: an error consumes NO plan number, and `failedCount` includes errors
+  so an error-only run still sends the summary mail.
+
+Notes on the shape (checked, not defects): the budget guard's `continue` sits inside the
+`try` and is untouched by it; `errTxt`/`soNoTxt` are scalar-only names in that function (no
+loop-variable clash — dgscan confirms); ERROR rows share the failure mail table but carry an
+`ERROR:` prefix, matching the log separation. The catch cannot save a statement-limit kill
+(uncatchable by design) — it covers genuine runtime throws such as bad data in one order.
+
+## Fixed 2026-08-23: store Issue screen — waste checkbox / pcs input
+
+Reported: uncheck left the box visually ticked while the count went to 0; typing did
+nothing (count snapped to 0); re-checking then showed 1. Confirmed a BUG against the
+documented intent (lot-allocator.js: "REMNANTS HE HAS DECLINED, or reduced the count on…
+Untick it and the cloth has to make up the difference") — nothing describes the stuck-tick
+behaviour as wanted. Three defects feeding each other, all in `app/js/main.js`:
+
+| # | Site | Was | Is |
+|---|---|---|---|
+| A | render (`checked` hardcoded on the waste checkbox) | declined remnant rendered TICKED over a 0-pcs input | tick derived from the decline via new `wasteCheckedFor(pick)` |
+| B | `onWasteInputChange` clamped against `pick.pieces` (0 while declined) and `max` attribute likewise | every keystroke snapped to 0; box unusable exactly when he is bringing pieces back | clamps against the RACK count via new `rackCountFor(m, pick)` |
+| C | the change-test fell through to `delete wasteDeclined` when the clamped value equalled the pick | typing while declined silently restored the FULL allowance with no re-render | compares against the CURRENT effective take; only the full rack count withdraws a decline (same semantics `wasteAllowed` uses) |
+
+Also hardened the same defect surface: `setWasteChecked` now updates `wasteDeclined`
+(state, not just paint — the master checkbox reaches it), and `onSelectAllChange`
+re-renders once after its sweep, since declines re-size the fresh metres. The submit path
+needed no change: unchecked rows were already excluded from the payload, so the honest
+render sends exactly what the buggy one accidentally did.
+
+**Tests:** new `tools/store-ui.test.js` (7 tests, stub DOM + real allocator + the extracted
+handlers via vm) — decline renders unticked at 0; typing accepted up to the rack; no silent
+un-decline; full rack ≡ no decline; re-check restores. Suite counts now:
+deluge-maths 43 · allocator 31 · pipeline 34 · store-ui 7.
 
 ---
 

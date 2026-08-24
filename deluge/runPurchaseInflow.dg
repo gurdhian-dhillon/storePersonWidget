@@ -1,0 +1,91 @@
+string runPurchaseInflow()
+{
+	// THE ONE ENTRY POINT EVERY AUTOMATIC CALLER USES. No arguments, on purpose.
+	//
+	// syncPurchaseInflow takes a dryRun string, and a webhook URL with that
+	// parameter missing or mistyped is a silent failure of the worst kind: it
+	// runs as a dry run for ever, lands nothing, and reports success the whole
+	// time. A no-argument Custom API cannot be called wrong. syncPurchaseInflow
+	// stays directly runnable from Execute, which is the debugging path.
+	//
+	// Called by:
+	//   - the Inventory Purchase Receive workflow webhook, on create or edit
+	//   - the store widget's "Check for arrivals" button
+	//
+	// Neither caller passes anything, and neither needs to: the Inventory_Inflow
+	// ledger works out what is new. That is why this can be fired on every
+	// receive, as often as you like, without double counting - a document whose
+	// last_modified_time has not moved is not even opened.
+	//
+	//------------------------------------------------------------------------
+	// THERE IS NO LOCK HERE, AND THAT IS A DECIDED RISK, NOT AN OVERSIGHT.
+	//
+	// Two runs overlapping would both read Applied_Qty = 0 for the same line,
+	// both compute the same delta, and both apply it - crediting cloth twice.
+	// It does NOT self-correct: the next run finds the document and the ledger
+	// agreeing, so nothing is left to notice it. Only reconcileRawMaterial would
+	// ever show the drift.
+	//
+	// Skipped because the window is the two or three seconds a run takes, and
+	// this factory books a handful of purchase receives a week. Two inside the
+	// same couple of seconds is not a realistic event at that volume.
+	//
+	// ADD IT WHEN EITHER OF THESE BECOMES TRUE:
+	//   - receives are booked in batches, or by more than one person at once
+	//   - a second automatic trigger is wired (a bill rule, a schedule, Flow)
+	//
+	// The shape it would take is written up in docs/inventory-build-plan.md: a
+	// Sync_Lock row taken before the work and released after, with staleness
+	// measured as a stored day plus a minute-of-day integer rather than datetime
+	// arithmetic, because the one path that cannot release a lock is the
+	// statement-execution limit and that is not catchable. It is not atomic
+	// either - Deluge has no test-and-set - so it narrows the window rather than
+	// closing it. Adding it later touches this function and a new form only, and
+	// NEVER the webhook, which is the reason the no-argument wrapper exists
+	// separately from the locking question.
+
+	res = "";
+	errTxt = "";
+
+	try
+	{
+		syncRes = "";
+
+		// Its own try/catch so a thrown sync still comes back as a readable
+		// reply. Creator collapses every runtime failure into a generic code
+		// 9430, and a webhook has nowhere to show that even if it did not.
+		try
+		{
+			syncRes = thisapp.syncPurchaseInflow("false").toString();
+		}
+		catch (eSync)
+		{
+			syncRes = "{\"errors\":[\"runPurchaseInflow: " + eSync.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ") + "\"]}";
+		}
+
+		info "runPurchaseInflow | " + syncRes;
+
+		// The sync's reply is passed straight through rather than summarised, so
+		// the button and the webhook log see exactly what Execute would.
+		res = "{\"ran\":true,\"result\":" + syncRes + "}";
+	}
+	catch (e)
+	{
+		errTxt = "DELUGE: " + e.toString();
+	}
+
+	// ONE EXIT, AT THE BOTTOM. Deluge's "all paths return" check does not count
+	// a return that lives inside try/catch, and a function whose every return
+	// sits in the try fails to save with "Missing return statement" reported
+	// against the first line of the body.
+	if(res == "")
+	{
+		if(errTxt == "")
+		{
+			errTxt = "Nothing ran";
+		}
+		res = "{\"ran\":false,\"reason\":\"" + errTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ") + "\"}";
+	}
+
+	return res;
+}

@@ -69,7 +69,232 @@ An Inventory workflow rule (`SynctoCreator`) posts new sales orders to the Creat
 
 ---
 
-## Phase 2 — the queue. NEXT
+## Phase 1b — purchased material arriving. RUNNING
+
+Taken out of order and built before the queue, because it is the half that unblocks the store:
+purchasing happens entirely in Inventory today and Creator never hears about it.
+
+```
+purchase + arrival in Inventory
+  → syncPurchaseInflow reads the arrival document
+  → fabric      → Raw_Material.Unallocated_Qty
+    non-fabric  → Raw_Material.Quantity
+  → store person drains Unallocated in the "Unallocated quantity" tab, giving it a lot
+```
+
+**The consuming half already existed.** [saveStockInward](../deluge/saveStockInward.dg#L228) has
+always taken its quantity out of `Unallocated_Qty` before raising the parent total, `getStoreLots`
+already returns the figure and the widget already renders the tab. `lots.md` called this "the
+Inventory seam" and left it holding zero. This is the feeder it was built for; nothing downstream
+changed.
+
+**Fabric does not go into a lot, and that is the whole point.** A lot is a *tone*, and nobody has
+looked at the cloth yet. Unallocated stock is deliberately unissuable — promising cloth of unknown
+tone to an order is the exact mistake lots exist to prevent.
+
+### Which document is the arrival
+
+Zoho raises stock on **one** of two documents, never both: the **Purchase Receive** if receives are
+switched on, otherwise the **Bill**. Reading both double-counts every arrival; reading the wrong one
+sees nothing ever land. Both failures are silent.
+
+`inflowSource` in [syncPurchaseInflow.dg](../deluge/syncPurchaseInflow.dg) is a **constant**, set
+once from [probePurchaseInflow](../deluge/probePurchaseInflow.dg)'s verdict. Auto-detecting per run
+would let the mode flip underneath live data. The tell is on the bill, not the receive: a bill line
+raised after a receive carries `receive_item_id`. A `Bill`-mode line that carries one is refused as
+`Skipped_Duplicate` rather than trusted — that combination means the org setting changed.
+
+> **SETTLED, 2026-08-24, by running the probe against the live org.** `PR-001` → `BILL-0001`, and
+> the bill's single line carries `receive_item_id` pointing at the receive's line. So
+> **`inflowSource = "Receive"`**, and bills must never be read for stock on this org.
+
+**A receive carries two statuses and only one of them answers the question.** The live receive read
+`status: "billed"` with `received_status: "received"` — `status` runs on to `billed` once the money
+side happens and stops saying whether the cloth arrived. The sync tests `received_status` when it is
+present, and keeps the `status` blacklist (`in_transit`, `draft`, `void`, `cancelled`) for the case
+where it is not.
+
+### `Inventory_Inflow` — the ledger, one row per (document, line)
+
+| Field | Type | Holds |
+|---|---|---|
+| `Doc_Type` | Dropdown | `Purchase_Receive`, `Bill` |
+| `Doc_ID` · `Doc_No` | Single line | the Inventory document |
+| `Doc_Date` | Date | what the window and the cutover are tested against |
+| `Doc_Modified` | Single line | `last_modified_time` as read; the unchanged-document test |
+| `Line_ID` | Single line | `line_item_id` |
+| `Inventory_Item_ID` | Single line | |
+| `Material` | Lookup → `Raw_Material` | empty while unmapped |
+| `Doc_Qty` | Decimal | what the document says **now** |
+| `Applied_Qty` | Decimal | what Creator has actually taken in |
+| `Target` | Single line | `Unallocated` or `Quantity` |
+| `Location_ID` | Single line | |
+| `Sync_Status` | Dropdown | `Applied`, `Unmapped`, `Skipped_Duplicate`, `Skipped_Not_Raw_Material`, `Blocked_Reduction` |
+| `Note` | Multi line | |
+
+`Sync_Status`, not `Status` — six forms already share that link name and a grep for `.Status = "`
+mixes all of them.
+
+**Why a ledger and not a last-synced timestamp.** Everything difficult falls out of the one shape:
+
+- **Applied exactly once.** The row *is* the record that it landed — no window, no clock skew.
+- **An edited receive is a delta.** 200 corrected to 180 applies −20, because the row remembers the
+  200. Posting the total would add 180 on top of 200. Same rule as the finished-goods post.
+- **A deleted line reverses.** It is a key the ledger has and the document no longer does.
+- **Provenance.** "Where did these 200 metres come from" stays answerable, which it is not once a
+  number has been added to a field.
+
+### A purchased item Creator has never heard of
+
+Without this the store is blocked on somebody noticing an `Unmapped` ledger row and hand-building a
+`Raw_Material` before any of that cloth can be given a tone. Purchasing buys new materials
+routinely, so that is the normal case, not the exception. It resolves in three ways, in order, and
+only the last writes a new record:
+
+1. **A `Raw_Material` already carries this SKU but no `Inventory_Item_ID`** → stamp it and use it.
+   This is the `mapInventoryItemIds` case arriving one material at a time. **Creating a second row
+   here would split one material in two** — two SKUs, two stock balances, and every BOM pointing at
+   the empty one. Matched upper-cased and trimmed, the same way lot numbers are.
+2. **Inventory says it is not raw material** → `Skipped_Not_Raw_Material`, and never retried.
+   Unmapped re-opens its document every run because it is waiting on somebody; this is not waiting
+   on anybody. A finished good belongs to `Item_Master`, and creating it here would put a garment on
+   the store's issue screen as cloth.
+3. **Mint it**, with the same field list `sendToPrint` uses — `Name` inside the insert block because
+   it is mandatory, every quantity at zero. The arrival then lands through the ordinary path, so a
+   material minted here and one mapped by hand are applied by exactly the same code, **on the same
+   run**.
+
+> **`Product Type` IS MATCHED BY `customfield_id`, NEVER BY LABEL.** Custom fields come back only
+> inside a `custom_fields` array of `{customfield_id, label, value}` — there are no `cf_` keys.
+> Matching on the label means renaming the field in Inventory silently unclassifies every item, and
+> the first symptom is purchases quietly no longer landing. The ids come from
+> [probeItemCustomFields](../deluge/probeItemCustomFields.dg) and are constants at the top of the
+> sync. **While `cfProductType` is empty nothing is ever created** — an item that cannot be
+> classified is refused and says why rather than being guessed at.
+
+Refused, each with the reason on the ledger row: no `Product Type` set, no SKU (the join key
+everywhere — a `Raw_Material` without one cannot be found again), no name (mandatory on the form).
+All of these re-open their document every run, so filling the gap in Inventory is enough.
+
+**A fabric with no width still lands.** The cloth is really on the rack and saying so is right, but
+the cut calculation divides by `Fabric_Width_Inches`, so the run report and the ledger note both
+shout about it and `createdWithoutWidth` counts it. It must be set by hand before the material can
+be planned.
+
+### Rules that are load-bearing
+
+> **THE CUTOVER DATE IS NOT OPTIONAL.** Creator's opening balances were seeded from Creator's own
+> figures, and Inventory already holds purchase documents from before this function existed. Without
+> a floor the first run reads every one of them as an arrival and puts months of history on the rack
+> a second time. `cutoverDate` **must be set to the go-live day before the first real run.** Too
+> late is the harmless direction: an arrival is not seen, the store person says so, the date moves
+> back.
+
+> **NEVER COMPARE TOTALS.** `reconcileRawMaterial` already reads `stock_on_hand` per SKU and knows
+> the difference; turning it into a writer would be a dozen lines and is the worst thing that could
+> be built here. Consumption posting is **switched off** — `receiveMaterials` no longer enqueues one
+> — so every supervisor receipt lowers Creator and leaves Inventory untouched. A balance-driven sync
+> would read that growing gap as material arriving and credit cloth that was cut last week, for
+> ever. Document driven, always.
+
+> **A REDUCTION STOPS AT ZERO AND NEVER TOUCHES A LOT.** Once cloth has a tone it is in a lot, and
+> which lot loses metres is a decision only the store person can make — he can see the rack. Taking
+> it off a lot here would be the system choosing a tone. The reduction takes what `Unallocated_Qty`
+> still holds; the remainder is recorded at `Blocked_Reduction` with the ledger keeping the unapplied
+> part, and is re-attempted every run until it clears.
+
+- **An in-transit receive moves nothing.** Zoho holds it against the order until it is marked
+  received — the same distinction this app already makes between issue and receipt.
+
+> **EVERY LOCATION COUNTS, and the first real receive is why.** This was written to accept Main
+> Warehouse only, on the reasoning that a receive into Production is not cloth at the store counter.
+> The org's first purchase receive landed at **Head Office** (`3955559000000032097`) and would have
+> been silently dropped — the worst shape this can fail in, because a skipped arrival is
+> indistinguishable from no arrival.
+>
+> The deeper reason is the identity itself: `reconcileRawMaterial` compares Creator against
+> `item.stock_on_hand`, which is the **org-wide** total, and Creator has no location concept
+> anywhere in it. Cloth received at any location is inside the number Creator is measured against,
+> so ignoring a location guarantees permanent drift nothing can explain. A purchase receive only
+> ever exists against a purchase order, so it is newly bought stock whatever door it came through.
+> The location is **recorded** on the ledger row rather than acted on.
+- **An unmapped line applies nothing and says so**, rather than refusing the whole document the way
+  `postTransferOrders` refuses a voucher. The ledger row makes the gap visible and it lands in full
+  on the next run once `Inventory_Item_ID` is stamped — a per-line record can be self-healing where
+  a stamp on a document cannot.
+- **`Unmapped` and `Blocked_Reduction` re-open their document** even though `last_modified_time` has
+  not moved. Both wait on something outside Inventory, and without this the unchanged-document
+  shortcut would skip them for ever while the ledger cheerfully said they had been seen.
+
+### What triggers it
+
+**`runPurchaseInflow` is the only entry point any automatic caller uses.** No arguments, on
+purpose: `syncPurchaseInflow` takes a `dryRun` string, and a webhook URL with that parameter
+missing or mistyped runs as a dry run for ever — landing nothing while reporting success. A
+no-argument Custom API cannot be called wrong. `syncPurchaseInflow` stays directly runnable from
+Execute, which is the debugging path.
+
+| Trigger | What it is |
+|---|---|
+| **Purchase Receive workflow → webhook** | Inventory-side, automatic, on Created or Edited |
+| **"Check for arrivals" button**, Unallocated tab | The store person, standing at the rack |
+
+The webhook is a bare POST to `runPurchaseInflow` with **no parameters and no body that matters**.
+It does not tell the sync which receive landed and does not need to — the ledger works that out.
+That is what makes it safe to fire on every receive, as often as it likes.
+
+**Created or Edited, no other criteria.** Create alone would miss a receive corrected from 200 to
+180 after the fact; the sync applies the −20 correctly but has to be told to look. A fire where
+nothing changed costs one list call and applies nothing, which the `unchanged` counter shows.
+
+> **THERE IS NO LOCK, AND THAT IS A DECIDED RISK.** Two overlapping runs would both read
+> `Applied_Qty = 0` for the same line, both compute the same delta, and both apply it — crediting
+> cloth twice. It does **not** self-correct: the next run finds the document and the ledger
+> agreeing, so nothing is left to notice it, and only `reconcileRawMaterial` would show the drift.
+>
+> Skipped because the window is the two or three seconds a run takes, and this factory books a
+> handful of receives a week. **Add it when receives start being booked in batches or by more than
+> one person, or when a second automatic trigger is wired** (a bill rule, a schedule, Zoho Flow).
+>
+> The shape: a `Sync_Lock` row taken before the work and released after, with staleness as a stored
+> day plus a **minute-of-day integer** rather than datetime arithmetic — the one path that cannot
+> release a lock is the statement-execution limit, and a lock is the wrong place to find out how
+> `subMinute` behaves. It would not be atomic either (Deluge has no test-and-set), so it narrows
+> the window rather than closing it. Adding it touches `runPurchaseInflow` and a new form only, and
+> **never the webhook** — which is why the no-argument wrapper exists separately from the locking
+> question.
+
+### A deleted purchase receive is NOT reversed
+
+The sync reverses a line that vanishes from a document it opens, but a document deleted outright is
+never opened, so its ledger rows are never touched and its stock stays credited in Creator for ever.
+A Delete trigger on the webhook does not fix it — the fix belongs in the sync: sweep for ledger
+documents inside the window that are absent from Inventory's list, and reverse those, guarded so a
+truncated list page (`listed >= 200`) can never be mistaken for a mass deletion. Not built.
+
+### Call cost
+
+One list call per run in the steady state. A document is only opened line by line when the ledger
+has never seen it or its `last_modified_time` has moved, so an unchanged history costs nothing
+however long it gets. `maxDetail` (12) bounds a bad day and the rest waits for the next run —
+the statement limit is not catchable and shows as a bare 500 with no error card.
+
+### Still to do
+
+- ~~Run `probePurchaseInflow` and set `inflowSource`~~ — done, `Receive`.
+- ~~Create `Inventory_Inflow`~~ — done. First real run: 2 calls, 1 document, 1 `Unmapped` line
+  (`HeliosZoho test item`), nothing moved.
+- Run `probeItemCustomFields` and set the seven `customfield_id` constants. Until `cfProductType`
+  is set, auto-create refuses everything and says so.
+- Set `cutoverDate`.
+- Deploy `runPurchaseInflow` as a Custom API with **no parameters**, and redeploy the store widget.
+- Point the Inventory Purchase Receive workflow webhook at it, Created or Edited.
+- Deferred, deliberately: the lock, the deleted-receive sweep, the daily Creator sweep. None is
+  needed at this volume, and `reconcileRawMaterial` is what would report a miss.
+
+---
+
+## Phase 2 — the queue
 
 New form **`Inventory_Post_Queue`**:
 

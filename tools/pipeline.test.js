@@ -77,7 +77,7 @@ function plannerRun(world, opts) {
   const scanLimit = opts.scanLimit !== undefined ? opts.scanLimit : 100;
   const stats = { queries: 0, writes: 0 };
   const logs = [];
-  const created = [], skipped = [], failed = [], deferred = [];
+  const created = [], skipped = [], failed = [], deferred = [], errored = [];
 
   // :102 pendingTotal BEFORE the cap
   stats.queries++;
@@ -115,8 +115,10 @@ function plannerRun(world, opts) {
   }
 
   for (const so of pendingOrders) {
-    // :176-186 budget guard — deferred is NOT failed
+  try {
+    // :176-186 budget guard - deferred is NOT failed
     if (created.length >= maxPerRun) { deferred.push(so.id); continue; }
+    if (so.failWith === 'pre') throw new Error('simulated pre-insert failure for ' + so.id);
     stats.queries++;
     // :188-209 resume path
     const existing = world.plans.filter(p => p.salesOrderId === so.id);
@@ -173,13 +175,25 @@ function plannerRun(world, opts) {
     stats.writes += 1 + so.items.length;             // header + plan_items
     world.plans.push({ id: 'PL' + planNo, planNo, salesOrderId: so.id, addedTime: 999999999,
                        assignedTo: assignedEmpId, status: 'Pending', priorityKey });
+    if (so.failWith === 'post') {
+      // Throw lands BETWEEN the header insert and the queue-exit write - Deluge
+      // has no transaction, so this is exactly the state the resume path exists
+      // to recover: plan exists, order still Pending.
+      throw new Error('simulated post-insert failure for ' + so.id);
+    }
     so.assignedTo = assignedEmpId;
     so.orderStatus = 'In Progress';
     created.push({ planNo, soId: so.id, priorityKey, rank: srcRank });
+  } catch (eOrder) {
+    // :634-660 ERROR -> logged apart from REJECT, counted in failedCount,
+    // the order keeps Pending. A post-insert plan is NOT rolled back (Deluge
+    // has no transaction) - the resume path IS the recovery.
+    errored.push({ id: so.id, message: eOrder.message });
+  }
   }
 
-  const mailSent = created.length > 0 || failed.length > 0;   // :641
-  return { created, skipped, failed, deferred, logs, mailSent, numSeedSnapshot,
+  const mailSent = created.length > 0 || failed.length > 0 || errored.length > 0;   // :641
+  return { created, skipped, failed, deferred, errored, logs, mailSent, numSeedSnapshot,
            pendingTotal, stats, finalMaxNum: maxNum };
 }
 
@@ -293,6 +307,10 @@ function pendingOrder(id, addedTime, over) {
     assignedTo: null, addedTime,
     items: [{ sku: 'ITM1', name: 'Item ' + id, qty: 10 }] }, over || {});
 }
+// failWith models a Deluge runtime throw inside the per-order body:
+//   'pre'  - throws during gathering (before any write)
+//   'post' - throws AFTER the plan header was inserted, BEFORE the order left
+//            the queue - the shape the resume path exists to recover
 
 test('P1 numbering starts at PLAN-00001 on an empty form', () => {
   const w = mkWorld(); w.salesOrders.push(pendingOrder('A1', 1));
@@ -805,3 +823,68 @@ if (failures.length) {
   failures.forEach(f => console.log('  FAIL ' + f.name + '\n       ' + f.msg.split('\n')[0]));
   process.exit(1);
 }
+
+// ---- PER-ORDER TRY/CATCH (:199-661) ------------------------------------------
+
+test('P18 a throwing order is reported as ERROR, stays Pending, and blocks NOTHING', () => {
+  const w = mkWorld();
+  w.salesOrders.push(pendingOrder('G1', 1));
+  w.salesOrders.push(pendingOrder('POISON', 2, { failWith: 'pre' }));
+  w.salesOrders.push(pendingOrder('G2', 3));
+  w.salesOrders.push(pendingOrder('R1', 4, { source: 'PR' }));   // a REJECT for contrast
+  const r = plannerRun(w);
+  assert.strictEqual(r.created.length, 2, 'both healthy orders planned in the SAME run');
+  assert.strictEqual(r.errored.length, 1);
+  assert.strictEqual(r.failed.length, 1);
+  assert.ok(r.logs.some(l => l.indexOf('ERROR ->') >= 0), 'ERROR logged apart from REJECT');
+  assert.ok(!r.logs.some(l => l.startsWith('REJECT -> SO SO-POISON')));
+  assert.strictEqual(
+    w.salesOrders.find(x => x.id === 'POISON').orderStatus, 'Pending', 'retries like a reject');
+});
+
+test('P19 THE POISON-PILL REGRESSION: the same throw on every run never blocks again', () => {
+  // Before :634, one bad order killed the WHOLE run - and because failures keep
+  // Pending, every later run died in the identical place, costing a full
+  // scheduling window each time, silently.
+  const w = mkWorld();
+  for (let i = 0; i < 10; i++) w.salesOrders.push(pendingOrder('GOOD' + i, 100 + i));
+  w.salesOrders.push(pendingOrder('BAD', 50, { failWith: 'pre' }));   // OLDEST - first scanned
+  // Run 1: BAD throws at the front; everything behind it is still planned.
+  const r1 = plannerRun(w, { maxPerRun: 5 });
+  assert.strictEqual(r1.created.length, 5);
+  assert.strictEqual(r1.errored.length, 1);
+  assert.strictEqual(r1.mailSent, true, 'an error-only or mixed run still reports');
+  // Run 2: the five goods are gone from the queue; BAD throws again - and the
+  // run must STILL complete (not die), reporting the same error.
+  const r2 = plannerRun(w, { maxPerRun: 5 });
+  assert.strictEqual(r2.errored.length, 1);
+  assert.strictEqual(r2.created.length, 5, 'the remaining goods planned despite BAD');
+});
+
+test('P20 post-insert throw: the plan survives and the NEXT run recovers via the resume path', () => {
+  const w = mkWorld();
+  w.salesOrders.push(pendingOrder('HALF', 1, { failWith: 'post' }));
+  w.salesOrders.push(pendingOrder('G1', 2));
+  const r1 = plannerRun(w);
+  assert.strictEqual(r1.errored.length, 1);
+  // Deluge has no transaction: the header is already written.
+  const halfPlan = w.plans.find(p => p.salesOrderId === 'HALF');
+  assert.ok(halfPlan, 'plan header exists');
+  assert.strictEqual(
+    w.salesOrders.find(x => x.id === 'HALF').orderStatus, 'Pending', 'never left the queue');
+  // Run 2: resume path finds the plan, moves the order on, plans NOTHING twice.
+  const r2 = plannerRun(w);
+  assert.strictEqual(r2.created.length, 0);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(r2.skipped)), ['HALF']);
+  assert.strictEqual(w.plans.filter(p => p.salesOrderId === 'HALF').length, 1, 'no duplicate');
+  assert.strictEqual(w.salesOrders[0].orderStatus, 'In Progress');
+});
+
+test('P21 errors spend NO plan number and share failedCount for the mail guard', () => {
+  const w = mkWorld();
+  w.salesOrders.push(pendingOrder('BAD', 1, { failWith: 'pre' }));
+  w.salesOrders.push(pendingOrder('G1', 2));
+  const r = plannerRun(w);
+  assert.strictEqual(r.finalMaxNum, 1, 'the error consumed no PLAN-000xx');
+  assert.strictEqual(r.mailSent, true, 'failedCount includes errors - error-only run reports');
+});

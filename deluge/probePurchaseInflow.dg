@@ -1,0 +1,357 @@
+string probePurchaseInflow()
+{
+	// READ ONLY. Run from Creator's Execute. Writes nothing, creates nothing.
+	//
+	// ONE QUESTION: which Zoho Inventory document is the moment raw material
+	// arrives, on THIS org - a Purchase Receive, or a Bill?
+	//
+	// It matters and it cannot be guessed. Zoho raises stock on ONE of the two,
+	// never both: with purchase receives switched on, the receive moves stock and
+	// the bill that follows is money only; with them off, the bill itself moves
+	// it. So a sync that reads both double-counts every arrival, and a sync that
+	// reads the wrong one never sees stock land at all - and both failures are
+	// silent, because Creator has no way to know what Inventory did.
+	//
+	// The tell is on the BILL, not the receive: a bill raised after a receive
+	// carries receive_item_id on its lines. Present on every line means receives
+	// are the event; absent everywhere means the bill is.
+	//
+	// It also answers four smaller things in the same run, each of which would
+	// otherwise be its own failed call later:
+	//   - does inventory_connection even reach these endpoints
+	//   - which location arrivals land at (only Main Warehouse is raw material -
+	//     a receive into Production or Finished Goods Store is not new cloth)
+	//   - whether line item ids resolve to Raw_Material.Inventory_Item_ID
+	//   - what the line quantity and unit actually look like
+	//
+	// List endpoints return headers only, so the most recent few documents are
+	// fetched individually - that is the only way to see line_items at all.
+
+	res = "{\"errors\":[\"Nothing ran\"]}";
+
+	try
+	{
+		orgId = "60076905558";
+		baseUrl = "https://www.zohoapis.in/inventory/v1/";
+		detailMax = 3;
+
+		//------------------------------------------------------------------
+		// The map an arriving line has to resolve through. Raw_Material only -
+		// anything that does not match is reported with its Inventory name,
+		// which is enough to tell a finished good from an unmapped fabric
+		// without walking Item_Master's ~1,900 rows for a probe.
+		//
+		// Keyed on the Inventory id as TEXT. These are 18-digit values and a
+		// mixed-type comparison throws.
+		//------------------------------------------------------------------
+		skuByInv = Map();
+		fabByInv = Map();
+		mappedCount = 0;
+
+		for each  rmRow in Raw_Material[ID != 0]
+		{
+			invId = ifnull(rmRow.Inventory_Item_ID,"").toString().trim();
+
+			if(invId != "")
+			{
+				mappedCount = mappedCount + 1;
+				skuByInv.put(invId,ifnull(rmRow.SKU,"").toString().trim());
+
+				// As TEXT, never against the boolean true. A Decision box gives a
+				// boolean, a yes/no dropdown gives the string "Yes", an untouched
+				// field gives EMPTY - and only the first matches == true.
+				fabTxt = ifnull(rmRow.Is_Fabric,"").toString().trim().toLowerCase();
+
+				if(fabTxt == "true" || fabTxt == "yes" || fabTxt == "1" || fabTxt == "y")
+				{
+					fabByInv.put(invId,"yes");
+				}
+				else
+				{
+					fabByInv.put(invId,"no");
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// PURCHASE RECEIVES. No date filter - the newest few are what is
+		// wanted, and a filter param this org does not accept would fail the
+		// call and read as "the endpoint is not there".
+		//------------------------------------------------------------------
+		rcvJson = "";
+		rcvNote = "";
+		rcvCount = 0;
+		rcvIds = List();
+
+		try
+		{
+			rcvResp = invokeurl
+			[
+				url :baseUrl + "purchasereceives?organization_id=" + orgId + "&per_page=25"
+				type :GET
+				connection:"inventory_connection"
+			];
+
+			rcvCode = ifnull(rcvResp.get("code"),"none").toString().trim();
+
+			if(rcvCode == "0")
+			{
+				rcvRows = ifnull(rcvResp.get("purchasereceives"),List());
+				rcvCount = rcvRows.size();
+
+				for each  rRow in rcvRows
+				{
+					rId = ifnull(rRow.get("purchasereceive_id"),"").toString();
+
+					// No reliable break in a for each - the body is guarded so
+					// only the newest few are opened up line by line below.
+					if(rcvIds.size() < detailMax && rId != "")
+					{
+						rcvIds.add(rId);
+					}
+
+					if(rcvJson != "")
+					{
+						rcvJson = rcvJson + ",";
+					}
+
+					// received_status and billed_status separately: an in_transit
+					// receive has NOT moved stock, and treating it as an arrival
+					// would credit cloth that is still on a lorry.
+					rcvJson = rcvJson + "{\"id\":\"" + rId + "\"," + "\"number\":\"" + ifnull(rRow.get("purchasereceive_number"),"").toString().replaceAll("\"","'") + "\"," + "\"date\":\"" + ifnull(rRow.get("receive_date"),"").toString() + "\"," + "\"status\":\"" + ifnull(rRow.get("status"),"").toString() + "\"," + "\"receivedStatus\":\"" + ifnull(rRow.get("received_status"),"").toString() + "\"," + "\"billedStatus\":\"" + ifnull(rRow.get("billed_status"),"").toString() + "\"," + "\"locationId\":\"" + ifnull(rRow.get("location_id"),"").toString() + "\"," + "\"locationName\":\"" + ifnull(rRow.get("location_name"),"").toString().replaceAll("\"","'") + "\"," + "\"vendor\":\"" + ifnull(rRow.get("vendor_name"),"").toString().replaceAll("\"","'") + "\"," + "\"poNumber\":\"" + ifnull(rRow.get("purchaseorder_number"),"").toString().replaceAll("\"","'") + "\"," + "\"lastModified\":\"" + ifnull(rRow.get("last_modified_time"),"").toString() + "\"}";
+				}
+
+				rcvNote = "purchasereceives answered with " + rcvCount + " row(s)";
+			}
+			else
+			{
+				rcvNote = "purchasereceives code " + rcvCode + ": " + ifnull(rcvResp.get("message"),"").toString().replaceAll("\"","'");
+			}
+		}
+		catch (eR)
+		{
+			rcvNote = "purchasereceives threw: " + eR.toString().replaceAll("\"","'");
+		}
+
+		//------------------------------------------------------------------
+		// The lines of the newest few receives. This is where the item id, the
+		// quantity and the unit are, and none of them appear on the list.
+		//------------------------------------------------------------------
+		rcvLineJson = "";
+
+		for each  rDetId in rcvIds
+		{
+			try
+			{
+				rdResp = invokeurl
+				[
+					url :baseUrl + "purchasereceives/" + rDetId + "?organization_id=" + orgId
+					type :GET
+					connection:"inventory_connection"
+				];
+
+				if(ifnull(rdResp.get("code"),"none").toString().trim() == "0")
+				{
+					rdBlock = rdResp.get("purchasereceive");
+
+					if(rdBlock != null)
+					{
+						for each  rLine in ifnull(rdBlock.get("line_items"),List())
+						{
+							lItem = ifnull(rLine.get("item_id"),"").toString().trim();
+							lSku = ifnull(skuByInv.get(lItem),"").toString();
+							lFab = ifnull(fabByInv.get(lItem),"").toString();
+
+							if(rcvLineJson != "")
+							{
+								rcvLineJson = rcvLineJson + ",";
+							}
+
+							// mapped/isFabric is the whole point: an arrival whose
+							// item has no Raw_Material behind it can never land, and
+							// this says so before anything is built on it.
+							rcvLineJson = rcvLineJson + "{\"doc\":\"" + ifnull(rdBlock.get("purchasereceive_number"),"").toString().replaceAll("\"","'") + "\"," + "\"lineId\":\"" + ifnull(rLine.get("line_item_id"),"").toString() + "\"," + "\"itemId\":\"" + lItem + "\"," + "\"name\":\"" + ifnull(rLine.get("name"),"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"," + "\"qty\":\"" + ifnull(rLine.get("quantity"),"").toString() + "\"," + "\"unit\":\"" + ifnull(rLine.get("unit"),"").toString().replaceAll("\"","'") + "\"," + "\"warehouseId\":\"" + ifnull(rLine.get("warehouse_id"),"").toString() + "\"," + "\"mapped\":\"" + lSku.replaceAll("\"","'") + "\"," + "\"isFabric\":\"" + lFab + "\"}";
+						}
+					}
+				}
+			}
+			catch (eRD)
+			{
+				info "probePurchaseInflow | receive detail " + rDetId + " threw: " + eRD.toString();
+			}
+		}
+
+		//------------------------------------------------------------------
+		// BILLS. The other candidate, and the one carrying the tell.
+		//------------------------------------------------------------------
+		blJson = "";
+		blNote = "";
+		blCount = 0;
+		blIds = List();
+
+		try
+		{
+			blResp = invokeurl
+			[
+				url :baseUrl + "bills?organization_id=" + orgId + "&per_page=25"
+				type :GET
+				connection:"inventory_connection"
+			];
+
+			blCode = ifnull(blResp.get("code"),"none").toString().trim();
+
+			if(blCode == "0")
+			{
+				blRows = ifnull(blResp.get("bills"),List());
+				blCount = blRows.size();
+
+				for each  bRow in blRows
+				{
+					bId = ifnull(bRow.get("bill_id"),"").toString();
+
+					if(blIds.size() < detailMax && bId != "")
+					{
+						blIds.add(bId);
+					}
+
+					if(blJson != "")
+					{
+						blJson = blJson + ",";
+					}
+
+					blJson = blJson + "{\"id\":\"" + bId + "\"," + "\"number\":\"" + ifnull(bRow.get("bill_number"),"").toString().replaceAll("\"","'") + "\"," + "\"date\":\"" + ifnull(bRow.get("date"),"").toString() + "\"," + "\"status\":\"" + ifnull(bRow.get("status"),"").toString() + "\"," + "\"vendor\":\"" + ifnull(bRow.get("vendor_name"),"").toString().replaceAll("\"","'") + "\"," + "\"lastModified\":\"" + ifnull(bRow.get("last_modified_time"),"").toString() + "\"}";
+				}
+
+				blNote = "bills answered with " + blCount + " row(s)";
+			}
+			else
+			{
+				blNote = "bills code " + blCode + ": " + ifnull(blResp.get("message"),"").toString().replaceAll("\"","'");
+			}
+		}
+		catch (eB)
+		{
+			blNote = "bills threw: " + eB.toString().replaceAll("\"","'");
+		}
+
+		//------------------------------------------------------------------
+		// THE TELL. receive_item_id on a bill line means a purchase receive
+		// already moved that stock and this bill is money only.
+		//------------------------------------------------------------------
+		blLineJson = "";
+		linesSeen = 0;
+		linesFromReceive = 0;
+
+		for each  bDetId in blIds
+		{
+			try
+			{
+				bdResp = invokeurl
+				[
+					url :baseUrl + "bills/" + bDetId + "?organization_id=" + orgId
+					type :GET
+					connection:"inventory_connection"
+				];
+
+				if(ifnull(bdResp.get("code"),"none").toString().trim() == "0")
+				{
+					bdBlock = bdResp.get("bill");
+
+					if(bdBlock != null)
+					{
+						for each  bLine in ifnull(bdBlock.get("line_items"),List())
+						{
+							bItem = ifnull(bLine.get("item_id"),"").toString().trim();
+							bRcvItem = ifnull(bLine.get("receive_item_id"),"").toString().trim();
+							bSku = ifnull(skuByInv.get(bItem),"").toString();
+
+							linesSeen = linesSeen + 1;
+
+							if(bRcvItem != "")
+							{
+								linesFromReceive = linesFromReceive + 1;
+							}
+
+							if(blLineJson != "")
+							{
+								blLineJson = blLineJson + ",";
+							}
+
+							blLineJson = blLineJson + "{\"doc\":\"" + ifnull(bdBlock.get("bill_number"),"").toString().replaceAll("\"","'") + "\"," + "\"lineId\":\"" + ifnull(bLine.get("line_item_id"),"").toString() + "\"," + "\"itemId\":\"" + bItem + "\"," + "\"name\":\"" + ifnull(bLine.get("name"),"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"," + "\"qty\":\"" + ifnull(bLine.get("quantity"),"").toString() + "\"," + "\"unit\":\"" + ifnull(bLine.get("unit"),"").toString().replaceAll("\"","'") + "\"," + "\"receiveItemId\":\"" + bRcvItem + "\"," + "\"mapped\":\"" + bSku.replaceAll("\"","'") + "\"}";
+						}
+					}
+				}
+			}
+			catch (eBD)
+			{
+				info "probePurchaseInflow | bill detail " + bDetId + " threw: " + eBD.toString();
+			}
+		}
+
+		//------------------------------------------------------------------
+		// PURCHASE ORDERS, for context only. A count of zero with receives
+		// present would say arrivals are booked without a PO at all, which
+		// changes nothing here but everything about the request half.
+		//------------------------------------------------------------------
+		poNote = "";
+		poCount = 0;
+
+		try
+		{
+			poResp = invokeurl
+			[
+				url :baseUrl + "purchaseorders?organization_id=" + orgId + "&per_page=25"
+				type :GET
+				connection:"inventory_connection"
+			];
+
+			poCode = ifnull(poResp.get("code"),"none").toString().trim();
+
+			if(poCode == "0")
+			{
+				poCount = ifnull(poResp.get("purchaseorders"),List()).size();
+				poNote = "purchaseorders answered with " + poCount + " row(s)";
+			}
+			else
+			{
+				poNote = "purchaseorders code " + poCode + ": " + ifnull(poResp.get("message"),"").toString().replaceAll("\"","'");
+			}
+		}
+		catch (eP)
+		{
+			poNote = "purchaseorders threw: " + eP.toString().replaceAll("\"","'");
+		}
+
+		//------------------------------------------------------------------
+		// The reading, stated rather than left to be worked out from the rows.
+		//------------------------------------------------------------------
+		verdict = "Inconclusive - no purchase documents exist yet on this org. Book one test purchase and run this again.";
+
+		if(rcvCount > 0 && linesSeen > 0 && linesFromReceive == linesSeen)
+		{
+			verdict = "PURCHASE RECEIVE is the arrival event. Every bill line carries receive_item_id, so bills follow receives and must NOT be read for stock.";
+		}
+		else if(rcvCount > 0 && linesSeen > 0 && linesFromReceive == 0)
+		{
+			verdict = "MIXED - receives exist but no bill line references one. Look at the rows before choosing; reading both would double-count.";
+		}
+		else if(rcvCount > 0 && linesSeen == 0)
+		{
+			verdict = "PURCHASE RECEIVE is the arrival event - receives exist and no bill has been raised against them yet.";
+		}
+		else if(rcvCount == 0 && blCount > 0)
+		{
+			verdict = "BILL is the arrival event. No purchase receive exists, so the bill is what moves stock.";
+		}
+
+		info "probePurchaseInflow | " + rcvNote + " | " + blNote + " | " + poNote + " | " + verdict;
+
+		res = "{\"errors\":[]," + "\"verdict\":\"" + verdict + "\"," + "\"mappedRawMaterials\":" + mappedCount + "," + "\"receiveNote\":\"" + rcvNote + "\",\"receives\":[" + rcvJson + "],\"receiveLines\":[" + rcvLineJson + "]," + "\"billNote\":\"" + blNote + "\",\"bills\":[" + blJson + "],\"billLines\":[" + blLineJson + "]," + "\"billLinesSeen\":" + linesSeen + ",\"billLinesFromReceive\":" + linesFromReceive + "," + "\"purchaseOrderNote\":\"" + poNote + "\",\"purchaseOrders\":" + poCount + "}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ") + "\"]}";
+	}
+
+	return res;
+}

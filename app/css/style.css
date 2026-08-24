@@ -1883,12 +1883,35 @@ th.col-num {
    alone. Rebuilding the input on every keystroke would take the focused
    element with it and drop the caret after one character. */
 .stockin-search {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
     padding: 0 0 0.75rem 0;
 }
 
 .stockin-search .note-input {
-    width: 100%;
+    flex: 1 1 16rem;
     max-width: 26rem;
+}
+
+/* The outcome of "Check for arrivals" sits beside the button rather than in an
+   alert. It is information, not a decision, and an alert would have to be
+   dismissed before the list underneath could be read — which is the thing he
+   pressed the button to see. */
+.stockin-check-msg {
+    font-size: 0.8125rem;
+    color: var(--text-muted, #64748b);
+}
+
+.stockin-check-msg.is-good {
+    color: #15803d;
+    font-weight: 600;
+}
+
+.stockin-check-msg.is-bad {
+    color: #b91c1c;
+    font-weight: 600;
 }
 
 /* One row of fields, wrapping on a narrow screen rather than scrolling — the
