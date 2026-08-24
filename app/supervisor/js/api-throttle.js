@@ -1,77 +1,112 @@
-// CREATOR THROTTLES CUSTOM API CALLS AT ~50 PER MINUTE PER USER, and the
+// CREATOR REFUSES CUSTOM API CALLS PAST ~50 A MINUTE PER USER, and the
 // production tab goes over it when the supervisor works quickly.
 //
 //   code 2955 - "You have reached your API call limit for a minute."
 //
 // It is NOT the daily quota. Widget-to-Custom-API calls are unmetered against
 // that, which is why this looks like it should be impossible - but the
-// per-minute rate limit applies to them all the same, and it is the one being
-// hit here.
+// per-minute rate limit applies to them all the same.
 //
-// WHY IT ADDS UP SO FAST. Every action on the production screen is TWO calls,
-// not one: the save, and then a full fetchAllData to redraw from the server.
-// Handing a stage to four operators and closing their shares is sixteen calls
-// before the stage is even ended. Working through two or three stages at the
-// pace someone actually clicks puts fifty inside a minute without anything
-// being wrong.
-//
-// The refetch is deliberate and is not what should change - a share alters what
-// the rest of the stage may do, and production.js is explicit that redrawing
-// from the server is the fix in both directions. So the calls are real; what is
-// missing is any pacing on them.
+// WHY IT ADDS UP. Every action on the production screen is TWO calls: the save,
+// and then a full fetchAllData to redraw from the server. Click Done on four
+// operators' shares in quick succession and four saves go out, each of which
+// fires its own refetch on the way back - eight calls, and SEVEN of them were
+// worth making. The four refetches ask the identical question and the first
+// three answers are thrown away the moment the next one lands.
 //
 //------------------------------------------------------------------------
-// WHAT THIS DOES
+// WHAT THIS DOES - AND WHAT IT DELIBERATELY NO LONGER DOES.
 //
-// Wraps ZOHO.CREATOR.DATA.invokeCustomApi once, before any tab script runs, so
-// every existing call site is covered without any of them changing. Three
-// things, in order of how often they matter:
+// It does NOT pace calls. It used to: a rolling-minute budget that queued
+// anything past 45 a minute. That was wrong and it hung the screen. Creator had
+// not refused anything - the widget was holding calls back on its own guess,
+// and once the queue built, every later action waited on a window that would
+// not roll for another minute. Delaying work Creator would have accepted is
+// worse than the error it was avoiding.
 //
-//   1. PACES. At most maxPerMin calls in any rolling 60 seconds. A burst is
-//      queued rather than refused, so the screen slows down instead of
-//      breaking - which is the right trade when the alternative is an alert
-//      saying "Network error. Check console."
-//   2. CAPS CONCURRENCY. Creator allows 6 concurrent per account; 3 leaves room
-//      for the other tabs and for anything else the account is doing.
-//   3. RETRIES A 2955. Pacing makes it rare rather than impossible - another
-//      tab, another user, or a burst that started before this loaded can still
-//      trip it - so a rate-limited call goes back to the FRONT of the queue and
-//      is tried again. Only a rate-limit is retried. Everything else rejects
-//      exactly as it did, because a retried save is a save that might happen
-//      twice.
+// What it does instead:
 //
-// Ordering is preserved: the queue is FIFO and a retry keeps its place at the
-// front. Two saves fired in sequence still reach the server in that sequence.
+//   1. DROPS SUPERSEDED READS. A queued read is discarded when an identical one
+//      is asked for behind it, and its caller is handed the newer answer. Four
+//      identical refetches become one call and four renders.
+//   2. CAPS CONCURRENCY at 4. Creator allows 6 per account; this leaves room
+//      for the other tabs and keeps a burst from arriving as one spike.
+//   3. RETRIES A 2955. A rate-limited call was refused BEFORE it executed, so
+//      retrying it cannot repeat any work - that is what makes this safe for a
+//      save as well as a read.
 //
-// The clock and the timer are injectable so this is testable without waiting a
-// real minute - see tools/api-throttle.test.js.
+//------------------------------------------------------------------------
+// NOTHING THAT WRITES IS EVER DROPPED. This is the whole safety argument, so it
+// is worth being exact about it:
+//
+//   - COALESCE_SAFE is an explicit allowlist, not a rule about names. Every
+//     entry was checked against its .dg file for insert / update / delete and
+//     has none. A function not on the list is never dropped, so the failure
+//     mode of forgetting one is a wasted call, never a lost write.
+//   - Only a call still WAITING is dropped, never one already in flight.
+//     Dropping the older for the newer always hands the caller FRESHER data.
+//     Merging into an in-flight call would do the opposite: a save that landed
+//     in between would be missing from the answer, and the screen would show a
+//     stage that had already moved on.
+//   - The payload has to match too, so two reads asking different questions are
+//     never confused for one.
+
+var COALESCE_SAFE = [
+    'getProductionWidgetData',
+    'getExpectedWaste',
+    'getDamageProposal',
+    'getReissueDrafts',
+    'getSupervisorCounts',
+    'getSupervisorDisputes',
+    'getSupervisorMaterials',
+    'getSupervisorWasteReturns',
+    'getSupervisorProductionHistory'
+];
 
 function installApiThrottle(target, options) {
     options = options || {};
 
-    var maxPerMin = options.maxPerMin || 45;
-    var maxInflight = options.maxInflight || 3;
-    var maxRetries = options.maxRetries === undefined ? 3 : options.maxRetries;
-    var retryWaitMs = options.retryWaitMs || 12000;
+    var maxInflight = options.maxInflight || 4;
+    var maxRetries = options.maxRetries === undefined ? 4 : options.maxRetries;
+    var retryWaitMs = options.retryWaitMs || 6000;
+    var safeList = options.coalesceSafe || COALESCE_SAFE;
     var now = options.now || function () { return Date.now(); };
     var later = options.setTimeout || function (fn, ms) { return setTimeout(fn, ms); };
-    var onWait = options.onWait || function () {};
+    var onDrop = options.onDrop || function () {};
+    var onRetry = options.onRetry || function () {};
 
     if (!target || typeof target.invokeCustomApi !== 'function') return null;
-    // Installing twice would queue behind itself and halve the rate for no
-    // reason. Harmless to call again; it just does nothing.
+    // Installing twice would put the queue behind itself for no reason.
     if (target.invokeCustomApi.isThrottled) return target.invokeCustomApi;
 
     var real = target.invokeCustomApi;
-    var starts = [];        // when each call in the last 60s was dispatched
-    var waiting = [];       // queued jobs, FIFO
+    var waiting = [];
     var inflight = 0;
-    var blockedUntil = 0;   // set when the server says we are over the limit
+    var blockedUntil = 0;
     var timer = null;
 
-    // Creator surfaces the limit as a rejection carrying code 2955. The string
-    // and the HTTP status are checked too - the same condition arrives as a
-    // bare 429 from some paths, and a wrapper that only knew one shape would
+    function isCoalesceSafe(opts) {
+        var name = opts && opts.api_name;
+        if (!name) return false;
+        for (var i = 0; i < safeList.length; i++) {
+            if (safeList[i] === name) return true;
+        }
+        return false;
+    }
+
+    // api_name plus the payload. Two reads asking different questions must
+    // never be treated as one; a signature that fails to match simply means no
+    // coalescing, which costs a call and loses nothing.
+    function signature(opts) {
+        var payload = (opts && opts.payload) || {};
+        var body;
+        try { body = JSON.stringify(payload); } catch (e) { body = String(now()); }
+        return (opts && opts.api_name) + '|' + body;
+    }
+
+    // Creator surfaces the limit as a rejection carrying code 2955. The HTTP
+    // status and the message are checked too - the same condition arrives as a
+    // bare 429 on some paths, and a wrapper that knew only one shape would
     // silently stop retrying if the other turned up.
     function isRateLimited(err) {
         if (!err) return false;
@@ -83,53 +118,48 @@ function installApiThrottle(target, options) {
         return txt.toLowerCase().indexOf('limit for a minute') !== -1;
     }
 
-    function prune(t) {
-        while (starts.length && t - starts[0] >= 60000) starts.shift();
-    }
-
-    // 0 = go now, >0 = wait this long, -1 = wait for a call to come back.
-    function nextSlotIn() {
-        var t = now();
-        prune(t);
-        if (t < blockedUntil) return blockedUntil - t;
-        if (inflight >= maxInflight) return -1;
-        if (starts.length >= maxPerMin) return 60000 - (t - starts[0]) + 50;
-        return 0;
+    function settleJob(job, ok, value) {
+        if (ok) job.resolve(value); else job.reject(value);
+        // Everyone whose call this one replaced gets the same answer. They
+        // asked the identical question, so it IS their answer - and a newer one
+        // than the call they queued would have returned.
+        for (var i = 0; i < job.replaced.length; i++) {
+            if (ok) job.replaced[i].resolve(value); else job.replaced[i].reject(value);
+        }
     }
 
     function pump() {
         while (waiting.length) {
-            var wait = nextSlotIn();
-            if (wait === -1) return;
-            if (wait > 0) {
+            var t = now();
+            if (t < blockedUntil) {
                 if (timer === null) {
-                    onWait(wait, waiting.length);
-                    timer = later(function () { timer = null; pump(); }, wait);
+                    timer = later(function () { timer = null; pump(); }, blockedUntil - t);
                 }
                 return;
             }
+            if (inflight >= maxInflight) return;
             dispatch(waiting.shift());
         }
     }
 
     function dispatch(job) {
         inflight++;
-        starts.push(now());
 
         real.call(target, job.opts).then(function (res) {
             inflight--;
-            job.resolve(res);
+            settleJob(job, true, res);
             pump();
         }, function (err) {
             inflight--;
             if (isRateLimited(err) && job.tries < maxRetries) {
                 job.tries++;
                 // Nothing may go out until the window has moved on, and this
-                // job goes first when it does.
+                // job goes first when it does - so ordering survives a retry.
                 blockedUntil = now() + retryWaitMs;
                 waiting.unshift(job);
+                onRetry(job.opts && job.opts.api_name, job.tries, retryWaitMs);
             } else {
-                job.reject(err);
+                settleJob(job, false, err);
             }
             pump();
         });
@@ -137,7 +167,22 @@ function installApiThrottle(target, options) {
 
     function throttled(opts) {
         return new Promise(function (resolve, reject) {
-            waiting.push({ opts: opts, resolve: resolve, reject: reject, tries: 0 });
+            var job = { opts: opts, resolve: resolve, reject: reject, tries: 0, replaced: [] };
+
+            if (isCoalesceSafe(opts)) {
+                job.sig = signature(opts);
+                for (var i = waiting.length - 1; i >= 0; i--) {
+                    if (waiting[i].sig === job.sig) {
+                        var dead = waiting.splice(i, 1)[0];
+                        // Its own replaced list comes along, or the caller two
+                        // supersessions back is never settled at all.
+                        job.replaced = job.replaced.concat([dead], dead.replaced);
+                        onDrop(opts.api_name);
+                    }
+                }
+            }
+
+            waiting.push(job);
             pump();
         });
     }
@@ -150,9 +195,9 @@ function installApiThrottle(target, options) {
 }
 
 // Installed as early as possible - the SDK script tag is above this one, so
-// ZOHO.CREATOR.DATA is normally there already. A few retries cover the case
-// where it is not yet, because a tab that loaded before the wrapper was in
-// place would keep the raw function for the life of the page.
+// ZOHO.CREATOR.DATA is normally already there. The retries cover the case where
+// it is not yet, because a tab script that ran before the wrapper was in place
+// would keep the raw function for the life of the page.
 (function () {
     var tries = 0;
 
@@ -160,8 +205,11 @@ function installApiThrottle(target, options) {
         var data = (typeof ZOHO !== 'undefined' && ZOHO.CREATOR && ZOHO.CREATOR.DATA) ? ZOHO.CREATOR.DATA : null;
 
         if (installApiThrottle(data, {
-            onWait: function (ms, queued) {
-                console.log('API throttle: holding ' + queued + ' call(s) for ' + Math.round(ms / 100) / 10 + 's to stay under Creator\'s per-minute limit');
+            onDrop: function (name) {
+                console.log('API: dropped a superseded ' + name + ' - a newer identical one is queued behind it');
+            },
+            onRetry: function (name, tryNo, waitMs) {
+                console.warn('API: Creator rate-limited ' + name + ' (attempt ' + tryNo + ') - retrying in ' + Math.round(waitMs / 1000) + 's');
             }
         })) {
             return;
@@ -169,7 +217,7 @@ function installApiThrottle(target, options) {
 
         tries++;
         if (tries < 20) setTimeout(attempt, 100);
-        else console.warn('API throttle could not install - ZOHO.CREATOR.DATA never appeared');
+        else console.warn('API wrapper could not install - ZOHO.CREATOR.DATA never appeared');
     }
 
     attempt();
