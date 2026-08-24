@@ -746,6 +746,7 @@ string issueMaterials(string supervisorId, string issuesJson)
 								{
 									pcCntS = "0";
 								}
+								pcLenS = ifnull(pcM.get("cutLengthCm"),"").toString().trim();
 
 								if(pcIdTxt != "" && pcCntS.toDecimal() > 0)
 								{
@@ -753,7 +754,14 @@ string issueMaterials(string supervisorId, string issuesJson)
 									{
 										prevPc = prevPc + ",";
 									}
-									prevPc = prevPc + pcIdTxt + ":" + pcCntS.toDecimal();
+									if(pcLenS != "")
+									{
+										prevPc = prevPc + pcIdTxt + ":" + pcCntS.toDecimal() + ":" + pcLenS.toDecimal();
+									}
+									else
+									{
+										prevPc = prevPc + pcIdTxt + ":" + pcCntS.toDecimal();
+									}
 								}
 							}
 
@@ -1329,10 +1337,15 @@ string issueMaterials(string supervisorId, string issuesJson)
 						for each  pcTok in pcSpec.toList(",")
 						{
 							pcBits = pcTok.toString().trim().toList(":");
-							if(pcBits.size() == 2)
+							if(pcBits.size() >= 2)
 							{
 								pcWantId = pcBits.get(0).toString().trim();
 								pcWantN = pcBits.get(1).toString().trim().toDecimal();
+								pcCutLen = 0.0;
+								if(pcBits.size() >= 3)
+								{
+									pcCutLen = pcBits.get(2).toString().trim().toDecimal();
+								}
 
 								if(pcWantId != "" && pcWantN > 0)
 								{
@@ -1357,6 +1370,12 @@ string issueMaterials(string supervisorId, string issuesJson)
 										{
 											fpwS = "0";
 										}
+										
+										if(pcCutLen <= 0)
+										{
+											// Legacy 2-part payload: whole piece goes out
+											pcCutLen = fplS.toDecimal();
+										}
 
 										// EVERY ONE OF THESE IS A REFUSAL, NOT A TRIM.
 										// Silently taking less is what produced handovers
@@ -1377,25 +1396,22 @@ string issueMaterials(string supervisorId, string issuesJson)
 										{
 											lotErr = matName + ": only " + fpcS.toDecimal() + " of that piece are on the rack";
 										}
+										else if(pcCutLen > fplS.toDecimal())
+										{
+											lotErr = matName + ": asking to cut " + pcCutLen + " cm from a piece that is only " + fplS.toDecimal() + " cm long";
+										}
 										else
 										{
-											// floor(W/cutW) * floor(L/cutL) - the same
-											// arithmetic an offcut uses, and correct for a
-											// full-width piece because grain is fixed and a
-											// piece is never rotated.
+											// Option B: pieces act as mini-rolls and yield from their CUT size.
 											pcAcross = (fpwS.toDecimal() / cutW).floor();
-											pcAlong = (fplS.toDecimal() / cutL).floor();
+											pcAlong = (pcCutLen / cutL).floor();
 
 											if(pcAcross > 0 && pcAlong > 0)
 											{
 												pcYield = pcYield + (pcAcross * pcAlong * pcWantN);
 											}
 
-											// A PIECE GOES OUT WHOLE. Its metres leave the
-											// lot even where this cut cannot use all of it -
-											// he cannot hand over half a piece, and the
-											// remainder comes back as an offcut.
-											pcMetres = pcMetres + ((fplS.toDecimal() * pcWantN) / 100);
+											pcMetres = pcMetres + ((pcCutLen * pcWantN) / 100);
 											passIsPieces = true;
 										}
 									}
@@ -1938,10 +1954,15 @@ string issueMaterials(string supervisorId, string issuesJson)
 							for each  pcMvTok in pcSpec.toList(",")
 							{
 								pcMvBits = pcMvTok.toString().trim().toList(":");
-								if(pcMvBits.size() == 2)
+								if(pcMvBits.size() >= 2)
 								{
 									pcMvId = pcMvBits.get(0).toString().trim();
 									pcMvN = pcMvBits.get(1).toString().trim().toDecimal();
+									pcMvCutLen = 0.0;
+									if(pcMvBits.size() >= 3)
+									{
+										pcMvCutLen = pcMvBits.get(2).toString().trim().toDecimal();
+									}
 
 									if(pcMvId != "" && pcMvN > 0)
 									{
@@ -1952,7 +1973,16 @@ string issueMaterials(string supervisorId, string issuesJson)
 											{
 												fpMvS = "0";
 											}
+											
+											fpOrigLenS = ifnull(fpMv.Piece_Length_Cm,"0").toString().trim();
+											if(pcMvCutLen <= 0)
+											{
+												// Legacy 2-part payload
+												pcMvCutLen = fpOrigLenS.toDecimal();
+											}
+											
 											fpMvLeft = fpMvS.toDecimal() - pcMvN;
+											isClamped = false;
 											if(fpMvLeft < 0)
 											{
 												// Cannot happen - the validation
@@ -1963,8 +1993,29 @@ string issueMaterials(string supervisorId, string issuesJson)
 												// said out loud rather than left.
 												info "issueMaterials: piece " + pcMvId + " would go negative - clamped";
 												fpMvLeft = 0;
+												isClamped = true;
 											}
 											fpMv.Piece_Count = fpMvLeft;
+											
+											fpMvRemainder = fpOrigLenS.toDecimal() - pcMvCutLen;
+											
+											if(fpMvRemainder > 0 && isClamped == false)
+											{
+												// Option B: create a new piece for the remainder that was put back
+												insert into Fabric_Piece
+												[
+													Added_User = zoho.loginuser
+													Material = fpMv.Material
+													Lot = fpMv.Lot
+													Piece_Length_Cm = fpMvRemainder
+													Piece_Width_Cm = fpMv.Piece_Width_Cm
+													Piece_Count = pcMvN
+													State = fpMv.State
+													Piece_Status = "Available"
+													Carton_Number = fpMv.Carton_Number
+													Print_Job = fpMv.Print_Job
+												];
+											}
 										}
 									}
 								}

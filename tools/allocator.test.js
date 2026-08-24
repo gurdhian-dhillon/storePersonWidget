@@ -99,11 +99,14 @@ test('D2 waste before fresh; least-waste-per-cut scoring picks the snug remnant'
   assert.strictEqual(f.picks.SNUG, 1); assert.strictEqual(f.picks.BIG, undefined);
   assert.strictEqual(f.fromWaste[0], 4); approx(f.freshMetres, 0);
 });
-test('D3 pieces lot: yield simulated per piece; metres follow the WHOLE pieces', () => {
+test('D3 pieces lot: mini-roll cuts EXACTLY the rows needed; tails are not charged', () => {
   const lot = pieceLot('LP', [fpiece('p1', 300, 140), fpiece('p2', 300, 140), fpiece('p3', 300, 140)], { wash: 9.00 });
   const f = A.lotFill(lot, [{ cutW: 60, cutL: 55, pieces: 25 }], { fabricWidthCm: 140 }, false);
-  // per piece floor(140/60)=2 x floor(300/55)=5 =10 -> three whole pieces cover 25 of 30
-  assert.strictEqual(f.fromFresh[0], 25); approx(f.freshMetres, 9.00);
+  // per piece floor(140/60)=2 across. Two full-width cuts of 5 rows (2.75 m)
+  // cover 20, then 3 rows (1.65 m) cover the last 5 of 25.
+  assert.strictEqual(f.fromFresh[0], 25);
+  approx(f.freshMetres, 7.15);
+  assert.notStrictEqual(f.freshMetres, 9.00, 'whole pieces would burn 1.85 m as tails');
   assert.notStrictEqual(f.fromFresh[0], 32, 'metres division would lie (floor(900/55)*2=32)');
 });
 test('D4 roll greige never serves TODAY, covers once washed', () => {
@@ -323,7 +326,7 @@ test('F13 declined remnant: allocation drops AND fresh need grows; row kept at z
   A.clearDeclined();
 });
 
-test('F14 pieces-lot end-to-end: per-piece naming travels to the payload', () => {
+test('F14 pieces-lot end-to-end: per-piece CUT instructions travel to the payload', () => {
   const data = [sup('S1', [material('M1', {
     fabricWidthCm: 140, cutWidth: 60,
     requiredPieces: 25, issuedPieces: 0,
@@ -333,11 +336,17 @@ test('F14 pieces-lot end-to-end: per-piece naming travels to the payload', () =>
   A.applyLotAllocation(data);
   const m = data[0].materials[0];
   assert.strictEqual(m.lotLines.length, 1);
-  approx(m.lotLines[0].qty, 9.00, 0.005);
+  approx(m.lotLines[0].qty, 7.15, 0.005);
   assert.strictEqual(m.freshPieces, 25);
   const lnP = m.lotLines[0].pieces;
   assert.strictEqual(lnP.length, 3);
   approx(lnP.reduce((a, p) => a + p.count, 0), 3);
+  // Option B: every entry names HOW MUCH to cut off its copy.
+  const cuts = {};
+  lnP.forEach(p => { cuts[p.pieceId] = p.cutLengthCm; });
+  assert.strictEqual(cuts.p1, 275);
+  assert.strictEqual(cuts.p2, 275);
+  assert.strictEqual(cuts.p3, 165, 'third copy cut only to the rows still owed');
 });
 
 test('F15a TWO-piece remnant splits across two items of one order', () => {

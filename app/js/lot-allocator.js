@@ -227,10 +227,10 @@ function lotFill(lot, demands, fab, greige) {
     var pieceTaken = {};
 
     if (pcs.length) {
-        // Scored the same way remnants are — least waste per cut obtained — so a
-        // snug piece is spent before a generous one and the big pieces stay
-        // whole for the big cuts. A PIECE GOES OUT WHOLE: it cannot be halved at
-        // the counter, which is the same rule a waste piece already follows.
+        // Scored the same way remnants are — least waste per cut obtained.
+        // A PIECE IS TREATED AS A MINI-ROLL: we cut exactly what we need
+        // from it, and the remainder goes back on the rack (though not
+        // available for the rest of this session to keep piece provenance clean).
         var pguard = 0;
         while (pguard++ < 400) {
             var pi = -1, pp = -1, pScore = 0, pCap = 0;
@@ -241,27 +241,41 @@ function lotFill(lot, demands, fab, greige) {
                     var cap = remnantYield(p, d.cutW, d.cutL);
                     if (cap <= 0) return;
                     var take = Math.min(cap, owed[i]);
-                    var score = ((p.width * p.length) - (take * d.cutW * d.cutL)) / take;
+                    // Score based on taking exactly what we need from ONE piece
+                    var pr = Math.floor(p.width / d.cutW);
+                    var rows = Math.ceil(take / pr);
+                    var lengthCut = rows * d.cutL;
+                    // Score = waste area per usable cut
+                    var score = ((p.width * lengthCut) - (take * d.cutW * d.cutL)) / take;
                     if (pi < 0 || score < pScore) { pi = i; pp = ri; pScore = score; pCap = cap; }
                 });
             });
             if (pi < 0) break;
 
-            var pUse = Math.min(Math.ceil(owed[pi] / pCap), pcs[pp].pieces);
-            var pGot = Math.min(pUse * pCap, owed[pi]);
-            // Metres follow the pieces, never the other way round.
-            var pM = round2((pcs[pp].length * pUse) / 100);
+            var d = demands[pi];
+            var p = pcs[pp];
+            var pr = Math.floor(p.width / d.cutW);
 
-            pcs[pp].pieces -= pUse;
-            owed[pi] -= pGot;
-            // fromFRESH, not fromWaste: this is raw material and it must land in
-            // Pieces_From_Raw. Booking it as waste would corrupt the reuse
-            // reporting and put printed cloth on the offcut screens.
-            fromFresh[pi] += pGot;
+            // We only process ONE piece count at a time to keep cut sizes exact
+            var take = Math.min(pCap, owed[pi]);
+            var rows = Math.ceil(take / pr);
+            var lengthCut = rows * d.cutL;
+            var got = Math.min(rows * pr, owed[pi]);
+
+            p.pieces -= 1; // Take one count of this piece
+            var pM = round2(lengthCut / 100);
+
+            owed[pi] -= got;
+            // fromFRESH, not fromWaste: this is raw material
+            fromFresh[pi] += got;
             freshMetres = round2(freshMetres + pM);
             metresPer[pi] = round2(metresPer[pi] + pM);
-            pieceTaken[pcs[pp].pieceId] = (pieceTaken[pcs[pp].pieceId] || 0) + pUse;
-            piecesPer[pi][pcs[pp].pieceId] = (piecesPer[pi][pcs[pp].pieceId] || 0) + pUse;
+            
+            pieceTaken[p.pieceId] = (pieceTaken[p.pieceId] || 0) + 1;
+            
+            // Record the cut length for this pieceId
+            if (!piecesPer[pi][p.pieceId]) piecesPer[pi][p.pieceId] = [];
+            piecesPer[pi][p.pieceId].push(lengthCut);
         }
     } else {
         demands.forEach(function (d, i) {
@@ -704,11 +718,21 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                 // and an older server simply ignores the field.
                 var lnPieces = [];
                 Object.keys(fill.piecesPer[i] || {}).forEach(function (pid) {
+                    var cuts = fill.piecesPer[i][pid]; // Array of cut lengths
                     var srcP = (lot.pieces || []).filter(function (x) {
                         return String(x.pieceId) === String(pid);
                     })[0] || {};
-                    lnPieces.push({ pieceId: pid, count: fill.piecesPer[i][pid],
-                                    lengthCm: srcP.lengthCm, carton: srcP.carton });
+                    
+                    var cutCounts = {};
+                    cuts.forEach(function(c) {
+                        cutCounts[c] = (cutCounts[c] || 0) + 1;
+                    });
+                    
+                    Object.keys(cutCounts).forEach(function(cutLen) {
+                        lnPieces.push({ pieceId: pid, count: cutCounts[cutLen],
+                                        cutLengthCm: Number(cutLen),
+                                        lengthCm: srcP.lengthCm, carton: srcP.carton });
+                    });
                 });
 
                 r.lotLines.push({ lotId: lot.lotId, lotNumber: lot.lotNumber,

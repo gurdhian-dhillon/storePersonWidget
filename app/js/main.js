@@ -1183,7 +1183,7 @@ function lotLinesHtml(m, supIdx, matIdx) {
         (ln.pieces || []).forEach(function (p) {
             var lk = String(ln.lotId);
             if (!piecesByLot[lk]) piecesByLot[lk] = {};
-            var pk = (Number(p.lengthCm) || 0) + '|' + (p.carton || '');
+            var pk = (Number(p.lengthCm) || 0) + '|' + (p.carton || '') + '|' + (Number(p.cutLengthCm) || 0);
             piecesByLot[lk][pk] = (piecesByLot[lk][pk] || 0) + (Number(p.count) || 0);
         });
     });
@@ -1195,9 +1195,17 @@ function lotLinesHtml(m, supIdx, matIdx) {
         return Object.keys(byKey).map(function (pk) {
             var parts = pk.split('|');
             var lenM = (Number(parts[0]) || 0) / 100;
+            var cutLenM = (Number(parts[2]) || 0) / 100;
             var n = byKey[pk];
-            return '<div class="lot-pieces">' + n + (n === 1 ? ' piece' : ' pieces') +
-                ' of ' + fmt(lenM) + ' m' +
+            
+            var desc = '';
+            if (cutLenM > 0) {
+                desc = 'Cut ' + fmt(cutLenM) + ' m from ' + fmt(lenM) + ' m piece' + (n === 1 ? '' : ' &times; ' + n);
+            } else {
+                desc = n + (n === 1 ? ' piece' : ' pieces') + ' of ' + fmt(lenM) + ' m';
+            }
+            
+            return '<div class="lot-pieces">' + desc +
                 (parts[1] ? ' &middot; carton ' + escapeHtml(parts[1])
                           : ' &middot; <span class="w-lot-none">carton not recorded</span>') +
                 '</div>';
