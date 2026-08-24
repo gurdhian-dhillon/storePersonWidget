@@ -458,13 +458,19 @@ string getSupervisorMaterials(string supervisorId)
 				{
 					prevL = ifnull(lineLotByMat.get(lnMat),"").toString();
 					prevQ = ifnull(lineQtyByMat.get(lnMat),"").toString();
+					prevN = ifnull(lineNoteByMat.get(lnMat),"").toString();
+					
 					if(prevL != "")
 					{
 						prevL = prevL + "~";
 						prevQ = prevQ + "~";
+						prevN = prevN + "~";
 					}
 					lineLotByMat.put(lnMat,prevL + ifnull(miLn.Lot,"").toString().trim());
 					lineQtyByMat.put(lnMat,prevQ + lqS);
+					
+					noteTxt = ifnull(miLn.Lot_Override_Note,"").toString().trim();
+					lineNoteByMat.put(lnMat,prevN + noteTxt.replaceAll("~","-"));
 				}
 			}
 		}
@@ -489,11 +495,13 @@ string getSupervisorMaterials(string supervisorId)
 
 		lotTxt = ifnull(lineLotByMat.get(k),"").toString();
 		qtyTxt = ifnull(lineQtyByMat.get(k),"").toString();
+		noteTxt = ifnull(lineNoteByMat.get(k),"").toString();
 
 		if(lotTxt != "")
 		{
 			lotParts = lotTxt.toList("~");
 			qtyParts = qtyTxt.toList("~");
+			noteParts = noteTxt.toList("~");
 
 			idxN = 0;
 			for each  qPart in qtyParts
@@ -509,12 +517,27 @@ string getSupervisorMaterials(string supervisorId)
 					if(takeHere > 0)
 					{
 						thisLot = lotParts.get(idxN).toString();
+						thisNote = noteParts.get(idxN).toString();
 						// A line issued before lots existed carries none. Named
 						// rather than dropped - the metres are real and he is
 						// being asked to sign for them.
 						if(thisLot == "")
 						{
 							thisLot = "none";
+						}
+						
+						if(thisNote != "")
+						{
+							if(lotSeen.contains(thisLot) == false)
+							{
+								lotNotes.put(thisLot, "");
+							}
+							prevNote = ifnull(lotNotes.get(thisLot),"").toString();
+							if(prevNote != "")
+							{
+								prevNote = prevNote + " | ";
+							}
+							lotNotes.put(thisLot, prevNote + thisNote);
 						}
 
 						if(lotSeen.contains(thisLot) == false)
@@ -554,6 +577,11 @@ string getSupervisorMaterials(string supervisorId)
 			if(lotLabelTxt == "")
 			{
 				lotLabelTxt = "Not recorded";
+			}
+			lNote = ifnull(lotNotes.get(lotKey),"").toString();
+			if(lNote != "")
+			{
+				lotLabelTxt = lotLabelTxt + " (" + lNote + ")";
 			}
 			lotsJson = lotsJson + "{\"lot\":\"" + lotLabelTxt.replaceAll("\"","'") + "\",\"qty\":" + lotQty.get(lotKey) + "}";
 		}

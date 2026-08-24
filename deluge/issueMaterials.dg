@@ -2260,6 +2260,16 @@ string issueMaterials(string supervisorId, string issuesJson)
 					// Written only when a tone override actually happened, so an
 					// ordinary handover line looks exactly as it always did.
 					noteTxt = ifnull(lnRaw.get("note"),"").toString().trim();
+					cSumm = ifnull(lnRaw.get("cutSummary"),"").toString().trim();
+					if(cSumm != "")
+					{
+						if(noteTxt != "")
+						{
+							noteTxt = noteTxt + " | ";
+						}
+						noteTxt = noteTxt + cSumm;
+					}
+
 					if(noteTxt != "")
 					{
 						fromTxt = ifnull(lnRaw.get("fromLot"),"").toString().trim();
