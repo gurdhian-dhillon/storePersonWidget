@@ -34,7 +34,8 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	inp = receiptsJson.toMap();
 	mats = ifnull(inp.get("materials"),"[]").toString().toJSONList();
 	wastes = ifnull(inp.get("waste"),"[]").toString().toJSONList();
-	info "supId=" + supId + " matLines=" + mats.size() + " wasteLines=" + wastes.size();
+	printed = ifnull(inp.get("printedPieces"),"[]").toString().toJSONList();
+	info "supId=" + supId + " matLines=" + mats.size() + " wasteLines=" + wastes.size() + " printedLines=" + printed.size();
 
 	// Partially Received is still open - the rest of the plan is yet to arrive.
 	//
@@ -457,6 +458,11 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 						// here rather than being parsed and thrown away.
 						if(settleLeft > 0 && lnMatTxt == matId)
 						{
+							if(ifnull(miLn.Lot_Override_Note,"").toString().contains("PRINTED_PIECE"))
+							{
+								continue;
+							}
+							
 							lnQtyS = ifnull(miLn.Qty,"0").toString().trim();
 							if(lnQtyS == "")
 							{
@@ -894,6 +900,221 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 					}
 					errJson = errJson + "\"Waste piece " + ifnull(wi.Piece_Width,0) + "x" + ifnull(wi.Piece_Length,0) + ": " + stillOut + " of " + issuedW + " not received" + wNoteTxt + " - dispute raised\"";
 				}
+			}
+		}
+	}
+
+	//------------------------------------------------------------------------
+	// PRINTED FABRIC PIECES: received per piece.
+	//------------------------------------------------------------------------
+	for each  pRaw in printed
+	{
+		pm = pRaw.toMap();
+		pIdTxt = ifnull(pm.get("issueLineId"),"").toString().trim();
+		pGotStr = ifnull(pm.get("received"),"0").toString().trim();
+		if(pGotStr == "")
+		{
+			pGotStr = "0";
+		}
+		pGot = pGotStr.toDecimal();
+		pNoteTxt = ifnull(pm.get("remark"),"").toString();
+
+		if(pIdTxt == "" || pGot < 0)
+		{
+			if(errJson != "")
+			{
+				errJson = errJson + ",";
+			}
+			errJson = errJson + "\"Printed piece: invalid received quantity\"";
+		}
+		else
+		{
+			// Find the Issue_Line
+			foundLn = false;
+			for each  miRec in supIssues
+			{
+				for each  miLn in miRec.Issue_Lines
+				{
+					if(miLn.ID == pIdTxt.toLong())
+					{
+						foundLn = true;
+						lnQtyS = ifnull(miLn.Qty,"0").toString().trim();
+						if(lnQtyS == "")
+						{
+							lnQtyS = "0";
+						}
+						lnSetS = ifnull(miLn.Settled_Qty,"0").toString().trim();
+						if(lnSetS == "")
+						{
+							lnSetS = "0";
+						}
+						lnRemain = lnQtyS.toDecimal() - lnSetS.toDecimal();
+						
+						takeP = pGot;
+						if(takeP > lnRemain)
+						{
+							takeP = lnRemain;
+						}
+
+						miLn.Settled_Qty = lnSetS.toDecimal() + takeP;
+						stillOutP = lnRemain - takeP;
+
+						// Update Material_Requirement
+						if(miLn.Requirement != null)
+						{
+							for each req in Material_Requirement[ID == miLn.Requirement]
+							{
+								reqRcvS = ifnull(req.Received_Qty,"0").toString().trim();
+								if(reqRcvS == "")
+								{
+									reqRcvS = "0";
+								}
+								req.Received_Qty = reqRcvS.toDecimal() + takeP;
+							}
+						}
+
+						// Update Parent Material transit qty
+						if (miLn.Material != null)
+						{
+							for each rm in Raw_Material[ID == miLn.Material]
+							{
+								ptiS = ifnull(rm.In_Transit_Qty,"0").toString().trim();
+								if(ptiS == "") { ptiS = "0"; }
+								ptdS = ifnull(rm.Disputed_Qty,"0").toString().trim();
+								if(ptdS == "") { ptdS = "0"; }
+								
+								rm.In_Transit_Qty = ptiS.toDecimal() - lnRemain;
+								if (stillOutP > 0)
+								{
+									rm.Disputed_Qty = ptdS.toDecimal() + stillOutP;
+								}
+							}
+						}
+
+						// Update Lot transit qty
+						if(miLn.Lot != null)
+						{
+							for each  lotSet in Raw_Material_Lot[ID == miLn.Lot]
+							{
+								ltiS = ifnull(lotSet.In_Transit_Qty,"0").toString().trim();
+								if(ltiS == "")
+								{
+									ltiS = "0";
+								}
+								ltdS = ifnull(lotSet.Disputed_Qty,"0").toString().trim();
+								if(ltdS == "")
+								{
+									ltdS = "0";
+								}
+								
+								lotSet.In_Transit_Qty = ltiS.toDecimal() - lnRemain;
+								if (stillOutP > 0)
+								{
+									lotSet.Disputed_Qty = ltdS.toDecimal() + stillOutP;
+								}
+							}
+						}
+						if(okJson != "")
+						{
+							okJson = okJson + ",";
+						}
+						okJson = okJson + "{\"id\":\"" + pIdTxt + "\",\"status\":\"success\"}";
+
+						if(stillOutP > 0)
+						{
+							if(pNoteTxt != "")
+							{
+								pNoteTxt = " (" + pNoteTxt + ")";
+							}
+							
+							try
+							{
+								pDispName = "";
+								pDispUnit = "";
+								for each  rm in Raw_Material[ID == miLn.Material]
+								{
+									pDispName = ifnull(rm.Material_Name,"").toString();
+									pDispUnit = ifnull(rm.Unit,"").toString();
+								}
+								
+								pSoNo = "";
+								pPlanId = null;
+								if(miLn.Requirement != null)
+								{
+									for each req in Material_Requirement[ID == miLn.Requirement]
+									{
+										if(req.Plan != null)
+										{
+											pPlanId = req.Plan;
+											pSoNo = ifnull(soNoByPlan.get(req.Plan + ""),"").toString();
+										}
+									}
+								}
+								
+								newDispId = insert into Stock_Dispute
+								[
+									Material_Name=pDispName
+									Unit=pDispUnit
+									Is_Waste=false
+									Direction="Outbound"
+									Issued_Qty=lnRemain
+									Received_Qty=takeP
+									Disputed_Qty=stillOutP
+									Status="Open"
+									Raised_On=zoho.currentdate
+									Raised_Note="Short by " + stillOutP + " Mtr on receipt" + pNoteTxt
+									Added_User=zoho.loginuser
+								];
+								
+								for each dsp in Stock_Dispute[ID == newDispId.toLong()]
+								{
+									dsp.Material = miLn.Material;
+									dsp.Supervisor = supId;
+									if(miLn.Lot != null)
+									{
+										dsp.Lot = miLn.Lot;
+									}
+									if(pPlanId != null)
+									{
+										dsp.Plan = pPlanId;
+									}
+									if(miLn.Requirement != null)
+									{
+										// Resolve plan item from requirement
+										for each req in Material_Requirement[ID == miLn.Requirement]
+										{
+											if (req.Plan_Item != null)
+											{
+												dsp.Plan_Item = req.Plan_Item;
+											}
+										}
+									}
+								}
+								
+								dispRows.add(pDispName + " (printed piece)|" + pSoNo + "|Mtr|" + lnRemain + "|" + takeP + "|" + stillOutP);
+							}
+							catch (e3)
+							{
+								info "Stock_Dispute not raised for printed piece " + pIdTxt + ": " + e3.toString();
+							}
+
+							if(errJson != "")
+							{
+								errJson = errJson + ",";
+							}
+							errJson = errJson + "\"Printed piece: " + stillOutP + " of " + lnRemain + " Mtr not received" + pNoteTxt + " - dispute raised\"";
+						}
+					}
+				}
+			}
+			
+			if(foundLn == false)
+			{
+				if(errJson != "")
+				{
+					errJson = errJson + ",";
+				}
+				errJson = errJson + "\"Printed piece " + pIdTxt + " not found\"";
 			}
 		}
 	}

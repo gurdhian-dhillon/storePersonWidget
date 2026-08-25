@@ -2305,6 +2305,7 @@ function issueForSupervisor(supIdx) {
             // Absent on a roll lot, so the line is unchanged there and an older
             // server simply never sees the field.
             if (ln.pieces && ln.pieces.length) out.pieces = ln.pieces;
+            if (ln.cutSummary) out.cutSummary = ln.cutSummary;
 
             // Only on a deliberate override. The handover records the lot that
             // actually left the shelf while Issued_Lot keeps the original, and

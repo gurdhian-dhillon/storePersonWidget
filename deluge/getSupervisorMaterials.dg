@@ -395,6 +395,10 @@ string getSupervisorMaterials(string supervisorId)
 	// Lists of Maps is the shape that stops serialising cleanly.
 	lineLotByMat = Map();
 	lineQtyByMat = Map();
+	lineNoteByMat = Map();
+	lotNotes = Map();
+	printedPiecesJson = "";
+	printedPendByMat = Map();
 
 	//------------------------------------------------------------------------
 	// BOUNDED BY THE OLDEST OPEN PLAN, and the bound is provable.
@@ -456,15 +460,81 @@ string getSupervisorMaterials(string supervisorId)
 
 				if(lqS.toDecimal() > 0)
 				{
-					prevL = ifnull(lineLotByMat.get(lnMat),"").toString();
-					prevQ = ifnull(lineQtyByMat.get(lnMat),"").toString();
-					if(prevL != "")
+					lnNote = ifnull(miLn.Lot_Override_Note,"").toString().trim();
+
+					//------------------------------------------------------
+					// PRINTED FABRIC PIECES: marked with PRINTED_PIECE in
+					// Lot_Override_Note. Each is a separate Issue_Line
+					// representing one physical piece the supervisor must
+					// receive individually.
+					//------------------------------------------------------
+					if(lnNote.contains("PRINTED_PIECE"))
 					{
-						prevL = prevL + "~";
-						prevQ = prevQ + "~";
+						// Per-line pending: Qty minus what the supervisor
+						// has already confirmed on THIS specific line.
+						settledS = ifnull(miLn.Settled_Qty,"0").toString().trim();
+						if(settledS == "")
+						{
+							settledS = "0";
+						}
+						pcPend = lqS.toDecimal() - settledS.toDecimal();
+						
+						printedPendByMat.put(lnMat, ifnull(printedPendByMat.get(lnMat), 0.0) + pcPend);
+
+						if(pcPend > 0)
+						{
+							pcE = agg.get(lnMat);
+							// Find the plan info for this issue line
+							pcPlanNo = "";
+							pcSalesOrder = "";
+							if(miLn.Requirement != null)
+							{
+								for each  pcReq in Material_Requirement[ID == miLn.Requirement]
+								{
+									if(pcReq.Plan != null)
+									{
+										for each  pcPlan in Production_Planning[ID == pcReq.Plan]
+										{
+											pcPlanNo = ifnull(pcPlan.Plan_No,"").toString();
+											if(pcPlan.Sales_Order != null)
+											{
+												for each  pcSo in Sales_Order[ID == pcPlan.Sales_Order]
+												{
+													pcSalesOrder = ifnull(pcSo.Sales_Order,"").toString();
+												}
+											}
+										}
+									}
+								}
+							}
+
+							pcCutW = ifnull(miLn.Cut_Size_Width,0);
+							pcCutL = ifnull(miLn.Cut_Size_Length,0);
+
+							if(printedPiecesJson != "")
+							{
+								printedPiecesJson = printedPiecesJson + ",";
+							}
+							printedPiecesJson = printedPiecesJson + "{\"issueLineId\":\"" + miLn.ID + "\",\"materialId\":\"" + lnMat + "\",\"material\":\"" + ifnull(pcE.get("name"),"").toString().replaceAll("\"","'") + "\",\"unit\":\"" + ifnull(pcE.get("unit"),"").toString() + "\",\"qty\":" + lqS + ",\"pending\":" + pcPend + ",\"cutWidth\":" + pcCutW + ",\"cutLength\":" + pcCutL + ",\"planNo\":\"" + pcPlanNo.replaceAll("\"","'") + "\",\"salesOrder\":\"" + pcSalesOrder.replaceAll("\"","'") + "\"}";
+						}
 					}
-					lineLotByMat.put(lnMat,prevL + ifnull(miLn.Lot,"").toString().trim());
-					lineQtyByMat.put(lnMat,prevQ + lqS);
+					else
+					{
+						// Regular material: aggregate by lot as before
+						prevL = ifnull(lineLotByMat.get(lnMat),"").toString();
+						prevQ = ifnull(lineQtyByMat.get(lnMat),"").toString();
+						prevN = ifnull(lineNoteByMat.get(lnMat),"").toString();
+
+						if(prevL != "")
+						{
+							prevL = prevL + "~";
+							prevQ = prevQ + "~";
+							prevN = prevN + "~";
+						}
+						lineLotByMat.put(lnMat,prevL + ifnull(miLn.Lot,"").toString().trim());
+						lineQtyByMat.put(lnMat,prevQ + lqS);
+						lineNoteByMat.put(lnMat,prevN + lnNote);
+					}
 				}
 			}
 		}
@@ -475,6 +545,13 @@ string getSupervisorMaterials(string supervisorId)
 	{
 		e = agg.get(k);
 
+		// Deduct printed pieces pending, skip if nothing left for the aggregate
+		adjPending = e.get("pending") - ifnull(printedPendByMat.get(k), 0.0);
+		if(adjPending <= 0)
+		{
+			continue;
+		}
+
 		//--------------------------------------------------------------------
 		// Take the newest lines until the pending figure is covered, summing
 		// per lot as we go. Two lots can appear on one material - one handover
@@ -482,18 +559,20 @@ string getSupervisorMaterials(string supervisorId)
 		// checks one roll and signs for two.
 		//--------------------------------------------------------------------
 		lotsJson = "";
-		leftToName = e.get("pending");
+		leftToName = adjPending;
 
 		lotSeen = List();
 		lotQty = Map();
 
 		lotTxt = ifnull(lineLotByMat.get(k),"").toString();
 		qtyTxt = ifnull(lineQtyByMat.get(k),"").toString();
+		noteTxt = ifnull(lineNoteByMat.get(k),"").toString();
 
 		if(lotTxt != "")
 		{
 			lotParts = lotTxt.toList("~");
 			qtyParts = qtyTxt.toList("~");
+			noteParts = noteTxt.toList("~");
 
 			idxN = 0;
 			for each  qPart in qtyParts
@@ -521,8 +600,24 @@ string getSupervisorMaterials(string supervisorId)
 						{
 							lotSeen.add(thisLot);
 							lotQty.put(thisLot,0.0);
+							lotNotes.put(thisLot,"");
 						}
 						lotQty.put(thisLot,lotQty.get(thisLot) + takeHere);
+						
+						thisNote = ifnull(noteParts.get(idxN),"").toString().trim();
+						if(thisNote != "")
+						{
+							haveNote = ifnull(lotNotes.get(thisLot),"").toString();
+							if(haveNote != "" && haveNote.contains(thisNote) == false)
+							{
+								haveNote = haveNote + ", ";
+							}
+							if(haveNote.contains(thisNote) == false)
+							{
+								lotNotes.put(thisLot, haveNote + thisNote);
+							}
+						}
+						
 						leftToName = leftToName - takeHere;
 					}
 				}
@@ -536,10 +631,6 @@ string getSupervisorMaterials(string supervisorId)
 			{
 				lotsJson = lotsJson + ",";
 			}
-			// Read once per distinct lot, then cached. The miss is cached too,
-			// as an empty string, so a lot that cannot be read is looked up
-			// once rather than on every handover that names it - and it still
-			// falls through to "Not recorded" below exactly as it did.
 			if(lotNumById.get(lotKey) == null)
 			{
 				lotNumById.put(lotKey,"");
@@ -555,6 +646,13 @@ string getSupervisorMaterials(string supervisorId)
 			{
 				lotLabelTxt = "Not recorded";
 			}
+			
+			nTxt = ifnull(lotNotes.get(lotKey),"").toString();
+			if(nTxt != "")
+			{
+				lotLabelTxt = lotLabelTxt + " (" + nTxt + ")";
+			}
+			
 			lotsJson = lotsJson + "{\"lot\":\"" + lotLabelTxt.replaceAll("\"","'") + "\",\"qty\":" + lotQty.get(lotKey) + "}";
 		}
 
@@ -566,5 +664,5 @@ string getSupervisorMaterials(string supervisorId)
 	}
 
 	// Built by hand - List.toString() does not reliably wrap in [].
-	return "{\"errors\":[],\"supervisors\":[" + supJson + "],\"materials\":[" + matJson + "],\"waste\":[" + wasteJson + "],\"plansAssigned\":" + plansAssigned + ",\"plansAwaiting\":" + plansAwaiting + "}";
+	return "{\"errors\":[],\"supervisors\":[" + supJson + "],\"materials\":[" + matJson + "],\"waste\":[" + wasteJson + "],\"printedPieces\":[" + printedPiecesJson + "],\"plansAssigned\":" + plansAssigned + ",\"plansAwaiting\":" + plansAwaiting + "}";
 }

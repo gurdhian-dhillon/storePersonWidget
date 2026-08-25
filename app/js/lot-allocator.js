@@ -233,7 +233,7 @@ function lotFill(lot, demands, fab, greige) {
         // available for the rest of this session to keep piece provenance clean).
         var pguard = 0;
         while (pguard++ < 400) {
-            var pi = -1, pp = -1, pScore = 0, pCap = 0;
+            var pi = -1, pp = -1, pScore = 0, pCap = 0, pTake = 0;
             demands.forEach(function (d, i) {
                 if (owed[i] <= 0) return;
                 pcs.forEach(function (p, ri) {
@@ -247,7 +247,9 @@ function lotFill(lot, demands, fab, greige) {
                     var lengthCut = rows * d.cutL;
                     // Score = waste area per usable cut
                     var score = ((p.width * lengthCut) - (take * d.cutW * d.cutL)) / take;
-                    if (pi < 0 || score < pScore) { pi = i; pp = ri; pScore = score; pCap = cap; }
+                    if (pi < 0 || score < pScore || (score === pScore && take > pTake)) { 
+                        pi = i; pp = ri; pScore = score; pCap = cap; pTake = take; 
+                    }
                 });
             });
             if (pi < 0) break;
@@ -735,9 +737,20 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                     });
                 });
 
+                var cSumm = '';
+                if (lnPieces.length > 0) {
+                    var parts = [];
+                    lnPieces.forEach(function(pc) {
+                        var cStr = round2(pc.cutLengthCm / 100) + 'm';
+                        if (pc.count > 1) cStr += 'x' + pc.count;
+                        parts.push(cStr);
+                    });
+                    cSumm = 'Cuts: ' + parts.join(', ');
+                }
+
                 r.lotLines.push({ lotId: lot.lotId, lotNumber: lot.lotNumber,
                                   qty: fill.metresPer[i], planItemId: d.planItemId,
-                                  planId: d.planId, pieces: lnPieces,
+                                  planId: d.planId, pieces: lnPieces, cutSummary: cSumm,
                                   note: noteOn, overrideFrom: fromOn });
             }
             // KEYED BY REMNANT **AND** ITEM.
