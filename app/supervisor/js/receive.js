@@ -23,6 +23,10 @@ function wasteShortId(i) { return 'waste-short-' + i; }
 function wasteInputId(i) { return 'waste-input-' + i; }
 function wasteRowId(i) { return 'waste-row-' + i; }
 function wasteNoteId(i) { return 'waste-note-' + i; }
+function printedShortId(i) { return 'printed-short-' + i; }
+function printedInputId(i) { return 'printed-input-' + i; }
+function printedRowId(i) { return 'printed-row-' + i; }
+function printedNoteId(i) { return 'printed-note-' + i; }
 
 // ---- Mode ----
 //
@@ -204,6 +208,48 @@ function renderWasteRow(w, i) {
         '</tr>';
 }
 
+// Printed fabric pieces — one physical piece per line, same shape as waste but
+// measured in metres, not piece count. Each row is one Issue_Line.
+function renderPrintedRow(p, i) {
+    var actionCell;
+    if (EDIT) {
+        actionCell =
+            '<span class="issue-input-group">' +
+                '<input type="number" step="0.01" min="0" max="' + p.pending + '" ' +
+                    'class="issue-input" id="' + printedInputId(i) + '" value="' + p.pending + '" ' +
+                    'oninput="onPrintedInput(' + i + ')" ' +
+                    'onblur="onPrintedCommit(' + i + ')" />' +
+                '<span class="issue-unit">Mtr</span>' +
+            '</span>' +
+            '<div class="short-hint" id="' + printedShortId(i) + '"></div>';
+    } else {
+        actionCell = '<span class="status-pill status-partial">Awaiting check</span>';
+    }
+
+    return '' +
+        '<tr id="' + printedRowId(i) + '">' +
+            '<td class="material-name-cell">' +
+                '<div class="mat-name">&#9851; ' + escapeHtml(p.material) +
+                    '<span class="fabric-badge">Printed</span>' +
+                '</div>' +
+                '<div class="mat-sku">' + escapeHtml(p.salesOrder || p.planNo) +
+                    ' &middot; cut ' + fmt(p.cutLength) + '&times;' + fmt(p.cutWidth) + ' cm</div>' +
+            '</td>' +
+            '<td class="col-lot">-</td>' +
+            '<td class="col-num col-strong">' +
+                '<span class="qty-big">' + fmt(p.pending) + '<span class="unit">Mtr</span></span>' +
+                '<div class="qty-sub">' + fmt(p.qty) + ' Mtr issued</div>' +
+            '</td>' +
+            '<td class="col-issue">' + actionCell + '</td>' +
+            (EDIT
+                ? '<td class="col-note">' +
+                      '<input type="text" class="note-input" id="' + printedNoteId(i) + '" ' +
+                          'placeholder="Why is it short?" disabled />' +
+                  '</td>'
+                : '') +
+        '</tr>';
+}
+
 function renderTable(title, note, rowsHtml) {
     if (!rowsHtml) return '';
     return '' +
@@ -261,7 +307,8 @@ function render(data) {
 
     var mats = (data && data.materials) || [];
     var waste = (data && data.waste) || [];
-    var total = mats.length + waste.length;
+    var printed = (data && data.printedPieces) || [];
+    var total = mats.length + waste.length + printed.length;
 
     // The Receive tab has carried a count badge since the tabs were built, and
     // nothing ever filled it — the one tab where something is genuinely waiting
@@ -289,6 +336,7 @@ function render(data) {
 
     var matHtml = mats.map(renderMaterialRow).join('');
     var wasteHtml = waste.map(renderWasteRow).join('');
+    var printedHtml = printed.map(renderPrintedRow).join('');
 
     var footer;
     if (EDIT) {
@@ -318,6 +366,7 @@ function render(data) {
                 '<div class="tables-container">' +
                     renderTable('Materials', 'one line per physical thing, not per order', matHtml) +
                     renderTable('Waste cut pieces', 'each piece is for a specific cut', wasteHtml) +
+                    renderTable('Printed fabric pieces', 'each piece is received individually', printedHtml) +
                 '</div>' +
                 footer +
             '</div>' +
@@ -431,6 +480,52 @@ function onWasteCommit(i) {
     onWasteInput(i);
 }
 
+function onPrintedInput(i) {
+    var input = document.getElementById(printedInputId(i));
+    var p = window.__data.printedPieces[i];
+
+    var raw = String(input.value).trim();
+    var val = parseFloat(raw);
+    var typed = raw !== '' && !isNaN(val);
+    if (!typed || val < 0) val = 0;
+
+    var over = typed && val > p.pending;
+    var short = over ? 0 : round2(p.pending - val);
+
+    input.classList.toggle('invalid', short > 0 || over);
+
+    var hint = document.getElementById(printedShortId(i));
+    if (hint) {
+        if (over) {
+            hint.textContent = 'more than was issued';
+        } else {
+            hint.textContent = short > 0
+                ? 'short by ' + fmt(short) + ' Mtr'
+                : '';
+        }
+    }
+
+    var note = document.getElementById(printedNoteId(i));
+    if (note) {
+        note.disabled = short <= 0;
+        if (short <= 0) note.value = '';
+    }
+
+    updateShortSummary();
+}
+
+function onPrintedCommit(i) {
+    var input = document.getElementById(printedInputId(i));
+    var p = window.__data.printedPieces[i];
+
+    var val = parseFloat(input.value);
+    if (isNaN(val) || val < 0) val = 0;
+    if (val > p.pending) val = p.pending;
+    input.value = round2(val);
+
+    onPrintedInput(i);
+}
+
 // How many lines he is reporting short, restated in the footer beside the
 // button he is about to press. Each one becomes a dispute for someone else to
 // chase, so it should not be possible to raise five of them by accident.
@@ -448,6 +543,10 @@ function updateShortSummary() {
     (data.waste || []).forEach(function (w, i) {
         var input = document.getElementById(wasteInputId(i));
         if (input && (parseInt(input.value, 10) || 0) < w.pending) n++;
+    });
+    (data.printedPieces || []).forEach(function (p, i) {
+        var input = document.getElementById(printedInputId(i));
+        if (input && (parseFloat(input.value) || 0) < p.pending) n++;
     });
 
     if (n === 0) {
@@ -467,7 +566,7 @@ function submitReceipt() {
     var supId = document.getElementById('sup-select').value;
     if (!supId) return;
 
-    var payload = { materials: [], waste: [] };
+    var payload = { materials: [], waste: [], printedPieces: [] };
 
     (data.materials || []).forEach(function (m, i) {
         var input = document.getElementById(matInputId(i));
@@ -495,6 +594,19 @@ function submitReceipt() {
         payload.waste.push({
             rowId: w.rowId,
             received: val,
+            remark: note ? note.value : ''
+        });
+    });
+
+    (data.printedPieces || []).forEach(function (p, i) {
+        var input = document.getElementById(printedInputId(i));
+        var note = document.getElementById(printedNoteId(i));
+        var val = input ? (parseFloat(input.value) || 0) : p.pending;
+        if (val < 0) val = 0;
+        if (val > p.pending) val = p.pending;
+        payload.printedPieces.push({
+            issueLineId: p.issueLineId,
+            received: round2(val),
             remark: note ? note.value : ''
         });
     });
