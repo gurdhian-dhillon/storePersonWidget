@@ -110,6 +110,51 @@ string saveStageAssignment(string payloadJson)
 			opId = opIdStr.toLong();
 
 			//----------------------------------------------------------
+			// MATERIAL FIRST. AN ITEM CANNOT START PARTIALLY.
+			//
+			// receiveMaterials writes Ready_For_Production only when EVERY
+			// requirement on the item is satisfied - fabric in cut pieces,
+			// everything else in its own unit, nothing still in transit, every
+			// issued waste movement received. So the status IS the readiness
+			// test, already computed by the one function entitled to compute it,
+			// and re-deriving it here would be a second opinion that can drift.
+			//
+			// The supervisor's screen already honours this - production.js only
+			// offers the control on a Ready_For_Production card - but this is a
+			// Custom API and callable from anywhere, and the widget hiding a
+			// button has never been the guard in this app.
+			//
+			// IT MATTERS TO INVENTORY, NOT JUST TO THE FLOOR. Consumption is
+			// posted at checking against Material_Requirement.Received_Qty, and
+			// the whole point of that is that Production drains to zero: what a
+			// transfer order pushes in, a check pushes back out. An item that
+			// started before its material was complete would be checked - and so
+			// post its consumption - while a later handover for it was still
+			// coming, and that second transfer would land in Production with no
+			// remaining event able to clear it. This guard is what keeps the
+			// invariant true rather than merely usually true.
+			//
+			// THE STATES THAT MAY PROCEED are the ones at or past the start of
+			// work. In_Production is the ordinary second-stage case; Complete is
+			// allowed because an alteration batch is deliberately left there by
+			// saveProductionPhase and its stages are still worked afterwards.
+			// Awaiting_Material is the one refused.
+			//----------------------------------------------------------
+			itemStatusTxt = "";
+			itemNameTxt = "";
+
+			for each  piRdy in Plan_Item[ID == itemId]
+			{
+				itemStatusTxt = ifnull(piRdy.Item_Status,"").toString().trim();
+				itemNameTxt = ifnull(piRdy.Item_Name,"").toString().replaceAll("\"","'");
+			}
+
+			if(itemStatusTxt == "Awaiting_Material")
+			{
+				return "{\"success\":false,\"code\":\"NO_MATERIAL\",\"error\":\"" + itemNameTxt + " is still waiting on material. The whole batch has to be received before anyone can be put on it.\"}";
+			}
+
+			//----------------------------------------------------------
 			// The stage header. Found, or opened.
 			//----------------------------------------------------------
 			logId = 0;

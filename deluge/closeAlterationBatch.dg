@@ -344,6 +344,81 @@ string closeAlterationBatch(string payloadJson)
 		}
 
 		//------------------------------------------------------------------
+		// A BATCH THAT PRODUCED NOTHING STILL CONSUMED ITS CLOTH, AND THIS IS
+		// THE ONLY PLACE THAT WILL EVER SAY SO.
+		//
+		// An alteration batch normally carries no material at all - that is what
+		// makes cloth optional for it. But the reissue path is open to these
+		// batches on purpose: raiseReissueRequest turns the draft into real
+		// Material_Requirement rows with Source = "Alteration", the store hands
+		// the cloth over, the supervisor receives it, and postTransferOrders
+		// moves it Main Warehouse -> Production.
+		//
+		// When qtyReturning is 0 the batch goes straight to Complete WITHOUT
+		// EVER REACHING A CHECK - the branch immediately above. So saveItemCheck,
+		// which posts consumption for every ordinary batch, never runs on it.
+		// Without this block that cloth sits in the Production location for ever:
+		// physically gone, still on the books, and invisible to
+		// reconcileRawMaterial because that compares ORG-WIDE totals, which a
+		// transfer between two locations does not change.
+		//
+		// WRITE_OFF, NOT CONSUMPTION. Nothing was made, so there is no finished
+		// good for it to net against. CLAUDE.md's accounting shape is explicit
+		// that a real loss belongs on its own line rather than disappearing into
+		// the conversion.
+		//
+		// Qty_Posted_To_Inventory is the delta guard, exactly as in
+		// saveItemCheck. Awaiting_Check is deliberately re-declarable, so a
+		// supervisor correcting his figure can bring this through twice.
+		//
+		// Its own try/catch, and LAST: the declaration above is already written
+		// and must never be reported as failed because a queue row would not
+		// insert.
+		//------------------------------------------------------------------
+		if(qtyReturning == 0)
+		{
+			try
+			{
+				woCount = 0;
+
+				for each  mrWo in Material_Requirement[Plan_Item == itemId]
+				{
+					woRecS = ifnull(mrWo.Received_Qty,"0").toString().trim();
+					if(woRecS == "") { woRecS = "0"; }
+
+					woPostedS = ifnull(mrWo.Qty_Posted_To_Inventory,"0").toString().trim();
+					if(woPostedS == "") { woPostedS = "0"; }
+
+					woDelta = woRecS.toDecimal() - woPostedS.toDecimal();
+
+					if(woDelta > 0 && mrWo.Material != null)
+					{
+						woQRes = thisapp.queueInventoryPost("Write_Off","Material_Requirement",mrWo.ID.toString(),mrWo.Material.toString(),woDelta.toString());
+
+						// Stamped only on a row that actually queued, so a
+						// refused post is retried rather than silently lost.
+						if(woQRes.toString().contains("\"queued\":true"))
+						{
+							mrWo.Qty_Posted_To_Inventory = woRecS.toDecimal();
+							woCount = woCount + 1;
+						}
+
+						info "closeAlterationBatch write-off -> item " + itemId + " | req " + mrWo.ID + " | qty " + woDelta + " | " + woQRes;
+					}
+				}
+
+				if(woCount > 0)
+				{
+					info "closeAlterationBatch -> " + woCount + " material row(s) written off on abandoned batch " + itemId;
+				}
+			}
+			catch (eWo)
+			{
+				info "closeAlterationBatch write-off FAILED -> item " + itemId + " | " + eWo.toString();
+			}
+		}
+
+		//------------------------------------------------------------------
 		// Roll the plan up.
 		//
 		// The PLAN's test is "every item at Awaiting_Check or beyond", not

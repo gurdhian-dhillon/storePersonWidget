@@ -152,6 +152,69 @@ string shortCloseOrder(string payloadJson)
 
 							piQ.Item_Status = "Complete";
 							piQ.Qty_Produced = 0;
+
+							//----------------------------------------------
+							// A CANCELLED BATCH CAN ALREADY BE HOLDING CLOTH.
+							//
+							// The test above is "nobody has STARTED it" -
+							// zero Stage_Log rows - and that is not the same
+							// as "it never got any material". A batch reaches
+							// Ready_For_Production only when receiveMaterials
+							// finds EVERY requirement on it satisfied, and
+							// postTransferOrders has by then moved all of it
+							// into Production. The supervisor simply has not
+							// picked it up yet.
+							//
+							// So Ready_For_Production with no stage log is
+							// precisely the window where cancelling strands
+							// real cloth in the Production location: the batch
+							// goes to Complete here, never reaches a check,
+							// and nothing else would ever post it out.
+							//
+							// Written off rather than consumed - the order is
+							// shipping short, these garments are not being
+							// made, and there is no output for the cloth to
+							// net against.
+							//
+							// Its own try/catch inside the loop so one bad row
+							// cannot take down a short close that has already
+							// written records.
+							//----------------------------------------------
+							try
+							{
+								for each  mrSc in Material_Requirement[Plan_Item == piQ.ID]
+								{
+									scRecS = ifnull(mrSc.Received_Qty,"0").toString().trim();
+									if(scRecS == "")
+									{
+										scRecS = "0";
+									}
+
+									scPostedS = ifnull(mrSc.Qty_Posted_To_Inventory,"0").toString().trim();
+									if(scPostedS == "")
+									{
+										scPostedS = "0";
+									}
+
+									scDelta = scRecS.toDecimal() - scPostedS.toDecimal();
+
+									if(scDelta > 0 && mrSc.Material != null)
+									{
+										scQRes = thisapp.queueInventoryPost("Write_Off","Material_Requirement",mrSc.ID.toString(),mrSc.Material.toString(),scDelta.toString());
+
+										if(scQRes.toString().contains("\"queued\":true"))
+										{
+											mrSc.Qty_Posted_To_Inventory = scRecS.toDecimal();
+										}
+
+										info "shortCloseOrder write-off -> item " + piQ.ID + " | req " + mrSc.ID + " | qty " + scDelta + " | " + scQRes;
+									}
+								}
+							}
+							catch (eSc)
+							{
+								info "shortCloseOrder write-off FAILED -> item " + piQ.ID + " | " + eSc.toString();
+							}
 						}
 					}
 				}

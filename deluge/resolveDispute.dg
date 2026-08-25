@@ -1351,6 +1351,49 @@ string resolveDispute(string payloadJson)
 				lnRow.Processed=true;
 				dsp.Resolution_Lines.insert(lnRow);
 
+				//------------------------------------------------------
+				// 4b. THE WRITE-OFF, AND IT BELONGS AT MAIN WAREHOUSE.
+				//
+				// Lost is the only outcome that takes stock off the books:
+				// Found means it reached production, and a correction means
+				// it never left the shelf. Both of those are already
+				// answered by the Creator writes above.
+				//
+				// MAIN WAREHOUSE, NOT PRODUCTION, and the reason is the
+				// transfer order. postTransferOrders moves
+				// Settled_Qty - Transferred_Qty, so it only ever moves what
+				// a receipt CONFIRMED. A disputed quantity is by definition
+				// the part that was never settled, so it never transferred
+				// and is still sitting at Main Warehouse in Inventory's
+				// books. Posting it at Production would drive Production
+				// negative for material that was never pushed there and
+				// leave Main Warehouse holding cloth that is gone.
+				//
+				// OUTBOUND AND NON-WASTE ONLY. An inbound dispute is
+				// offcuts, which are a Creator-only concept and never
+				// entered Inventory - CLAUDE.md is explicit that the waste
+				// loop posts nothing. Writing one off here would invent a
+				// deduction for stock Inventory never knew about.
+				//
+				// Its own try/catch: the dispute is already resolved in
+				// Creator, and a queue failure must not report a settled
+				// decision as failed. The row is written LAST, after the
+				// Creator records, so a queue row can never claim a
+				// write-off that did not happen.
+				//------------------------------------------------------
+				if(applyKind == "Lost" && inbound == false && isWaste == false && dsp.Material != null && take > 0)
+				{
+					try
+					{
+						woRes = thisapp.queueInventoryPost("Write_Off","Stock_Dispute",dispId.toString(),dsp.Material.toString(),take.toString());
+						info "resolveDispute write-off -> dispute " + dispId + " | qty " + take + " | " + woRes;
+					}
+					catch (eWo)
+					{
+						info "resolveDispute write-off FAILED -> dispute " + dispId + " | " + eWo.toString();
+					}
+				}
+
 				// Closed once the lines account for the whole disputed amount.
 				// A partial resolution leaves it open with the remainder,
 				// because "one of the two turned up" is a real answer.

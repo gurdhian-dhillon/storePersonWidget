@@ -7,7 +7,16 @@ string postInventoryQueue(string dryRun)
 		adjUrl = "https://www.zohoapis.in/inventory/v1/inventoryadjustments";
 		accConsumption = "3955559000000032057";
 		accWriteOff = "3955559000000000558";
+		// PRODUCTION, not Main Warehouse. postTransferOrders has already moved
+		// every confirmed receipt out of Main Warehouse and into Production, so
+		// Production is where the material sits when a check consumes it. The
+		// end-goal invariant is that Production drains to zero: what a transfer
+		// order pushes in, a Consumption adjustment must push back out.
 		locRawMaterial = "3955559000000219654";
+		// MAIN WAREHOUSE, and only Write_Off uses it. A disputed quantity is the
+		// part of a handover that was never settled, so postTransferOrders never
+		// moved it - it is still here. See the write-off block in resolveDispute.
+		locWriteOff = "3955559000000212001";
 		locFinished = "3955559000000227307";
 		maxAttempts = 5;
 		maxBatches = 6;
@@ -129,6 +138,11 @@ string postInventoryQueue(string dryRun)
 					{
 						rowLocId = locFinished;
 						rowSign = 1;
+					}
+					else if(qRow.Post_Type == "Write_Off")
+					{
+						// Never transferred, so it never left Main Warehouse.
+						rowLocId = locWriteOff;
 					}
 					mapItmKey = itmId + "|" + rowLocId;
 
