@@ -405,6 +405,110 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 						}
 
 						//--------------------------------------------------
+						// Pass 1.5 - printed pieces from Material_Issue.
+						// A printed piece is physically discrete just like a waste piece.
+						//--------------------------------------------------
+						for each wIssW in supIssuesW
+						{
+							for each wLnW in wIssW.Issue_Lines
+							{
+								if(ifnull(wLnW.Plan_Item,"").toString().trim() == planItemId && wLnW.Material.toString() == matId.toString())
+								{
+									lnNote = ifnull(wLnW.Lot_Override_Note,"").toString().trim();
+									if(lnNote.contains("PRINTED_PIECE"))
+									{
+										wMatId = matId.toString();
+										wLotTxt = ifnull(wLnW.Lot,"").toString().trim();
+										wLotJson = "";
+										if(wLotTxt != "")
+										{
+											if(lotNumById.get(wLotTxt) == null)
+											{
+												lotNumById.put(wLotTxt,"");
+												for each  lotRefP in Raw_Material_Lot[ID == wLotTxt.toLong()]
+												{
+													lotNumById.put(wLotTxt,ifnull(lotRefP.Lot_Number,"").toString().replaceAll("\"","'"));
+												}
+											}
+											wLotJson = ",\"lotId\":\"" + wLotTxt + "\",\"lotNumber\":\"" + ifnull(lotNumById.get(wLotTxt),"").toString() + "\"";
+										}
+
+										// Qty is in metres. We need pieceL in cm.
+										wQtyM = ifnull(wLnW.Qty, 0);
+										pieceL = (wQtyM * 100).toDecimal();
+										pieceW = fabricWidthCm; // printed pieces are full width of the fabric
+
+										if(remain > 0 && pieceW >= cutW && pieceL >= cutL)
+										{
+											perRow = (pieceW / cutW).floor();
+											maxRows = (pieceL / cutL).floor();
+											capacity = perRow * maxRows;
+											sideW = pieceW - (perRow * cutW);
+
+											avail = 1; // It's one piece
+											fullPieces = (remain / capacity).floor();
+											if(fullPieces > avail) { fullPieces = avail; }
+											
+											if(fullPieces > 0)
+											{
+												usedLen = maxRows * cutL;
+												if(sideW > 0)
+												{
+													if(genJson != "") { genJson = genJson + ","; }
+													genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideW + ",\"length\":" + usedLen + ",\"count\":" + fullPieces + ",\"origin\":\"side\"" + wLotJson + "}";
+												}
+												fullTail = pieceL - usedLen;
+												if(fullTail > 0)
+												{
+													if(genJson != "") { genJson = genJson + ","; }
+													genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + pieceW + ",\"length\":" + fullTail + ",\"count\":" + fullPieces + ",\"origin\":\"tail\"" + wLotJson + "}";
+												}
+												remain = remain - (fullPieces * capacity);
+												avail = avail - fullPieces;
+											}
+
+											if(remain > 0 && avail > 0)
+											{
+												take = remain;
+												partRows = (take / perRow).floor();
+												lastRow = take - (partRows * perRow);
+												rows = partRows;
+												if(lastRow > 0) { rows = rows + 1; }
+												lengthUsed = rows * cutL;
+
+												if(partRows > 0 && sideW > 0)
+												{
+													if(genJson != "") { genJson = genJson + ","; }
+													genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideW + ",\"length\":" + (partRows * cutL) + ",\"count\":1,\"origin\":\"side\"" + wLotJson + "}";
+												}
+												if(lastRow > 0)
+												{
+													partW = pieceW - (lastRow * cutW);
+													if(partW > 0)
+													{
+														if(genJson != "") { genJson = genJson + ","; }
+														genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + partW + ",\"length\":" + cutL + ",\"count\":1,\"origin\":\"partial_row\"" + wLotJson + "}";
+													}
+												}
+												tailL = pieceL - lengthUsed;
+												if(tailL > 0)
+												{
+													if(genJson != "") { genJson = genJson + ","; }
+													genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + pieceW + ",\"length\":" + tailL + ",\"count\":1,\"origin\":\"tail\"" + wLotJson + "}";
+												}
+												remain = 0;
+											}
+										}
+										
+										// Emit empty fabrics entry for the printed piece to clear UI Loading state
+										if(fabJson != "") { fabJson = fabJson + ","; }
+										fabJson = fabJson + "{\"materialId\":\"" + matId + "-PRINT_" + wLnW.ID + "\",\"material\":\"" + matLabel + "\",\"cutWidth\":" + cutW + ",\"cutLength\":" + cutL + ",\"fabricWidthCm\":" + fabricWidthCm + ",\"piecesCut\":0,\"freshMetres\":0,\"lots\":[],\"waste\":[]}";
+									}
+								}
+							}
+						}
+
+						//--------------------------------------------------
 						// Pass 2 - whatever the waste could not cover came off
 						// FRESH FABRIC, and that is cut ONE LOT AT A TIME.
 						//

@@ -385,6 +385,7 @@ string getStoreMaterialRequirements()
 	// piece and printed cloth does not age on the rack.
 	//------------------------------------------------------------------------
 	pieceJsonByLot = Map();
+	pieceMetersByLot = Map();
 
 	// sort by on its OWN assignment, never inline in the for each header.
 	availablePieces = Fabric_Piece[Piece_Status == "Available"] sort by Added_Time;
@@ -432,6 +433,13 @@ string getStoreMaterialRequirements()
 				prevPieces = prevPieces + ",";
 			}
 			pieceJsonByLot.put(fpLot,prevPieces + fpFrag);
+			
+			if(fpSt == "Wash")
+			{
+				pieceMtr = (fplS.toDecimal() / 100) * fpcS.toDecimal();
+				curMtr = ifnull(pieceMetersByLot.get(fpLot), 0.0);
+				pieceMetersByLot.put(fpLot, curMtr + pieceMtr);
+			}
 		}
 	}
 
@@ -462,12 +470,20 @@ string getStoreMaterialRequirements()
 	// empty-lot filters, exactly as it did, so an offcut can still name its lot
 	// after that lot has dropped off the picker.
 	//------------------------------------------------------------------------
+	calcWashByMat = Map();
+	calcUnwashByMat = Map();
+	calcInWashByMat = Map();
+
 	for each  lotMatId in neededMats
 	{
 		lrMat = lotMatId.toString().trim();
 
 		// sort by on its own assignment, never inline in a for each header.
 		matLotRows = Raw_Material_Lot[Material == lrMat.toLong()] sort by Added_Time;
+		
+		matWash = 0.0;
+		matUnwash = 0.0;
+		matInWash = 0.0;
 
 		for each  lotR in matLotRows
 		{
@@ -519,6 +535,24 @@ string getStoreMaterialRequirements()
 
 		lrWash = lrwS.toDecimal();
 		lrUnwash = lruS.toDecimal();
+		
+		// FORM DECIDES HOW THE ALLOCATOR READS THE METRES, and an EMPTY one
+		// means Roll. Every lot that existed before printing has it blank,
+		// and reading blank as anything else would put the whole rack down
+		// the piece path with no pieces - every roll suddenly uncuttable.
+		lrForm = ifnull(lotR.Form,"").toString().trim();
+		if(lrForm != "Pieces")
+		{
+			lrForm = "Roll";
+		}
+		
+		// A Pieces lot holds no continuous cloth, its usable stock is exactly
+		// the sum of the pieces on the rack. The Creator rollup misses scripted
+		// additions, so we sum them live from the pieces we just fetched.
+		if(lrForm == "Pieces")
+		{
+			lrWash = ifnull(pieceMetersByLot.get(lotR.ID + ""), 0.0);
+		}
 
 		// An empty lot is not a choice. It stays on the form for its history
 		// but must not clutter a screen about what can be issued today -
@@ -531,16 +565,6 @@ string getStoreMaterialRequirements()
 			// unwash is context, exactly as unwashedStock is at material level.
 			lrNum = ifnull(lotR.Lot_Number,"").toString().replaceAll("\"","'");
 			lrLab = ifnull(lotR.Lot_Label,"").toString().replaceAll("\"","'");
-
-			// FORM DECIDES HOW THE ALLOCATOR READS THE METRES, and an EMPTY one
-			// means Roll. Every lot that existed before printing has it blank,
-			// and reading blank as anything else would put the whole rack down
-			// the piece path with no pieces - every roll suddenly uncuttable.
-			lrForm = ifnull(lotR.Form,"").toString().trim();
-			if(lrForm != "Pieces")
-			{
-				lrForm = "Roll";
-			}
 
 			// A Roll lot sends an empty array, so the widget has one shape to
 			// read and the piece path simply never has anything to pick.
@@ -560,9 +584,19 @@ string getStoreMaterialRequirements()
 			}
 			lotJsonByMat.put(lrMat,prevLots + lotFrag);
 		}
+		
+		// Accumulate total stock across all lots (including blocked and empty, mimicking the Creator rollup
+		// but guaranteeing it is perfectly in sync with the lots the UI receives, notably printed pieces).
+		matWash = matWash + lrWash;
+		matUnwash = matUnwash + lrUnwash;
+		matInWash = matInWash + lriS.toDecimal();
 
 		}
 		// end of the lots for this material
+		
+		calcWashByMat.put(lrMat, matWash);
+		calcUnwashByMat.put(lrMat, matUnwash);
+		calcInWashByMat.put(lrMat, matInWash);
 	}
 	// end of the per-material loop
 
@@ -644,9 +678,11 @@ string getStoreMaterialRequirements()
 			dispName = ifnull(rm.Material_Display_Name,"").toString().trim();
 			if(isFab == true)
 			{
-				availableStock = ifnull(rm.Wash_Quantity,0);
-				unwashedStock = ifnull(rm.Unwash_Quantity,0);
-				inWashStock = ifnull(rm.In_Wash_Qty,0);
+				// Bypass the Creator rollup field which lags and ignores printed piece lot additions.
+				// Use the synchronous sums calculated directly from the lots we just sent.
+				availableStock = ifnull(calcWashByMat.get(matIdTxt), 0.0);
+				unwashedStock = ifnull(calcUnwashByMat.get(matIdTxt), 0.0);
+				inWashStock = ifnull(calcInWashByMat.get(matIdTxt), 0.0);
 				// Stored as TEXT, in inches. Converted here and nowhere else.
 				val = rm.Fabric_Width_Inches;
 				if(val != null && val.trim() != "")

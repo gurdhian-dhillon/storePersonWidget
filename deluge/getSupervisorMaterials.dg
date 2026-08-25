@@ -510,12 +510,28 @@ string getSupervisorMaterials(string supervisorId)
 
 							pcCutW = ifnull(miLn.Cut_Size_Width,0);
 							pcCutL = ifnull(miLn.Cut_Size_Length,0);
+							
+							pcLotNum = "Not recorded";
+							if (miLn.Lot != null)
+							{
+								lotKey = miLn.Lot.toString();
+								if (lotNumById.get(lotKey) == null)
+								{
+									lotNumById.put(lotKey, "");
+									for each lotRef in Raw_Material_Lot[ID == miLn.Lot]
+									{
+										lotNumById.put(lotKey, ifnull(lotRef.Lot_Number,"").toString());
+									}
+								}
+								pcLotNum = ifnull(lotNumById.get(lotKey),"").toString();
+								if(pcLotNum == "") { pcLotNum = "Not recorded"; }
+							}
 
 							if(printedPiecesJson != "")
 							{
 								printedPiecesJson = printedPiecesJson + ",";
 							}
-							printedPiecesJson = printedPiecesJson + "{\"issueLineId\":\"" + miLn.ID + "\",\"materialId\":\"" + lnMat + "\",\"material\":\"" + ifnull(pcE.get("name"),"").toString().replaceAll("\"","'") + "\",\"unit\":\"" + ifnull(pcE.get("unit"),"").toString() + "\",\"qty\":" + lqS + ",\"pending\":" + pcPend + ",\"cutWidth\":" + pcCutW + ",\"cutLength\":" + pcCutL + ",\"planNo\":\"" + pcPlanNo.replaceAll("\"","'") + "\",\"salesOrder\":\"" + pcSalesOrder.replaceAll("\"","'") + "\"}";
+							printedPiecesJson = printedPiecesJson + "{\"issueLineId\":\"" + miLn.ID + "\",\"materialId\":\"" + lnMat + "\",\"material\":\"" + ifnull(pcE.get("name"),"").toString().replaceAll("\"","'") + "\",\"unit\":\"" + ifnull(pcE.get("unit"),"").toString() + "\",\"qty\":" + lqS + ",\"pending\":" + pcPend + ",\"cutWidth\":" + pcCutW + ",\"cutLength\":" + pcCutL + ",\"planNo\":\"" + pcPlanNo.replaceAll("\"","'") + "\",\"salesOrder\":\"" + pcSalesOrder.replaceAll("\"","'") + "\",\"lot\":\"" + pcLotNum.replaceAll("\"","'") + "\"}";
 						}
 					}
 					else

@@ -248,7 +248,33 @@ string issueMaterials(string supervisorId, string issuesJson)
 			// Fabric is only ever issued as washed meters.
 			if(isFab == true)
 			{
-				stkStr = ifnull(matRec.Wash_Quantity,"0").toString().trim();
+				matWashStock = 0.0;
+				for each mLot in Raw_Material_Lot[Material == matId.toLong()]
+				{
+					lForm = ifnull(mLot.Form,"").toString().trim();
+					lwS = ifnull(mLot.Wash_Quantity,"0").toString().trim();
+					if(lwS == "") { lwS = "0"; }
+					lwNum = lwS.toDecimal();
+					
+					// If the lot form is Pieces, Wash_Quantity may be out of sync. 
+					// Live-calculate it from the actual pieces on the rack.
+					if(lForm == "Pieces")
+					{
+						pSum = 0.0;
+						for each fp in Fabric_Piece[Lot == mLot.ID && Piece_Status == "Available"]
+						{
+							if(ifnull(fp.State,"Wash").toString().trim() == "Wash")
+							{
+								fpLen = ifnull(fp.Piece_Length_Cm,"0").toString().toDecimal() / 100;
+								fpCnt = ifnull(fp.Piece_Count,"0").toString().toDecimal();
+								pSum = pSum + (fpLen * fpCnt);
+							}
+						}
+						lwNum = pSum;
+					}
+					matWashStock = matWashStock + lwNum;
+				}
+				stkStr = matWashStock.toString();
 			}
 			else
 			{
@@ -660,6 +686,25 @@ string issueMaterials(string supervisorId, string issuesJson)
 										{
 											lhS = "0";
 										}
+										
+										// If the lot form is Pieces, Wash_Quantity may be out of sync. 
+										// Live-calculate it from the actual pieces on the rack.
+										if(ifnull(lrec.Form,"").toString().trim() == "Pieces")
+										{
+											pSum = 0.0;
+											for each  fp in Fabric_Piece[Lot == lrec.ID && Piece_Status == "Available"]
+											{
+												fpSt = ifnull(fp.State,"Wash").toString().trim();
+												if(fpSt == "Wash")
+												{
+													fpLen = ifnull(fp.Piece_Length_Cm,"0").toString().toDecimal() / 100;
+													fpCnt = ifnull(fp.Piece_Count,"0").toString().toDecimal();
+													pSum = pSum + (fpLen * fpCnt);
+												}
+											}
+											lhS = pSum.toString();
+										}
+										
 										lotHave.put(laId,lhS.toDecimal());
 										lotName.put(laId,ifnull(lrec.Lot_Number,laId).toString());
 										lotOrder.add(laId);

@@ -233,9 +233,9 @@ function renderPrintedRow(p, i) {
                     '<span class="fabric-badge">Printed</span>' +
                 '</div>' +
                 '<div class="mat-sku">' + escapeHtml(p.salesOrder || p.planNo) +
-                    ' &middot; cut ' + fmt(p.cutLength) + '&times;' + fmt(p.cutWidth) + ' cm</div>' +
+                    ' &middot; piece ' + fmt(p.qty * 100) + ' cm</div>' +
             '</td>' +
-            '<td class="col-lot">-</td>' +
+            '<td class="col-lot">' + escapeHtml(p.lot || '-') + '</td>' +
             '<td class="col-num col-strong">' +
                 '<span class="qty-big">' + fmt(p.pending) + '<span class="unit">Mtr</span></span>' +
                 '<div class="qty-sub">' + fmt(p.qty) + ' Mtr issued</div>' +
