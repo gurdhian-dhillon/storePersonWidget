@@ -1,0 +1,94 @@
+void syncBillsFromInventory()
+{
+	// Scheduled Deluge script to sync subcontractor purchase bills from Zoho Inventory to Zoho Creator.
+	//
+	// It pulls the latest 100 bills from Zoho Inventory, filters by vendors that exist in Creator's Third_Party
+	// form, and saves the detailed line items locally to Creator's Third_Party_Bill form.
+	
+	baseUrl = "https://www.zohoapis.in/inventory/v1/";
+	orgId = "60076905558";
+	
+	// 1. Fetch latest bills list from Zoho Inventory
+	billsResp = invokeurl
+	[
+		url :baseUrl + "bills?organization_id=" + orgId + "&sort_column=date&sort_order=descending&per_page=100"
+		type :GET
+		connection:"inventory_connection"
+	];
+	
+	billsCode = ifnull(billsResp.get("code"), -1).toLong();
+	if(billsCode == 0)
+	{
+		bills = billsResp.get("bills");
+		for each b in bills
+		{
+			vendorName = ifnull(b.get("vendor_name"), "").toString().trim();
+			
+			// Only sync bills if the vendor exists as a subcontractor in Creator's Third_Party form
+			tpCount = Third_Party[Party_Name == vendorName].count();
+			if(tpCount > 0)
+			{
+				bId = b.get("bill_id").toString();
+				billNo = ifnull(b.get("bill_number"), "").toString().trim();
+				billDate = ifnull(b.get("date"), "").toString().toDate();
+				billStatus = ifnull(b.get("status"), "").toString().trim();
+				
+				// 2. Fetch detailed line items for this bill to get rates & items
+				detUrl = baseUrl + "bills/" + bId + "?organization_id=" + orgId;
+				detResp = invokeurl
+				[
+					url :detUrl
+					type :GET
+					connection:"inventory_connection"
+				];
+				
+				detCode = ifnull(detResp.get("code"), -1).toLong();
+				if(detCode == 0)
+				{
+					billObj = detResp.get("bill");
+					lineItems = billObj.get("line_items");
+					
+					for each item in lineItems
+					{
+						itemName = ifnull(item.get("name"), "").toString().trim();
+						itemQty = ifnull(item.get("quantity"), 0).toDecimal();
+						itemRate = ifnull(item.get("rate"), 0).toDecimal();
+						itemTotal = ifnull(item.get("item_total"), 0).toDecimal();
+						
+						// Check if this line item was already synced to Creator
+						existingCount = Third_Party_Bill[Bill_Number == billNo && Item_Name == itemName].count();
+						
+						if(existingCount == 0)
+						{
+							// Insert new local bill line record
+							insert into Third_Party_Bill
+							[
+								Vendor_Name = vendorName
+								Bill_Number = billNo
+								Bill_Date = billDate
+								Status = billStatus
+								Item_Name = itemName
+								Quantity = itemQty
+								Rate = itemRate
+								Total = itemTotal
+							];
+						}
+						else
+						{
+							// Update existing local bill line record
+							for each record in Third_Party_Bill[Bill_Number == billNo && Item_Name == itemName]
+							{
+								record.Vendor_Name = vendorName;
+								record.Bill_Date = billDate;
+								record.Status = billStatus;
+								record.Quantity = itemQty;
+								record.Rate = itemRate;
+								record.Total = itemTotal;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}

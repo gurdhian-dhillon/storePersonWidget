@@ -1,0 +1,155 @@
+string getThirdPartyHistory(string payloadJson)
+{
+	// Fetches Zoho Creator local third party details and outsource history for comparison.
+	// 100% local Creator, no real-time external Inventory calls!
+	//
+	// Custom API, POST, one argument: payloadJson.
+	//   { "partyIds": ["123", "456"] }
+	//
+	
+	if(payloadJson == "")
+	{
+		return "{\"success\":false,\"error\":\"payloadJson parameter is empty. Please check the Custom API settings in Creator and verify argument mapping for payloadJson.\"}";
+	}
+	inp = payloadJson.toMap();
+	if(inp.size() == 0)
+	{
+		return "{\"success\":false,\"error\":\"payloadJson is empty or invalid. Value: " + payloadJson.replaceAll("\"", "'") + "\"}";
+	}
+	partyIdsRaw = ifnull(inp.get("partyIds"), list());
+	
+	partiesResultList = list();
+	
+	for each partyIdStr in partyIdsRaw
+	{
+		partyId = partyIdStr.toLong();
+		partyName = "";
+		partyContact = "";
+		partyPhone = "";
+		partyEmail = "";
+		
+		for each tp in Third_Party[ID == partyId]
+		{
+			partyName = ifnull(tp.Party_Name, "").toString();
+			partyContact = ifnull(tp.Contact_Person, "").toString();
+			partyPhone = ifnull(tp.Phone, "").toString();
+			partyEmail = ifnull(tp.Email, "").toString();
+		}
+		
+		if(partyName != "")
+		{
+			// Fetch Creator synced bills (last 5 bills)
+			billsJsonList = list();
+			vendorBillsList = Third_Party_Bill[Vendor_Name == partyName] sort by Bill_Date desc;
+			uniqueBills = list();
+			
+			for each vb in vendorBillsList
+			{
+				bNo = vb.Bill_Number;
+				if(uniqueBills.contains(bNo) == false)
+				{
+					if(uniqueBills.size() < 5)
+					{
+						uniqueBills.add(bNo);
+					}
+				}
+			}
+			
+			for each bNo in uniqueBills
+			{
+				bDateStr = "";
+				bStatusStr = "";
+				bTotalVal = 0.0;
+				itemsList = list();
+				
+				for each line in Third_Party_Bill[Bill_Number == bNo]
+				{
+					bDateStr = ifnull(line.Bill_Date, "").toString();
+					bStatusStr = ifnull(line.Status, "").toString();
+					bTotalVal = bTotalVal + ifnull(line.Total, 0).toDecimal();
+					
+					itemJson = "{\"name\":\"" + ifnull(line.Item_Name, "").replaceAll("\"", "'") + "\",\"description\":\"\",\"qty\":" + ifnull(line.Quantity, 0) + ",\"rate\":" + ifnull(line.Rate, 0) + ",\"total\":" + ifnull(line.Total, 0) + "}";
+					itemsList.add(itemJson);
+				}
+				
+				itemsJsonStr = "";
+				for each it in itemsList
+				{
+					if(itemsJsonStr != "")
+					{
+						itemsJsonStr = itemsJsonStr + ",";
+					}
+					itemsJsonStr = itemsJsonStr + it;
+				}
+				
+				billJson = "{\"bill_number\":\"" + bNo.replaceAll("\"", "'") + "\",\"date\":\"" + bDateStr + "\",\"status\":\"" + bStatusStr + "\",\"total\":" + bTotalVal + ",\"line_items\":[" + itemsJsonStr + "]}";
+				billsJsonList.add(billJson);
+			}
+			
+			billsJsonStr = "";
+			for each bj in billsJsonList
+			{
+				if(billsJsonStr != "")
+				{
+					billsJsonStr = billsJsonStr + ",";
+				}
+				billsJsonStr = billsJsonStr + bj;
+			}
+			
+			// Fetch Creator history (last 10 runs) to get rates and past jobs
+			localHistList = list();
+			historyRows = Stage_Assignment[Third_Party == partyId] sort by Sent_On desc;
+			histLimit = 0;
+			for each hist in historyRows
+			{
+				if(histLimit < 10)
+				{
+					hItemName = "";
+					for each pi in Plan_Item[ID == hist.Plan_Item]
+					{
+						hItemName = ifnull(pi.Item_Name, "").toString();
+					}
+					
+					hStage = ifnull(hist.Phase_Name, "").toString();
+					hSentQty = ifnull(hist.Assigned_Qty, 0);
+					hReturnedQty = ifnull(hist.Qty_Out, 0);
+					hSentOn = ifnull(hist.Sent_On, "").toString();
+					hReturnedOn = ifnull(hist.Returned_On, "").toString();
+					hStatus = ifnull(hist.Assignment_Status, "").toString();
+					hRemarks = ifnull(hist.Remarks, "").toString().replaceAll("\n", " ").replaceAll("\r", " ");
+					hRate = ifnull(hist.Rate, 0).toDecimal();
+					
+					histJson = "{\"item_name\":\"" + hItemName.replaceAll("\"", "'") + "\",\"stage\":\"" + hStage.replaceAll("\"", "'") + "\",\"qty_sent\":" + hSentQty + ",\"qty_returned\":" + hReturnedQty + ",\"sent_on\":\"" + hSentOn + "\",\"returned_on\":\"" + hReturnedOn + "\",\"status\":\"" + hStatus + "\",\"remarks\":\"" + hRemarks.replaceAll("\"", "'") + "\",\"rate\":" + hRate + "}";
+					localHistList.add(histJson);
+					histLimit = histLimit + 1;
+				}
+			}
+			
+			histJsonStr = "";
+			for each hj in localHistList
+			{
+				if(histJsonStr != "")
+				{
+					histJsonStr = histJsonStr + ",";
+				}
+				histJsonStr = histJsonStr + hj;
+			}
+			
+			partyResultJson = "{\"partyId\":\"" + partyIdStr + "\",\"vendorFound\":true,\"vendorDetails\":{\"id\":\"" + partyIdStr + "\",\"name\":\"" + partyName.replaceAll("\"", "'") + "\",\"contact\":\"" + partyContact.replaceAll("\"", "'") + "\",\"phone\":\"" + partyPhone + "\",\"email\":\"" + partyEmail + "\"},\"bills\":[" + billsJsonStr + "],\"localHistory\":[" + histJsonStr + "]}";
+			partiesResultList.add(partyResultJson);
+		}
+	}
+	
+	partiesResultStr = "";
+	for each pr in partiesResultList
+	{
+		if(partiesResultStr != "")
+		{
+			partiesResultStr = partiesResultStr + ",";
+		}
+		partiesResultStr = partiesResultStr + pr;
+	}
+	
+	res = "{\"success\":true,\"parties\":[" + partiesResultStr + "]}";
+	return res;
+}

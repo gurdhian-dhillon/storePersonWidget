@@ -94,6 +94,13 @@ string sendToThirdParty(string payloadJson)
 		qStr = "0";
 	}
 	sendQty = qStr.toDecimal().toLong();
+	
+	rateStr = ifnull(inp.get("rate"),"0").toString().trim();
+	if(rateStr == "")
+	{
+		rateStr = "0";
+	}
+	sendRate = rateStr.toDecimal();
 	if(sendQty <= 0)
 	{
 		return "{\"success\":false,\"error\":\"Quantity to send must be more than zero\"}";
@@ -432,6 +439,7 @@ string sendToThirdParty(string payloadJson)
 					Outsource_Ref=osRef
 					Remarks=remarkTxt
 					Added_User=zoho.loginuser
+					Rate=sendRate
 				];
 
 				asgNewId = newAsg.toLong();

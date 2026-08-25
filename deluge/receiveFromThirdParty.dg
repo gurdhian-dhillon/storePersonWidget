@@ -193,6 +193,215 @@ string receiveFromThirdParty(string payloadJson)
 	}
 
 	//------------------------------------------------------------------
+	// Automatically generate Purchase Bill in Zoho Inventory
+	//------------------------------------------------------------------
+	vendorInventoryId = "";
+	vendorName = "";
+	partyId = 0;
+	
+	// Get subcontractor ID
+	for each shC in shareRows
+	{
+		if(shC.Third_Party != null)
+		{
+			partyId = shC.Third_Party;
+		}
+	}
+	
+	if(partyId != 0)
+	{
+		for each tp in Third_Party[ID == partyId]
+		{
+			vendorName = ifnull(tp.Party_Name, "").toString();
+		}
+	}
+	
+	if(vendorName != "")
+	{
+		baseUrl = "https://www.zohoapis.in/inventory/v1/";
+		orgId = "60076905558";
+		
+		// 1. Search Zoho Inventory Vendor ID
+		searchUrl = baseUrl + "contacts?contact_name=" + zoho.encryption.urlEncode(vendorName) + "&organization_id=" + orgId;
+		searchResp = invokeurl
+		[
+			url :searchUrl
+			type :GET
+			connection:"inventory_connection"
+		];
+		
+		searchCode = ifnull(searchResp.get("code"), -1).toLong();
+		if(searchCode == 0)
+		{
+			contacts = searchResp.get("contacts");
+			if(contacts.size() > 0)
+			{
+				firstContact = contacts.get(0);
+				vendorInventoryId = ifnull(firstContact.get("contact_id"), "").toString();
+			}
+		}
+		
+		// 2. Generate line items for each stage in the block
+		if(vendorInventoryId != "")
+		{
+			// Resolve the garment product name and search its Zoho Inventory item ID
+			productName = "";
+			for each pi in Plan_Item[ID == itemId]
+			{
+				productName = ifnull(pi.Item_Name, "").toString();
+			}
+			
+			productInventoryId = "";
+			productInventoryName = productName;
+			
+			if(productName != "")
+			{
+				itemSearchUrl = baseUrl + "items?name=" + zoho.encryption.urlEncode(productName) + "&organization_id=" + orgId;
+				itemSearchResp = invokeurl
+				[
+					url :itemSearchUrl
+					type :GET
+					connection:"inventory_connection"
+				];
+				
+				itemSearchCode = ifnull(itemSearchResp.get("code"), -1).toLong();
+				if(itemSearchCode == 0)
+				{
+					itemsList = itemSearchResp.get("items");
+					if(itemsList.size() > 0)
+					{
+						firstItem = itemsList.get(0);
+						productInventoryId = ifnull(firstItem.get("item_id"), "").toString();
+						productInventoryName = ifnull(firstItem.get("name"), "").toString();
+					}
+				}
+			}
+			
+			// Fallback to "Stitching Service" if the product doesn't exist in Inventory
+			if(productInventoryId == "")
+			{
+				fallbackItemName = "Stitching Service";
+				itemSearchUrl = baseUrl + "items?name=" + zoho.encryption.urlEncode(fallbackItemName) + "&organization_id=" + orgId;
+				itemSearchResp = invokeurl
+				[
+					url :itemSearchUrl
+					type :GET
+					connection:"inventory_connection"
+				];
+				
+				itemSearchCode = ifnull(itemSearchResp.get("code"), -1).toLong();
+				if(itemSearchCode == 0)
+				{
+					itemsList = itemSearchResp.get("items");
+					if(itemsList.size() > 0)
+					{
+						firstItem = itemsList.get(0);
+						productInventoryId = ifnull(firstItem.get("item_id"), "").toString();
+						productInventoryName = ifnull(firstItem.get("name"), "").toString();
+					}
+				}
+			}
+
+			lineItemsList = list();
+			hasBillableLines = false;
+			
+			for each shC in shareRows
+			{
+				stageName = ifnull(shC.Phase_Name, "").toString();
+				qtyOut = ifnull(shC.Qty_Out, 0);
+				rateVal = ifnull(shC.Rate, 0).toDecimal();
+				
+				if(rateVal > 0 && qtyOut > 0)
+				{
+					lineItem = map();
+					if(productInventoryId != "")
+					{
+						lineItem.put("item_id", productInventoryId);
+					}
+					lineItem.put("name", productInventoryName);
+					lineItem.put("quantity", qtyOut);
+					lineItem.put("rate", rateVal);
+					lineItem.put("description", stageName + " Charges (Ref: " + refTxt + ")");
+					
+					lineItemsList.add(lineItem);
+					hasBillableLines = true;
+				}
+			}
+			
+			if(hasBillableLines)
+			{
+				billData = map();
+				billData.put("vendor_id", vendorInventoryId);
+				billData.put("bill_number", "BILL-" + refTxt);
+				billData.put("date", ifnull(retOnTxt, zoho.currentdate.toString("yyyy-MM-dd")));
+				billData.put("line_items", lineItemsList);
+				
+				billUrl = baseUrl + "bills?organization_id=" + orgId;
+				billCreateResp = invokeurl
+				[
+					url :billUrl
+					type :POST
+					parameters :billData.toString()
+					headers : {"Content-Type":"application/json"}
+					connection:"inventory_connection"
+				];
+				
+				billCode = ifnull(billCreateResp.get("code"), -1).toLong();
+				if(billCode == 0)
+				{
+					billObj = billCreateResp.get("bill");
+					createdBillNumber = ifnull(billObj.get("bill_number"), "").toString();
+					
+					// Save created bill number in remarks
+					for each shC in shareRows
+					{
+						shC.Remarks = shC.Remarks + " | Auto-generated Inventory Bill: " + createdBillNumber;
+					}
+					
+					// Instantly write bill lines to local Creator Third_Party_Bill form
+					for each shC in shareRows
+					{
+						stageName = ifnull(shC.Phase_Name, "").toString();
+						qtyOut = ifnull(shC.Qty_Out, 0);
+						rateVal = ifnull(shC.Rate, 0).toDecimal();
+						
+						if(rateVal > 0 && qtyOut > 0)
+						{
+							serviceItemName = productInventoryName;
+							
+							// Check if this line item is already in Creator
+							existingCount = Third_Party_Bill[Bill_Number == createdBillNumber && Item_Name == serviceItemName].count();
+							if(existingCount == 0)
+							{
+								insert into Third_Party_Bill
+								[
+									Vendor_Name = vendorName
+									Bill_Number = createdBillNumber
+									Bill_Date = ifnull(retOnTxt, zoho.currentdate.toString("yyyy-MM-dd")).toDate()
+									Status = "open"
+									Item_Name = serviceItemName
+									Quantity = qtyOut
+									Rate = rateVal
+									Total = qtyOut * rateVal
+								];
+							}
+						}
+					}
+				}
+				else
+				{
+					// Log error directly to Creator remarks so you can see why it failed
+					errorMsg = ifnull(billCreateResp.get("message"), "").toString();
+					for each shC in shareRows
+					{
+						shC.Remarks = shC.Remarks + " | Inventory Bill creation failed: " + errorMsg;
+					}
+				}
+			}
+		}
+	}
+
+	//------------------------------------------------------------------
 	// The stages the block touched, in order, with no duplicates.
 	//
 	// Ids held as TEXT. They are map keys and list members here, and a
