@@ -926,6 +926,171 @@ string saveItemCheck(string payloadJson)
 	}
 
 	//----------------------------------------------------------------------
+	// ZOHO INVENTORY: THE PRODUCTION CONVERSION, POSTED HERE.
+	//
+	// Two halves of one event, and they belong together because they are the
+	// same event: the cloth stops being cloth and becomes garments.
+	//
+	//   Consumption    - every material this batch actually received   (-)
+	//   Finished_Goods - the pieces the checker approved               (+)
+	//
+	// Both go through Inventory_Post_Queue, never straight to the API. The
+	// queue is what survives a failed call: a batch reference is stamped
+	// before the POST, so a run killed by the statement limit - which is NOT
+	// catchable and takes the try/catch with it - leaves rows at Posting for
+	// the drain to ask Inventory about, instead of posting twice.
+	//
+	// BOTH HIT THE SAME ACCOUNT (Raw Materials And Consumables), so the
+	// conversion nets to the value added and only the sale posts COGS. See
+	// docs/inventory-build-plan.md - posting consumption to COGS counts the
+	// same cloth twice, once as material and again inside the garment.
+	//
+	// WHY HERE AND NOT AT SUPERVISOR RECEIPT. receiveMaterials used to enqueue
+	// the consumption and no longer does; the deduction moved to this moment so
+	// raw material leaving and finished goods arriving are one dated pair. It
+	// also means Inventory is never told cloth was consumed by a batch that
+	// then produced nothing.
+	//
+	// THE FULL RECEIVED QUANTITY IS CONSUMED, NOT THE APPROVED SHARE.
+	// Decided deliberately. A rejected garment's cloth was still cut and is
+	// still gone - pro-rating it would leave that share on hand in Inventory
+	// for ever, because the remake batch is a SEPARATE Plan_Item that gets its
+	// own cloth issued and deducts it at its OWN check. Nothing is double
+	// counted and nothing is stranded.
+	//
+	// Not derived from the BOM either. Required_Qty is a pre-waste plan-time
+	// estimate and Issued_Qty legitimately exceeds it on fabric, because every
+	// handover re-rounds up to whole marker rows. Received_Qty is what the
+	// supervisor actually confirmed, which is the only figure that can hold
+	// reconcileRawMaterial's identity.
+	//
+	// OFFCUTS ARE NOT IN THIS NUMBER and must not be. Fabric is consumed once,
+	// as fresh cloth; a remnant coming back and being reused is Creator-only
+	// and posts nothing. Received_Qty only ever carries fresh raw material -
+	// waste pieces settle through Waste_Movement, on their own counters.
+	//
+	// EVERY POST IS A DELTA, tracked in Qty_Posted_To_Inventory on both forms.
+	// Absolute quantities race with the purchase team and cannot be batched;
+	// deltas compose. The stamp is written only when the queue row landed, so a
+	// material with no Inventory_Item_ID mapped is refused loudly and left
+	// unstamped rather than silently marked as posted.
+	//
+	// AND IT NEVER FAILS THE CHECK. Its own try/catch, and the whole block sits
+	// AFTER Processed - the check has already written the batches by now, and a
+	// queue that cannot be written must not make a finished check report itself
+	// failed. The user would retry and the one-round-per-batch guard would
+	// refuse the retry, leaving a Complete item with no check at all.
+	//----------------------------------------------------------------------
+	invPostEnabled = true;
+	invFgQty = 0.0;
+	invRawRows = 0;
+	invSkipped = 0;
+
+	if(invPostEnabled == true)
+	{
+		try
+		{
+			// FINISHED GOODS. Cumulative accepted minus cumulative posted, not
+			// the round's own figure - the item may already carry acceptances
+			// from a previous life, and this shape stays correct if it ever does
+			// get inspected twice.
+			invAccNow = haveAcc.toDecimal() + approved;
+			invPosted = 0.0;
+
+			for each  invPi in Plan_Item[ID == itemId]
+			{
+				invPS = ifnull(invPi.Qty_Posted_To_Inventory,"0").toString().trim();
+				if(invPS == "")
+				{
+					invPS = "0";
+				}
+				invPosted = invPS.toDecimal();
+			}
+
+			invFgDelta = invAccNow - invPosted;
+
+			if(invFgDelta > 0 && srcSku != null)
+			{
+				// Item_Sku is a LOOKUP, so toString() gives the Item_Master
+				// record id - which is exactly what queueInventoryPost resolves
+				// Inventory_Item_ID through.
+				invFgRes = thisapp.queueInventoryPost("Finished_Goods","Plan_Item",itemId.toString(),srcSku.toString(),invFgDelta.toString()).toString();
+
+				// Tested as text rather than parsed. The reason string can carry
+				// an arbitrary Deluge exception message, and toMap() on that is
+				// one more way for a reporting line to throw inside the block
+				// that exists so nothing throws.
+				if(invFgRes.contains("\"queued\":true"))
+				{
+					for each  invPiW in Plan_Item[ID == itemId]
+					{
+						invPiW.Qty_Posted_To_Inventory = invAccNow;
+					}
+					invFgQty = invFgDelta;
+					logLines.add("INVENTORY FG queued -> +" + invFgDelta + " pcs | " + itemName);
+				}
+				else
+				{
+					invSkipped = invSkipped + 1;
+					logLines.add("INVENTORY FG NOT queued -> " + itemName + " | " + invFgRes);
+				}
+			}
+			else if(invFgDelta > 0)
+			{
+				invSkipped = invSkipped + 1;
+				logLines.add("INVENTORY FG NOT queued -> " + itemName + " has no Item_Sku, so no Inventory item can be resolved");
+			}
+
+			// RAW MATERIAL. One queue row per requirement row, aggregated by
+			// item at the drain - a backlog of two hundred rows is still one to
+			// three API calls, not two hundred.
+			for each  invReq in Material_Requirement[Plan_Item == itemId]
+			{
+				invRcvS = ifnull(invReq.Received_Qty,"0").toString().trim();
+				if(invRcvS == "")
+				{
+					invRcvS = "0";
+				}
+				invRqPS = ifnull(invReq.Qty_Posted_To_Inventory,"0").toString().trim();
+				if(invRqPS == "")
+				{
+					invRqPS = "0";
+				}
+
+				invRcv = invRcvS.toDecimal();
+				invRawDelta = invRcv - invRqPS.toDecimal();
+				invMatName = ifnull(invReq.Material_Name,"").toString().replaceAll("\"","'");
+
+				if(invRawDelta > 0 && invReq.Material != null)
+				{
+					invRawRes = thisapp.queueInventoryPost("Consumption","Material_Requirement",invReq.ID.toString(),invReq.Material.toString(),invRawDelta.toString()).toString();
+
+					if(invRawRes.contains("\"queued\":true"))
+					{
+						invReq.Qty_Posted_To_Inventory = invRcv;
+						invRawRows = invRawRows + 1;
+						logLines.add("INVENTORY RM queued -> -" + invRawDelta + " " + ifnull(invReq.Unit,"").toString() + " | " + invMatName);
+					}
+					else
+					{
+						invSkipped = invSkipped + 1;
+						logLines.add("INVENTORY RM NOT queued -> " + invMatName + " | " + invRawRes);
+					}
+				}
+				else if(invRawDelta > 0)
+				{
+					invSkipped = invSkipped + 1;
+					logLines.add("INVENTORY RM NOT queued -> " + invMatName + " has no Material lookup");
+				}
+			}
+		}
+		catch (eInv)
+		{
+			logLines.add("INVENTORY FAILED: " + eInv.toString());
+		}
+	}
+
+	//----------------------------------------------------------------------
 	// EMAIL NOTIFICATION: REJECTION / ALTERATION ALERT
 	//
 	// Fires ONLY when the check produced a rejection or an alteration, and
@@ -1185,6 +1350,16 @@ string saveItemCheck(string payloadJson)
 	}
 	logLines.add("VERDICT -> " + verdict);
 
+	try
+	{
+		thisapp.postInventoryQueue("false");
+		logLines.add("IMMEDIATE POST QUEUE TRIGGERED");
+	}
+	catch (eQueue)
+	{
+		logLines.add("IMMEDIATE POST QUEUE FAILED: " + eQueue.toString());
+	}
+
 	info logLines;
 
 	// Ids stringified - an 18-digit id breaks JSON.parse on the widget side.
@@ -1200,7 +1375,7 @@ string saveItemCheck(string payloadJson)
 		altTxt = altItemId.toString();
 	}
 
-	res = "{\"success\":true,\"checkId\":\"" + checkId + "\",\"remakeItem\":\"" + remakeTxt + "\",\"alterationItem\":\"" + altTxt + "\",\"orderVerdict\":\"" + verdict.replaceAll("\"","'") + "\",\"logs\":\"" + logLines.toString().replaceAll("\"","'") + "\"}";
+	res = "{\"success\":true,\"checkId\":\"" + checkId + "\",\"remakeItem\":\"" + remakeTxt + "\",\"alterationItem\":\"" + altTxt + "\",\"orderVerdict\":\"" + verdict.replaceAll("\"","'") + "\",\"inventoryFgQueued\":" + invFgQty + ",\"inventoryRawRowsQueued\":" + invRawRows + ",\"inventoryNotQueued\":" + invSkipped + ",\"logs\":\"" + logLines.toString().replaceAll("\"","'") + "\"}";
 	}
 	catch (e)
 	{

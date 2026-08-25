@@ -109,7 +109,7 @@ string syncPurchaseInflow(string dryRun)
 		// constant on purpose - auto-detecting per run would let the mode flip
 		// underneath live data, which is the same silent corruption one level up.
 		//------------------------------------------------------------------
-		inflowSource = "Receive";
+		inflowSource = "Bill";
 
 		//------------------------------------------------------------------
 		// SET THIS TO THE DAY THE SYNC GOES LIVE, BEFORE THE FIRST REAL RUN.
@@ -123,7 +123,7 @@ string syncPurchaseInflow(string dryRun)
 		// Too late is the harmless direction: an arrival is simply not seen, the
 		// store person says so, the date moves back.
 		//------------------------------------------------------------------
-		cutoverDate = '24-Aug-2026';
+		cutoverDate = '25-Aug-2026';
 
 		// How far back the ledger is read and documents are considered. A
 		// document older than this that is edited will be missed;

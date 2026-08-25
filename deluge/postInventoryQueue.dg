@@ -7,7 +7,7 @@ string postInventoryQueue(string dryRun)
 		adjUrl = "https://www.zohoapis.in/inventory/v1/inventoryadjustments";
 		accConsumption = "3955559000000032057";
 		accWriteOff = "3955559000000000558";
-		locRawMaterial = "3955559000000212001";
+		locRawMaterial = "3955559000000219654";
 		locFinished = "3955559000000227307";
 		maxAttempts = 5;
 		maxBatches = 6;
@@ -73,28 +73,30 @@ string postInventoryQueue(string dryRun)
 			}
 		}
 		stampTxt = zoho.currenttime.toString("yyyyMMddHHmmss");
-		for each  typeKey in {"Consumption","Write_Off","Finished_Goods"}
+		for each  typeKey in {"Combined_Production","Write_Off"}
 		{
-			reasonTxt = "Consumed in production";
+			reasonTxt = "Production Cycle";
 			accId = accConsumption;
-			locId = locRawMaterial;
-			signMul = -1;
 			if(typeKey == "Write_Off")
 			{
 				reasonTxt = "Stock Written off";
 				accId = accWriteOff;
 			}
-			else if(typeKey == "Finished_Goods")
-			{
-				reasonTxt = "Production output";
-				locId = locFinished;
-				signMul = 1;
-			}
 			itemKeys = List();
 			itemQty = Map();
 			rowIds = List();
 			badRows = 0;
-			for each  qRow in Inventory_Post_Queue[Post_Status == "Pending" && Post_Type == typeKey]
+			pendingRows = Inventory_Post_Queue[ID == 0];
+			if(typeKey == "Combined_Production")
+			{
+				pendingRows = Inventory_Post_Queue[Post_Status == "Pending" && (Post_Type == "Consumption" || Post_Type == "Finished_Goods")];
+			}
+			else
+			{
+				pendingRows = Inventory_Post_Queue[Post_Status == "Pending" && Post_Type == typeKey];
+			}
+
+			for each  qRow in pendingRows
 			{
 				attS = ifnull(qRow.Attempts,"0").toString().trim();
 				if(attS == "")
@@ -121,12 +123,21 @@ string postInventoryQueue(string dryRun)
 				}
 				else if(rowIds.size() < 40)
 				{
-					if(itemQty.get(itmId) == null)
+					rowLocId = locRawMaterial;
+					rowSign = -1;
+					if(qRow.Post_Type == "Finished_Goods")
 					{
-						itemKeys.add(itmId);
-						itemQty.put(itmId,0.0);
+						rowLocId = locFinished;
+						rowSign = 1;
 					}
-					itemQty.put(itmId,itemQty.get(itmId) + qtyVal);
+					mapItmKey = itmId + "|" + rowLocId;
+
+					if(itemQty.get(mapItmKey) == null)
+					{
+						itemKeys.add(mapItmKey);
+						itemQty.put(mapItmKey,0.0);
+					}
+					itemQty.put(mapItmKey,itemQty.get(mapItmKey) + (qtyVal * rowSign));
 					rowIds.add(qRow.ID.toString());
 				}
 			}
@@ -135,12 +146,16 @@ string postInventoryQueue(string dryRun)
 				linesJson = "";
 				for each  ik in itemKeys
 				{
+					parts = ik.toList("|");
+					realItmId = parts.get(0);
+					realLocId = parts.get(1);
+					
 					if(linesJson != "")
 					{
 						linesJson = linesJson + ",";
 					}
-					adjQty = itemQty.get(ik) * signMul;
-					linesJson = linesJson + "{\"item_id\":\"" + ik + "\",\"quantity_adjusted\":" + adjQty + ",\"location_id\":\"" + locId + "\"}";
+					adjQty = itemQty.get(ik);
+					linesJson = linesJson + "{\"item_id\":\"" + realItmId + "\",\"quantity_adjusted\":" + adjQty + ",\"location_id\":\"" + realLocId + "\"}";
 				}
 				refNo = "CR-" + typeKey + "-" + stampTxt;
 				bodyJson = "{\"date\":\"" + zoho.currentdate.toString("yyyy-MM-dd") + "\",\"reason\":\"" + reasonTxt + "\",\"description\":\"Creator " + typeKey + ", " + rowIds.size() + " event(s)\",\"adjustment_type\":\"quantity\",\"reference_number\":\"" + refNo + "\",\"account_id\":\"" + accId + "\",\"line_items\":[" + linesJson + "]}";

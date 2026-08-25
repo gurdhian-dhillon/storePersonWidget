@@ -4167,8 +4167,7 @@ function checkForArrivals() {
 
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'runPurchaseInflow',
-        http_method: 'POST',
-        payload: {}
+        http_method: 'POST'
     }).then(function (response) {
         var parsed;
         try {
