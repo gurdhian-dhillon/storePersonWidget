@@ -458,6 +458,11 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 						// here rather than being parsed and thrown away.
 						if(settleLeft > 0 && lnMatTxt == matId)
 						{
+							if(ifnull(miLn.Lot_Override_Note,"").toString().contains("PRINTED_PIECE"))
+							{
+								continue;
+							}
+							
 							lnQtyS = ifnull(miLn.Qty,"0").toString().trim();
 							if(lnQtyS == "")
 							{
@@ -926,7 +931,7 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 		{
 			// Find the Issue_Line
 			foundLn = false;
-			for each  miRec in Material_Issue[Issue_Lines.ID == pIdTxt.toLong()]
+			for each  miRec in supIssues
 			{
 				for each  miLn in miRec.Issue_Lines
 				{
@@ -965,13 +970,24 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 									reqRcvS = "0";
 								}
 								req.Received_Qty = reqRcvS.toDecimal() + takeP;
+							}
+						}
+
+						// Update Parent Material transit qty
+						if (miLn.Material != null)
+						{
+							for each rm in Raw_Material[ID == miLn.Material]
+							{
+								ptiS = ifnull(rm.In_Transit_Qty,"0").toString().trim();
+								if(ptiS == "") { ptiS = "0"; }
+								ptdS = ifnull(rm.Disputed_Qty,"0").toString().trim();
+								if(ptdS == "") { ptdS = "0"; }
 								
-								reqInTransitS = ifnull(req.In_Transit_Qty,"0").toString().trim();
-								if(reqInTransitS == "")
+								rm.In_Transit_Qty = ptiS.toDecimal() - lnRemain;
+								if (stillOutP > 0)
 								{
-									reqInTransitS = "0";
+									rm.Disputed_Qty = ptdS.toDecimal() + stillOutP;
 								}
-								req.In_Transit_Qty = reqInTransitS.toDecimal() - takeP;
 							}
 						}
 
@@ -985,10 +1001,19 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 								{
 									ltiS = "0";
 								}
-								lotSet.In_Transit_Qty = ltiS.toDecimal() - takeP;
+								ltdS = ifnull(lotSet.Disputed_Qty,"0").toString().trim();
+								if(ltdS == "")
+								{
+									ltdS = "0";
+								}
+								
+								lotSet.In_Transit_Qty = ltiS.toDecimal() - lnRemain;
+								if (stillOutP > 0)
+								{
+									lotSet.Disputed_Qty = ltdS.toDecimal() + stillOutP;
+								}
 							}
 						}
-
 						if(okJson != "")
 						{
 							okJson = okJson + ",";
@@ -1004,32 +1029,67 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 							
 							try
 							{
-								pDispName = ifnull(miLn.Material.Material_Name,"").toString();
+								pDispName = "";
+								pDispUnit = "";
+								for each  rm in Raw_Material[ID == miLn.Material]
+								{
+									pDispName = ifnull(rm.Material_Name,"").toString();
+									pDispUnit = ifnull(rm.Unit,"").toString();
+								}
+								
 								pSoNo = "";
+								pPlanId = null;
 								if(miLn.Requirement != null)
 								{
 									for each req in Material_Requirement[ID == miLn.Requirement]
 									{
 										if(req.Plan != null)
 										{
+											pPlanId = req.Plan;
 											pSoNo = ifnull(soNoByPlan.get(req.Plan + ""),"").toString();
 										}
 									}
 								}
 								
-								insert into Stock_Dispute
+								newDispId = insert into Stock_Dispute
 								[
-									Added_User=zoho.loginuserid
-									Date_Raised=zoho.currentdate
-									Disputed_Qty=stillOutP
+									Material_Name=pDispName
+									Unit=pDispUnit
 									Is_Waste=false
-									Material=miLn.Material
-									Requirement=miLn.Requirement
-									Plan=ifnull(miLn.Requirement.Plan,null)
-									Reason_Note="Short by " + stillOutP + " Mtr on receipt" + pNoteTxt
+									Direction="Outbound"
+									Issued_Qty=lnRemain
+									Received_Qty=takeP
+									Disputed_Qty=stillOutP
 									Status="Open"
-									Supervisor=supId
+									Raised_On=zoho.currentdate
+									Raised_Note="Short by " + stillOutP + " Mtr on receipt" + pNoteTxt
+									Added_User=zoho.loginuser
 								];
+								
+								for each dsp in Stock_Dispute[ID == newDispId.toLong()]
+								{
+									dsp.Material = miLn.Material;
+									dsp.Supervisor = supId;
+									if(miLn.Lot != null)
+									{
+										dsp.Lot = miLn.Lot;
+									}
+									if(pPlanId != null)
+									{
+										dsp.Plan = pPlanId;
+									}
+									if(miLn.Requirement != null)
+									{
+										// Resolve plan item from requirement
+										for each req in Material_Requirement[ID == miLn.Requirement]
+										{
+											if (req.Plan_Item != null)
+											{
+												dsp.Plan_Item = req.Plan_Item;
+											}
+										}
+									}
+								}
 								
 								dispRows.add(pDispName + " (printed piece)|" + pSoNo + "|Mtr|" + lnRemain + "|" + takeP + "|" + stillOutP);
 							}

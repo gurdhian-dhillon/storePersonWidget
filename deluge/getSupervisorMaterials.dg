@@ -398,7 +398,7 @@ string getSupervisorMaterials(string supervisorId)
 	lineNoteByMat = Map();
 	lotNotes = Map();
 	printedPiecesJson = "";
-	printedMatIds = List();
+	printedPendByMat = Map();
 
 	//------------------------------------------------------------------------
 	// BOUNDED BY THE OLDEST OPEN PLAN, and the bound is provable.
@@ -470,11 +470,6 @@ string getSupervisorMaterials(string supervisorId)
 					//------------------------------------------------------
 					if(lnNote.contains("PRINTED_PIECE"))
 					{
-						if(printedMatIds.contains(lnMat) == false)
-						{
-							printedMatIds.add(lnMat);
-						}
-
 						// Per-line pending: Qty minus what the supervisor
 						// has already confirmed on THIS specific line.
 						settledS = ifnull(miLn.Settled_Qty,"0").toString().trim();
@@ -483,6 +478,8 @@ string getSupervisorMaterials(string supervisorId)
 							settledS = "0";
 						}
 						pcPend = lqS.toDecimal() - settledS.toDecimal();
+						
+						printedPendByMat.put(lnMat, ifnull(printedPendByMat.get(lnMat), 0.0) + pcPend);
 
 						if(pcPend > 0)
 						{
@@ -526,14 +523,17 @@ string getSupervisorMaterials(string supervisorId)
 						// Regular material: aggregate by lot as before
 						prevL = ifnull(lineLotByMat.get(lnMat),"").toString();
 						prevQ = ifnull(lineQtyByMat.get(lnMat),"").toString();
+						prevN = ifnull(lineNoteByMat.get(lnMat),"").toString();
 
 						if(prevL != "")
 						{
 							prevL = prevL + "~";
 							prevQ = prevQ + "~";
+							prevN = prevN + "~";
 						}
 						lineLotByMat.put(lnMat,prevL + ifnull(miLn.Lot,"").toString().trim());
 						lineQtyByMat.put(lnMat,prevQ + lqS);
+						lineNoteByMat.put(lnMat,prevN + lnNote);
 					}
 				}
 			}
@@ -545,8 +545,9 @@ string getSupervisorMaterials(string supervisorId)
 	{
 		e = agg.get(k);
 
-		// Skip materials fully handled as printed pieces
-		if(printedMatIds.contains(k))
+		// Deduct printed pieces pending, skip if nothing left for the aggregate
+		adjPending = e.get("pending") - ifnull(printedPendByMat.get(k), 0.0);
+		if(adjPending <= 0)
 		{
 			continue;
 		}
@@ -558,18 +559,20 @@ string getSupervisorMaterials(string supervisorId)
 		// checks one roll and signs for two.
 		//--------------------------------------------------------------------
 		lotsJson = "";
-		leftToName = e.get("pending");
+		leftToName = adjPending;
 
 		lotSeen = List();
 		lotQty = Map();
 
 		lotTxt = ifnull(lineLotByMat.get(k),"").toString();
 		qtyTxt = ifnull(lineQtyByMat.get(k),"").toString();
+		noteTxt = ifnull(lineNoteByMat.get(k),"").toString();
 
 		if(lotTxt != "")
 		{
 			lotParts = lotTxt.toList("~");
 			qtyParts = qtyTxt.toList("~");
+			noteParts = noteTxt.toList("~");
 
 			idxN = 0;
 			for each  qPart in qtyParts
@@ -597,8 +600,24 @@ string getSupervisorMaterials(string supervisorId)
 						{
 							lotSeen.add(thisLot);
 							lotQty.put(thisLot,0.0);
+							lotNotes.put(thisLot,"");
 						}
 						lotQty.put(thisLot,lotQty.get(thisLot) + takeHere);
+						
+						thisNote = ifnull(noteParts.get(idxN),"").toString().trim();
+						if(thisNote != "")
+						{
+							haveNote = ifnull(lotNotes.get(thisLot),"").toString();
+							if(haveNote != "" && haveNote.contains(thisNote) == false)
+							{
+								haveNote = haveNote + ", ";
+							}
+							if(haveNote.contains(thisNote) == false)
+							{
+								lotNotes.put(thisLot, haveNote + thisNote);
+							}
+						}
+						
 						leftToName = leftToName - takeHere;
 					}
 				}
@@ -627,6 +646,13 @@ string getSupervisorMaterials(string supervisorId)
 			{
 				lotLabelTxt = "Not recorded";
 			}
+			
+			nTxt = ifnull(lotNotes.get(lotKey),"").toString();
+			if(nTxt != "")
+			{
+				lotLabelTxt = lotLabelTxt + " (" + nTxt + ")";
+			}
+			
 			lotsJson = lotsJson + "{\"lot\":\"" + lotLabelTxt.replaceAll("\"","'") + "\",\"qty\":" + lotQty.get(lotKey) + "}";
 		}
 

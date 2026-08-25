@@ -578,6 +578,7 @@ string issueMaterials(string supervisorId, string issuesJson)
 			cutSummOf = Map();
 			lotHave = Map();
 			lotName = Map();
+			passEmitted = Map();
 			// Pass key -> "pieceId:count,pieceId:count". Empty for every roll
 			// lot, so the whole piece path below is unreachable on the flow that
 			// existed before printing.
@@ -1771,31 +1772,44 @@ string issueMaterials(string supervisorId, string issuesJson)
 
 											if(passCutSumm != "" && pcSpecLn != "")
 											{
-												// One Issue_Line per piece token
-												for each  pcLnTok in pcSpecLn.toList(",")
+												// Guard: Emit pieces only once per pass, even if it fans across multiple rows
+												if(passEmitted.get(passId) == null)
 												{
-													pcLnBits = pcLnTok.toString().trim().toList(":");
-													if(pcLnBits.size() >= 3)
+													passEmitted.put(passId, true);
+													
+													// One Issue_Line per piece token
+													for each  pcLnTok in pcSpecLn.toList(",")
 													{
-														pcLnCutCm = pcLnBits.get(2).toString().trim().toDecimal();
-														pcLnN = pcLnBits.get(1).toString().trim().toDecimal();
-														pcLnMtr = (pcLnCutCm * pcLnN) / 100;
-
-														lnMap = Map();
-														lnMap.put("req",row.ID);
-														lnMap.put("planItem",row.Plan_Item);
-														lnMap.put("lot",passLot);
-														lnMap.put("note",ifnull(noteOf.get(passId),"").toString());
-														lnMap.put("fromLot",ifnull(fromOf.get(passId),"").toString());
-														lnMap.put("qty",pcLnMtr);
-														lnMap.put("unit",ifnull(row.Unit,"").toString());
-														lnMap.put("cutW",cutW);
-														lnMap.put("cutL",cutL);
-														lnMap.put("matId",matId);
-														lnMap.put("matName",matName);
-														lnMap.put("matDisp",matDisp);
-														lnMap.put("cutSummary","PRINTED_PIECE");
-														issueLines.add(lnMap);
+														pcLnBits = pcLnTok.toString().trim().toList(":");
+														if(pcLnBits.size() >= 3)
+														{
+															pcLnCutCm = pcLnBits.get(2).toString().trim().toDecimal();
+															pcLnN = pcLnBits.get(1).toString().trim().toDecimal();
+															pcLnMtr = (pcLnCutCm * pcLnN) / 100;
+	
+															lnMap = Map();
+															lnMap.put("req",row.ID);
+															lnMap.put("planItem",row.Plan_Item);
+															lnMap.put("lot",passLot);
+															
+															// Include PRINTED_PIECE and the allocator's human summary
+															baseNote = ifnull(noteOf.get(passId),"").toString();
+															if(baseNote != "")
+															{
+																baseNote = baseNote + " | ";
+															}
+															lnMap.put("note", baseNote + "PRINTED_PIECE | " + passCutSumm);
+															
+															lnMap.put("fromLot",ifnull(fromOf.get(passId),"").toString());
+															lnMap.put("qty",pcLnMtr);
+															lnMap.put("unit",ifnull(row.Unit,"").toString());
+															lnMap.put("cutW",cutW);
+															lnMap.put("cutL",cutL);
+															lnMap.put("matId",matId);
+															lnMap.put("matName",matName);
+															lnMap.put("matDisp",matDisp);
+															issueLines.add(lnMap);
+														}
 													}
 												}
 											}
@@ -2303,18 +2317,7 @@ string issueMaterials(string supervisorId, string issuesJson)
 						liRow.Lot=lotTxt.toLong();
 					}
 
-					// Written only when a tone override actually happened, so an
-					// ordinary handover line looks exactly as it always did.
 					noteTxt = ifnull(lnRaw.get("note"),"").toString().trim();
-					cSumm = ifnull(lnRaw.get("cutSummary"),"").toString().trim();
-					if(cSumm != "")
-					{
-						if(noteTxt != "")
-						{
-							noteTxt = noteTxt + " | ";
-						}
-						noteTxt = noteTxt + cSumm;
-					}
 
 					if(noteTxt != "")
 					{
