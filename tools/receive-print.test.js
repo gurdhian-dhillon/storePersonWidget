@@ -53,7 +53,8 @@ function screenAgg(mats, issues) {
       if (!(dec(lqS) > 0)) continue;
       const lnNote = ifnullStr(ln.note, '');
       if (lnNote.indexOf('PRINTED_PIECE') >= 0) {
-        const pcPend = dec(lqS) - dec(ifnullStr(ln.settled, '0'));
+        let pcPend = dec(lqS) - dec(ifnullStr(ln.settled, '0'));
+        if (pcPend < 0) pcPend = 0;      // clamped, never negated - dg :481
         printedPendByMat[lnMat] = (printedPendByMat[lnMat] || 0) + pcPend;
         if (pcPend > 0) printedCards.push({ materialId: lnMat, qty: dec(lqS), pending: pcPend });
       } else {
@@ -130,14 +131,42 @@ function addReq(w, r) { w.reqs[r.id] = r; return w.reqs[r.id]; }
 function addParent(w, id, inTransit) { w.parent[id] = { inTransit: inTransit, disputed: 0 }; }
 function addLot(w, id, inTransit) { w.lots[id] = { inTransit: inTransit, disputed: 0 }; }
 
+// PORT: the printedPendByReq / printedPendLoose prescan that now sits between
+// the dispute prescan and the mats[] loop. Every PRINTED_PIECE line's OUTSTANDING
+// metres, keyed by the requirement row it names - those are settled by the
+// printed card and must not be settled by the aggregate as well.
+function printedPending(issues) {
+  const byReq = {}, loose = {};
+  for (const voucher of issues) {
+    for (const ln of voucher.lines) {
+      if (ifnullStr(ln.note, '').indexOf('PRINTED_PIECE') < 0) continue;
+      const left = dec(ln.qty) - dec(ifnullStr(ln.settled, '0'));
+      if (left <= 0) continue;
+      if (ln.req != null) byReq[String(ln.req)] = (byReq[String(ln.req)] || 0) + left;
+      else if (ln.material != null) loose[String(ln.material)] = (loose[String(ln.material)] || 0) + left;
+    }
+  }
+  return { byReq, loose };
+}
+
 // deluge/receiveMaterials.dg:285-382 - one mats[] line against all requirement rows.
-function bulkReceive(w, matId, gotQty, plansInOrder, reqsByPlan) {
+// `issues` is now required: the pending total has to be net of open printed lines,
+// exactly as getSupervisorMaterials nets the figure it puts on the screen.
+function bulkReceive(w, matId, gotQty, plansInOrder, reqsByPlan, issues) {
   let toFan = gotQty, pendingTotal = 0;
   const shortPerPlan = {};
+  const pp = printedPending(issues || []);
   for (const planId of plansInOrder) {
     for (const row of reqsByPlan[planId] || []) {
       if (String(row.material) !== String(matId)) continue;
-      const rowPend = row.issued - row.received;
+      let rowPend = row.issued - row.received;
+      // Drawn down as it is applied, so two rows cannot discount one line.
+      const ppLeft = pp.byReq[String(row.id)] || 0;
+      if (ppLeft > 0 && rowPend > 0) {
+        const take = Math.min(ppLeft, rowPend);
+        rowPend -= take;
+        pp.byReq[String(row.id)] = ppLeft - take;
+      }
       if (rowPend <= 0) continue;
       pendingTotal += rowPend;
       let give = 0;
@@ -145,6 +174,8 @@ function bulkReceive(w, matId, gotQty, plansInOrder, reqsByPlan) {
       if (rowPend - give > 0) shortPerPlan[planId] = (shortPerPlan[planId] || 0) + (rowPend - give);
     }
   }
+  const looseLeft = pp.loose[String(matId)] || 0;
+  if (looseLeft > 0) pendingTotal = Math.max(0, pendingTotal - looseLeft);
   let shortBy = pendingTotal - gotQty;
   if (shortBy < 0) shortBy = 0;
   const p = w.parent[matId];
@@ -170,16 +201,37 @@ function printedReceive(w, issues, p) {
       ln.settled = dec(ln.settled) + takeP;
       const stillOutP = lnRemain - takeP;
 
-      if (ln.req != null) w.reqs[ln.req].received += takeP;
+      // Capped at what the named row is owed, then spilled to siblings of the
+      // same plan item and material - see the block at dg :1000.
+      if (ln.req != null && w.reqs[ln.req]) {
+        const named = w.reqs[ln.req];
+        let spill = takeP;
+        const room = Math.max(0, Math.min(spill, named.issued - named.received));
+        named.received += room;
+        spill -= room;
+        if (spill > 0 && named.item != null) {
+          for (const sib of Object.keys(w.reqs).map(k => w.reqs[k])) {
+            if (spill <= 0) continue;
+            if (String(sib.id) === String(named.id)) continue;
+            if (sib.item !== named.item) continue;
+            if (String(sib.material) !== String(named.material)) continue;
+            const sroom = Math.max(0, Math.min(spill, sib.issued - sib.received));
+            sib.received += sroom;
+            spill -= sroom;
+          }
+        }
+      }
 
+      // Both drains are now floored at what is actually in transit, the same
+      // cap the aggregate path has always applied.
       const mat = w.parent[String(ln.material)];
       if (mat) {
-        mat.inTransit -= lnRemain;                       // uncapped, faithful to :986
+        mat.inTransit -= Math.max(0, Math.min(lnRemain, mat.inTransit));
         if (stillOutP > 0) mat.disputed += stillOutP;
       }
       const lot = w.lots[String(ln.lot)];
       if (lot) {
-        lot.inTransit -= lnRemain;                       // uncapped, faithful to :1010
+        lot.inTransit -= Math.max(0, Math.min(lnRemain, lot.inTransit));
         if (stillOutP > 0) lot.disputed += stillOutP;
       }
       if (stillOutP > 0) {
@@ -335,6 +387,20 @@ test('S6 same note twice merges once, distinct notes join with a comma', () => {
   assert.strictEqual(r2.materials[0].lots[0].lot, '22 (tail piece, override L1 to L2)');
 });
 
+test('S8 an over-settled printed line contributes nothing, and never ADDS to the aggregate', () => {
+  // Settled_Qty past Qty would net to a negative and inflate the material row,
+  // putting metres on the screen that nothing owes.
+  const r = screenAgg(
+    { M: { pending: 6, name: 'M', unit: 'Mtr' } },
+    [{ lines: [
+      { id: 'A', material: 'M', qty: 3, settled: 5, note: 'PRINTED_PIECE | x', lot: '9', req: 'R1' },
+      { id: 'B', material: 'M', qty: 6, settled: 0, note: '', lot: '9', req: 'R2' },
+    ] }]);
+  assert.strictEqual(r.materials.length, 1);
+  assert.strictEqual(r.materials[0].pending, 6);   // not 8
+  assert.strictEqual(r.printedPieces.length, 0);
+});
+
 test('GAP-DOC S7 quote-only escaping: a typed quote survives, a typed newline breaks JSON.parse', () => {
   const mk = note => screenAgg(
     { M: { pending: 6, name: 'M', unit: 'Mtr' } },
@@ -391,31 +457,103 @@ test('R4 over-receipt caps at the outstanding metres and never invents stock', (
   assert.strictEqual(w.disputes.length, 0);
 });
 
-test('GAP-DOC R5 mixed material, he types what the rolls show: a spurious dispute fires for cloth his printed receipt is about to bring', () => {
+test('R5 mixed material: the aggregate settles only the ROLLS, and no dispute is raised for cloth the printed card is about to bring', () => {
   const { w, r1, r2, issues } = fixtureMixed();
   // Screen shows aggregate 6 (rolls only) plus the printed card 4. He confirms
   // both halves correctly - bulk first, then the printed pieces.
-  bulkReceive(w, 'M', 6, ['P1', 'P2'], { P1: [r1], P2: [r2] });
-  assert.strictEqual(w.disputes.filter(d => d.src === 'bulk').length, 1);
-  assert.strictEqual(w.disputes[0].disputed, 4);   // the printed metres, not missing
-  printedReceive(w, issues, { issueLineId: 'L1', received: 4 });   // they arrive
-  // ...and the dispute stays Open over cloth that physically arrived, while
-  // transit was drained twice: bulk settled the GROSS pendingTotal (10, dg:414)
-  // and the piece receipt drained its lnRemain (4) again.
-  assert.strictEqual(w.parent.M.inTransit, -4);
-  assert.strictEqual(w.reqs.R1.received + w.reqs.R2.received, 10);
+  const res = bulkReceive(w, 'M', 6, ['P1', 'P2'], { P1: [r1], P2: [r2] }, issues);
+  assert.strictEqual(res.pendingTotal, 6);           // NET of the open printed line
+  assert.strictEqual(res.shortBy, 0);
+  assert.strictEqual(w.disputes.length, 0);
+  assert.strictEqual(w.parent.M.inTransit, 4);       // only the rolls have landed
+  printedReceive(w, issues, { issueLineId: 'L1', received: 4 });
+  assert.strictEqual(w.parent.M.inTransit, 0);       // and now the pieces have too
+  assert.strictEqual(w.parent.M.disputed, 0);
+  assert.strictEqual(w.disputes.length, 0);
+  // EVERY ROW CREDITED EXACTLY ONCE - this is what the readiness test reads.
+  assert.strictEqual(w.reqs.R1.received, 4);
+  assert.strictEqual(w.reqs.R2.received, 6);
 });
 
-test('GAP-DOC R6 the default flow instead over-credits the requirement and drives parent transit negative', () => {
+test('R6 pressing "all received as listed" on a mixed material credits each row once and never drives transit negative', () => {
   const { w, r1, r2, issues } = fixtureMixed();
-  // Widget defaults every input to its shown pending: materials row = GROSS 10
-  // (dg line 663), printed card = 4. Pressing "All received as listed" sends both.
-  bulkReceive(w, 'M', 10, ['P1', 'P2'], { P1: [r1], P2: [r2] });
+  // The widget defaults every input to its SHOWN pending. The materials row now
+  // shows the net 6, so that is what "all as listed" sends - and even if a stale
+  // screen sent the old gross 10, the pending total is rebuilt server-side.
+  bulkReceive(w, 'M', 10, ['P1', 'P2'], { P1: [r1], P2: [r2] }, issues);
   printedReceive(w, issues, { issueLineId: 'L1', received: 4 });
-  assert.strictEqual(w.reqs.R1.received, 8);         // credited twice: 4 by fan, 4 by piece
-  assert.ok(w.reqs.R1.received > w.reqs.R1.issued);
-  assert.ok(w.parent.M.inTransit < 0);               // 10 drained by bulk, 4 again by piece
-  assert.strictEqual(w.parent.M.inTransit, -4);
+  assert.strictEqual(w.reqs.R1.received, 4);
+  assert.strictEqual(w.reqs.R2.received, 6);
+  assert.ok(w.reqs.R1.received <= w.reqs.R1.issued);
+  assert.strictEqual(w.parent.M.inTransit, 0);
+  assert.ok(w.parent.M.inTransit >= 0);
+});
+
+test('R7 mixed material SHORT on the rolls disputes the rolls only, at the right size', () => {
+  const { w, r1, r2, issues } = fixtureMixed();
+  // He was owed 6 m of roll and 4 m of printed pieces; 2 m of roll never arrived.
+  const res = bulkReceive(w, 'M', 4, ['P1', 'P2'], { P1: [r1], P2: [r2] }, issues);
+  assert.strictEqual(res.pendingTotal, 6);
+  assert.strictEqual(res.shortBy, 2);
+  assert.strictEqual(w.disputes.length, 1);
+  assert.strictEqual(w.disputes[0].disputed, 2);     // the missing ROLL metres
+  assert.strictEqual(w.disputes[0].plan, 'P2');      // the plan that carries the gap
+  assert.strictEqual(w.parent.M.disputed, 2);
+  printedReceive(w, issues, { issueLineId: 'L1', received: 4 });
+  assert.strictEqual(w.parent.M.inTransit, 0);
+  assert.strictEqual(w.reqs.R1.received, 4);
+  assert.strictEqual(w.reqs.R2.received, 4);         // 2 short, and disputed
+});
+
+test('R8 a printed receipt can never drive transit past zero, however often it is replayed', () => {
+  const { w, issues } = fixtureMixed();
+  printedReceive(w, issues, { issueLineId: 'L1', received: 4 });
+  printedReceive(w, issues, { issueLineId: 'L1', received: 4 });
+  printedReceive(w, issues, { issueLineId: 'L1', received: 4 });
+  assert.ok(w.parent.M.inTransit >= 0);
+  assert.ok(w.lots.LOT9.inTransit >= 0);
+  assert.strictEqual(w.parent.M.inTransit, 6);       // the rolls, untouched
+});
+
+test('R9 a pass emitted against ONE row of a two-row plan item credits both, so neither strands at Awaiting_Material', () => {
+  // The shape E1 pins: issueMaterials emits a pass's piece lines once, stamped
+  // with the first row it reached. Both rows belong to plan item I1 and both
+  // were charged Issued_Qty, but only R1 is named on the line.
+  const w = makeWorld();
+  addReq(w, { id: 'R1', plan: 'P1', item: 'I1', material: 'M', issued: 4, received: 0 });
+  addReq(w, { id: 'R2', plan: 'P1', item: 'I1', material: 'M', issued: 5, received: 0 });
+  addParent(w, 'M', 9);
+  addLot(w, 'LOT9', 9);
+  const issues = [{ lines: [
+    { id: 'L1', material: 'M', qty: 9, settled: 0, note: 'PRINTED_PIECE | 3 pcs x 300 cm', lot: 'LOT9', req: 'R1' },
+  ] }];
+
+  printedReceive(w, issues, { issueLineId: 'L1', received: 9 });
+
+  assert.strictEqual(w.reqs.R1.received, 4);   // capped at what it is owed
+  assert.strictEqual(w.reqs.R2.received, 5);   // the rest spilled to its sibling
+  assert.ok(w.reqs.R1.received <= w.reqs.R1.issued);
+  assert.strictEqual(w.parent.M.inTransit, 0);
+  // The readiness test reads recQty < issQty row by row - both now pass.
+  Object.keys(w.reqs).forEach(k => assert.ok(w.reqs[k].received >= w.reqs[k].issued));
+});
+
+test('R10 the spill never reaches a row of another plan item or another material', () => {
+  const w = makeWorld();
+  addReq(w, { id: 'R1', plan: 'P1', item: 'I1', material: 'M', issued: 2, received: 0 });
+  addReq(w, { id: 'R2', plan: 'P1', item: 'I2', material: 'M', issued: 5, received: 0 });  // other item
+  addReq(w, { id: 'R3', plan: 'P1', item: 'I1', material: 'N', issued: 5, received: 0 });  // other material
+  addParent(w, 'M', 6);
+  addLot(w, 'LOT9', 6);
+  const issues = [{ lines: [
+    { id: 'L1', material: 'M', qty: 6, settled: 0, note: 'PRINTED_PIECE | x', lot: 'LOT9', req: 'R1' },
+  ] }];
+
+  printedReceive(w, issues, { issueLineId: 'L1', received: 6 });
+
+  assert.strictEqual(w.reqs.R1.received, 2);   // its own outstanding, no more
+  assert.strictEqual(w.reqs.R2.received, 0);   // different plan item - untouched
+  assert.strictEqual(w.reqs.R3.received, 0);   // different material - untouched
 });
 
 // Issue: the emit-once guard.
@@ -451,6 +589,53 @@ test('E3 legacy whole-piece spec (no cut length) falls back to the ordinary sing
   assert.strictEqual(lines.length, 1);
   assert.strictEqual(lines[0].qty, 3.5);
   assert.strictEqual(lines[0].note, '');
+});
+
+// ---- static marker contract ----------------------------------------------------
+// Four .dg files must agree CHARACTER FOR CHARACTER on the marker and the field
+// it travels in, or the netting/settlement design silently stops matching: a
+// rename on the writer side leaves every reader counting printed metres as roll
+// metres, which is exactly the double-settlement this whole fix removed.
+// Deluge cannot run here, so these are comment- and string-aware text passes -
+// the same shape tools/dgscan.js applies.
+
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const dg = f => fs.readFileSync(path.join(__dirname, '..', 'deluge', f), 'utf8');
+const ISSUE = dg('issueMaterials.dg');
+const RECV = dg('receiveMaterials.dg');
+const SCREEN = dg('getSupervisorMaterials.dg');
+const WASTE = dg('getExpectedWaste.dg');
+
+test('M1 issueMaterials writes the marker into the line NOTE map, guarded to emit once per pass', () => {
+  assert.ok(ISSUE.includes('"PRINTED_PIECE | "'), 'the writer must spell the marker exactly');
+  assert.ok(/passEmitted\.get\(passId\) == null/.test(ISSUE), 'emit-once guard present');
+});
+
+test('M2 issueMaterials lands that note in Lot_Override_Note - the field every reader matches', () => {
+  assert.ok(/liRow\.Lot_Override_Note\s*=\s*noteTxt/.test(ISSUE),
+    'note -> Lot_Override_Note wiring changed; update every reader with it');
+  // And the note only reaches the row when non-empty, so a blank override can
+  // never clobber a real one.
+  assert.ok(/if\(noteTxt != ""\)/.test(ISSUE));
+});
+
+console.log('\nstatic marker contract (deluge text passes)');
+
+for (const [name, src] of [['receiveMaterials', RECV], ['getSupervisorMaterials', SCREEN], ['getExpectedWaste', WASTE]]) {
+  test(`M3 ${name} reads the marker off Lot_Override_Note`, () => {
+    assert.ok(src.includes('PRINTED_PIECE'), `${name} lost the marker`);
+    assert.ok(src.includes('Lot_Override_Note'), `${name} no longer reads the note field`);
+  });
+}
+
+test('M4 the supervisor screen emits printedPieces keyed by issueLineId, and receiveMaterials parses them', () => {
+  assert.ok(SCREEN.includes('printedPiecesJson'), 'screen payload key changed');
+  // Hand-built Deluge JSON escapes its quotes: {\"issueLineId\":\"
+  assert.ok(/\\"issueLineId\\":\\"/.test(SCREEN), 'per-line id missing from the screen payload');
+  assert.ok(RECV.includes('"printedPieces"'), 'receiveMaterials no longer reads the printedPieces array');
+  assert.ok(RECV.includes('"issueLineId"'), 'receiveMaterials no longer keys receipts by issueLineId');
 });
 
 // ---- summary -------------------------------------------------------------------

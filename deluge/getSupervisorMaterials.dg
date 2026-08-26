@@ -478,7 +478,17 @@ string getSupervisorMaterials(string supervisorId)
 							settledS = "0";
 						}
 						pcPend = lqS.toDecimal() - settledS.toDecimal();
-						
+						if(pcPend < 0)
+						{
+							// A line settled past its own quantity would otherwise
+							// ADD to the aggregate below rather than take from it,
+							// putting metres on the screen that nothing owes. It
+							// contributes nothing either way - clamp, do not
+							// negate. receiveMaterials nets the same figure per
+							// requirement row and clamps it the same way.
+							pcPend = 0.0;
+						}
+
 						printedPendByMat.put(lnMat, ifnull(printedPendByMat.get(lnMat), 0.0) + pcPend);
 
 						if(pcPend > 0)

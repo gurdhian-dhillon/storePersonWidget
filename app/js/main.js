@@ -1246,6 +1246,29 @@ function lotShortHtml(m, supIdx, matIdx) {
         return '<div class="lot-short"><b>' + escapeHtml(why.lot || '') + '</b> &middot; ' +
             fmt(why.qty) + ' ' + u + ' at the wash house</div>';
     }
+
+    // NO PRINTED STOCK, AND PLAIN CLOTH TO PRINT IT FROM.
+    //
+    // ONE LINE AND ONE BUTTON, the same shape as the wash line above it and the
+    // override button on a dry pin. The lot is what he walks to; the base
+    // material sits in the title because the row already names this cloth and the
+    // base is that name minus the pattern.
+    //
+    // The metres are washed and greige together — a print run goes out in either
+    // state — so this is plain cloth in the building, not plain cloth ready to
+    // cut, and the Print tab splits the two the moment he lands on it.
+    if (why.kind === 'noPrinted') {
+        var plain = (why.lots || []).map(function (w, i) {
+            return fmt(w.qty) + (i === 0 ? ' ' + u + ' of plain' : '') +
+                   ' on <b>' + escapeHtml(w.lotNumber || '') + '</b>';
+        });
+        return '<div class="lot-dry">No printed stock &mdash; ' + plain.join(', ') +
+            '</div>' +
+            '<button type="button" class="lot-override-btn" ' +
+            'title="Print more from ' + escapeHtml(why.base || 'the plain cloth') + '" ' +
+            'onclick="openPrintForBase(\'' + escapeHtml(String(why.baseId || '')) + '\')">' +
+            'Print&hellip;</button>';
+    }
     if (why.kind === 'pinnedDry' || why.kind === 'pinnedBlocked') {
         return '<div class="lot-dry">' +
             (why.kind === 'pinnedBlocked'
@@ -4896,6 +4919,40 @@ function renderPrintList() {
 function renderPrintJobs() {
     var box = document.getElementById('print-jobs');
     if (box) box.innerHTML = printJobsHtml();
+}
+
+// ARRIVING FROM A SHORT ISSUE ROW.
+//
+// The Issue tab prints a **Print…** button on a printed fabric row that has no
+// printed stock while plain cloth sits on the rack (shortReasonFor, kind
+// 'noPrinted'). PRINTING IS TO STOCK — no print job carries a plan — so the
+// button cannot raise anything and does not try to. Its whole job is to put him
+// in front of the send form for the right plain material, which is the one thing
+// the row knows and the Print tab would otherwise make him search for.
+//
+// It goes through showTab and printOpenId, which is the tab's OWN idea of which
+// card is open, rather than a second selection path. A card opened any other way
+// is one printListHtml closes again the next time it redraws.
+function openPrintForBase(baseId) {
+    printOpenId = String(baseId || '');
+    // The search box filters the same list. A stale filter left in place would
+    // hide the card that was just asked for, and an empty tab reads as the button
+    // being broken.
+    printFilter = '';
+    showTab('print');
+    // First open: showTab loads the tab and renderPrint draws the card open on
+    // its own, because printOpenId is already set. Already open: showTab
+    // re-fetches nothing, so nothing would redraw and the card would stay shut.
+    if (PRINT_DATA) renderPrint();
+    var card = document.getElementById('print-list-card-' + printOpenId);
+    if (card) {
+        card.classList.add('open');
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(function () {
+                card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        }
+    }
 }
 
 function onPrintFilter() {

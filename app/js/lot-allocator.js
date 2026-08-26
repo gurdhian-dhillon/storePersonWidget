@@ -148,6 +148,61 @@ function lotGreigePieces(lot) {
     return n;
 }
 
+// ---- Printed cloth, and the plain cloth behind it ----
+//
+// A printed SKU carries Print_Base: the plain SKU it is printed from. The
+// server sends the id, the base's name and the base's LOTS in the same shape as
+// this material's own, so a row with no printed stock can say what there IS.
+
+// IS THERE ANY PRINTED STOCK AT ALL of this material?
+//
+// Read off the SERVER's lots (m.lots), never the allocator's spent-down copies.
+// The copies are what this pass has left after serving the card's orders, so a
+// lot emptied by an allocation that still fell short would read as "there was
+// never any" — and the row would tell him to go and print more of cloth he has
+// just been handed some of.
+//
+// Anything counts: washed, greige, at the wash house, or pieces on the rack.
+// Blocked cloth counts too, deliberately — quarantined printed stock is still
+// printed stock, and the `blocked` reason below is the one that says something
+// he can act on.
+function hasOwnStock(m) {
+    return (m.lots || []).some(function (l) {
+        if ((Number(l.wash) || 0) > 0) return true;
+        if ((Number(l.unwash) || 0) > 0) return true;
+        if ((Number(l.inWash) || 0) > 0) return true;
+        return (l.pieces || []).some(function (p) {
+            return (Number(p.count) || 0) > 0;
+        });
+    });
+}
+
+// THE PLAIN CLOTH THIS ROW COULD BE PRINTED FROM, biggest lot first.
+//
+// Washed AND greige, because a print run may go out in either state — the send
+// form picks which counter it comes off. Quoting only the washed pile would say
+// "nothing to print" over a rack full of greige.
+//
+// Blocked lots are excluded: quarantined plain cloth cannot be sent anywhere,
+// so offering it would send him to the printer with cloth he cannot take.
+//
+// Returns null when there is nothing to print, which is what makes the row fall
+// through to the ordinary reasons instead of naming an action he cannot take.
+function plainBaseStock(m) {
+    if (!m || !m.printBase) return null;
+    var lots = (m.printBaseLots || []).filter(function (l) {
+        return !l.blocked &&
+               round2((Number(l.wash) || 0) + (Number(l.unwash) || 0)) > 0;
+    }).map(function (l) {
+        return { lotNumber: l.lotNumber,
+                 qty: round2((Number(l.wash) || 0) + (Number(l.unwash) || 0)) };
+    });
+    if (lots.length === 0) return null;
+    lots.sort(function (a, b) { return b.qty - a.qty; });
+    return { id: String(m.printBase), name: String(m.printBaseName || ''),
+             lots: lots };
+}
+
 function lotFill(lot, demands, fab, greige) {
     var rem = (lot.waste || []).map(function (r) {
         return { wasteId: r.wasteId, width: r.width, length: r.length,
@@ -1153,6 +1208,16 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
         // The per-order decisions for the whole material, on every row of it. The
         // audit filters by planId; the store screen ignores it.
         m.orderOutcomes = outcomes;
+        // THE PRINTED/PLAIN LINK, NORMALISED ONTO EVERY ROW OF THE MATERIAL.
+        //
+        // It arrives on the payload rather than being worked out here — only the
+        // server can follow Raw_Material.Print_Base — but every row of a material
+        // has to carry it, and a server that predates the field has to read as
+        // "not printed" rather than as undefined. shortReasonFor and the render
+        // both go through these three and nothing else.
+        m.printBase = String(m0.printBase || '');
+        m.printBaseName = String(m0.printBaseName || '');
+        m.printBaseLots = m0.printBaseLots || [];
         m.shortReason = shortReasonFor(m, r, lots);
     });
 }
@@ -1215,6 +1280,32 @@ function shortReasonFor(m, r, lots) {
         }
     });
     if (atWash) return atWash;
+
+    // NO PRINTED STOCK, AND PLAIN CLOTH SITTING THERE TO PRINT IT FROM.
+    //
+    // Ranked below the pinned and wash cases on purpose. Those are about cloth
+    // that already exists in this shade and is about to become available — a
+    // wash comes back in days, a print run does not — so telling him to go and
+    // print when the answer is "wash L2" would send him the long way round.
+    //
+    // Ranked ABOVE nofit / blocked / nolots / empty because those all describe a
+    // rack that has this material on it, and this one describes a rack that has
+    // none: "None of this shade left" over a hundred metres of the plain cloth it
+    // is printed from is true, useless, and the exact silent state the row exists
+    // to kill.
+    //
+    // BOTH HALVES ARE REQUIRED. No printed stock at all — anything on any lot,
+    // greige and quarantined included, means there IS printed stock and one of
+    // the reasons below is the honest one. And plain cloth actually there to
+    // print: a printed row with nothing behind it falls straight through to the
+    // generic reasons, because "print more" is not an action he can take.
+    if (!hasOwnStock(m)) {
+        var base = plainBaseStock(m);
+        if (base) {
+            return { kind: 'noPrinted', baseId: base.id, base: base.name,
+                     lots: base.lots };
+        }
+    }
 
     // Cloth on the rack that no single job fits inside. SAY THE NUMBERS: he is
     // looking at a rack with cloth on it, and "no lot holds enough" is true and

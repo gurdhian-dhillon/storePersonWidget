@@ -499,10 +499,25 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 												remain = 0;
 											}
 										}
-										
-										// Emit empty fabrics entry for the printed piece to clear UI Loading state
-										if(fabJson != "") { fabJson = fabJson + ","; }
-										fabJson = fabJson + "{\"materialId\":\"" + matId + "-PRINT_" + wLnW.ID + "\",\"material\":\"" + matLabel + "\",\"cutWidth\":" + cutW + ",\"cutLength\":" + cutL + ",\"fabricWidthCm\":" + fabricWidthCm + ",\"piecesCut\":0,\"freshMetres\":0,\"lots\":[],\"waste\":[]}";
+
+										// NO fabrics ENTRY IS EMITTED HERE, and putting one back is a no-op.
+										//
+										// A synthetic entry keyed "<matId>-PRINT_<issueLineId>" used to be written
+										// at this point to "clear the UI Loading state". It cleared nothing.
+										//
+										// The printed pieces' predicted waste is appended to the SAME genJson the
+										// per-material entry at the bottom of this block emits, and that entry
+										// carries the REAL material id - which is the only id the widget matches
+										// on: production.js looks up exp-waste-<itemId>-<materialId>, built from
+										// the requirement row's own material. A synthetic id matches no element,
+										// so the entry only ever added a junk key to wasteLotsByMat carrying an
+										// empty lot list.
+										//
+										// This pass runs INSIDE the cut-size and fabric-width guard, so anything
+										// that reaches it also reaches that emit - including a plan item whose
+										// only fabric is printed. Its requirement row IS the printed SKU, and the
+										// printed SKU's Fabric_Width_Inches is copied from the plain one when it
+										// is minted, so the guard passes and the real entry is emitted.
 									}
 								}
 							}

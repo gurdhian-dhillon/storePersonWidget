@@ -214,6 +214,82 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	}
 
 	//------------------------------------------------------------------------
+	// PRINTED FABRIC PIECES ARE SETTLED BY THEIR OWN CARD, NEVER BY THE
+	// AGGREGATE - and this map is what stops the two settling the same metres
+	// twice.
+	//
+	// getSupervisorMaterials shows the material row NET of every open
+	// PRINTED_PIECE line, because each piece is confirmed individually on a
+	// card of its own. The figure the supervisor types is therefore already
+	// net of them. Rebuilding the pending total from Issued_Qty - Received_Qty
+	// below counts those metres a SECOND time, and all three consequences were
+	// live on a material holding both rolls and printed pieces: the shortfall
+	// test raised a dispute over cloth the printed card was about to bring,
+	// In_Transit was drained once by the aggregate and again by the piece
+	// receipt - straight past zero into negative - and the requirement was
+	// credited twice, so Received_Qty could exceed Issued_Qty.
+	//
+	// PER REQUIREMENT ROW, not per material. Received_Qty is what the
+	// readiness test at the bottom of this function reads row by row, so
+	// netting at material level would leave the total right and the individual
+	// rows wrong - which is the shape that strands an item at
+	// Awaiting_Material with nothing saying why.
+	//
+	// Drawn down as it is applied, the same way openDispPM is and for the same
+	// reason: two requirement rows must not each discount the same line.
+	//
+	// A printed line with no Requirement behind it cannot be attributed to any
+	// row, so it is held aside per material and taken off the total instead.
+	//------------------------------------------------------------------------
+	printedPendByReq = Map();
+	printedPendLoose = Map();
+
+	for each  miPP in supIssues
+	{
+		for each  lnPP in miPP.Issue_Lines
+		{
+			if(ifnull(lnPP.Lot_Override_Note,"").toString().contains("PRINTED_PIECE"))
+			{
+				ppQtyS = ifnull(lnPP.Qty,"0").toString().trim();
+				if(ppQtyS == "")
+				{
+					ppQtyS = "0";
+				}
+				ppSetS = ifnull(lnPP.Settled_Qty,"0").toString().trim();
+				if(ppSetS == "")
+				{
+					ppSetS = "0";
+				}
+				ppLeft = ppQtyS.toDecimal() - ppSetS.toDecimal();
+
+				if(ppLeft > 0)
+				{
+					if(lnPP.Requirement != null)
+					{
+						ppKey = lnPP.Requirement + "";
+						ppHave = printedPendByReq.get(ppKey);
+						if(ppHave == null)
+						{
+							ppHave = 0.0;
+						}
+						printedPendByReq.put(ppKey,ppHave + ppLeft);
+					}
+					else if(lnPP.Material != null)
+					{
+						ppMKey = lnPP.Material + "";
+						ppMHave = printedPendLoose.get(ppMKey);
+						if(ppMHave == null)
+						{
+							ppMHave = 0.0;
+						}
+						printedPendLoose.put(ppMKey,ppMHave + ppLeft);
+					}
+				}
+			}
+		}
+	}
+
+	//------------------------------------------------------------------------
 	// Fungible materials - metres, cones, labels. Fan across the plan rows.
 	//------------------------------------------------------------------------
 	for each  mRaw in mats
@@ -326,6 +402,24 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 							openDispPM.put(pmKeyF,dispLeftF - takeOffF);
 						}
 
+						// And net off what this row's PRINTED_PIECE lines still
+						// owe - see the map built before this loop. Those metres
+						// are confirmed on their own cards, they were not on the
+						// figure he was shown either, and settling them here as
+						// well is what drove In_Transit negative.
+						ppRowKey = row.ID + "";
+						ppRowLeft = printedPendByReq.get(ppRowKey);
+						if(ppRowLeft != null && ppRowLeft > 0 && rowPend > 0)
+						{
+							ppTake = ppRowLeft;
+							if(ppTake > rowPend)
+							{
+								ppTake = rowPend;
+							}
+							rowPend = rowPend - ppTake;
+							printedPendByReq.put(ppRowKey,ppRowLeft - ppTake);
+						}
+
 						if(rowPend > 0)
 						{
 							pendingTotal = pendingTotal + rowPend;
@@ -369,6 +463,22 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 							}
 						}
 					}
+				}
+			}
+
+			// PRINTED_PIECE lines that named no requirement could not be
+			// attributed to any row above, so they come off the total here.
+			// Nothing writes such a line today - issueMaterials always stamps
+			// one - but a line whose requirement was later deleted reads the
+			// same way, and counting it would raise a dispute for cloth the
+			// printed card is about to bring.
+			ppLoose = printedPendLoose.get(matId);
+			if(ppLoose != null && ppLoose > 0)
+			{
+				pendingTotal = pendingTotal - ppLoose;
+				if(pendingTotal < 0)
+				{
+					pendingTotal = 0.0;
 				}
 			}
 
@@ -959,17 +1069,92 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 						miLn.Settled_Qty = lnSetS.toDecimal() + takeP;
 						stillOutP = lnRemain - takeP;
 
-						// Update Material_Requirement
+						//----------------------------------------------------
+						// CREDIT THE ROW THE LINE NAMES, CAPPED AT WHAT THAT ROW
+						// IS ACTUALLY OWED, THEN SPILL THE REST TO ITS SIBLINGS.
+						//
+						// issueMaterials emits a pass's piece lines ONCE, stamped
+						// with the first requirement row the pass reached
+						// (issueMaterials.dg:1821). The pass is pinned to one
+						// Plan_Item, so in practice that row is the only one it
+						// can reach - but if a plan item ever carries two
+						// requirement rows for one material at one cut size, the
+						// whole pass lands on the first. Crediting it blind then
+						// pushes Received_Qty past Issued_Qty on that row while
+						// the second stays at zero, and the readiness test below
+						// reads `recQty < issQty` ROW BY ROW: the item sits at
+						// Awaiting_Material for ever with nothing saying why.
+						//
+						// Costs nothing on the ordinary path - the named row
+						// absorbs its own metres and there is nothing to spill.
+						//----------------------------------------------------
+						ppSpill = takeP;
+
 						if(miLn.Requirement != null)
 						{
+							ppItemId = null;
+							ppMatId = "";
+
 							for each req in Material_Requirement[ID == miLn.Requirement]
 							{
+								ppItemId = req.Plan_Item;
+								ppMatId = ifnull(req.Material,"").toString().trim();
+
+								reqIssS = ifnull(req.Issued_Qty,"0").toString().trim();
+								if(reqIssS == "")
+								{
+									reqIssS = "0";
+								}
 								reqRcvS = ifnull(req.Received_Qty,"0").toString().trim();
 								if(reqRcvS == "")
 								{
 									reqRcvS = "0";
 								}
-								req.Received_Qty = reqRcvS.toDecimal() + takeP;
+
+								ppRoom = reqIssS.toDecimal() - reqRcvS.toDecimal();
+								if(ppRoom > ppSpill)
+								{
+									ppRoom = ppSpill;
+								}
+								if(ppRoom < 0)
+								{
+									ppRoom = 0.0;
+								}
+								req.Received_Qty = reqRcvS.toDecimal() + ppRoom;
+								ppSpill = ppSpill - ppRoom;
+							}
+
+							// Siblings of the SAME plan item and material only.
+							// No break in a for each, so the body is guarded.
+							if(ppSpill > 0 && ppItemId != null && ppMatId != "")
+							{
+								for each  reqSib in Material_Requirement[Plan_Item == ppItemId]
+								{
+									if(ppSpill > 0 && (reqSib.ID + "") != (miLn.Requirement + "") && ifnull(reqSib.Material,"").toString().trim() == ppMatId)
+									{
+										sibIssS = ifnull(reqSib.Issued_Qty,"0").toString().trim();
+										if(sibIssS == "")
+										{
+											sibIssS = "0";
+										}
+										sibRcvS = ifnull(reqSib.Received_Qty,"0").toString().trim();
+										if(sibRcvS == "")
+										{
+											sibRcvS = "0";
+										}
+
+										sibRoom = sibIssS.toDecimal() - sibRcvS.toDecimal();
+										if(sibRoom > ppSpill)
+										{
+											sibRoom = ppSpill;
+										}
+										if(sibRoom > 0)
+										{
+											reqSib.Received_Qty = sibRcvS.toDecimal() + sibRoom;
+											ppSpill = ppSpill - sibRoom;
+										}
+									}
+								}
 							}
 						}
 
@@ -982,8 +1167,26 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 								if(ptiS == "") { ptiS = "0"; }
 								ptdS = ifnull(rm.Disputed_Qty,"0").toString().trim();
 								if(ptdS == "") { ptdS = "0"; }
-								
-								rm.In_Transit_Qty = ptiS.toDecimal() - lnRemain;
+
+								// CANNOT SETTLE MORE THAN IS ACTUALLY IN TRANSIT,
+								// the same floor the aggregate path applies. This
+								// was the one settlement in the function without
+								// it: a re-run, or a receipt racing the aggregate
+								// over a material holding rolls AND pieces, drove
+								// the figure straight past zero - and a negative
+								// In_Transit reads as stock the company does not
+								// have on every screen that sums it.
+								ptiQty = ptiS.toDecimal();
+								ptDrain = lnRemain;
+								if(ptDrain > ptiQty)
+								{
+									ptDrain = ptiQty;
+								}
+								if(ptDrain < 0)
+								{
+									ptDrain = 0.0;
+								}
+								rm.In_Transit_Qty = ptiQty - ptDrain;
 								if (stillOutP > 0)
 								{
 									rm.Disputed_Qty = ptdS.toDecimal() + stillOutP;
@@ -1006,8 +1209,21 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 								{
 									ltdS = "0";
 								}
-								
-								lotSet.In_Transit_Qty = ltiS.toDecimal() - lnRemain;
+
+								// Same floor as the parent above. The lot is the
+								// figure the allocator ranks on, so a negative
+								// here offers a tone that is not there.
+								ltiQty = ltiS.toDecimal();
+								ltDrain = lnRemain;
+								if(ltDrain > ltiQty)
+								{
+									ltDrain = ltiQty;
+								}
+								if(ltDrain < 0)
+								{
+									ltDrain = 0.0;
+								}
+								lotSet.In_Transit_Qty = ltiQty - ltDrain;
 								if (stillOutP > 0)
 								{
 									lotSet.Disputed_Qty = ltdS.toDecimal() + stillOutP;

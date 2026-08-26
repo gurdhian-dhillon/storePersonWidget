@@ -17,7 +17,59 @@ string reconcileRawMaterial(string skuPrefix)
 		diffJson = "";
 		lotJson = "";
 		lotBroken = 0;
+		pieceJson = "";
+		pieceBroken = 0;
 		netDiff = 0.0;
+		//--------------------------------------------------------------------
+		// PIECE-VERSUS-LOT NEEDS THE PIECES, AND THAT IS ONE QUERY FOR THE
+		// WHOLE FORM - never one per lot.
+		//
+		// docs/printing.md: for a lot whose Form is Pieces, each of the lot's
+		// metres figures is itself SUM over its pieces of
+		// (Piece_Length_Cm x Piece_Count) / 100. Editing a Fabric_Piece by hand
+		// in a Creator report does not update its lot, and the lot is what the
+		// allocator reads - so the two drift silently and the header wins.
+		//
+		// A query per lot is the road to the statement-execution limit, which is
+		// NOT catchable: it kills the script and the caller gets a bare 500 with
+		// no error card. Grouped into a map keyed by lot id in one pass, exactly
+		// the shape getStoreMaterialRequirements already uses for the same form.
+		//
+		// ONLY Piece_Status == "Available" COUNTS TOWARD THE LOT'S METRES, and
+		// that is a decision, not an accident. A Disputed piece row is invisible
+		// to both the receipt list and the allocator (docs/printing.md), and the
+		// lot header already carries a SEPARATE Disputed_Qty column for cloth
+		// whose existence is in question - the same split Waste_Master makes
+		// between Piece_Count and Disputed_Count. So a disputed piece belongs to
+		// Disputed_Qty, not to Wash / Unwash / In_Wash, and counting it here
+		// would make a correctly booked dispute read as drift.
+		//
+		// The criteria also drops a row whose Piece_Status was never written.
+		// receiveFromPrint always writes "Available", so an empty one is
+		// hand-made - and on a report that only ever REPORTS, a false alarm is
+		// the cheap direction to fail and a missed one is silent.
+		//--------------------------------------------------------------------
+		pieceMtrByLot = Map();
+		for each  fpRec in Fabric_Piece[Piece_Status == "Available"]
+		{
+			fpLotTxt = ifnull(fpRec.Lot,"").toString().trim();
+			fpcS = ifnull(fpRec.Piece_Count,"0").toString().trim();
+			if(fpcS == "")
+			{
+				fpcS = "0";
+			}
+			fplS = ifnull(fpRec.Piece_Length_Cm,"0").toString().trim();
+			if(fplS == "")
+			{
+				fplS = "0";
+			}
+			if(fpLotTxt != "")
+			{
+				fpMtr = (fplS.toDecimal() / 100) * fpcS.toDecimal();
+				fpPrev = ifnull(pieceMtrByLot.get(fpLotTxt),0.0);
+				pieceMtrByLot.put(fpLotTxt,fpPrev + fpMtr);
+			}
+		}
 		for each  rmRec in Raw_Material[ID != 0]
 		{
 			rmSku = ifnull(rmRec.SKU,"").toString().trim();
@@ -29,16 +81,6 @@ string reconcileRawMaterial(string skuPrefix)
 			}
 			if(rmSku == "" || wanted == false)
 			{
-				continue;
-			}
-			if(invItem == "")
-			{
-				unmapped = unmapped + 1;
-				continue;
-			}
-			if(callsUsed >= maxCalls || apiError != "")
-			{
-				remaining = remaining + 1;
 				continue;
 			}
 			isFab = ifnull(rmRec.Is_Fabric,false);
@@ -72,6 +114,11 @@ string reconcileRawMaterial(string skuPrefix)
 			{
 				iwS = "0";
 			}
+			ipS = ifnull(rmRec.In_Print_Qty,"0").toString().trim();
+			if(ipS == "")
+			{
+				ipS = "0";
+			}
 			unS = ifnull(rmRec.Unallocated_Qty,"0").toString().trim();
 			if(unS == "")
 			{
@@ -82,11 +129,18 @@ string reconcileRawMaterial(string skuPrefix)
 			{
 				baseQty = wS.toDecimal() + uS.toDecimal();
 			}
-			creatorQty = baseQty + tS.toDecimal() + dS.toDecimal() + iwS.toDecimal() + unS.toDecimal();
+			// In_Print_Qty belongs in the parent total. Cloth at the printer is
+			// still ours - the send moves metres between two counters and never
+			// changes the SKU total - and NOTHING POSTS TO INVENTORY AT SEND
+			// (docs/printing.md), so Inventory still holds those metres too.
+			// Leaving the term out would make every plain SKU with an open print
+			// job read as short against Inventory by exactly Metres_Sent.
+			creatorQty = baseQty + tS.toDecimal() + dS.toDecimal() + iwS.toDecimal() + ipS.toDecimal() + unS.toDecimal();
 			lotOn = 0.0;
 			lotTr = 0.0;
 			lotDs = 0.0;
 			lotIw = 0.0;
+			lotIp = 0.0;
 			lotCount = 0;
 			for each  ltRec in Raw_Material_Lot[Material == rmRec.ID]
 			{
@@ -116,15 +170,52 @@ string reconcileRawMaterial(string skuPrefix)
 				{
 					liS = "0";
 				}
+				lipS = ifnull(ltRec.In_Print_Qty,"0").toString().trim();
+				if(lipS == "")
+				{
+					lipS = "0";
+				}
 				lotOn = lotOn + lwS.toDecimal() + luS.toDecimal();
 				lotTr = lotTr + ltS.toDecimal();
 				lotDs = lotDs + ldS.toDecimal();
 				lotIw = lotIw + liS.toDecimal();
+				lotIp = lotIp + lipS.toDecimal();
+				// PIECE-VERSUS-LOT, PER LOT. Reported, NEVER corrected - the
+				// drift is always caused by something worth knowing about.
+				//
+				// Fabric_Piece.State carries exactly the three ON-RACK states
+				// (Unwash / In_Wash / Wash) and those are exactly the three lot
+				// columns a piece row stands behind. In_Transit_Qty,
+				// Disputed_Qty and In_Print_Qty are metres that have LEFT the
+				// rack: issueMaterials decrements the piece rows in the same
+				// pass that moves the metres into In_Transit, so no piece backs
+				// them and adding them here would report every issued pieces lot
+				// as broken.
+				//
+				// Anything other than "Pieces" - including blank, which is every
+				// lot created before the field existed - is a Roll and has no
+				// piece rows to check. Same rule the allocator applies.
+				if(ifnull(ltRec.Form,"").toString().trim() == "Pieces")
+				{
+					lotRack = lwS.toDecimal() + luS.toDecimal() + liS.toDecimal();
+					pcMtr = ifnull(pieceMtrByLot.get(ltRec.ID + ""),0.0);
+					pcGap = pcMtr - lotRack;
+					if(pcGap > 0.005 || pcGap < -0.005)
+					{
+						pieceBroken = pieceBroken + 1;
+						if(pieceJson != "")
+						{
+							pieceJson = pieceJson + ",";
+						}
+						pcLotNo = ifnull(ltRec.Lot_Number,"").toString().trim().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+						pieceJson = pieceJson + "{\"sku\":\"" + rmSku.replaceAll("\"","'") + "\",\"lotId\":\"" + ltRec.ID + "\",\"lotNumber\":\"" + pcLotNo + "\",\"lotOnRack\":" + lotRack + ",\"pieceMetres\":" + pcMtr + ",\"difference\":" + pcGap + "}";
+					}
+				}
 			}
 			lotGap = 0.0;
 			if(isFab == true && lotCount > 0)
 			{
-				lotGap = (baseQty - lotOn) + (tS.toDecimal() - lotTr) + (dS.toDecimal() - lotDs) + (iwS.toDecimal() - lotIw);
+				lotGap = (baseQty - lotOn) + (tS.toDecimal() - lotTr) + (dS.toDecimal() - lotDs) + (iwS.toDecimal() - lotIw) + (ipS.toDecimal() - lotIp);
 			}
 			if(lotGap > 0.005 || lotGap < -0.005)
 			{
@@ -133,7 +224,26 @@ string reconcileRawMaterial(string skuPrefix)
 				{
 					lotJson = lotJson + ",";
 				}
-				lotJson = lotJson + "{\"sku\":\"" + rmSku.replaceAll("\"","'") + "\",\"lots\":" + lotCount + ",\"parentOnHand\":" + baseQty + ",\"lotOnHand\":" + lotOn + ",\"parentTransit\":" + tS.toDecimal() + ",\"lotTransit\":" + lotTr + ",\"parentDisputed\":" + dS.toDecimal() + ",\"lotDisputed\":" + lotDs + "}";
+				lotJson = lotJson + "{\"sku\":\"" + rmSku.replaceAll("\"","'") + "\",\"lots\":" + lotCount + ",\"parentOnHand\":" + baseQty + ",\"lotOnHand\":" + lotOn + ",\"parentTransit\":" + tS.toDecimal() + ",\"lotTransit\":" + lotTr + ",\"parentDisputed\":" + dS.toDecimal() + ",\"lotDisputed\":" + lotDs + ",\"parentInPrint\":" + ipS.toDecimal() + ",\"lotInPrint\":" + lotIp + "}";
+			}
+			// THE TWO CREATOR-SIDE CHECKS RUN BEFORE THE INVENTORY ONES, and
+			// they have to. A Creator-minted printed SKU has no
+			// Inventory_Item_ID by design - docs/printing.md defers the whole
+			// sync - so the unmapped skip below would swallow every material
+			// that can hold pieces at all, and the piece check would never once
+			// have run. Neither lot-versus-parent nor piece-versus-lot has
+			// anything to do with Inventory, so neither belongs behind an
+			// Inventory guard. unmapped, remaining, checked, agreed and differs
+			// keep their exact previous meanings.
+			if(invItem == "")
+			{
+				unmapped = unmapped + 1;
+				continue;
+			}
+			if(callsUsed >= maxCalls || apiError != "")
+			{
+				remaining = remaining + 1;
+				continue;
 			}
 			callsUsed = callsUsed + 1;
 			itmResp = invokeurl
@@ -182,7 +292,7 @@ string reconcileRawMaterial(string skuPrefix)
 		{
 			errJson = "\"" + apiError.replaceAll("\"","'") + "\"";
 		}
-		res = "{\"errors\":[" + errJson + "],\"callsUsed\":" + callsUsed + ",\"checked\":" + checked + ",\"agreed\":" + agreed + ",\"differs\":" + differs + ",\"unmapped\":" + unmapped + ",\"remaining\":" + remaining + ",\"lotMismatches\":" + lotBroken + ",\"lotRows\":[" + lotJson + "],\"netDifference\":" + netDiff + ",\"rows\":[" + diffJson + "]}";
+		res = "{\"errors\":[" + errJson + "],\"callsUsed\":" + callsUsed + ",\"checked\":" + checked + ",\"agreed\":" + agreed + ",\"differs\":" + differs + ",\"unmapped\":" + unmapped + ",\"remaining\":" + remaining + ",\"lotMismatches\":" + lotBroken + ",\"lotRows\":[" + lotJson + "],\"pieceMismatches\":" + pieceBroken + ",\"pieceRows\":[" + pieceJson + "],\"netDifference\":" + netDiff + ",\"rows\":[" + diffJson + "]}";
 	}
 	catch (e)
 	{

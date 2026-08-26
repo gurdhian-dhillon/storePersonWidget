@@ -444,6 +444,115 @@ string getStoreMaterialRequirements()
 	}
 
 	//------------------------------------------------------------------------
+	// THE MATERIAL RECORD ITSELF, ONCE PER MATERIAL IN PLAY.
+	//
+	// This read used to sit inside the emit loop below, which walks KEYS - one
+	// per supervisor x material x cut size x source - so the same fabric on
+	// three cards was fetched three times. Hoisted here it is one indexed query
+	// per material, and the emit loop reads the maps.
+	//
+	// It also has to happen BEFORE the lot pass, because of Print_Base.
+	//
+	// Raw_Material.Print_Base is set on the PRINTED material and names the plain
+	// SKU it is printed from. It is what makes the plain->printed link navigable
+	// in both directions, and without it no screen can say "there is no printed
+	// stock, but there is plain cloth to print" - a row that goes blank while
+	// cloth sits on the rack is exactly the silent state this screen exists to
+	// kill.
+	//
+	// The base's LOTS are built by the ordinary lot pass below rather than by a
+	// second copy of it: a base already in play is never fetched twice, and one
+	// that is not simply joins the list that pass walks. A query per material
+	// inside a row loop is the shape that blows the statement-execution limit,
+	// which is not catchable and reaches the widget as a bare 500.
+	//------------------------------------------------------------------------
+	matSkuByMat = Map();
+	matDispByMat = Map();
+	matQtyByMat = Map();
+	matWidthByMat = Map();
+	printBaseByMat = Map();
+	// Display name with a fallback, for the PLAIN base only. The name a
+	// requirement row captured at plan time does not exist for a material
+	// nothing on this screen is asking for, so an empty display name has to fall
+	// back to something rather than print a blank on the row.
+	baseNameById = Map();
+	lotMats = List();
+	baseMats = List();
+
+	for each  nmId in neededMats
+	{
+		nmTxt = nmId.toString().trim();
+		if(nmTxt != "" && lotMats.contains(nmTxt) == false)
+		{
+			lotMats.add(nmTxt);
+		}
+		for each  rmB in Raw_Material[ID == nmTxt.toLong()]
+		{
+			matSkuByMat.put(nmTxt,ifnull(rmB.SKU,"").toString());
+			// Trimmed only - the serialisation below does the quote escaping for
+			// this one, exactly as it did when it was read inline.
+			bDisp = ifnull(rmB.Material_Display_Name,"").toString().trim();
+			matDispByMat.put(nmTxt,bDisp);
+			matQtyByMat.put(nmTxt,ifnull(rmB.Quantity,0));
+
+			// Stored as TEXT, in inches. Converted here and nowhere else.
+			bwIn = ifnull(rmB.Fabric_Width_Inches,"").toString().trim();
+			if(bwIn == "")
+			{
+				bwIn = "0";
+			}
+			matWidthByMat.put(nmTxt,bwIn.toDecimal() * 2.54);
+
+			bName = bDisp;
+			if(bName == "")
+			{
+				bName = ifnull(rmB.Name,"").toString().trim();
+			}
+			if(bName == "")
+			{
+				bName = ifnull(rmB.SKU,"").toString().trim();
+			}
+			// Free text crossing hand-built JSON needs the WHOLE chain. A
+			// Material_Display_Name is typed by hand in Creator and one press of
+			// Enter in it puts a raw newline inside a JSON string literal, which
+			// is invalid JSON and fails with no error card at all.
+			baseNameById.put(nmTxt,bName.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," "));
+
+			pbTxt = ifnull(rmB.Print_Base,"").toString().trim();
+			printBaseByMat.put(nmTxt,pbTxt);
+			if(pbTxt != "" && baseMats.contains(pbTxt) == false)
+			{
+				baseMats.add(pbTxt);
+			}
+		}
+	}
+
+	// The bases nothing on this screen is asking for. Added to the lot list AFTER
+	// it is complete, so a base that is itself in play is not queued twice - two
+	// passes of the lot builder over one material would emit its lots twice and
+	// the allocator would offer the same cloth as two lots.
+	for each  bmId in baseMats
+	{
+		if(lotMats.contains(bmId) == false)
+		{
+			lotMats.add(bmId);
+			for each  rmC in Raw_Material[ID == bmId.toLong()]
+			{
+				cName = ifnull(rmC.Material_Display_Name,"").toString().trim();
+				if(cName == "")
+				{
+					cName = ifnull(rmC.Name,"").toString().trim();
+				}
+				if(cName == "")
+				{
+					cName = ifnull(rmC.SKU,"").toString().trim();
+				}
+				baseNameById.put(bmId,cName.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," "));
+			}
+		}
+	}
+
+	//------------------------------------------------------------------------
 	// ONE INDEXED QUERY PER MATERIAL IN PLAY, never the whole form.
 	//
 	// This used to fetch every Raw_Material_Lot ever created and test each row
@@ -474,7 +583,10 @@ string getStoreMaterialRequirements()
 	calcUnwashByMat = Map();
 	calcInWashByMat = Map();
 
-	for each  lotMatId in neededMats
+	// lotMats, not neededMats: it is neededMats plus any PLAIN BASE of a
+	// printed material on this screen, so the base's lots are built by this one
+	// pass and not by a second copy of it.
+	for each  lotMatId in lotMats
 	{
 		lrMat = lotMatId.toString().trim();
 
@@ -672,28 +784,23 @@ string getStoreMaterialRequirements()
 		// Read live from Raw_Material rather than the Material_Name snapshot on
 		// the requirement, so renaming a material fixes plans already created.
 		dispName = "";
-		for each  rm in Raw_Material[ID == matId]
+		// Read off the per-material maps built above rather than queried again
+		// here. This loop walks KEYS, so a fabric wanted by three supervisors used
+		// to fetch the same Raw_Material record three times.
+		skuText = ifnull(matSkuByMat.get(matIdTxt),"");
+		dispName = ifnull(matDispByMat.get(matIdTxt),"").toString().trim();
+		if(isFab == true)
 		{
-			skuText = rm.SKU;
-			dispName = ifnull(rm.Material_Display_Name,"").toString().trim();
-			if(isFab == true)
-			{
-				// Bypass the Creator rollup field which lags and ignores printed piece lot additions.
-				// Use the synchronous sums calculated directly from the lots we just sent.
-				availableStock = ifnull(calcWashByMat.get(matIdTxt), 0.0);
-				unwashedStock = ifnull(calcUnwashByMat.get(matIdTxt), 0.0);
-				inWashStock = ifnull(calcInWashByMat.get(matIdTxt), 0.0);
-				// Stored as TEXT, in inches. Converted here and nowhere else.
-				val = rm.Fabric_Width_Inches;
-				if(val != null && val.trim() != "")
-				{
-					fabricWidthCm = val.trim().toDecimal() * 2.54;
-				}
-			}
-			else
-			{
-				availableStock = ifnull(rm.Quantity,0);
-			}
+			// Bypass the Creator rollup field which lags and ignores printed piece lot additions.
+			// Use the synchronous sums calculated directly from the lots we just sent.
+			availableStock = ifnull(calcWashByMat.get(matIdTxt), 0.0);
+			unwashedStock = ifnull(calcUnwashByMat.get(matIdTxt), 0.0);
+			inWashStock = ifnull(calcInWashByMat.get(matIdTxt), 0.0);
+			fabricWidthCm = ifnull(matWidthByMat.get(matIdTxt), 0.0);
+		}
+		else
+		{
+			availableStock = ifnull(matQtyByMat.get(matIdTxt),0);
 		}
 
 
@@ -764,6 +871,31 @@ string getStoreMaterialRequirements()
 			// Built once per material above and reused here, so the same fabric
 			// appearing on three supervisor cards costs one build, not three.
 			matEntry.put("lotsJson",ifnull(lotJsonByMat.get(matIdTxt),"").toString());
+
+			//----------------------------------------------------------
+			// THE PLAIN CLOTH THIS PRINTED SKU IS PRINTED FROM.
+			//
+			// Empty on plain cloth, which is every fabric row that is not a
+			// printed SKU - the widget reads the empty string as "this is not
+			// printed" and the reason never fires.
+			//
+			// The base lots go out in the SAME SHAPE as this row's own lots,
+			// because they were built by the same pass. A row with no printed
+			// stock can then name the lot the plain cloth is sitting on and how
+			// much of it there is, which is the whole point: a row that goes
+			// blank while cloth is on the rack reads as the screen being broken.
+			//----------------------------------------------------------
+			pbForMat = ifnull(printBaseByMat.get(matIdTxt),"").toString().trim();
+			pbName = "";
+			pbLotsJson = "";
+			if(pbForMat != "")
+			{
+				pbName = ifnull(baseNameById.get(pbForMat),"").toString();
+				pbLotsJson = ifnull(lotJsonByMat.get(pbForMat),"").toString();
+			}
+			matEntry.put("printBase",pbForMat);
+			matEntry.put("printBaseName",pbName);
+			matEntry.put("printBaseLotsJson",pbLotsJson);
 
 			wastePicks = List();
 
@@ -1032,7 +1164,7 @@ string getStoreMaterialRequirements()
 					}
 				}
 
-				matsJson = matsJson + ",\"unwashedStock\":" + mEnt.get("unwashedStock") + ",\"inWashStock\":" + ifnull(mEnt.get("inWashStock"),0) + ",\"cutWidth\":" + mEnt.get("cutWidth") + ",\"cutLength\":" + mEnt.get("cutLength") + ",\"fabricWidthCm\":" + mEnt.get("fabricWidthCm") + ",\"requiredPieces\":" + mEnt.get("requiredPieces") + ",\"issuedPieces\":" + mEnt.get("issuedPieces") + ",\"wasteIssuedPieces\":" + mEnt.get("wasteIssuedPieces") + ",\"outstandingPieces\":" + mEnt.get("outstandingPieces") + ",\"wastePicks\":[" + picksJson + "],\"wasteStock\":[" + stockJson + "],\"freshMeters\":" + mEnt.get("freshMeters") + ",\"piecesCoveredByWaste\":" + mEnt.get("piecesCoveredByWaste") + ",\"freshPieces\":" + mEnt.get("freshPieces") + ",\"requiredTotal\":" + mEnt.get("requiredTotal") + ",\"lots\":[" + ifnull(mEnt.get("lotsJson"),"").toString() + "]";
+				matsJson = matsJson + ",\"unwashedStock\":" + mEnt.get("unwashedStock") + ",\"inWashStock\":" + ifnull(mEnt.get("inWashStock"),0) + ",\"cutWidth\":" + mEnt.get("cutWidth") + ",\"cutLength\":" + mEnt.get("cutLength") + ",\"fabricWidthCm\":" + mEnt.get("fabricWidthCm") + ",\"requiredPieces\":" + mEnt.get("requiredPieces") + ",\"issuedPieces\":" + mEnt.get("issuedPieces") + ",\"wasteIssuedPieces\":" + mEnt.get("wasteIssuedPieces") + ",\"outstandingPieces\":" + mEnt.get("outstandingPieces") + ",\"wastePicks\":[" + picksJson + "],\"wasteStock\":[" + stockJson + "],\"freshMeters\":" + mEnt.get("freshMeters") + ",\"piecesCoveredByWaste\":" + mEnt.get("piecesCoveredByWaste") + ",\"freshPieces\":" + mEnt.get("freshPieces") + ",\"requiredTotal\":" + mEnt.get("requiredTotal") + ",\"lots\":[" + ifnull(mEnt.get("lotsJson"),"").toString() + "],\"printBase\":\"" + ifnull(mEnt.get("printBase"),"").toString() + "\",\"printBaseName\":\"" + ifnull(mEnt.get("printBaseName"),"").toString() + "\",\"printBaseLots\":[" + ifnull(mEnt.get("printBaseLotsJson"),"").toString() + "]";
 			}
 
 			matsJson = matsJson + "}";

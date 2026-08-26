@@ -139,6 +139,13 @@ string postTransferOrders(string dryRun)
 		//------------------------------------------------------------------
 		invItemMap = Map();
 
+		// AND WHY A MATERIAL IS UNMAPPED, off the SAME pass rather than a query
+		// later. Print_Base is set on a printed SKU and on nothing else, so it is
+		// the test for "minted in Creator by sendToPrint" - which is exactly the
+		// material that cannot have an Inventory_Item_ID in this build. Collected
+		// here so the diagnosis below costs nothing extra.
+		printedSkuByMat = Map();
+
 		for each  rmRow in Raw_Material[ID != 0]
 		{
 			invTxt = ifnull(rmRow.Inventory_Item_ID,"").toString().trim();
@@ -146,6 +153,18 @@ string postTransferOrders(string dryRun)
 			if(invTxt != "")
 			{
 				invItemMap.put(rmRow.ID.toString(),invTxt);
+			}
+
+			pbTxt = ifnull(rmRow.Print_Base,"").toString().trim();
+
+			if(pbTxt != "")
+			{
+				pbSkuTxt = ifnull(rmRow.SKU,"").toString().trim();
+				if(pbSkuTxt == "")
+				{
+					pbSkuTxt = "material " + rmRow.ID;
+				}
+				printedSkuByMat.put(rmRow.ID.toString(),pbSkuTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," "));
 			}
 		}
 
@@ -241,6 +260,8 @@ string postTransferOrders(string dryRun)
 				lineMove = Map();
 				stillOwed = false;
 				unmapped = "";
+				printedList = List();
+				printedTxt = "";
 
 				for each  ln in mi.Issue_Lines
 				{
@@ -288,6 +309,32 @@ string postTransferOrders(string dryRun)
 								unmapped = unmapped + ", ";
 							}
 							unmapped = unmapped + ifnull(ln.Material_Name,matKey).toString();
+
+							// THE DIAGNOSIS, NOT AN EXCEPTION. The whole-voucher refusal
+							// above is deliberate and stays exactly as it is - moving four
+							// of five lines and marking the voucher Done would strand the
+							// fifth silently. What was missing is WHY.
+							//
+							// A Creator-minted printed SKU has no Inventory item BY DESIGN:
+							// docs/printing.md defers the whole sync, sendToPrint never sets
+							// Inventory_Item_ID, and mapInventoryItemIds only matches codes
+							// that already exist in Zoho, so an RM- code minted here never
+							// maps. Unnamed, that refusal reads exactly like a mapping bug
+							// and somebody goes hunting for one that is not there.
+							//
+							// Deduped by SKU - one printed material on three lines is one
+							// thing to say, not three.
+							pSkuTxt = ifnull(printedSkuByMat.get(matKey),"").toString();
+
+							if(pSkuTxt != "" && printedList.contains(pSkuTxt) == false)
+							{
+								printedList.add(pSkuTxt);
+								if(printedTxt != "")
+								{
+									printedTxt = printedTxt + ", ";
+								}
+								printedTxt = printedTxt + pSkuTxt;
+							}
 						}
 						else
 						{
@@ -341,7 +388,19 @@ string postTransferOrders(string dryRun)
 					// Refused whole. See the note where unmapped is built.
 					failedCount = failedCount + 1;
 					mi.Transfer_Attempts = attNow + 1;
-					mi.Transfer_Error = "No Inventory_Item_ID mapped for: " + unmapped;
+					// ONE LINE, no raw newlines and no quotes. This string is written to a
+					// Creator field AND copied into the hand-built JSON below, where a raw
+					// control character fails with no error card and no 9430 at all.
+					printedNote = "";
+					if(printedList.size() == 1)
+					{
+						printedNote = " | printed SKU " + printedTxt + " has no Inventory item yet (minted in Creator; Inventory sync deferred)";
+					}
+					else if(printedList.size() > 1)
+					{
+						printedNote = " | printed SKUs " + printedTxt + " have no Inventory item yet (minted in Creator; Inventory sync deferred)";
+					}
+					mi.Transfer_Error = "No Inventory_Item_ID mapped for: " + unmapped + printedNote;
 
 					if(attNow + 1 >= maxAttempts)
 					{
@@ -352,7 +411,9 @@ string postTransferOrders(string dryRun)
 					{
 						reportJson = reportJson + ",";
 					}
-					reportJson = reportJson + "{\"voucher\":\"" + voucherTxt + "\",\"result\":\"unmapped\",\"detail\":\"" + unmapped.replaceAll("\"","'") + "\"}";
+					detailTxt = unmapped + printedNote;
+					detailTxt = detailTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+					reportJson = reportJson + "{\"voucher\":\"" + voucherTxt + "\",\"result\":\"unmapped\",\"detail\":\"" + detailTxt + "\"}";
 				}
 				else
 				{
