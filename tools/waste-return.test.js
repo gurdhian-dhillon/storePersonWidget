@@ -128,13 +128,15 @@ function issueWaste(W, opts) {
   }
 
   // ---- the fan (:1883-2006), with the movement-once guard OUTSIDE the passes ----
+  // rowPin is the REQUIREMENT ROW'S OWN Plan_Item (:1667) - it both keys the
+  // pinned pool and, via mv.Plan_Item below (:1990), stamps the movements.
   let wasteLogged = false;
   let fanWaste = piecesFromWaste;
   for (const row of opts.rows) {
     if (fanWaste <= 0) break;                          // fanWaste exhausted
     const pRem2 = row.requiredPieces - (row.fromWaste + row.fromRaw);
     if (pRem2 <= 0) continue;
-    const rowPin = ifnullStr(row.pin, '');
+    const rowPin = ifnullStr(row.item, '');
     const pinHave = wPinTot[rowPin] || 0;
     let giveW = wFree + pinHave;
     if (giveW > fanWaste) giveW = fanWaste;
@@ -158,7 +160,7 @@ function issueWaste(W, opts) {
                          Piece_Count: nPcs3,
                          Pieces_Yielded: nPcs3 * pkYield[wId3],
                          Waste_Piece: wId3,
-                         Plan: String(row.planId), Plan_Item: String(row.pin),
+                         Plan: String(row.planId), Plan_Item: rowPin,
                          Parent_Movement: '' };
             W.Waste_Movement.push(mv);
             res.movements.push(mv);
@@ -348,7 +350,7 @@ function fixture() {
 const CUT = { cutW: 55, cutL: 55 };
 
 function reqRow(over) {
-  return Object.assign({ id: 'R1', planId: 'PLAN1', item: 'IT1', pin: '',
+  return Object.assign({ id: 'R1', planId: 'PLAN1', item: 'IT1',
                          requiredPieces: 10, requiredQty: 2.75, isFab: true,
                          issued: 0, received: 0, fromWaste: 0, fromRaw: 0 }, over || {});
 }
@@ -441,8 +443,8 @@ test('I4 movements are written ONCE PER PRESS even when the fan spans two plans,
 test('I5 a PINNED pick serves its own item even when an earlier unpinned row is needier', () => {
   const W = fixture();
   const rem = addWastePiece(W, { SKU: W.mat.ID, Piece_Width: 120, Piece_Length: 170, Piece_Count: 1 });
-  const rows = [reqRow({ id: 'R1', item: 'IT1', pin: '', requiredPieces: 10 }),
-                reqRow({ id: 'R2', item: 'IT2', pin: 'IT2', requiredPieces: 4 })];
+  const rows = [reqRow({ id: 'R1', item: 'IT1', requiredPieces: 10 }),
+                reqRow({ id: 'R2', item: 'IT2', requiredPieces: 4 })];
   issueWaste(W, Object.assign({}, CUT, { matId: W.mat.ID, matName: 'G', isFab: true,
     picks: [{ wasteId: rem.ID, pieces: 1, planItemId: 'IT2' }], rows }));
   // giveW is capped by what the row OWES (pRem2): the remnant yields 6 cuts but
@@ -457,7 +459,7 @@ test('I6 pinned picks are spent BEFORE the free pool', () => {
   const W = fixture();
   const pinned = addWastePiece(W, { SKU: W.mat.ID, Piece_Width: 120, Piece_Length: 170, Piece_Count: 1 });
   const loose = addWastePiece(W, { SKU: W.mat.ID, Piece_Width: 120, Piece_Length: 170, Piece_Count: 1 });
-  const rows = [reqRow({ id: 'R1', item: 'IT1', pin: 'IT1', requiredPieces: 10 })];
+  const rows = [reqRow({ id: 'R1', item: 'IT1', requiredPieces: 10 })];
   issueWaste(W, Object.assign({}, CUT, { matId: W.mat.ID, matName: 'G', isFab: true,
     picks: [{ wasteId: pinned.ID, pieces: 1, planItemId: 'IT1' },
             { wasteId: loose.ID, pieces: 1 }],

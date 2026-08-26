@@ -2154,6 +2154,9 @@ string issueMaterials(string supervisorId, string issuesJson)
 				if(isFab == true)
 				{
 					matRec.Wash_Quantity = balance;
+					qU = ifnull(matRec.Unwash_Quantity,"0").toString().trim();
+					qA = ifnull(matRec.Unallocated_Qty,"0").toString().trim();
+					matRec.Quantity = balance + if(qU=="",0.0,qU.toDecimal()) + if(qA=="",0.0,qA.toDecimal());
 				}
 				else
 				{

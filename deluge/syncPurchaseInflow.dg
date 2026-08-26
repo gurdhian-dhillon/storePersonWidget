@@ -1057,6 +1057,9 @@ string syncPurchaseInflow(string dryRun)
 											uwS = "0";
 										}
 										rmUpd.Unallocated_Qty = uwS.toDecimal() + moveQty;
+										qUW = ifnull(rmUpd.Unwash_Quantity,"0").toString().trim();
+										qW = ifnull(rmUpd.Wash_Quantity,"0").toString().trim();
+										rmUpd.Quantity = rmUpd.Unallocated_Qty + if(qUW=="",0.0,qUW.toDecimal()) + if(qW=="",0.0,qW.toDecimal());
 									}
 									else
 									{
@@ -1238,6 +1241,9 @@ string syncPurchaseInflow(string dryRun)
 														guS = "0";
 													}
 													gonUpd.Unallocated_Qty = guS.toDecimal() - gonMove;
+													gqUW = ifnull(gonUpd.Unwash_Quantity,"0").toString().trim();
+													gqW = ifnull(gonUpd.Wash_Quantity,"0").toString().trim();
+													gonUpd.Quantity = gonUpd.Unallocated_Qty + if(gqUW=="",0.0,gqUW.toDecimal()) + if(gqW=="",0.0,gqW.toDecimal());
 												}
 												else
 												{

@@ -633,6 +633,10 @@ string receiveFromPrint(string payloadJson)
 				}
 				pmatNew.Wash_Quantity = mwS.toDecimal() + washMetres;
 				pmatNew.Unwash_Quantity = muS.toDecimal() + unwashMetres;
+				qW = ifnull(pmatNew.Wash_Quantity,"0").toString().trim();
+				qU = ifnull(pmatNew.Unwash_Quantity,"0").toString().trim();
+				qA = ifnull(pmatNew.Unallocated_Qty,"0").toString().trim();
+				pmatNew.Quantity = if(qW=="",0.0,qW.toDecimal()) + if(qU=="",0.0,qU.toDecimal()) + if(qA=="",0.0,qA.toDecimal());
 			}
 		}
 

@@ -90,7 +90,8 @@ string getRawMaterialsList()
 			{
 				washQty = ifnull(rm.Wash_Quantity, 0.0).toDecimal();
 				unwashQty = ifnull(rm.Unwash_Quantity, 0.0).toDecimal();
-				totalQty = washQty + unwashQty;
+				unallocQty = ifnull(rm.Unallocated_Qty, 0.0).toDecimal();
+				totalQty = washQty + unwashQty + unallocQty;
 			}
 			else
 			{

@@ -126,6 +126,9 @@ void resolveStockDispute()
 									onStr = "0";
 								}
 								rm.Wash_Quantity = onStr.toDecimal() + takeD;
+								qU = ifnull(rm.Unwash_Quantity,"0").toString().trim();
+								qA = ifnull(rm.Unallocated_Qty,"0").toString().trim();
+								rm.Quantity = rm.Wash_Quantity + if(qU=="",0.0,qU.toDecimal()) + if(qA=="",0.0,qA.toDecimal());
 							}
 							else
 							{

@@ -314,6 +314,8 @@ string saveStockInward(string inwardJson)
 				{
 					rmUpd.Unallocated_Qty = unallocHave - fromUnalloc;
 				}
+				qA = ifnull(rmUpd.Unallocated_Qty,"0").toString().trim();
+				rmUpd.Quantity = matWashOut + matUnwashOut + if(qA=="",0.0,qA.toDecimal());
 			}
 
 			// Ids forced to string - 18-digit ids break JSON.parse on the widget.

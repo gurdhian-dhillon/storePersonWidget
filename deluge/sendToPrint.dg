@@ -687,6 +687,10 @@ string sendToPrint(string payloadJson)
 				{
 					rmUpd.Unwash_Quantity = muS.toDecimal() - metresSent;
 				}
+				qW = ifnull(rmUpd.Wash_Quantity,"0").toString().trim();
+				qU = ifnull(rmUpd.Unwash_Quantity,"0").toString().trim();
+				qA = ifnull(rmUpd.Unallocated_Qty,"0").toString().trim();
+				rmUpd.Quantity = if(qW=="",0.0,qW.toDecimal()) + if(qU=="",0.0,qU.toDecimal()) + if(qA=="",0.0,qA.toDecimal());
 
 				rmUpd.In_Print_Qty = matInPrintOut;
 			}

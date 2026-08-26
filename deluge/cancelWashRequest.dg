@@ -133,6 +133,10 @@ void cancelWashRequest()
 				{
 					matRec.In_Wash_Qty = inwQty - moveQty;
 					matRec.Unwash_Quantity = unwQty + moveQty;
+					qW = ifnull(matRec.Wash_Quantity,"0").toString().trim();
+					qU = ifnull(matRec.Unwash_Quantity,"0").toString().trim();
+					qA = ifnull(matRec.Unallocated_Qty,"0").toString().trim();
+					matRec.Quantity = if(qW=="",0.0,qW.toDecimal()) + if(qU=="",0.0,qU.toDecimal()) + if(qA=="",0.0,qA.toDecimal());
 
 					// The same move on the lot, in the same pass, so the lot and
 					// the maintained parent total cannot disagree. Never one
