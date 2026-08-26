@@ -1918,6 +1918,52 @@ string issueMaterials(string supervisorId, string issuesJson)
 										{
 											giveW = pRem2;
 										}
+										if(wasteLogged == false)
+										{
+											wasteLogged = true;
+											for each  pkRaw3 in picks
+											{
+												pk3 = pkRaw3.toMap();
+												wId3 = ifnull(pk3.get("wasteId"),"").toString().trim();
+												pcs3 = ifnull(pk3.get("pieces"),"0").toString().trim();
+												if(pcs3 == "")
+												{
+													pcs3 = "0";
+												}
+												nPcs3 = pcs3.toDecimal().toLong();
+												if(nPcs3 > 0 && pkYield.get(wId3) != null)
+												{
+													// STEP 4b: an Issued movement replaces the
+													// Waste_Issued subform row. No Received_Count
+													// here - receipt is its own movement pointing
+													// back at this one, so a short receipt leaves
+													// both numbers and both dates on the record
+													// instead of one mutable counter.
+													newMvId = insert into Waste_Movement
+													[
+														Movement_Type="Issued"
+														Piece_Width=pkW.get(wId3)
+														Piece_Length=pkL.get(wId3)
+														Piece_Count=nPcs3
+														Cut_Size_Width=cutW
+														Cut_Size_Length=cutL
+														Pieces_Yielded=nPcs3 * pkYield.get(wId3)
+														Moved_On=zoho.currentdate
+														Added_User=zoho.loginuser
+													];
+
+													// Lookups after the insert - a null cannot go
+													// in the insert block.
+													for each  mv in Waste_Movement[ID == newMvId.toLong()]
+													{
+														mv.Waste_Piece = wId3.toLong();
+														mv.Plan = planTok.toLong();
+														mv.Plan_Item = row.Plan_Item;
+														mv.Moved_By = supId;
+													}
+												}
+											}
+										}
 										if(giveW > 0)
 										{
 											row.Pieces_From_Waste = alreadyW + giveW;
@@ -1941,57 +1987,6 @@ string issueMaterials(string supervisorId, string issuesJson)
 											if(wFree < 0)
 											{
 												wFree = 0;
-											}
-
-											// Record what physical cloth the
-											// supervisor actually receives - the
-											// counters above say how much is
-											// owed, not what is in his hands.
-											if(wasteLogged == false)
-											{
-												wasteLogged = true;
-												for each  pkRaw3 in picks
-												{
-													pk3 = pkRaw3.toMap();
-													wId3 = ifnull(pk3.get("wasteId"),"").toString().trim();
-													pcs3 = ifnull(pk3.get("pieces"),"0").toString().trim();
-													if(pcs3 == "")
-													{
-														pcs3 = "0";
-													}
-													nPcs3 = pcs3.toDecimal().toLong();
-													if(nPcs3 > 0 && pkYield.get(wId3) != null)
-													{
-														// STEP 4b: an Issued movement replaces the
-														// Waste_Issued subform row. No Received_Count
-														// here - receipt is its own movement pointing
-														// back at this one, so a short receipt leaves
-														// both numbers and both dates on the record
-														// instead of one mutable counter.
-														newMvId = insert into Waste_Movement
-														[
-															Movement_Type="Issued"
-															Piece_Width=pkW.get(wId3)
-															Piece_Length=pkL.get(wId3)
-															Piece_Count=nPcs3
-															Cut_Size_Width=cutW
-															Cut_Size_Length=cutL
-															Pieces_Yielded=nPcs3 * pkYield.get(wId3)
-															Moved_On=zoho.currentdate
-															Added_User=zoho.loginuser
-														];
-
-														// Lookups after the insert - a null cannot go
-														// in the insert block.
-														for each  mv in Waste_Movement[ID == newMvId.toLong()]
-														{
-															mv.Waste_Piece = wId3.toLong();
-															mv.Plan = planTok.toLong();
-															mv.Plan_Item = row.Plan_Item;
-															mv.Moved_By = supId;
-														}
-													}
-												}
 											}
 										}
 										giveR = fanRaw;
