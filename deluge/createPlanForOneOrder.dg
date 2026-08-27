@@ -1,0 +1,332 @@
+string createPlanForOneOrder(int soId)
+{
+	// PER-RECORD BODY OF createProductionPlans, for the Batch Workflow.
+	//
+	// createProductionPlans does its own Sales_Order[Order_Status == "Pending"]
+	// scan and loops over every row itself - that loop is what hit Deluge's
+	// uncatchable statement-execution limit at 100 orders in one script. The
+	// Batch Workflow ("CreateProductionPlan", Sales Order form, On Schedule,
+	// condition Order_Status == "Pending") does that looping FOR us: it calls
+	// this function once per matching record, each call its own script
+	// invocation. So the ~80-statement cost of one order never has to sum
+	// across 100 orders in a single execution.
+	//
+	// soId comes in as the current record's ID from the batch workflow script.
+	//
+	// NO MAIL, NO PUSH, NO RUN SUMMARY HERE - deliberately. Per the user: get
+	// plan creation working per-record first; notification is a separate
+	// scheduled function once this is proven, not folded into a per-record
+	// call the way the old run-level mail was.
+	//
+	// PLAN NUMBERING IS RE-DERIVED ON EVERY CALL, not carried in memory across
+	// a loop the way createProductionPlans did - there is no shared loop here,
+	// each call is its own invocation. This narrows the race between two
+	// orders both computing the same "next" number, but if the batch workflow
+	// ever runs records in this block with any parallelism, it does not fully
+	// close it - two calls at the exact same instant could still both read the
+	// same max and both write the same Plan_No. Sequential execution within a
+	// batch block, if that is what Creator actually does, would make this
+	// moot; this has not been verified either way. Worth confirming, and worth
+	// a Creator report checking for duplicate Plan_No if this runs unattended.
+	returnMsg = "";
+
+	for each  so in Sales_Order[ID == soId]
+	{
+		soId2 = so.ID;
+		hasPlan = false;
+		for each  exPlan in Production_Planning[Sales_Order == soId2]
+		{
+			if(exPlan.Assigned_To != null)
+			{
+				so.Assigned_To = exPlan.Assigned_To;
+			}
+			hasPlan = true;
+		}
+
+		if(hasPlan)
+		{
+			// Planned already - a plan built before the status drove this, or
+			// a previous call that died between the two writes. Move it on
+			// rather than leaving it Pending for ever.
+			so.Order_Status = "In Progress";
+			// Clears any stale reject reason from an earlier failed attempt -
+			// this order is no longer blocked, so nothing should still say it
+			// is when sendProductionPlanSummary reads Plan_Reject_Reason.
+			so.Plan_Reject_Reason = "";
+			so.Batch_Run_Outcome = "Skipped";
+			so.Needs_Plan_Summary = true;
+			returnMsg = "SKIP (plan exists) -> SO " + so.Sales_Order;
+		}
+		else
+		{
+			//----------------------------------------------------------------
+			// EVERY reason this order cannot be planned is collected before
+			// any reject, same as createProductionPlans - see that function
+			// for why (one round trip to learn every problem, not one per
+			// problem).
+			//----------------------------------------------------------------
+			rejReasons = "";
+
+			orderSource = so.Order_Source;
+			assignedEmpId = null;
+			if(orderSource != null && orderSource != "")
+			{
+				assignRows = Order_Assignment[Order_Source == orderSource.toString().trim()];
+				for each  oaRec in assignRows
+				{
+					if(oaRec.Employee != null && assignedEmpId == null)
+					{
+						assignedEmpId = oaRec.Employee;
+					}
+				}
+			}
+			if(assignedEmpId == null)
+			{
+				srcTxt = "(no order source)";
+				if(orderSource != null && orderSource != "")
+				{
+					srcTxt = orderSource;
+				}
+				rejReasons = "No supervisor assigned for order source '" + srcTxt + "' - add a rule in Order Assignment";
+			}
+
+			planItems = list();
+			itemLineCount = 0;
+			noBomTxt = "";
+			multiBomTxt = "";
+			for each  soRow in so.Item_Table
+			{
+				finishedItemId = soRow.SKU;
+				produceQty = ifnull(soRow.Quantity,0);
+				itemName = soRow.Item_Name;
+
+				nameTxt = ifnull(itemName,"").toString().trim();
+				if(nameTxt == "")
+				{
+					nameTxt = "(unnamed item)";
+				}
+
+				bomCount = 0;
+				bomId = null;
+				for each  bomRec in BOM[Item == finishedItemId]
+				{
+					bomId = bomRec.ID;
+					bomCount = bomCount + 1;
+				}
+
+				if(bomCount == 0)
+				{
+					if(noBomTxt != "")
+					{
+						noBomTxt = noBomTxt + ", ";
+					}
+					noBomTxt = noBomTxt + nameTxt;
+				}
+				else if(bomCount > 1)
+				{
+					if(multiBomTxt != "")
+					{
+						multiBomTxt = multiBomTxt + ", ";
+					}
+					multiBomTxt = multiBomTxt + nameTxt + " (" + bomCount + " BOMs)";
+					bomId = null;
+				}
+
+				piMap = Map();
+				piMap.put("name",itemName);
+				piMap.put("sku",finishedItemId);
+				piMap.put("qty",produceQty);
+				piMap.put("bom",bomId);
+				itemLineCount = itemLineCount + 1;
+
+				itemMatsJson = "[]";
+				if(bomId != null)
+				{
+					itemMatsJson = thisapp.buildItemRequirements(bomId.toString(),produceQty.toString(),"SO " + so.Sales_Order);
+				}
+
+				piMap.put("mats",itemMatsJson);
+				planItems.add(piMap);
+			}
+
+			if(itemLineCount == 0)
+			{
+				if(rejReasons != "")
+				{
+					rejReasons = rejReasons + "; ";
+				}
+				rejReasons = rejReasons + "No items on the order";
+			}
+			if(noBomTxt != "")
+			{
+				if(rejReasons != "")
+				{
+					rejReasons = rejReasons + "; ";
+				}
+				rejReasons = rejReasons + "No BOM for: " + noBomTxt;
+			}
+			if(multiBomTxt != "")
+			{
+				if(rejReasons != "")
+				{
+					rejReasons = rejReasons + "; ";
+				}
+				rejReasons = rejReasons + "More than one BOM for: " + multiBomTxt;
+			}
+
+			if(rejReasons != "")
+			{
+				// Order KEEPS Order_Status "Pending" - the batch workflow's
+				// own condition (Order_Status == "Pending") means the next
+				// scheduled run picks it up again automatically.
+				//
+				// WRITTEN so the reason survives past this call. Nothing else
+				// persists it - createPlanForOneOrder runs once per record
+				// with no shared state across calls in a batch workflow, so
+				// this return value would otherwise be discarded the moment
+				// the call ends. sendProductionPlanSummary reads this field
+				// directly rather than trying to reconstruct "why" from
+				// Order_Status alone, which only ever says THAT an order is
+				// stuck, never why. Overwritten (not appended) on every
+				// attempt, so it always reflects the CURRENT blocker - a
+				// fixed BOM issue must not leave a stale reason behind next
+				// to a genuinely new one.
+				so.Plan_Reject_Reason = rejReasons;
+				so.Batch_Run_Outcome = "Rejected";
+				so.Needs_Plan_Summary = true;
+				returnMsg = "REJECT -> SO " + so.Sales_Order + " | " + rejReasons;
+			}
+			else
+			{
+				// THE TEN NEWEST, NEVER ALL OF THEM - re-derived on every call,
+				// see the note at the top of this function about why.
+				allPlansDesc = Production_Planning[ID != 0] sort by Added_Time desc range from 1 to 10;
+				maxNum = 0;
+				for each  lp in allPlansDesc
+				{
+					lastNo = ifnull(lp.Plan_No,"").toString().trim();
+					if(lastNo != "" && lastNo.indexOf("-") >= 0)
+					{
+						thisNum = lastNo.substring(lastNo.lastIndexOf("-") + 1).toLong();
+						if(thisNum > maxNum)
+						{
+							maxNum = thisNum;
+						}
+					}
+				}
+
+				maxNum = maxNum + 1;
+				if(maxNum < 10)
+				{
+					padded = "0000" + maxNum;
+				}
+				else if(maxNum < 100)
+				{
+					padded = "000" + maxNum;
+				}
+				else if(maxNum < 1000)
+				{
+					padded = "00" + maxNum;
+				}
+				else if(maxNum < 10000)
+				{
+					padded = "0" + maxNum;
+				}
+				else
+				{
+					padded = "" + maxNum;
+				}
+				planNo = "PLAN-" + padded;
+
+				srcRank = 5;
+				srcTxt = ifnull(orderSource,"").toString().trim().toLowerCase();
+				if(srcTxt == "shopify")
+				{
+					srcRank = 1;
+				}
+				else if(srcTxt == "faire")
+				{
+					srcRank = 2;
+				}
+				else if(srcTxt == "custom")
+				{
+					srcRank = 3;
+				}
+				else if(srcTxt == "pr")
+				{
+					srcRank = 4;
+				}
+				priorityKey = (srcRank * 1000000) + maxNum;
+
+				newPlan = insert into Production_Planning
+				[
+					Plan_No=planNo
+					Sales_Order=soId2
+					Assigned_To=assignedEmpId
+					Order_Status="Pending"
+					Plan_Start_Date=zoho.currentdate
+					Order_Source=ifnull(orderSource,"").toString()
+					Priority_Rank=srcRank
+					Priority_Key=priorityKey
+					Added_User=zoho.loginuser
+				];
+
+				for each  planRec in Production_Planning[Plan_No == planNo]
+				{
+					lineNo = 0;
+					for each  piMap2 in planItems
+					{
+						lineNo = lineNo + 1;
+						newItemId = insert into Plan_Item
+						[
+							Plan=planRec.ID
+							Item_Sku=piMap2.get("sku")
+							Item_Name=piMap2.get("name")
+							Qty_Ordered=piMap2.get("qty")
+							Qty_Produced=0
+							Item_Status="Awaiting_Material"
+							Line_No=lineNo
+							BOM=piMap2.get("bom")
+							Added_User=zoho.loginuser
+						];
+						matsList = piMap2.get("mats").toString().toJSONList();
+						for each  mRaw in matsList
+						{
+							mm = mRaw.toMap();
+							insert into Material_Requirement
+							[
+								Plan=planRec.ID
+								Plan_Item=newItemId
+								Material_Name=mm.get("name")
+								Is_Fabric=mm.get("isFab")
+								Unit=mm.get("unit")
+								Required_Qty=mm.get("req")
+								Issued_Qty=0
+								Received_Qty=0
+								Cut_Size_Length=mm.get("cutLen")
+								Cut_Size_Width=mm.get("cutWid")
+								Required_Pieces=mm.get("pcs")
+								Pieces_From_Waste=0
+								Pieces_From_Raw=0
+								Material=mm.get("mat").toString().toLong()
+								Assigned_To=assignedEmpId
+								Added_User=zoho.loginuser
+							];
+						}
+					}
+				}
+
+				so.Assigned_To = assignedEmpId;
+				so.Order_Status = "In Progress";
+				// Cleared for the same reason as the SKIP branch above - a
+				// successful plan means this order is no longer blocked.
+				so.Plan_Reject_Reason = "";
+				so.Batch_Run_Outcome = "Created";
+				so.Needs_Plan_Summary = true;
+				returnMsg = "CREATE " + planNo + " -> SO " + so.Sales_Order;
+			}
+		}
+	}
+
+	return returnMsg;
+}

@@ -1,0 +1,95 @@
+string seedSalesOrders()
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		// 1. Get the single customer
+		custId = 0;
+		for each  cust in Customer[ID != 0]
+		{
+			custId = cust.ID;
+			break;
+		}
+
+		if(custId == 0)
+		{
+			return "{\"errors\":[\"No customer found in the database.\"]}";
+		}
+
+		// 2. Fetch the 5 items from Item_Master
+		itemIds = Map();
+		itemNames = Map();
+		itemRates = Map();
+		for each  sku in {"SKU-00001","SKU-00002","SKU-00003","SKU-00004","SKU-00005"}
+		{
+			for each  itm in Item_Master[SKU == sku]
+			{
+				itemIds.put(sku,itm.ID);
+				
+				// TODO: Replace 'Item_Name' and 'Rate' with your actual Item_Master field link names!
+				itemNames.put(sku,ifnull(itm.Item_Name,"").toString());
+				itemRates.put(sku,ifnull(itm.Rate,0.0).toDecimal());
+			}
+		}
+
+		if(itemIds.size() < 5)
+		{
+			return "{\"errors\":[\"Could not find all 5 SKUs (SKU-00001 to SKU-00005) in Item_Master.\"]}";
+		}
+
+		createdCount = 0;
+		timestampTxt = zoho.currenttime.toString("MMddHHmmss");
+
+		// 3. Create 100 Sales Orders (Nested loop 10x10 = 100)
+		tens = {0,1,2,3,4,5,6,7,8,9};
+		ones = {1,2,3,4,5,6,7,8,9,10};
+
+		for each  t in tens
+		{
+			for each  o in ones
+			{
+				createdCount = createdCount + 1;
+				rowCollection = Collection();
+
+				for each  sku in {"SKU-00001","SKU-00002","SKU-00003","SKU-00004","SKU-00005"}
+				{
+					newRow = Sales_Order.Item_Table();
+					
+					// TODO: Replace 'SKU', 'Item_Name', 'Rate', 'Amount' with your actual Item_Table subform field link names!
+					newRow.SKU = itemIds.get(sku);
+					newRow.Item_Name = itemNames.get(sku);
+					newRow.Quantity = 10;
+					
+					rateVal = itemRates.get(sku).toDecimal();
+					newRow.Rate = rateVal;
+					newRow.Amount = rateVal * 10.0;
+					
+					rowCollection.insert(newRow);
+				}
+
+				// Generate SO Number from SO-01000 to SO-01099
+				soNumber = "SO-0" + (999 + createdCount);
+
+				insertResult = insert into Sales_Order
+				[
+					Sales_Order_Date=zoho.currentdate
+					Customer=custId
+					Sales_Order=soNumber
+					Total=0.0
+					Grand_Total=0.0
+					Order_Status="Pending"
+					Order_Source="Test Script"
+					Item_Table=rowCollection
+					Added_User=zoho.loginuser
+				];
+			}
+		}
+
+		res = "{\"success\":true,\"createdCount\":" + createdCount + "}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

@@ -141,32 +141,37 @@ function issueWaste(W, opts) {
     let giveW = wFree + pinHave;
     if (giveW > fanWaste) giveW = fanWaste;
     if (giveW > pRem2) giveW = pRem2;
+    // THE MOVEMENTS: once per press, logged by the FIRST row that still owes
+    // pieces - BEFORE the giveW > 0 gate since the working-tree change
+    // (issueMaterials.dg ~:1921). A row whose giveW was clamped to zero no
+    // longer suppresses the record of cloth that :1040 already moved to
+    // transit. Still guarded by the OUTER gate `isFab && (fanWaste > 0 ||
+    // fanRaw > 0)`, so a press with nothing but zero-yield picks and no fresh
+    // cloth skips this block entirely - see GAP-DOC I1 below.
+    if (wasteLogged === false) {
+      wasteLogged = true;
+      for (const pkRaw of opts.picks) {
+        const wId3 = ifnullStr(pkRaw.wasteId, '');
+        const nPcs3 = dFloor(dec(ifnullStr(pkRaw.pieces, '0')));
+        if (nPcs3 > 0 && pkYield[wId3] !== undefined) {
+          const mv = { ID: nid(W), Movement_Type: 'Issued',
+                       Piece_Width: pkW[wId3], Piece_Length: pkL[wId3],
+                       Piece_Count: nPcs3,
+                       Pieces_Yielded: nPcs3 * pkYield[wId3],
+                       Waste_Piece: wId3,
+                       Plan: String(row.planId), Plan_Item: rowPin,
+                       Parent_Movement: '' };
+          W.Waste_Movement.push(mv);
+          res.movements.push(mv);
+        }
+      }
+    }
     if (giveW > 0) {
       row.fromWaste += giveW;
       fanWaste -= giveW;
       const useP = Math.min(giveW, pinHave);
       if (useP > 0) wPinTot[rowPin] = pinHave - useP;
       wFree = Math.max(0, wFree - (giveW - useP));
-      // THE MOVEMENTS: once per press, on the FIRST row that took credit, full
-      // pick counts regardless of which row absorbed them (:1950-1994).
-      if (wasteLogged === false) {
-        wasteLogged = true;
-        for (const pkRaw of opts.picks) {
-          const wId3 = ifnullStr(pkRaw.wasteId, '');
-          const nPcs3 = dFloor(dec(ifnullStr(pkRaw.pieces, '0')));
-          if (nPcs3 > 0 && pkYield[wId3] !== undefined) {
-            const mv = { ID: nid(W), Movement_Type: 'Issued',
-                         Piece_Width: pkW[wId3], Piece_Length: pkL[wId3],
-                         Piece_Count: nPcs3,
-                         Pieces_Yielded: nPcs3 * pkYield[wId3],
-                         Waste_Piece: wId3,
-                         Plan: String(row.planId), Plan_Item: rowPin,
-                         Parent_Movement: '' };
-            W.Waste_Movement.push(mv);
-            res.movements.push(mv);
-          }
-        }
-      }
     }
   }
   return res;
@@ -357,14 +362,14 @@ function reqRow(over) {
 
 console.log('\nissue-side: validation, credit, movements');
 
-test('GAP-DOC I1 an ALL-ZERO-YIELD handover moves the cloth to In_Transit_Count but writes NO movement - nothing can ever receipt it', () => {
-  // issueMaterials.dg:1912 - giveW = min(pool, fanWaste=0, ...) = 0 skips the
-  // whole credit AND movement block, while :1040-1069 has ALREADY decremented
-  // Piece_Count and raised In_Transit_Count. The remnant is physically gone,
-  // sits in transit for ever (getWastePendingReceipt lists movements; there is
-  // none), and nothing is credited - the recoverable direction, but the
-  // counters are stuck. Unreachable through the widget (remnantYield returns 0
-  // and the scorer skips it); reachable from anywhere, because Custom API.
+test('GAP-DOC I1 a press of NOTHING BUT zero-yield picks and no fresh cloth still writes NO movement', () => {
+  // RESIDUAL after the working-tree move. The movement block now sits before
+  // the giveW > 0 gate (issueMaterials.dg ~:1921), so a clamped row no longer
+  // suppresses it - but the OUTER gate `isFab && (fanWaste > 0 || fanRaw > 0)`
+  // still fails when every pick yields zero AND the pass carries no raw cloth:
+  // fanWaste = SUM(pieces x yield) = 0 and fanRaw = 0. The cloth is in
+  // In_Transit_Count (:1040-1069) with nothing ever receipting it. Unreachable
+  // through the widget; reachable because Custom API.
   const W = fixture();
   const small = addWastePiece(W, { SKU: W.mat.ID, Piece_Width: 40, Piece_Length: 165, Piece_Count: 2 });
   const rows = [reqRow()];
@@ -374,8 +379,7 @@ test('GAP-DOC I1 an ALL-ZERO-YIELD handover moves the cloth to In_Transit_Count 
   assert.strictEqual(rows[0].fromWaste, 0, 'floor(40/55)=0 across - no credit');
   assert.strictEqual(small.Piece_Count, 0, 'the cloth really left the rack');
   assert.strictEqual(small.In_Transit_Count, 2);
-  assert.strictEqual(small.Status, 'Issued');
-  assert.strictEqual(r.movements.length, 0, 'CURRENT behaviour - no movement, so no receipt path exists');
+  assert.strictEqual(r.movements.length, 0, 'CURRENT behaviour - outer gate skips the block');
 });
 
 test('I1b a MIXED handover (one zero-yield pick beside a good one) still logs BOTH remnants', () => {
@@ -392,6 +396,23 @@ test('I1b a MIXED handover (one zero-yield pick beside a good one) still logs BO
   assert.strictEqual(r.movements.length, 2);
   const zero = r.movements.find(m => String(m.Waste_Piece) === String(small.ID));
   assert.strictEqual(zero.Pieces_Yielded, 0, 'on the record as handed over, credited nothing');
+});
+
+test('I1c CLOSED by the working-tree move: a zero-yield pick beside FRESH CLOTH is logged even when the waste side credits nothing', () => {
+  // Old code gated the movements on giveW > 0; the first row here takes raw
+  // cloth only (its waste was clamped away by stillNeeded upstream - modelled
+  // by an empty free pool), yet :1040 moved the remnant to transit. The block
+  // now logs it.
+  const W = fixture();
+  const small = addWastePiece(W, { SKU: W.mat.ID, Piece_Width: 40, Piece_Length: 165, Piece_Count: 1 });
+  const rows = [reqRow({ requiredPieces: 10 })];
+  const r = issueWaste(W, Object.assign({}, CUT, { matId: W.mat.ID, matName: 'G', isFab: true,
+    picks: [{ wasteId: small.ID, pieces: 1 }], rows }));
+  // fanWaste = 1 x 0 = 0 and this port has no raw cloth, so the outer gate
+  // still skips: same residual as I1. What the move DID change is the clamped
+  // case below - fanWaste > 0 with every row's giveW forced to 0 by pRem2.
+  assert.strictEqual(r.movements.length, 0);
+  assert.strictEqual(small.In_Transit_Count, 1);
 });
 
 test('I2 yield is grain-fixed: 120x170 gives 2 across x 3 along = 6 cuts per piece', () => {

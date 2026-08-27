@@ -16,7 +16,7 @@ string postInventoryQueue(string dryRun)
 		// MAIN WAREHOUSE, and only Write_Off uses it. A disputed quantity is the
 		// part of a handover that was never settled, so postTransferOrders never
 		// moved it - it is still here. See the write-off block in resolveDispute.
-		locWriteOff = "3955559000000212001";
+		locWriteOff = "3955559000000032097";
 		locFinished = "3955559000000227307";
 		maxAttempts = 5;
 		maxBatches = 6;
@@ -82,7 +82,7 @@ string postInventoryQueue(string dryRun)
 			}
 		}
 		stampTxt = zoho.currenttime.toString("yyyyMMddHHmmss");
-		for each  typeKey in {"Combined_Production","Write_Off"}
+		for each  typeKey in {"Consumption","Finished_Goods","Write_Off"}
 		{
 			reasonTxt = "Production Cycle";
 			accId = accConsumption;
@@ -95,15 +95,7 @@ string postInventoryQueue(string dryRun)
 			itemQty = Map();
 			rowIds = List();
 			badRows = 0;
-			pendingRows = Inventory_Post_Queue[ID == 0];
-			if(typeKey == "Combined_Production")
-			{
-				pendingRows = Inventory_Post_Queue[Post_Status == "Pending" && (Post_Type == "Consumption" || Post_Type == "Finished_Goods")];
-			}
-			else
-			{
-				pendingRows = Inventory_Post_Queue[Post_Status == "Pending" && Post_Type == typeKey];
-			}
+			pendingRows = Inventory_Post_Queue[Post_Status == "Pending" && Post_Type == typeKey];
 
 			for each  qRow in pendingRows
 			{

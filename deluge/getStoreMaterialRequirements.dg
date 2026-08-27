@@ -1,10 +1,64 @@
-string getStoreMaterialRequirements()
+string getStoreMaterialRequirements(string skipCountTxt)
 {
 	// Everything the store person is owed, grouped by supervisor, with fabric
 	// requirements already allocated against reusable offcuts.
 	//
-	// Contract is a BARE JSON ARRAY of supervisor blocks. The widget renders
-	// whatever is in it, so the error path below has to fit that shape too.
+	// CONTRACT CHANGED: was a bare JSON array, now
+	// {"plans":[...supervisor blocks, same shape as before...],"plansConsumed":N}.
+	// A PLAN-COUNT page size (PAGE_SIZE=20, then 10) was tried first and
+	// proved wrong, not just imperfect: statement cost tracks
+	// Material_Requirement ROW count, and row count per plan is arbitrary
+	// (however many items x however many BOM lines), so a fixed number of
+	// PLANS is not a fixed amount of WORK. Two pages of 10 plans each can
+	// differ by 10x in actual cost depending on which plans land on which
+	// page - proven here by Execute: page 1 succeeded at pageSize=20, page 2
+	// (same size) failed, twice, even after fixing two separate unbounded
+	// fetches (Waste_Master, Fabric_Piece) that turned out to be the bigger
+	// cost. Shrinking pageSize further would only ever be a coin flip that
+	// happens to work for THIS dataset and fails again the moment order mix
+	// changes - not a fix.
+	//
+	// So the boundary moved to what actually drives cost:
+	// Material_Requirement ROW COUNT, walked and capped by ROW_BUDGET below.
+	// Plans are consumed ONE AT A TIME (in small fetch batches, so the
+	// SCANNING itself stays bounded) until the running row total would
+	// exceed the budget, and the call stops there - however many or few
+	// plans that turned out to be. plansConsumed tells the caller exactly
+	// how many top-priority plans this call walked, so the NEXT call's
+	// skipCountTxt is skipCountTxt + plansConsumed - not a page number,
+	// because pages are no longer a fixed size and a page number cannot
+	// describe where a variable-size walk stopped.
+	//
+	// ROW_BUDGET = 150. Not derived from a formula - chosen with real margin
+	// under the volumes that were tested to fail (a 20-plan page could
+	// exceed several hundred rows once waste/lot/material passes are
+	// included; 150 keeps this call's own aggregation loop, plus everything
+	// downstream that scales with neededMats/lotMats, comfortably inside the
+	// statement ceiling proven safe by the pageSize=10 test). If a single
+	// PLAN alone ever carries more than ROW_BUDGET requirement rows, that one
+	// plan is still consumed whole (never split mid-plan - a partial
+	// aggregation would double-count on the next call) and plansConsumed=1
+	// for that call; whether ROW_BUDGET holds against a plan that size has
+	// not been tested and would need widening if it doesn't.
+	//
+	// skipCountTxt arrives as a STRING from the Custom API, and empty/invalid
+	// must default to 0 (start from the top), not throw. The signature and
+	// contract both changed here, so the Custom API config in Creator needs
+	// its argument name AND its callers updated to match, per CLAUDE.md.
+	rowBudget = 150;
+	planFetchBatch = 5;
+	skipCount = 0;
+	scStr = ifnull(skipCountTxt,"").toString().trim();
+	if(scStr != "")
+	{
+		skipCount = scStr.toLong();
+		if(skipCount < 0)
+		{
+			skipCount = 0;
+		}
+	}
+	plansConsumed = 0;
+	rowCountSoFar = 0;
 	resultJson = "[]";
 
 	try
@@ -57,20 +111,75 @@ string getStoreMaterialRequirements()
 	// In Progress for the same reason: one item can be on the cutting table while
 	// another is still waiting for cloth. Fully-issued rows render as read-only
 	// receipts, so a plan appearing here does not mean it is asking for anything.
-	pendingPlans = Production_Planning[Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress"] sort by Priority_Key;
+	// SLICED TO ONE PAGE AT THE QUERY ITSELF, same sorted order as before - the
+	// priority ordering (highest rank, oldest first) is unchanged, only how
+	// much of it any single call has to process.
+	//
+	// "range from X to Y" MUST sit on the SAME query expression as the fetch,
+	// exactly like allPlansDesc does in createProductionPlans - splitting it
+	// into "fetch everything, then range over the in-memory result" as an
+	// earlier draft of this change did defeats the entire point: the
+	// expensive part (119 rows) would already have happened before range even
+	// runs.
+	//
+	// "range from X to Y" WITH VARIABLES - CONFIRMED WORKING against this org
+	// by a throwaway test function (returned exactly the requested slice
+	// size).
+	//
+	// ONE FETCH, up to SCAN_CAP=200 plans past skipCount - not the whole
+	// remaining queue, and not the earlier batch-of-5-at-a-time design
+	// (which needed a literal numeric-range list to drive the outer loop;
+	// Deluge's List() takes no inline arguments, so that failed at Execute -
+	// "Not able to find 'List' function" - and rather than guess at a second
+	// unverified range/counter syntax, this collapses to the single query
+	// shape already proven safe elsewhere in this file). SCAN_CAP bounds the
+	// FETCH; rowBudget below (via the "if budgetSpent" guard) bounds how
+	// much of what was fetched is actually WALKED into aggregation - so a
+	// queue deeper than 200 is still safe, just scanned in more than one
+	// call, exactly like scanLimit does in createProductionPlans.
+	scanCap = 200;
+	planBatch = Production_Planning[Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress"] sort by Priority_Key range from (skipCount + 1) to (skipCount + scanCap);
 
+	budgetSpent = false;
 
-	for each  plan in pendingPlans
+	for each  plan in planBatch
 	{
-		// Hoisted out of the requirement loop - one fetch per plan, not per row.
-		soNo = "";
-		for each  so in Sales_Order[ID == plan.Sales_Order]
+		if(budgetSpent == false)
 		{
-			soNo = so.Sales_Order;
-		}
+			planRows = Material_Requirement[Plan == plan.ID];
+			thisPlanRowCount = planRows.count();
 
-		for each  mr in Material_Requirement[Plan == plan.ID]
-		{
+			// A plan is NEVER split mid-aggregation - partially aggregating
+			// one plan's rows and picking up the rest on the next call would
+			// double-count that plan the moment the next call re-fetches it.
+			// So the budget check happens BEFORE this plan's rows are
+			// touched, and if it already has 0 rows counted so far, this
+			// plan is consumed whole regardless of its own size (see the
+			// ROW_BUDGET note above the top of this function for what that
+			// means if one plan alone exceeds the budget).
+			if(rowCountSoFar > 0 && (rowCountSoFar + thisPlanRowCount) > rowBudget)
+			{
+				budgetSpent = true;
+			}
+			else
+			{
+				rowCountSoFar = rowCountSoFar + thisPlanRowCount;
+				plansConsumed = plansConsumed + 1;
+
+				// UNVERIFIED AGAINST THIS ORG - NEEDS A REAL EXECUTE, NOT
+				// JUST A READ. Sales_Order is a Lookup field on
+				// Production_Planning, and Deluge lookup dot-notation is
+				// documented to read a linked record's field directly
+				// (Lookup.Field) without a separate query - see
+				// https://www.zoho.com/deluge/help/composite-fields-usage.html.
+				// If Execute shows plan.Sales_Order.Sales_Order does not
+				// resolve (blank, or throws), revert to a for-each
+				// Sales_Order[ID == plan.Sales_Order] form - do not guess
+				// further in code, test it directly.
+				soNo = ifnull(plan.Sales_Order.Sales_Order,"").toString();
+
+				for each  mr in planRows
+				{
 			supId = mr.Assigned_To;
 			matId = mr.Material;
 			if(supId != null && matId != null)
@@ -234,8 +343,12 @@ string getStoreMaterialRequirements()
 
 				agg.put(key,cur);
 			}
+			}
+			// end of the mr loop for this plan
+			}
 		}
 	}
+	// end of the plan walk
 
 
 	//------------------------------------------------------------------------
@@ -273,65 +386,91 @@ string getStoreMaterialRequirements()
 	wasteLotById = Map();
 	wasteCartonById = Map();
 
-	availableWaste = Waste_Master[Status == "Available"] sort by Added_Time;
-
-
-	for each  wp in availableWaste
+	// ONE INDEXED QUERY PER MATERIAL IN neededMats, never the whole form.
+	//
+	// This used to be Waste_Master[Status == "Available"] with NO material
+	// filter at all - every available offcut in the whole store, on every
+	// single call, regardless of paging. Grouping the RESULT by SKU (below)
+	// only controlled how the allocator read it; the FETCH itself scanned
+	// unbounded, and paging pendingPlans never touched it because it does not
+	// depend on plan count. Confirmed as the real cost by Execute: page 1
+	// (20 plans) succeeded, page 2 (20 plans, same size) failed at this exact
+	// block - the aggregation loop above is the same shape either way, so a
+	// fixed, unbounded cost sitting right after it is what tips a marginal
+	// page over the limit.
+	//
+	// Waste_Master.SKU is a Lookup holding a Raw_Material id, same as
+	// Material_Requirement.Material - confirmed against
+	// getWastePendingReceipt.dg and getSupervisorWasteReturns.dg, which both
+	// do Raw_Material[ID == wp.SKU]. So it can be filtered per material
+	// exactly like Raw_Material_Lot[Material == lrMat.toLong()] already is
+	// further down in this same function - one indexed query per material
+	// actually in play (neededMats, built by the aggregation loop above,
+	// bounded by what is on THIS page) instead of one unfiltered scan of
+	// every offcut ever declared.
+	for each  wNmId in neededMats
 	{
-		skuId = ifnull(wp.SKU,"").toString();
+		wMatTxt = wNmId.toString().trim();
 
-		// Creator fields that were never written are EMPTY, not null, and
-		// toDecimal() throws on empty - normalise to string first.
-		pwStr = ifnull(wp.Piece_Width,"0").toString().trim();
-		if(pwStr == "")
+		availableWaste = Waste_Master[Status == "Available" && SKU == wMatTxt.toLong()] sort by Added_Time;
+
+		for each  wp in availableWaste
 		{
-			pwStr = "0";
-		}
-		plStr = ifnull(wp.Piece_Length,"0").toString().trim();
-		if(plStr == "")
-		{
-			plStr = "0";
-		}
-		pcStr = ifnull(wp.Piece_Count,"0").toString().trim();
-		if(pcStr == "")
-		{
-			pcStr = "0";
-		}
+			skuId = wMatTxt;
 
-		pw = pwStr.toDecimal();
-		pl = plStr.toDecimal();
-		pc = pcStr.toDecimal().toLong();
-
-		// A zero-dimension or zero-count row is not stock. It would make the
-		// scoring divide by zero, so it never gets into the list.
-		if(skuId != "" && pw > 0 && pl > 0 && pc > 0)
-		{
-			wRow = Map();
-			wRow.put("wasteId",wp.ID + "");
-			wRow.put("sku",skuId);
-			wRow.put("width",pw);
-			wRow.put("length",pl);
-			// The count as it stands on the rack. Nothing here spends it down any
-			// more - the widget needs the whole figure to do its own, lot-aware
-			// allocation, because a remnant carries the tone of the lot it was
-			// cut from and which pieces are usable therefore depends on which lot
-			// the fresh cloth comes off.
-			wRow.put("count",pc);
-
-			// Which lot it was cut from and which carton it is sitting in. Both
-			// are what the store person needs to WALK TO IT - the allocator names
-			// a remnant, and without these he is hunting a rack for it.
-			wasteLotById.put(wp.ID + "",ifnull(wp.Lot,"").toString().trim());
-			wasteCartonById.put(wp.ID + "",ifnull(wp.Carton_Number,"").toString().trim().replaceAll("\"","'"));
-
-			skuList = wasteBySku.get(skuId);
-			if(skuList == null)
+			// Creator fields that were never written are EMPTY, not null, and
+			// toDecimal() throws on empty - normalise to string first.
+			pwStr = ifnull(wp.Piece_Width,"0").toString().trim();
+			if(pwStr == "")
 			{
-				skuList = List();
+				pwStr = "0";
 			}
-			skuList.add(wRow);
-			wasteBySku.put(skuId,skuList);
+			plStr = ifnull(wp.Piece_Length,"0").toString().trim();
+			if(plStr == "")
+			{
+				plStr = "0";
+			}
+			pcStr = ifnull(wp.Piece_Count,"0").toString().trim();
+			if(pcStr == "")
+			{
+				pcStr = "0";
+			}
 
+			pw = pwStr.toDecimal();
+			pl = plStr.toDecimal();
+			pc = pcStr.toDecimal().toLong();
+
+			// A zero-dimension or zero-count row is not stock. It would make the
+			// scoring divide by zero, so it never gets into the list.
+			if(pw > 0 && pl > 0 && pc > 0)
+			{
+				wRow = Map();
+				wRow.put("wasteId",wp.ID + "");
+				wRow.put("sku",skuId);
+				wRow.put("width",pw);
+				wRow.put("length",pl);
+				// The count as it stands on the rack. Nothing here spends it down any
+				// more - the widget needs the whole figure to do its own, lot-aware
+				// allocation, because a remnant carries the tone of the lot it was
+				// cut from and which pieces are usable therefore depends on which lot
+				// the fresh cloth comes off.
+				wRow.put("count",pc);
+
+				// Which lot it was cut from and which carton it is sitting in. Both
+				// are what the store person needs to WALK TO IT - the allocator names
+				// a remnant, and without these he is hunting a rack for it.
+				wasteLotById.put(wp.ID + "",ifnull(wp.Lot,"").toString().trim());
+				wasteCartonById.put(wp.ID + "",ifnull(wp.Carton_Number,"").toString().trim().replaceAll("\"","'"));
+
+				skuList = wasteBySku.get(skuId);
+				if(skuList == null)
+				{
+					skuList = List();
+				}
+				skuList.add(wRow);
+				wasteBySku.put(skuId,skuList);
+
+			}
 		}
 	}
 
@@ -384,64 +523,20 @@ string getStoreMaterialRequirements()
 	// Added_Time order, so a tie in the allocator's scoring falls to the oldest
 	// piece and printed cloth does not age on the rack.
 	//------------------------------------------------------------------------
-	pieceJsonByLot = Map();
-	pieceMetersByLot = Map();
-
-	// sort by on its OWN assignment, never inline in the for each header.
-	availablePieces = Fabric_Piece[Piece_Status == "Available"] sort by Added_Time;
-
-	for each  fp in availablePieces
-	{
-		fpLot = ifnull(fp.Lot,"").toString().trim();
-
-		// Creator fields never written are EMPTY, not null, and toDecimal()
-		// throws on empty - normalise to string, test, then convert.
-		fpcS = ifnull(fp.Piece_Count,"0").toString().trim();
-		if(fpcS == "")
-		{
-			fpcS = "0";
-		}
-		fplS = ifnull(fp.Piece_Length_Cm,"0").toString().trim();
-		if(fplS == "")
-		{
-			fplS = "0";
-		}
-		fpwS = ifnull(fp.Piece_Width_Cm,"0").toString().trim();
-		if(fpwS == "")
-		{
-			fpwS = "0";
-		}
-
-		// GREIGE PIECES ARE SENT, NOT DROPPED, and the allocator refuses them.
-		// Same rule as an unwashed roll: greige never counts as available today.
-		// Dropping them would make a lot holding nothing but unwashed cloth read
-		// as empty, which is the "nothing on the rack" lie the blocked-lot note
-		// above exists to prevent.
-		fpSt = ifnull(fp.State,"").toString().trim();
-		if(fpSt == "")
-		{
-			fpSt = "Wash";
-		}
-
-		if(fpLot != "" && fpcS.toDecimal() > 0 && fplS.toDecimal() > 0)
-		{
-			fpFrag = "{\"pieceId\":\"" + fp.ID + "\",\"lengthCm\":" + fplS.toDecimal() + ",\"widthCm\":" + fpwS.toDecimal() + ",\"count\":" + fpcS.toDecimal() + ",\"state\":\"" + fpSt + "\",\"carton\":\"" + ifnull(fp.Carton_Number,"").toString().trim().replaceAll("\"","'") + "\"}";
-
-			prevPieces = ifnull(pieceJsonByLot.get(fpLot),"").toString();
-			if(prevPieces != "")
-			{
-				prevPieces = prevPieces + ",";
-			}
-			pieceJsonByLot.put(fpLot,prevPieces + fpFrag);
-			
-			if(fpSt == "Wash")
-			{
-				pieceMtr = (fplS.toDecimal() / 100) * fpcS.toDecimal();
-				curMtr = ifnull(pieceMetersByLot.get(fpLot), 0.0);
-				pieceMetersByLot.put(fpLot, curMtr + pieceMtr);
-			}
-		}
-	}
+	// UNBOUNDED FETCH REMOVED. This used to be
+	// Fabric_Piece[Piece_Status == "Available"] with NO lot filter - every
+	// printed-piece row in the whole store, on every call, grouped by Lot
+	// only AFTER the fetch. Same bug shape as the Waste_Master fetch above,
+	// and it could not be fixed the same way (loop over neededMats and
+	// filter per material) because Fabric_Piece is keyed by LOT, and lot ids
+	// are not known until the per-material lot loop below runs.
+	//
+	// So it moves there instead, and lazily: pieceMetersByLot / pieceJsonByLot
+	// (below) are only ever read when a lot's Form is "Pieces" - most lots are
+	// Roll and never need this at all. Querying Fabric_Piece[Lot == lotR.ID]
+	// right at that read, one lot at a time, costs a query only for the lots
+	// that are actually Pieces-form AND actually in play on this page -
+	// bounded twice over instead of not at all.
 
 	//------------------------------------------------------------------------
 	// THE MATERIAL RECORD ITSELF, ONCE PER MATERIAL IN PLAY.
@@ -661,9 +756,64 @@ string getStoreMaterialRequirements()
 		// A Pieces lot holds no continuous cloth, its usable stock is exactly
 		// the sum of the pieces on the rack. The Creator rollup misses scripted
 		// additions, so we sum them live from the pieces we just fetched.
+		//
+		// QUERIED HERE, ONE LOT AT A TIME, ONLY FOR Pieces-FORM LOTS - see the
+		// note above the lot loop for why this moved from an unbounded
+		// upfront Fabric_Piece fetch. lrPieces is built in the SAME pass as
+		// lrWash so a Pieces lot costs one Fabric_Piece query, not two.
+		lrPieces = "";
 		if(lrForm == "Pieces")
 		{
-			lrWash = ifnull(pieceMetersByLot.get(lotR.ID + ""), 0.0);
+			lrPieceMtr = 0.0;
+			for each  fp in Fabric_Piece[Lot == lotR.ID && Piece_Status == "Available"] sort by Added_Time
+			{
+				// Creator fields never written are EMPTY, not null, and
+				// toDecimal() throws on empty - normalise to string, test,
+				// then convert.
+				fpcS = ifnull(fp.Piece_Count,"0").toString().trim();
+				if(fpcS == "")
+				{
+					fpcS = "0";
+				}
+				fplS = ifnull(fp.Piece_Length_Cm,"0").toString().trim();
+				if(fplS == "")
+				{
+					fplS = "0";
+				}
+				fpwS = ifnull(fp.Piece_Width_Cm,"0").toString().trim();
+				if(fpwS == "")
+				{
+					fpwS = "0";
+				}
+
+				// GREIGE PIECES ARE SENT, NOT DROPPED, and the allocator
+				// refuses them. Same rule as an unwashed roll: greige never
+				// counts as available today. Dropping them would make a lot
+				// holding nothing but unwashed cloth read as empty, which is
+				// the "nothing on the rack" lie the blocked-lot note above
+				// exists to prevent.
+				fpSt = ifnull(fp.State,"").toString().trim();
+				if(fpSt == "")
+				{
+					fpSt = "Wash";
+				}
+
+				if(fpcS.toDecimal() > 0 && fplS.toDecimal() > 0)
+				{
+					fpFrag = "{\"pieceId\":\"" + fp.ID + "\",\"lengthCm\":" + fplS.toDecimal() + ",\"widthCm\":" + fpwS.toDecimal() + ",\"count\":" + fpcS.toDecimal() + ",\"state\":\"" + fpSt + "\",\"carton\":\"" + ifnull(fp.Carton_Number,"").toString().trim().replaceAll("\"","'") + "\"}";
+					if(lrPieces != "")
+					{
+						lrPieces = lrPieces + ",";
+					}
+					lrPieces = lrPieces + fpFrag;
+
+					if(fpSt == "Wash")
+					{
+						lrPieceMtr = lrPieceMtr + ((fplS.toDecimal() / 100) * fpcS.toDecimal());
+					}
+				}
+			}
+			lrWash = lrPieceMtr;
 		}
 
 		// An empty lot is not a choice. It stays on the form for its history
@@ -677,14 +827,6 @@ string getStoreMaterialRequirements()
 			// unwash is context, exactly as unwashedStock is at material level.
 			lrNum = ifnull(lotR.Lot_Number,"").toString().replaceAll("\"","'");
 			lrLab = ifnull(lotR.Lot_Label,"").toString().replaceAll("\"","'");
-
-			// A Roll lot sends an empty array, so the widget has one shape to
-			// read and the piece path simply never has anything to pick.
-			lrPieces = "";
-			if(lrForm == "Pieces")
-			{
-				lrPieces = ifnull(pieceJsonByLot.get(lotR.ID + ""),"").toString();
-			}
 
 			// Ids as strings - an 18-digit id breaks JSON.parse on the widget.
 			lotFrag = "{\"lotId\":\"" + lotR.ID + "\",\"lotNumber\":\"" + lrNum + "\",\"label\":\"" + lrLab + "\",\"blocked\":" + lrBlocked + ",\"wash\":" + lrWash + ",\"unwash\":" + lrUnwash + ",\"inWash\":" + lriS.toDecimal() + ",\"form\":\"" + lrForm + "\",\"pieces\":[" + lrPieces + "]}";
@@ -1180,14 +1322,23 @@ string getStoreMaterialRequirements()
 	}
 	resultJson = resultJson + "]";
 
+	// WRAPPED, NOT A BARE ARRAY ANY MORE. plansConsumed is the whole reason
+	// for the wrapper: pages are now variable-length (bounded by rowBudget,
+	// not by a fixed plan count), so the caller cannot compute where this
+	// call stopped on its own - it has to be told. The next call's
+	// skipCountTxt is this call's skipCount + plansConsumed.
+	resultJson = "{\"plans\":" + resultJson + ",\"plansConsumed\":" + plansConsumed + "}";
+
 	}
 	catch (e)
 	{
 		info "DELUGE ERROR: " + e.toString();
 		// Creator reports every failure to a widget as the useless "code 9430",
 		// so the real message is carried out in the supervisor name - the only
-		// text channel this API's array contract has.
-		return "[{\"supervisorId\":\"0\",\"supervisorName\":\"ERR: " + e.toString().replaceAll("\"","'") + "\",\"materials\":[]}]";
+		// text channel this API's contract has. plansConsumed:0 on error, so
+		// the widget's page loop stops rather than retrying the same failing
+		// call for ever.
+		return "{\"plans\":[{\"supervisorId\":\"0\",\"supervisorName\":\"ERR: " + e.toString().replaceAll("\"","'") + "\",\"materials\":[]}],\"plansConsumed\":0}";
 	}
 
 	return resultJson;

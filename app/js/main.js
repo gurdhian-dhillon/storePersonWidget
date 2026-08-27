@@ -2447,6 +2447,54 @@ function issueForSupervisor(supIdx) {
 
 // ---- Load ----
 
+// getStoreMaterialRequirements is now PAGED, and paged by MATERIAL
+// REQUIREMENT ROW COUNT, not by plan count. A fixed plan-count page (tried
+// first, at 30, then 20, then 10) was proven wrong by Execute, not merely
+// suboptimal: statement cost tracks Material_Requirement rows, and rows per
+// plan are arbitrary, so a fixed number of PLANS is not a fixed amount of
+// WORK - two same-size pages differed by roughly 10x in real cost depending
+// on which plans landed where, and pages that had worked at one size failed
+// again at that same size once the order mix changed.
+//
+// So the function now walks plans one at a time (in small internal fetch
+// batches) and stops itself once accumulated requirement rows cross its own
+// budget - see getStoreMaterialRequirements.dg's header comment for the
+// full reasoning. Because pages are variable-length, this widget can no
+// longer compute "page N" on its own; the function returns
+// {"plans":[...],"plansConsumed":N} and the cursor for the next call is
+// simply skipCount + plansConsumed from the call just made.
+// plansConsumed === 0 is the "no more pages" signal.
+//
+// The store person still needs to see EVERYONE they're owed at once - there
+// is no supervisor picker on this screen and, per how this org actually
+// assigns orders, one supervisor can hold the whole queue, so filtering by
+// supervisor would not even bound the problem. So pages are fetched in the
+// background and MERGED before render() ever runs, and the screen looks
+// exactly as it did before paging existed - just assembled from several
+// cheap calls instead of one that no longer completes.
+//
+// Merging is by supervisorId, not concatenation: two pages can both carry a
+// block for the same supervisor (their plans just landed on different
+// pages), and concatenating would draw two cards for one person and silently
+// drop half his materials off whichever card the allocator runs on first.
+function mergeRequirementPages(target, page) {
+    for (var i = 0; i < page.length; i++) {
+        var block = page[i];
+        var existing = null;
+        for (var j = 0; j < target.length; j++) {
+            if (target[j].supervisorId === block.supervisorId) {
+                existing = target[j];
+                break;
+            }
+        }
+        if (existing) {
+            existing.materials = existing.materials.concat(block.materials);
+        } else {
+            target.push(block);
+        }
+    }
+}
+
 function loadRequirements() {
     var content = document.getElementById('dynamic-content');
     var emptyState = document.getElementById('empty-state');
@@ -2458,18 +2506,38 @@ function loadRequirements() {
         '<div class="skeleton-line"></div><div class="skeleton-line"></div>' +
         '<div class="skeleton-line w-70"></div></div>';
 
-    ZOHO.CREATOR.DATA.invokeCustomApi({
-        api_name: 'getStoreMaterialRequirements',
-        http_method: 'GET'
-    }).then(function (response) {
-        console.log('raw response:', response);
+    var merged = [];
+    var MAX_CALLS = 40; // safety cap - real stop condition is plansConsumed===0; this only guards against an unexpected server-side bug looping forever
+
+    function fetchPage(skipCount, callsSoFar) {
+        if (callsSoFar >= MAX_CALLS) {
+            console.error('loadRequirements: hit MAX_CALLS safety cap, stopping - server may not be advancing plansConsumed correctly');
+            return;
+        }
+        return ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'getStoreMaterialRequirements',
+            http_method: 'POST',
+            payload: {
+                skipCountTxt: String(skipCount)
+            }
+        }).then(function (response) {
+            var parsed = JSON.parse(response.result);
+            mergeRequirementPages(merged, parsed.plans || []);
+
+            var consumed = parsed.plansConsumed || 0;
+            if (consumed > 0) {
+                return fetchPage(skipCount + consumed, callsSoFar + 1);
+            }
+        });
+    }
+
+    fetchPage(0, 0).then(function () {
+        console.log('merged requirements:', merged);
         refreshBtn.disabled = false;
         try {
-            var parsed = JSON.parse(response.result);
-            console.log('parsed:', parsed);
-            render(parsed);
+            render(merged);
         } catch (e) {
-            console.error('JSON.parse failed:', e, response.result);
+            console.error('render failed:', e, merged);
             content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Could not read requirements</h2><p>Check the browser console for details.</p></div>';
         }
     }).catch(function (err) {

@@ -76,16 +76,15 @@ string createProductionPlans()
 	//------------------------------------------------------------------------
 	// A CAPPED BATCH, and the cap is the whole point of this block.
 	//
-	// This drained the ENTIRE queue in one execution. Per order the run does
-	// roughly 115 record operations - one Production_Planning, ~5 Plan_Item,
-	// ~30 Material_Requirement, and every insert followed by a re-query
-	// because a null lookup inside an insert block throws. So a backlog of 500
-	// orders, which is one Shopify import or one weekend of a dead scheduler,
-	// is around 57,000 operations in a single script.
-	//
-	// The statement-execution limit is NOT catchable. It kills the run
-	// outright, so there is no error card, no summary mail and no log line -
-	// the failure is indistinguishable from "the scheduler never fired".
+	// PROVEN, NOT THEORETICAL: an uncapped run against 100 orders x 5 items
+	// died with "Number of statement execution limit exceed" at the
+	// Material_Requirement insert line. The statement-execution limit is NOT
+	// catchable - it killed the run outright, no error card, no summary mail,
+	// no log line past whatever had already been appended to logLines in
+	// memory (which is also lost, since info logLines never ran). So the
+	// exact stopping point is invisible from inside the function; only
+	// Production_Planning/Plan_Item counts in Creator after the fact show how
+	// far it got.
 	//
 	// CAPPING IS SAFE BECAUSE THE RESUME PATH ALREADY EXISTS. An order that
 	// already has a plan is detected below and moved out of Pending, so the
@@ -537,6 +536,11 @@ string createProductionPlans()
 			for each  piMap2 in planItems
 			{
 				lineNo = lineNo + 1;
+				// BOM goes straight into the insert now. An item with no BOM,
+				// or more than one, rejects the WHOLE order earlier (noBomTxt /
+				// multiBomTxt above) and never reaches here - so piMap2.get("bom")
+				// is guaranteed non-null at this point, and the requery this
+				// used to need to set it afterwards is gone.
 				newItemId = insert into Plan_Item
 				[
 					Plan=planRec.ID
@@ -546,17 +550,9 @@ string createProductionPlans()
 					Qty_Produced=0
 					Item_Status="Awaiting_Material"
 					Line_No=lineNo
+					BOM=piMap2.get("bom")
 					Added_User=zoho.loginuser
 				];
-				// BOM is a lookup and an item may have none - a null cannot go
-				// in the insert block, so it is set afterwards when present.
-				if(piMap2.get("bom") != null)
-				{
-					for each  pit in Plan_Item[ID == newItemId]
-					{
-						pit.BOM=piMap2.get("bom");
-					}
-				}
 				matsList = piMap2.get("mats").toString().toJSONList();
 				for each  mRaw in matsList
 				{
@@ -566,6 +562,14 @@ string createProductionPlans()
 					// at plan time because waste stock moves between now and
 					// issue, so any split decided here would be stale by the
 					// time the store person acts.
+					// Material and Assigned_To go straight into the insert now -
+					// both are guaranteed non-null here (mm.get("mat") comes from
+					// buildItemRequirements off a resolved BOM row, assignedEmpId
+					// is guaranteed by the reject-on-missing-assignment check
+					// above), so the requery this used to need is gone. That was
+					// one extra query per Material_Requirement row - ~30 per
+					// order - and was the single biggest contributor to the
+					// statement count that hit the execution limit at 100 orders.
 					newReqId = insert into Material_Requirement
 					[
 						Plan=planRec.ID
@@ -581,16 +585,10 @@ string createProductionPlans()
 						Required_Pieces=mm.get("pcs")
 						Pieces_From_Waste=0
 						Pieces_From_Raw=0
+						Material=mm.get("mat").toString().toLong()
+						Assigned_To=assignedEmpId
 						Added_User=zoho.loginuser
 					];
-					// Lookups set after the insert - assignedEmpId is guaranteed
-					// non-null by the skip above, but Material is safer this way
-					// and it keeps both lookups in one place.
-					for each  mrq in Material_Requirement[ID == newReqId]
-					{
-						mrq.Material=mm.get("mat").toString().toLong();
-						mrq.Assigned_To=assignedEmpId;
-					}
 				}
 			}
 		}

@@ -1,0 +1,319 @@
+string sendProductionPlanSummary()
+{
+	// Called by the Batch Workflow's success action.
+	// We read Sales_Order[Needs_Plan_Summary == true] to see exactly what happened
+	// during this batch execution, then clear the flag.
+	
+	notifyTo = "gurdhian.helios@gmail.com";
+	pushNotifyTo = "livelinenstore@gmail.com";
+	pushReportLink = "Production_Planning_Report";
+
+	mFont = "-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif";
+	mTh = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:left;font-weight:600";
+	mThR = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:right;font-weight:600";
+	mTd = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a";
+	mTdR = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a;text-align:right;font-weight:600";
+	mTdBad = "padding:10px 12px;border-bottom:1px solid #fee2e2;font-size:13px;color:#991b1b";
+
+	summary = "";
+
+	try
+	{
+		createdList = list();
+		failedList = list();
+		supervisorList = list();
+		storeList = list();
+		
+		createdCount = 0;
+		failedCount = 0;
+		skippedCount = 0;
+		firstCreatedPlanId = "";
+		supervisorPushList = list();
+
+		for each soRec in Sales_Order[Needs_Plan_Summary == true]
+		{
+			outcome = ifnull(soRec.Batch_Run_Outcome,"").toString();
+			soNoTxt = ifnull(soRec.Sales_Order,"").toString();
+
+			if (outcome == "Rejected")
+			{
+				failedCount = failedCount + 1;
+				reasonTxt = ifnull(soRec.Plan_Reject_Reason,"").toString().replaceAll("<","&lt;");
+				failedList.add("<tr><td style='" + mTd + ";white-space:nowrap'><b>" + soNoTxt + "</b></td><td style='" + mTdBad + "'>" + reasonTxt + "</td></tr>");
+			}
+			else if (outcome == "Skipped")
+			{
+				skippedCount = skippedCount + 1;
+			}
+			else if (outcome == "Created")
+			{
+				createdCount = createdCount + 1;
+				// Fetch the latest plan for this order
+				for each planRec in Production_Planning[Sales_Order == soRec.ID] sort by Added_Time desc range from 1 to 1
+				{
+					if(firstCreatedPlanId == "")
+					{
+						firstCreatedPlanId = planRec.ID.toString();
+					}
+
+					totalQty = 0;
+					for each itRow in soRec.Item_Table
+					{
+						totalQty = totalQty + ifnull(itRow.Quantity,0);
+					}
+
+					supName = "";
+					for each empN in Employee[ID == planRec.Assigned_To]
+					{
+						supName = ifnull(empN.Employee_Name,"").toString();
+					}
+					
+					matLineCount = Material_Requirement[Plan == planRec.ID].count();
+
+					planNo = ifnull(planRec.Plan_No,"").toString();
+					createdList.add("<tr><td style='" + mTd + ";white-space:nowrap'><b style='color:#2563eb'>" + planNo + "</b></td><td style='" + mTd + ";white-space:nowrap'>" + soNoTxt + "</td><td style='" + mTd + "'>" + supName.replaceAll("\"","'") + "</td></tr>");
+					
+					supervisorList.add("<tr><td style='" + mTd + ";white-space:nowrap'><b>" + soNoTxt + "</b></td><td style='" + mTdR + "'>" + totalQty + "</td></tr>");
+					storeList.add("<tr><td style='" + mTd + "'><b>" + supName.replaceAll("\"","'") + "</b></td><td style='" + mTdR + "'>" + matLineCount + " materials</td></tr>");
+
+					supPush = Map();
+					supPush.put("supId",ifnull(planRec.Assigned_To,"").toString());
+					supPush.put("supName",supName);
+					supPush.put("planId",planRec.ID.toString());
+					supPush.put("orderNo",soNoTxt);
+					supPush.put("pieces",totalQty);
+					supervisorPushList.add(supPush);
+				}
+			}
+		}
+
+		mailNote = "not sent - nothing created and nothing blocked";
+		
+		if(createdCount > 0 || failedCount > 0)
+		{
+			planWord = "plans";
+			if(createdCount == 1)
+			{
+				planWord = "plan";
+			}
+			orderWord = "orders";
+			if(failedCount == 1)
+			{
+				orderWord = "order";
+			}
+
+			mailBody = "<div style='background:#e9eef4;padding:24px 12px;font-family:" + mFont + "'>";
+			mailBody = mailBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0'><tr><td align='center'>";
+			mailBody = mailBody + "<table role='presentation' width='640' cellpadding='0' cellspacing='0' border='0' style='width:640px;max-width:100%;background:#ffffff;border:1px solid #dbe3ec;border-radius:10px'>";
+
+			mailBody = mailBody + "<tr><td style='background:#2563eb;padding:18px 24px;border-radius:10px 10px 0 0'>";
+			mailBody = mailBody + "<div style='font-size:17px;font-weight:700;color:#ffffff'>Production Planning</div>";
+			mailBody = mailBody + "<div style='font-size:12px;color:#c7dbfe;padding-top:3px'>" + zoho.currentdate.toString("dd MMM yyyy") + " &middot; " + zoho.currenttime.toString("HH:mm") + "</div>";
+			mailBody = mailBody + "</td></tr>";
+
+			failInk = "#94a3b8";
+			failBg = "#f8fafc";
+			if(failedCount > 0)
+			{
+				failInk = "#dc2626";
+				failBg = "#fef2f2";
+			}
+
+			mailBody = mailBody + "<tr><td style='padding:20px 24px 4px 24px'>";
+			mailBody = mailBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0'><tr>";
+			mailBody = mailBody + "<td width='50%' style='background:#f0f7ff;border:1px solid #dbeafe;border-radius:8px;padding:14px 16px'>";
+			mailBody = mailBody + "<div style='font-size:28px;font-weight:700;color:#2563eb;line-height:1.1'>" + createdCount + "</div>";
+			mailBody = mailBody + "<div style='font-size:12px;color:#64748b;padding-top:4px'>Plans created this run</div>";
+			mailBody = mailBody + "</td><td width='12'>&nbsp;</td>";
+			mailBody = mailBody + "<td width='50%' style='background:" + failBg + ";border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px'>";
+			mailBody = mailBody + "<div style='font-size:28px;font-weight:700;color:" + failInk + ";line-height:1.1'>" + failedCount + "</div>";
+			mailBody = mailBody + "<div style='font-size:12px;color:#64748b;padding-top:4px'>Orders blocked this run</div>";
+			mailBody = mailBody + "</td></tr></table></td></tr>";
+
+			if(failedCount > 0)
+			{
+				rowsHtml = "";
+				for each  r in failedList
+				{
+					rowsHtml = rowsHtml + r;
+				}
+				mailBody = mailBody + "<tr><td style='padding:18px 24px 0 24px'>";
+				mailBody = mailBody + "<div style='border-left:3px solid #dc2626;padding-left:12px'>";
+				mailBody = mailBody + "<div style='font-size:14px;font-weight:700;color:#991b1b'>" + failedCount + " " + orderWord + " could not be planned</div>";
+				mailBody = mailBody + "<div style='font-size:12px;color:#64748b;padding-top:4px'>These orders keep their Pending status and will retry on the next run once the reason is fixed.</div>";
+				mailBody = mailBody + "</div>";
+				mailBody = mailBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;margin-top:12px;border:1px solid #e2e8f0;border-radius:6px'>";
+				mailBody = mailBody + "<tr><th style='" + mTh + "'>Sales order</th><th style='" + mTh + "'>Why it was not planned</th></tr>";
+				mailBody = mailBody + rowsHtml + "</table></td></tr>";
+			}
+
+			if(createdCount > 0)
+			{
+				createdHtml = "";
+				for each  cr in createdList
+				{
+					createdHtml = createdHtml + cr;
+				}
+				mailBody = mailBody + "<tr><td style='padding:18px 24px 0 24px'>";
+				mailBody = mailBody + "<div style='font-size:14px;font-weight:700;color:#0f172a'>" + createdCount + " " + planWord + " created</div>";
+				mailBody = mailBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;margin-top:12px;border:1px solid #e2e8f0;border-radius:6px'>";
+				mailBody = mailBody + "<tr><th style='" + mTh + "'>Plan</th><th style='" + mTh + "'>Sales order</th><th style='" + mTh + "'>Supervisor</th></tr>";
+				mailBody = mailBody + createdHtml + "</table></td></tr>";
+			}
+			
+			if(skippedCount > 0)
+			{
+				mailBody = mailBody + "<tr><td style='padding:16px 24px 0 24px;font-size:12px;color:#64748b'>" + skippedCount + " order(s) already had a plan and were moved out of the queue.</td></tr>";
+			}
+
+			mailBody = mailBody + "<tr><td style='padding:20px 24px 22px 24px'>";
+			mailBody = mailBody + "<div style='border-top:1px solid #eef2f6;padding-top:12px;font-size:11px;color:#94a3b8'>Gad Fashions Manufacturing &middot; automated planning run, via Batch Workflow. Nothing to reply to.</div>";
+			mailBody = mailBody + "</td></tr>";
+
+			mailBody = mailBody + "</table></td></tr></table></div>";
+
+			subjTxt = "Production planning: " + createdCount + " created";
+			if(failedCount > 0)
+			{
+				subjTxt = subjTxt + ", " + failedCount + " blocked";
+			}
+
+			try
+			{
+				sendmail
+				[
+					from :zoho.adminuserid
+					to :notifyTo
+					subject :subjTxt
+					message :mailBody
+				]
+				mailNote = "accepted, to " + notifyTo;
+				
+				if(createdCount > 0)
+				{
+					// Store Person Email
+					storeRowsHtml = "";
+					for each sr in storeList
+					{
+						storeRowsHtml = storeRowsHtml + sr;
+					}
+					storeSubject = "Materials Ready to Issue: " + createdCount + " new " + planWord;
+					storeBody = "<div style='background:#f0fdf4;padding:24px 12px;font-family:" + mFont + "'>";
+					storeBody = storeBody + "<table role='presentation' width='640' cellpadding='0' cellspacing='0' border='0' style='width:640px;max-width:100%;background:#ffffff;border:1px solid #bbf7d0;border-radius:10px;margin:0 auto;overflow:hidden;'>";
+					storeBody = storeBody + "<tr><td style='background:#16a34a;padding:18px 24px;'>";
+					storeBody = storeBody + "<div style='font-size:18px;font-weight:700;color:#ffffff'>Materials Ready to Issue</div>";
+					storeBody = storeBody + "</td></tr>";
+					storeBody = storeBody + "<tr><td style='padding:24px;'>";
+					storeBody = storeBody + "<div style='font-size:14px;color:#334155;margin-bottom:20px'>" + createdCount + " new production " + planWord + " have been created. The following supervisors require materials:</div>";
+					storeBody = storeBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;'>";
+					storeBody = storeBody + "<tr><th style='" + mTh + "'>Supervisor</th><th style='" + mThR + "'>Materials to Issue</th></tr>";
+					storeBody = storeBody + storeRowsHtml;
+					storeBody = storeBody + "</table></td></tr></table></div>";
+					sendmail
+					[
+						from :zoho.adminuserid
+						to :notifyTo
+						subject :storeSubject
+						message :storeBody
+					]
+
+					// Supervisor Email
+					supRowsHtml = "";
+					for each sr in supervisorList
+					{
+						supRowsHtml = supRowsHtml + sr;
+					}
+					supSubject = "New Order Assigns: " + createdCount + " " + planWord;
+					supBody = "<div style='background:#f0f9ff;padding:24px 12px;font-family:" + mFont + "'>";
+					supBody = supBody + "<table role='presentation' width='640' cellpadding='0' cellspacing='0' border='0' style='width:640px;max-width:100%;background:#ffffff;border:1px solid #bae6fd;border-radius:10px;margin:0 auto;overflow:hidden;'>";
+					supBody = supBody + "<tr><td style='background:#0ea5e9;padding:18px 24px;'>";
+					supBody = supBody + "<div style='font-size:18px;font-weight:700;color:#ffffff'>New Order Assigns</div>";
+					supBody = supBody + "</td></tr>";
+					supBody = supBody + "<tr><td style='padding:24px;'>";
+					supBody = supBody + "<div style='font-size:14px;color:#334155;margin-bottom:20px'>" + createdCount + " new production " + planWord + " have been created and assigned to you.</div>";
+					supBody = supBody + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;'>";
+					supBody = supBody + "<tr><th style='" + mTh + "'>Sales Order No.</th><th style='" + mThR + "'>Total Pieces</th></tr>";
+					supBody = supBody + supRowsHtml;
+					supBody = supBody + "</table></td></tr></table></div>";
+					sendmail
+					[
+						from :zoho.adminuserid
+						to :notifyTo
+						subject :supSubject
+						message :supBody
+					]
+				}
+				
+				// CLEAR FLAGS ONLY IF MAILS SENT SUCCESSFULLY
+				for each soRec2 in Sales_Order[Needs_Plan_Summary == true]
+				{
+					soRec2.Needs_Plan_Summary = false;
+					soRec2.Batch_Run_Outcome = "";
+				}
+			}
+			catch (eMail)
+			{
+				mailNote = "FAILED - " + eMail.toString();
+			}
+
+			try
+			{
+				if(createdCount > 0 && firstCreatedPlanId != "")
+				{
+					adminMsg = createdCount + " production plan(s) created.";
+					if(failedCount > 0)
+					{
+						adminMsg = adminMsg + " " + failedCount + " order(s) still blocked.";
+					}
+					zoho.pushNotification(pushNotifyTo,"Production planning",adminMsg,pushReportLink,firstCreatedPlanId.toLong());
+
+					sentSupIds = list();
+					for each  sp in supervisorPushList
+					{
+						supIdTxt = ifnull(sp.get("supId"),"").toString();
+						if(supIdTxt != "" && sentSupIds.contains(supIdTxt) == false)
+						{
+							sentSupIds.add(supIdTxt);
+							supPlanCount = 0;
+							supPieces = 0;
+							firstSupPlanId = ifnull(sp.get("planId"),"").toString();
+							firstOrderNo = ifnull(sp.get("orderNo"),"").toString();
+							supNameTxt = ifnull(sp.get("supName"),"").toString();
+							for each  sp2 in supervisorPushList
+							{
+								if(ifnull(sp2.get("supId"),"").toString() == supIdTxt)
+								{
+									supPlanCount = supPlanCount + 1;
+									supPieces = supPieces + ifnull(sp2.get("pieces"),0);
+								}
+							}
+							supPushMsg = supPlanCount + " new order(s) assigned to " + supNameTxt + ".";
+							if(supPlanCount == 1)
+							{
+								supPushMsg = "New order assigned: " + firstOrderNo + " (" + supPieces + " pcs).";
+							}
+							if(firstSupPlanId != "")
+							{
+								zoho.pushNotification(pushNotifyTo,"New supervisor order",supPushMsg,pushReportLink,firstSupPlanId.toLong());
+							}
+						}
+					}
+				}
+			}
+			catch (ePush)
+			{
+				// Push is an alert only - mail is the source of truth.
+			}
+		}
+
+		summary = "Done. Created: " + createdCount + ", Still blocked: " + failedCount + " | Mail: " + mailNote;
+		info summary;
+	}
+	catch (e)
+	{
+		info "DELUGE ERROR: " + e.toString();
+		summary = "ERROR: " + e.toString();
+	}
+
+	return summary;
+}

@@ -69,7 +69,7 @@ string postTransferOrders(string dryRun)
 		//------------------------------------------------------------------
 		orgId = "60076905558";
 		toUrl = "https://www.zohoapis.in/inventory/v1/transferorders";
-		fromLoc = "3955559000000212001";
+		fromLoc = "3955559000000032097";
 		toLoc = "3955559000000219654";
 		maxAttempts = 5;
 		maxOrders = 10;
