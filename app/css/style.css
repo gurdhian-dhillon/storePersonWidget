@@ -2382,3 +2382,27 @@ th.col-num {
 .mat-chevron.expanded {
     transform: rotate(90deg);
 }
+
+/* Issue Progress Modal */
+.progress-container {
+    width: 100%;
+    background-color: #e2e8f0;
+    border-radius: 9999px;
+    height: 14px;
+    overflow: hidden;
+    margin: 1.5rem 0 1rem;
+}
+
+.progress-bar {
+    height: 100%;
+    background-color: var(--primary);
+    width: 0%;
+    transition: width 0.3s ease;
+}
+
+.progress-text {
+    text-align: center;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-main);
+}

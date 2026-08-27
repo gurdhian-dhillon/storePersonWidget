@@ -717,6 +717,34 @@ function closeExceptionDialog() {
     exceptionModalEl().classList.add('hidden');
 }
 
+function progressModalEl() {
+    var el = document.getElementById('progress-modal');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'progress-modal';
+        el.className = 'exc-modal hidden';
+        el.innerHTML = '<div class="exc-panel" style="max-width: 380px; text-align: center;">' +
+            '<h3 id="progress-modal-title" style="margin-bottom: 0.5rem;">Issuing Materials...</h3>' +
+            '<div class="progress-text" id="progress-modal-text">0 of 0 batches</div>' +
+            '<div class="progress-container"><div class="progress-bar" id="progress-modal-bar"></div></div>' +
+            '</div>';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+function showProgressModal(title, text, percentage) {
+    var el = progressModalEl();
+    document.getElementById('progress-modal-title').textContent = title;
+    document.getElementById('progress-modal-text').textContent = text;
+    document.getElementById('progress-modal-bar').style.width = percentage + '%';
+    el.classList.remove('hidden');
+}
+
+function closeProgressModal() {
+    progressModalEl().classList.add('hidden');
+}
+
 
 // ---- Raising the combined request from the summary ----
 
@@ -1014,6 +1042,9 @@ function submitSummaryException(kind, idx) {
 
     btn.disabled = true;
     btn.textContent = 'Raising…';
+    if (typeof showProgressModal === 'function') {
+        showProgressModal('Raising Request', 'Notifying team and queuing the job...');
+    }
 
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'raiseMaterialException',
@@ -1046,6 +1077,9 @@ function submitSummaryException(kind, idx) {
             parsed = null;
         }
         if (parsed && parsed.success) {
+            if (typeof closeProgressModal === 'function') {
+                closeProgressModal();
+            }
             closeExceptionDialog();
 
             // Record what the ticket now covers, not just that one exists — the
@@ -1076,11 +1110,17 @@ function submitSummaryException(kind, idx) {
                 ? 'Updated the open request already raised for this material.'
                 : 'Request raised.');
         } else {
+            if (typeof closeProgressModal === 'function') {
+                closeProgressModal();
+            }
             alert('Could not raise it: ' + ((parsed && parsed.error) || 'unknown error'));
             btn.disabled = false;
             btn.textContent = 'Raise it';
         }
     }).catch(function (err) {
+        if (typeof closeProgressModal === 'function') {
+            closeProgressModal();
+        }
         console.error('raiseMaterialException error:', err);
         alert('Failed to reach the server. Check the console.');
         btn.disabled = false;
@@ -2392,57 +2432,103 @@ function issueForSupervisor(supIdx) {
     var btn = document.getElementById('issue-btn-' + supIdx);
     btn.dataset.busy = '1';
     btn.disabled = true;
-    btn.textContent = 'Issuing…';
 
-    ZOHO.CREATOR.DATA.invokeCustomApi({
-        api_name: 'issueMaterials',
-        http_method: 'POST',
-        payload: {
-            supervisorId: sup.supervisorId,
-            issuesJson: JSON.stringify(issues)
-        }
-    }).then(function (response) {
-        console.log('issue response:', response);
-        var parsed;
-        try {
-            parsed = JSON.parse(response.result);
-        } catch (e) {
-            parsed = null;
-        }
+    var CHUNK_SIZE = 10;
+    var issueChunks = [];
+    for (var i = 0; i < issues.length; i += CHUNK_SIZE) {
+        issueChunks.push(issues.slice(i, i + CHUNK_SIZE));
+    }
 
-        if (parsed && parsed.errors && parsed.errors.length > 0) {
-            alert('Some materials could not be issued:\n' + parsed.errors.join('\n'));
-        }
+    var allErrors = [];
+    var chunkIndex = 0;
 
-        // Lock the inputs for this card regardless, then refresh from server
-        // so remaining/stock reflect the real post-issue state.
-        sup.materials.forEach(function (m, matIdx) {
-            var input = document.getElementById(rowInputId(supIdx, matIdx));
-            var checkbox = document.getElementById(rowCheckboxId(supIdx, matIdx));
-            if (input) input.disabled = true;
-            if (checkbox) checkbox.disabled = true;
+    function processNextChunk() {
+        if (chunkIndex >= issueChunks.length) {
+            closeProgressModal();
 
-            wastePicks(m).forEach(function (p, pickIdx) {
-                var wInput = document.getElementById(wasteInputId(supIdx, matIdx, pickIdx));
-                var wCheck = document.getElementById(wasteCheckboxId(supIdx, matIdx, pickIdx));
-                if (wInput) wInput.disabled = true;
-                if (wCheck) wCheck.disabled = true;
+            // All chunks processed successfully (or with manageable server-side validation errors)
+            if (allErrors.length > 0) {
+                alert('Some materials could not be issued:\n' + allErrors.join('\n'));
+            }
+
+            // Lock the inputs for this card regardless, then refresh from server
+            // so remaining/stock reflect the real post-issue state.
+            sup.materials.forEach(function (m, matIdx) {
+                var input = document.getElementById(rowInputId(supIdx, matIdx));
+                var checkbox = document.getElementById(rowCheckboxId(supIdx, matIdx));
+                if (input) input.disabled = true;
+                if (checkbox) checkbox.disabled = true;
+
+                wastePicks(m).forEach(function (p, pickIdx) {
+                    var wInput = document.getElementById(wasteInputId(supIdx, matIdx, pickIdx));
+                    var wCheck = document.getElementById(wasteCheckboxId(supIdx, matIdx, pickIdx));
+                    if (wInput) wInput.disabled = true;
+                    if (wCheck) wCheck.disabled = true;
+                });
             });
-        });
-        ISSUE_SECTIONS.forEach(function (section) {
-            var master = document.getElementById(selectAllId(supIdx, section));
-            if (master) master.disabled = true;
-        });
-        footer.innerHTML = '<span class="issued-locked-pill">&#10003; Issued</span>';
+            ISSUE_SECTIONS.forEach(function (section) {
+                var master = document.getElementById(selectAllId(supIdx, section));
+                if (master) master.disabled = true;
+            });
+            footer.innerHTML = '<span class="issued-locked-pill">&#10003; Issued</span>';
 
-        loadRequirements();
-    }).catch(function (err) {
-        console.error('issueMaterials error:', err);
-        alert('Failed to issue materials. Check the console for details.');
-        delete btn.dataset.busy;
-        btn.disabled = false;
-        btn.textContent = 'Issue to ' + sup.supervisorName;
-    });
+            loadRequirements();
+            return;
+        }
+
+        var displayTotal = issueChunks.length;
+        if (displayTotal > 1) {
+            btn.textContent = 'Issuing… (' + (chunkIndex + 1) + '/' + displayTotal + ')';
+        } else {
+            btn.textContent = 'Issuing…';
+        }
+
+        var pct = ((chunkIndex) / displayTotal) * 100;
+        showProgressModal('Issuing to ' + sup.supervisorName, 'Batch ' + (chunkIndex + 1) + ' of ' + displayTotal, pct);
+
+        var currentChunk = issueChunks[chunkIndex];
+
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'issueMaterials',
+            http_method: 'POST',
+            payload: {
+                supervisorId: sup.supervisorId,
+                issuesJson: JSON.stringify(currentChunk)
+            }
+        }).then(function (response) {
+            console.log('issue response chunk ' + chunkIndex + ':', response);
+            var parsed;
+            try {
+                parsed = JSON.parse(response.result);
+            } catch (e) {
+                parsed = null;
+            }
+
+            if (parsed && parsed.errors && parsed.errors.length > 0) {
+                allErrors = allErrors.concat(parsed.errors);
+            }
+
+            // Proceed to the next chunk
+            chunkIndex++;
+            processNextChunk();
+
+        }).catch(function (err) {
+            closeProgressModal();
+            console.error('issueMaterials error on chunk ' + chunkIndex + ':', err);
+            var batchNum = chunkIndex + 1;
+            alert('Failed to issue batch ' + batchNum + '. Check the console for details.\n\nAny batches before this one were successfully issued. The screen will now reload so you can see which items remain.');
+            
+            delete btn.dataset.busy;
+            btn.disabled = false;
+            btn.textContent = 'Issue to ' + sup.supervisorName;
+
+            // Reload to show what DID succeed before the crash
+            loadRequirements();
+        });
+    }
+
+    // Start the sequential chunk processing
+    processNextChunk();
 }
 
 // ---- Load ----

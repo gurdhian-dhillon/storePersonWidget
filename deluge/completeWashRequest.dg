@@ -179,13 +179,9 @@ void completeWashRequest()
 				capHere = inwQty + unwQty;
 				if(hasLotHere == true)
 				{
-					// AND capped at what THIS LOT holds. The parent is the sum of
-					// every lot, so it can cover a figure one lot cannot.
-					lotCap = lotInWash + lotUnw;
-					if(lotCap < capHere)
-					{
-						capHere = lotCap;
-					}
+					// AND capped at what THIS LOT holds. If the parent is out of sync 
+					// (e.g. from baseline resets), we trust the lot to let the wash complete.
+					capHere = lotInWash + lotUnw;
 				}
 
 				moveQty = gotQty;

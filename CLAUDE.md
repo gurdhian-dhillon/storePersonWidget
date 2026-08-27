@@ -851,6 +851,106 @@ Deluge cannot be run here, so:
 - **Deluge's reported line number is a hint, not a fact.** It points at the statement that
   *failed*, which is often not the statement that is *wrong*. Isolate first — a per-row
   try/catch that names the record beats reading the reported line.
+- **`row` is a reserved word.** A loop variable named `row` fails at Execute with `Variable 'row'
+  is not defined` — confirmed live, not a guess. `mrq` (or anything else) works fine.
+  `List.toString()`-adjacent oddities aside, `row` specifically is off limits as an identifier.
+- **A `List()` built by hand-appending fetched records (`for each x in Form[...] { lst.add(x) }`)
+  does NOT reliably survive being iterated later.** Tried as a fix for `issueMaterials` (fetch
+  `Material_Requirement` rows once, mutate them across three passes instead of re-querying) and
+  failed at Execute with `Invalid collection object found`, reported against a line that was
+  nowhere near the actual `for each` — same "line number is a hint" trap as above, at its worst.
+  Reverted; not proven impossible, just not proven safe, and this repo doesn't rely on unverified
+  Deluge behaviour. If this is ever worth revisiting, settle it at the tryout sandbox FIRST
+  (fetch → add to List → read a field back later, in isolation) before writing it into a
+  1000+-line write path again.
+
+---
+
+## Scaling work done at real volume — where it stands
+
+Prompted by a real test: 119 sales orders, 111 of them landing on one supervisor (this org's
+actual pattern — one supervisor can hold the whole queue). This is not a projection, it is what
+Execute returned. Three functions were exercised against it; two are fixed and confirmed, one is
+not.
+
+**`createProductionPlans` → replaced by a Batch Workflow.** The single-script version that scanned
+`Sales_Order[Order_Status=="Pending"]` and looped in one execution hit the statement limit at
+~100 orders (confirmed, not theoretical). Replaced with a Creator **Batch Workflow** on `Sales_Order`
+(`On Schedule`, condition `Order_Status=="Pending"`) whose per-record action calls
+`thisapp.createPlanForOneOrder(input.ID)` — one script invocation per order, so the ~80-statement
+cost of one order never sums across the backlog. `createPlanForOneOrder.dg` is the per-record body;
+the old `createProductionPlans.dg` is left in the repo unused, parked in case the batch-workflow
+route is ever abandoned. **Notifications are not wired for the batch-workflow path yet** —
+`createPlanForOneOrder` writes `Plan_Reject_Reason` and `Batch_Run_Outcome`/`Needs_Plan_Summary`
+onto `Sales_Order` per attempt (fields added to the form for this), and `sendProductionPlanSummary`
+is meant to read them from the workflow's success-action step and send the run digest + push
+notifications the old single-script version used to send inline. This was mid-build when the
+session moved on to `issueMaterials` — check `sendProductionPlanSummary.dg` and the batch workflow's
+"Configure success action" script before assuming it is finished.
+
+> **A batch workflow's per-record calls do NOT share mutable state.** Tried defining a variable in
+> "Before execution starts" and appending to it from "Action to execute for each record", expecting
+> it to accumulate across all records in the run and be readable in "Configure success action" —
+> confirmed by a real test mail that it does not: the variable came back holding only the LAST
+> record's write (`testCount=1` after ~9 records ran). Whatever this scope is for, it is not a
+> cross-record accumulator. The durable-field-on-the-record pattern (`Plan_Reject_Reason` etc.) is
+> what actually works, because each per-record call, independently, writes to a row that survives
+> past that call — no shared memory required.
+
+**`getStoreMaterialRequirements` → fixed and confirmed working at 119 plans.** Was a single
+unpaged call; failed at the statement limit once real plan/material/waste volume was reached.
+Fixed by:
+  1. Two previously-unbounded fetches — `Waste_Master[Status=="Available"]` (no material filter)
+     and `Fabric_Piece[Piece_Status=="Available"]` (no lot filter) — scanned the WHOLE form on
+     every call regardless of paging. Rebuilt to query per-material and per-lot respectively,
+     bounded by `neededMats`/`lotMats` the way every other pass in this function already was.
+  2. Paging changed from a **fixed plan-count page** (tried at 30, then 20, then 10 — all proven
+     wrong, because statement cost tracks `Material_Requirement` ROW count and rows-per-plan is
+     arbitrary, so a fixed plan count is not a fixed amount of work) to a **row-budget walk**:
+     `skipCountTxt` in, the function walks plans one at a time up to a `rowBudget` (150) of
+     `Material_Requirement` rows, returns `{"plans":[...],"plansConsumed":N}`, and the caller's
+     next `skipCountTxt` is `skipCountTxt + plansConsumed`. Contract changed from a bare array to
+     that wrapper object — `app/js/main.js` and `app/admin/js/main.js` were both updated to page
+     through it and merge by `supervisorId` before rendering (merge, not concatenate — two pages
+     can carry a block for the same supervisor).
+  - `plan.Sales_Order.Sales_Order` (Deluge lookup dot-notation, reading a linked record's field
+    without a separate query) — confirmed working against this org by Execute.
+  - `"range from X to Y"` with **variables** for X/Y (not just literals) — confirmed working by a
+    throwaway test function.
+  - `List(1,2,3,...)` — a literal-argument `List()` constructor — does **not** work
+    (`"Not able to find 'List' function"`). Build with `.add()` in a loop instead.
+
+**`issueMaterials` → NOT fixed. Real bug found, fix not yet built.** `matPlanIdx` (which materials
+land on which of a supervisor's open plans) was rebuilt the same way as `getStoreMaterialRequirements`'s
+fixes — one query per material instead of one per plan×material — and that part is confirmed
+working (Execute against 111 real open plans). The remaining problem is structural, not a query
+count: `getStoreMaterialRequirements` and the widget already narrow a **fabric** line to specific
+plans/items via `lotId`/`planItemId` in the payload (see `issueMaterials.dg`'s own top-of-file
+comment on why — grain, tone-matching). **A non-fabric (trim) line carries only `materialId` and a
+bulk `qty`, no `planId`/`planItemId`** — so `issueMaterials`' fan has no choice but to walk every
+plan in `matPlanFor` for that material to decide which rows absorb the qty. For a common trim
+(thread, labels) shared across most of a supervisor's plans, `matPlanFor` is close to the full open
+count, and the three passes (pass 1 / pin-lefts / the fan) each re-query per plan — proven to still
+blow the statement limit at 111 plans even after the `matPlanIdx` fix, confirmed by Execute.
+**Two directions were floated and rejected/parked, not decided:**
+  - *Move the fan to the frontend* (pre-compute which rows get how much, send it pre-resolved) —
+    rejected: `Issued_Qty` is read-and-written live off the server's own current state precisely so
+    two concurrent issues can't race each other into double- or under-issuing (this is the same
+    concern the fabric side's per-lot, per-pass server-side accounting already exists to close).
+    Pre-computing client-side reopens that race.
+  - *Cap `matPlanFor` per call and resume next press* — floated, not built. Concern raised (unverified):
+    Custom API calls from a widget are NOT metered per this file's own "Widgets" section, so a
+    rate-limit objection to more calls may not actually apply — but the Code 2955 error that
+    prompted the objection was never actually identified, so don't assume either way. Check what
+    2955 is before designing around it.
+  - A resumable-server-side-loop shape (function internally batches across plan-groups within one
+    execution, returns "partially issued, press Issue again" only for the one trim line that hit
+    budget) was suggested as a middle path that keeps `Issued_Qty` writes server-owned without
+    needing more widget round-trips. Not built, not verified.
+  **Whoever picks this up next: read `issueMaterials.dg`'s current state before changing it** — it
+  was reverted mid-session back to the safe per-plan-requery shape after the caching attempt
+  above failed, so the file is in the LAST KNOWN WORKING state for the statement-limit problem
+  (confirmed clean of that specific error), just not yet fixed for the trim-fan-at-scale problem.
 
 ---
 

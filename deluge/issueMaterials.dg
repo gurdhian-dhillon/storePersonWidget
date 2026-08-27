@@ -41,279 +41,332 @@ string issueMaterials(string supervisorId, string issuesJson)
 	// Pieces_From_Raw with a piece nobody cut, which is the same silent loss
 	// CLAUDE.md already records four of. The per-lot pass makes it impossible
 	// rather than merely guarded against.
-
 	errJson = "";
 	okJson = "";
-
 	// DEBUG WRAPPER: Creator reports every runtime failure as a generic
 	// "code 9430 - There is an error while executing Custom API." Catching it
 	// here surfaces the real Deluge message in the widget console instead.
-	try
+	try 
 	{
-	supId = supervisorId.trim().toLong();
-	issues = issuesJson.toJSONList();
-	info "supId=" + supId + " issueCount=" + issues.size();
-
-	// Oldest plan first, so material is consumed against the longest-waiting
-	// order rather than whatever order the fetch happens to return.
-	// Partially Received is still open - otherwise the materials for a plan's
-	// unverified items could never be issued.
-	plans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress")] sort by Priority_Key;
-	info "plans=" + plans.count();
-
-	// STEP 4 of the migration: one Material_Issue record per handover - per press
-	// of Issue, however many materials it covered. The balances below say how much
-	// is owed and how much has gone out; they cannot say that at 15:40 on Tuesday
-	// this cloth crossed the counter. Lines are gathered here and written once at
-	// the end, because a subform row needs its parent to exist first and the
-	// parent cannot be created until we know there is anything to record.
-	issueLines = List();
-	primaryPlanId = 0;
-
-	//------------------------------------------------------------------------
-	// WHICH PLANS CARRY WHICH MATERIAL, INDEXED ONCE.
-	//
-	// Three loops below - pass 1, the pin-lefts read, and the fan - each walked
-	// EVERY open plan of this supervisor and fetched every one of its
-	// Material_Requirement rows. All three sit INSIDE the per-material loop, so
-	// one press of Issue cost 3 x materials x plans queries and
-	// 3 x materials x plans x rows row-visits. Thirteen materials against twenty
-	// open plans is ~780 queries for one button. The statement-execution limit
-	// is NOT catchable: it kills the script and the store person gets a bare
-	// HTTP 500 with no error card.
-	//
-	// SKIPPING A PLAN IS A PROVABLE NO-OP, not a behaviour change. Every one of
-	// those three loops opens by testing row.Material against matId, so a plan
-	// carrying nothing of this material contributes exactly nothing to any of
-	// them.
-	//
-	// ORDER IS PRESERVED. This walks `plans` in its own Priority_Key order and
-	// appends, so the ids come back out in that same sequence - and that
-	// sequence is what decides which order gets scarce offcuts first.
-	//
-	// IT NARROWS WHICH PLANS ARE LOOKED AT, AND NOTHING ELSE. No row and no
-	// field is cached here. The three loops still query Material_Requirement
-	// live inside themselves, which is required: the pin-lefts loop and the fan
-	// both have to see the writes that earlier passes made to those same rows.
-	//------------------------------------------------------------------------
-	matPlanIdx = Map();
-
-	for each  ixPlan in plans
-	{
-		for each  ixRow in Material_Requirement[Plan == ixPlan.ID]
-		{
-			if(ixRow.Material != null)
-			{
-				ixKey = ixRow.Material.toString();
-				ixPrev = ifnull(matPlanIdx.get(ixKey),"").toString();
-				ixTok = ixPlan.ID + "";
-
-				if(ixPrev == "")
-				{
-					matPlanIdx.put(ixKey,ixTok);
-				}
-				else if(ixPrev.toList(",").contains(ixTok) == false)
-				{
-					matPlanIdx.put(ixKey,ixPrev + "," + ixTok);
-				}
-			}
-		}
-	}
-
-	for each  issue in issues
-	{
-		// toJSONList() yields JSON objects, NOT Deluge Maps - .get() silently
-		// returns null on those. .toMap() converts to a real Map first.
-		im = issue.toMap();
-
-		matId = im.get("materialId").toString();
-
-		// The plans that actually carry this material, off the index built
-		// above. Empty when no open plan wants it, in which case all three
-		// loops below simply do not run - which is what they already did, one
-		// wasted query per plan at a time.
-		matPlanTxt = ifnull(matPlanIdx.get(matId),"").toString().trim();
-		matPlanFor = List();
-
-		if(matPlanTxt != "")
-		{
-			matPlanFor = matPlanTxt.toList(",");
-		}
-
-		// NOTE: two more traps stacked here.
-		//  1. ifnull() only guards null - a Creator field that was never
-		//     written is EMPTY, not null, and toDecimal() throws on it.
-		//  2. You cannot compare a number to "" - Deluge rejects mixed-type
-		//     comparison. So normalise to string FIRST, test, then convert.
-		qStr = ifnull(im.get("qty"),"0").toString().trim();
-		if(qStr == "")
-		{
-			qStr = "0";
-		}
-		askQty = qStr.toDecimal();
-
-		cwStr = ifnull(im.get("cutWidth"),"0").toString().trim();
-		if(cwStr == "")
-		{
-			cwStr = "0";
-		}
-		clStr = ifnull(im.get("cutLength"),"0").toString().trim();
-		if(clStr == "")
-		{
-			clStr = "0";
-		}
-		cutW = cwStr.toDecimal();
-		cutL = clStr.toDecimal();
-
-		//------------------------------------------------------------------
-		// WHICH KIND OF REQUIREMENT THIS LINE IS FOR.
+		supId = supervisorId.trim().toLong();
+		issues = issuesJson.toJSONList();
+		info "supId=" + supId + " issueCount=" + issues.size();
+		// Oldest plan first, so material is consumed against the longest-waiting
+		// order rather than whatever order the fetch happens to return.
+		// Partially Received is still open - otherwise the materials for a plan's
+		// unverified items could never be issued.
+		plans = Production_Planning[Assigned_To == supId && Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress"] sort by Priority_Key;
+		info "plans=" + plans.count();
+		// STEP 4 of the migration: one Material_Issue record per handover - per press
+		// of Issue, however many materials it covered. The balances below say how much
+		// is owed and how much has gone out; they cannot say that at 15:40 on Tuesday
+		// this cloth crossed the counter. Lines are gathered here and written once at
+		// the end, because a subform mrq needs its parent to exist first and the
+		// parent cannot be created until we know there is anything to record.
+		issueLines = List();
+		primaryPlanId = 0;
+		globalPlansFanned = 0;
+		//------------------------------------------------------------------------
+		// WHICH PLANS CARRY WHICH MATERIAL, INDEXED ONCE.
 		//
-		// The store screen shows the plan's own demand and reissues as SEPARATE
-		// blocks, so the person ticking a reissue row expects that row to be the
-		// one credited. Without this the fan below matched on material and cut
-		// size only and filled whatever was outstanding in plan order - so
-		// issuing 24 cones against the reissue block silently credited a
-		// part-issued PLAN row instead, the reissue block still read as owing 24,
-		// and the obvious next move was to issue 24 more.
+		// Three loops below - pass 1, the pin-lefts read, and the fan - each walked
+		// EVERY open plan of this supervisor and fetched every one of its
+		// Material_Requirement rows. All three sit INSIDE the per-material loop, so
+		// one press of Issue cost 3 x materials x plans queries and
+		// 3 x materials x plans x rows mrq-visits. Thirteen materials against twenty
+		// open plans is ~780 queries for one button. The statement-execution limit
+		// is NOT catchable: it kills the script and the store person gets a bare
+		// HTTP 500 with no error card.
 		//
-		// Fabric was not protected by the cut-size test either: a reissue copies
-		// its cut size from the same BOM, so it matches exactly.
+		// SKIPPING A PLAN IS A PROVABLE NO-OP, not a behaviour change. Every one of
+		// those three loops opens by testing mrq.Material against matId, so a plan
+		// carrying nothing of this material contributes exactly nothing to any of
+		// them.
 		//
-		// Empty means "Plan" - a Creator field never written is EMPTY, not null,
-		// and every row raised before Source existed came from the plan. A
-		// payload with no source at all also lands here, so an older widget
-		// keeps its previous behaviour against plan rows.
-		//------------------------------------------------------------------
-		srcWanted = ifnull(im.get("source"),"").toString().trim();
-		if(srcWanted != "Reissue")
+		// ORDER IS PRESERVED. This walks `plans` in its own Priority_Key order and
+		// appends, so the ids come back out in that same sequence - and that
+		// sequence is what decides which order gets scarce offcuts first.
+		//
+		// IT NARROWS WHICH PLANS ARE LOOKED AT, AND NOTHING ELSE. No mrq and no
+		// field is cached here. The three loops still query Material_Requirement
+		// live inside themselves, which is required: the pin-lefts loop and the fan
+		// both have to see the writes that earlier passes made to those same rows.
+		//
+		// BUILT AS ONE QUERY PER TARGET MATERIAL, NOT plans x materials.
+		//
+		// The plans x targetMats double loop (one count() query per combination)
+		// was a real improvement over the original 3 x materials x plans shape,
+		// but it is still O(plans x materials) queries just to build the index -
+		// and plans itself is UNBOUNDED (every open plan for this supervisor, no
+		// cap). One supervisor holding most of a 100+ plan backlog turns "4
+		// materials in this chunk" into 400+ queries for the index alone, before
+		// any of the three narrowing loops even run. This is the exact shape that
+		// blew getStoreMaterialRequirements before it was fixed the same way:
+		// filter at the query, not by scanning a cross product.
+		//
+		// Material_Requirement carries Assigned_To directly (confirmed against
+		// getStoreMaterialRequirements.dg, which already reads mr.Assigned_To) -
+		// so each target material costs exactly ONE query,
+		// Material_Requirement[Assigned_To == supId && Material == matId], never
+		// touching plans.count() at all. What that query cannot filter is plan
+		// STATUS (Pending/Partially Received/In Progress) - that only lives on
+		// Production_Planning - so validPlanIds (built from plans, already
+		// status-filtered) is checked in code, which is a List.contains() against
+		// an in-memory list, not a query, and costs nothing per mrq.
+		//------------------------------------------------------------------------
+		matPlanIdx = Map();
+		validPlanIds = List();
+		for each  vp in plans
 		{
-			srcWanted = "Plan";
+			validPlanIds.add(vp.ID + "");
 		}
-
-		picks = ifnull(im.get("wastePicks"),"[]").toString().toJSONList();
-		lotLines = ifnull(im.get("lots"),"[]").toString().toJSONList();
-
-		matRec = Raw_Material[ID == matId.toLong()];
-
-		if(matRec.count() == 0)
+		// Collect the specific materials we are issuing to avoid indexing the entire world
+		targetMats = List();
+		for each  issue in issues
 		{
-			if(errJson != "")
-			{
-				errJson = errJson + ",";
-			}
-			errJson = errJson + "\"Material " + matId + " not found\"";
+			im = issue.toMap();
+			targetMats.add(im.get("materialId").toString());
 		}
-		else
+		for each  targetMat in targetMats
 		{
-			matName = ifnull(matRec.SKU,"").toString();
-
-			// The human name, captured HERE - off a record already in hand, so
-			// it costs nothing extra - and written onto the handover line below.
-			//
-			// It used to be left off, and Material_Name was filled with the SKU
-			// instead. That made every handover line unreadable on its own, so
-			// getStoreIssueHistory had to query Raw_Material again for each line
-			// to recover the name. One query per issued line, every time anyone
-			// opened History, to fetch something that was already sitting in this
-			// variable at the moment the line was written.
-			//
-			// A handover is an audit record: it should say what crossed the
-			// counter without depending on a second form to explain itself. It is
-			// also the reason the name is stored rather than re-resolved - if a
-			// material is later renamed, the handover should still read the way it
-			// read on the day, and a live lookup would silently rewrite history.
-			matDisp = ifnull(matRec.Material_Display_Name,"").toString().trim();
-			if(matDisp == "")
+			ixKey = targetMat;
+			ixTokens = List();
+			// plans, not the query result, decides ORDER - Priority_Key order is
+			// what decides which order gets scarce offcuts first, and this query
+			// carries no such guarantee. So this walks plans (already sorted) and
+			// asks, for each plan in order, whether it is one of the plans this
+			// material actually landed on - a List.contains() against a small
+			// in-memory set built from the single query below, not a query itself.
+			matReqPlanIds = List();
+			for each  mrRow in Material_Requirement[Assigned_To == supId && Material == targetMat.toLong()]
 			{
-				matDisp = ifnull(matRec.Name,"").toString().trim();
-			}
-			if(matDisp == "")
-			{
-				matDisp = matName;
-			}
-
-			isFab = matRec.Is_Fabric;
-
-			fabricWidthCm = 0.0;
-			if(isFab == true)
-			{
-				// Stored as TEXT, in inches.
-				fwVal = matRec.Fabric_Width_Inches;
-				if(fwVal != null && fwVal.trim() != "")
+				mrPlanTxt = ifnull(mrRow.Plan,"").toString().trim();
+				if(mrPlanTxt != "" && matReqPlanIds.contains(mrPlanTxt) == false)
 				{
-					fabricWidthCm = fwVal.trim().toDecimal() * 2.54;
+					matReqPlanIds.add(mrPlanTxt);
 				}
 			}
-
-			// Fabric is only ever issued as washed meters.
-			if(isFab == true)
+			for each  vp2 in plans
 			{
-				matWashStock = 0.0;
-				for each mLot in Raw_Material_Lot[Material == matId.toLong()]
+				vpTok = vp2.ID + "";
+				if(matReqPlanIds.contains(vpTok) == true)
 				{
-					lForm = ifnull(mLot.Form,"").toString().trim();
-					lwS = ifnull(mLot.Wash_Quantity,"0").toString().trim();
-					if(lwS == "") { lwS = "0"; }
-					lwNum = lwS.toDecimal();
-					
-					// If the lot form is Pieces, Wash_Quantity may be out of sync. 
-					// Live-calculate it from the actual pieces on the rack.
-					if(lForm == "Pieces")
+					ixTokens.add(vpTok);
+				}
+			}
+			if(ixTokens.size() > 0)
+			{
+				ixJoined = "";
+				for each  ixt in ixTokens
+				{
+					if(ixJoined != "")
 					{
-						pSum = 0.0;
-						for each fp in Fabric_Piece[Lot == mLot.ID && Piece_Status == "Available"]
-						{
-							if(ifnull(fp.State,"Wash").toString().trim() == "Wash")
-							{
-								fpLen = ifnull(fp.Piece_Length_Cm,"0").toString().toDecimal() / 100;
-								fpCnt = ifnull(fp.Piece_Count,"0").toString().toDecimal();
-								pSum = pSum + (fpLen * fpCnt);
-							}
-						}
-						lwNum = pSum;
+						ixJoined = ixJoined + ",";
 					}
-					matWashStock = matWashStock + lwNum;
+					ixJoined = ixJoined + ixt;
 				}
-				stkStr = matWashStock.toString();
+				matPlanIdx.put(ixKey,ixJoined);
+			}
+		}
+		for each  issue in issues
+		{
+			// toJSONList() yields JSON objects, NOT Deluge Maps - .get() silently
+			// returns null on those. .toMap() converts to a real Map first.
+			im = issue.toMap();
+			matId = im.get("materialId").toString();
+			// The plans that actually carry this material, off the index built
+			// above. Empty when no open plan wants it, in which case all three
+			// loops below simply do not run - which is what they already did, one
+			// wasted query per plan at a time.
+			matPlanTxt = ifnull(matPlanIdx.get(matId),"").toString().trim();
+			matPlanFor = List();
+			if(matPlanTxt != "")
+			{
+				matPlanFor = matPlanTxt.toList(",");
+			}
+			// REVERTED: a "fetch once into a List(), iterate three times" cache
+			// was tried here and failed at Execute - "Invalid collection object
+			// found" - once the rename from `row` (a Deluge reserved word,
+			// confirmed by a separate Execute error) to `mrq` was applied. Rather
+			// than keep guessing at unverified Deluge List()-of-records semantics,
+			// this reverts to matPlanFor alone (proven safe - it collapsed
+			// matPlanIdx's own build from plans x materials queries to one query
+			// per material, confirmed working by Execute against 111 real open
+			// plans) and re-queries Material_Requirement per pass, same as
+			// before. Pass 1, the pin-lefts read and the fan each still query
+			// Material_Requirement[Plan == planTok && Material == matId] per
+			// plan in matPlanFor - narrowed to only the plans that actually
+			// carry this material, which is the real saving; a caching layer on
+			// top of that is a further optimisation for later, once the
+			// List()-of-records question is actually settled rather than assumed.
+			// NOTE: two more traps stacked here.
+			//  1. ifnull() only guards null - a Creator field that was never
+			//     written is EMPTY, not null, and toDecimal() throws on it.
+			//  2. You cannot compare a number to "" - Deluge rejects mixed-type
+			//     comparison. So normalise to string FIRST, test, then convert.
+			qStr = ifnull(im.get("qty"),"0").toString().trim();
+			if(qStr == "")
+			{
+				qStr = "0";
+			}
+			askQty = qStr.toDecimal();
+			cwStr = ifnull(im.get("cutWidth"),"0").toString().trim();
+			if(cwStr == "")
+			{
+				cwStr = "0";
+			}
+			clStr = ifnull(im.get("cutLength"),"0").toString().trim();
+			if(clStr == "")
+			{
+				clStr = "0";
+			}
+			cutW = cwStr.toDecimal();
+			cutL = clStr.toDecimal();
+			//------------------------------------------------------------------
+			// WHICH KIND OF REQUIREMENT THIS LINE IS FOR.
+			//
+			// The store screen shows the plan's own demand and reissues as SEPARATE
+			// blocks, so the person ticking a reissue mrq expects that mrq to be the
+			// one credited. Without this the fan below matched on material and cut
+			// size only and filled whatever was outstanding in plan order - so
+			// issuing 24 cones against the reissue block silently credited a
+			// part-issued PLAN mrq instead, the reissue block still read as owing 24,
+			// and the obvious next move was to issue 24 more.
+			//
+			// Fabric was not protected by the cut-size test either: a reissue copies
+			// its cut size from the same BOM, so it matches exactly.
+			//
+			// Empty means "Plan" - a Creator field never written is EMPTY, not null,
+			// and every mrq raised before Source existed came from the plan. A
+			// payload with no source at all also lands here, so an older widget
+			// keeps its previous behaviour against plan rows.
+			//------------------------------------------------------------------
+			srcWanted = ifnull(im.get("source"),"").toString().trim();
+			if(srcWanted != "Reissue")
+			{
+				srcWanted = "Plan";
+			}
+			picks = ifnull(im.get("wastePicks"),"[]").toString().toJSONList();
+			lotLines = ifnull(im.get("lots"),"[]").toString().toJSONList();
+			matRec = Raw_Material[ID == matId.toLong()];
+			if(matRec.count() == 0)
+			{
+				if(errJson != "")
+				{
+					errJson = errJson + ",";
+				}
+				errJson = errJson + "\"Material " + matId + " not found\"";
 			}
 			else
 			{
-				stkStr = ifnull(matRec.Quantity,"0").toString().trim();
-			}
-			if(stkStr == "")
-			{
-				stkStr = "0";
-			}
-			available = stkStr.toDecimal();
-
-			//--------------------------------------------------------------
-			// Pass 1 - how much does this supervisor still actually need?
-			//
-			// Fabric rows are matched on cut size as well as SKU. Two plans
-			// can want the same fabric at different cut sizes, and crediting
-			// 55x55 pieces against a 45x90 row would silently close the wrong
-			// requirement.
-			//--------------------------------------------------------------
-			outstanding = 0.0;
-			outPieces = 0;
-			// Narrowed to the plans carrying this material - see matPlanIdx.
-			for each  planTok in matPlanFor
-			{
-				for each  row in Material_Requirement[Plan == planTok.toLong()]
+				matName = ifnull(matRec.SKU,"").toString();
+				// The human name, captured HERE - off a record already in hand, so
+				// it costs nothing extra - and written onto the handover line below.
+				//
+				// It used to be left off, and Material_Name was filled with the SKU
+				// instead. That made every handover line unreadable on its own, so
+				// getStoreIssueHistory had to query Raw_Material again for each line
+				// to recover the name. One query per issued line, every time anyone
+				// opened History, to fetch something that was already sitting in this
+				// variable at the moment the line was written.
+				//
+				// A handover is an audit record: it should say what crossed the
+				// counter without depending on a second form to explain itself. It is
+				// also the reason the name is stored rather than re-resolved - if a
+				// material is later renamed, the handover should still read the way it
+				// read on the day, and a live lookup would silently rewrite history.
+				matDisp = ifnull(matRec.Material_Display_Name,"").toString().trim();
+				if(matDisp == "")
 				{
-					if(row.Material != null && row.Material.toString() == matId)
+					matDisp = ifnull(matRec.Name,"").toString().trim();
+				}
+				if(matDisp == "")
+				{
+					matDisp = matName;
+				}
+				isFab = matRec.Is_Fabric;
+				fabricWidthCm = 0.0;
+				if(isFab == true)
+				{
+					// Stored as TEXT, in inches.
+					fwVal = matRec.Fabric_Width_Inches;
+					if(fwVal != null && fwVal.trim() != "")
+					{
+						fabricWidthCm = fwVal.trim().toDecimal() * 2.54;
+					}
+				}
+				// Fabric is only ever issued as washed meters.
+				if(isFab == true)
+				{
+					matWashStock = 0.0;
+					for each  mLot in Raw_Material_Lot[Material == matId.toLong()]
+					{
+						lForm = ifnull(mLot.Form,"").toString().trim();
+						lwS = ifnull(mLot.Wash_Quantity,"0").toString().trim();
+						if(lwS == "")
+						{
+							lwS = "0";
+						}
+						lwNum = lwS.toDecimal();
+						// If the lot form is Pieces, Wash_Quantity may be out of sync. 
+						// Live-calculate it from the actual pieces on the rack.
+						if(lForm == "Pieces")
+						{
+							pSum = 0.0;
+							for each  fp in Fabric_Piece[Lot == mLot.ID && Piece_Status == "Available"]
+							{
+								if(ifnull(fp.State,"Wash").toString().trim() == "Wash")
+								{
+									fpLen = ifnull(fp.Piece_Length_Cm,"0").toString().toDecimal() / 100;
+									fpCnt = ifnull(fp.Piece_Count,"0").toString().toDecimal();
+									pSum = pSum + fpLen * fpCnt;
+								}
+							}
+							lwNum = pSum;
+						}
+						matWashStock = matWashStock + lwNum;
+					}
+					stkStr = matWashStock.toString();
+				}
+				else
+				{
+					stkStr = ifnull(matRec.Quantity,"0").toString().trim();
+				}
+				if(stkStr == "")
+				{
+					stkStr = "0";
+				}
+				available = stkStr.toDecimal();
+				//--------------------------------------------------------------
+				// Pass 1 - how much does this supervisor still actually need?
+				//
+				// Fabric rows are matched on cut size as well as SKU. Two plans
+				// can want the same fabric at different cut sizes, and crediting
+				// 55x55 pieces against a 45x90 mrq would silently close the wrong
+				// requirement.
+				//--------------------------------------------------------------
+				fanningCapped = false;
+				outstanding = 0.0;
+				outPieces = 0;
+				// FETCH ALL REQUIREMENTS FOR THIS MATERIAL AT ONCE
+				allMatReqs = Material_Requirement[Assigned_To == supId && Material == matId.toLong()];
+				// Narrowed to the plans carrying this material - see matPlanIdx.
+				for each  mrq in allMatReqs
+				{
+					mrPlanTxt = ifnull(mrq.Plan,"").toString().trim();
+					if(matPlanFor.contains(mrPlanTxt))
 					{
 						sizeOk = true;
 						if(isFab == true)
 						{
-							if(ifnull(row.Cut_Size_Width,0) != cutW || ifnull(row.Cut_Size_Length,0) != cutL)
+							if(ifnull(mrq.Cut_Size_Width,0) != cutW || ifnull(mrq.Cut_Size_Length,0) != cutL)
 							{
 								sizeOk = false;
 							}
 						}
-						// Same rule as cut size: a row of the WRONG KIND is not this line's
-						// row, however well the material matches. Empty reads as "Plan".
-						rowSrc = ifnull(row.Source,"").toString().trim();
+						// Same rule as cut size: a mrq of the WRONG KIND is not this line's
+						// mrq, however well the material matches. Empty reads as "Plan".
+						rowSrc = ifnull(mrq.Source,"").toString().trim();
 						if(rowSrc != "Reissue")
 						{
 							rowSrc = "Plan";
@@ -324,12 +377,12 @@ string issueMaterials(string supervisorId, string issuesJson)
 						}
 						if(sizeOk == true)
 						{
-							reqStr = ifnull(row.Required_Qty,"0").toString().trim();
+							reqStr = ifnull(mrq.Required_Qty,"0").toString().trim();
 							if(reqStr == "")
 							{
 								reqStr = "0";
 							}
-							issStr = ifnull(row.Issued_Qty,"0").toString().trim();
+							issStr = ifnull(mrq.Issued_Qty,"0").toString().trim();
 							if(issStr == "")
 							{
 								issStr = "0";
@@ -341,7 +394,7 @@ string issueMaterials(string supervisorId, string issuesJson)
 							}
 							if(isFab == true)
 							{
-								pRem = ifnull(row.Required_Pieces,0) - (ifnull(row.Pieces_From_Waste,0) + ifnull(row.Pieces_From_Raw,0));
+								pRem = ifnull(mrq.Required_Pieces,0) - (ifnull(mrq.Pieces_From_Waste,0) + ifnull(mrq.Pieces_From_Raw,0));
 								if(pRem > 0)
 								{
 									outPieces = outPieces + pRem;
@@ -350,916 +403,857 @@ string issueMaterials(string supervisorId, string issuesJson)
 						}
 					}
 				}
-			}
-
-			//--------------------------------------------------------------
-			// FABRIC IS BUDGETED IN PIECES, NOT METRES.
-			//
-			// outstanding is the sum of Required_Qty - Issued_Qty, and
-			// Required_Qty is written once at plan time and never topped up.
-			// It is ceil(P/perRow) * cutL for the WHOLE order - ONE rounding
-			// up. But cloth is only usable in whole marker rows, so every
-			// separate handover rounds up again, and k handovers can genuinely
-			// need up to (k-1) * cutL more cloth than the plan estimated.
-			//
-			// The old cap refused that difference, and the failure was silent
-			// and permanent:
-			//
-			//   100 pieces, 3 per row, 55cm cut -> Required_Qty 18.70m
-			//   issue 10.00m -> 18 whole rows, 54 pieces, 10cm thrown away
-			//   46 pieces left need 16 rows = 8.80m; budget left is 8.70m
-			//   -> 45 issued, ONE PIECE STRANDED FOR GOOD
-			//
-			// receiveMaterials gates fabric readiness on PIECES, so that item
-			// never leaves Awaiting_Material and the plan never reaches
-			// Material Ready. And nothing says so: the "nothing outstanding"
-			// error needs outstanding <= 0 AND outPieces <= 0, so with a piece
-			// still owed it never fires - Issue just does nothing.
-			//
-			// So for fabric the budget is RECOMPUTED from the pieces actually
-			// outstanding. This is CLAUDE.md's rule applied to the metres:
-			// Required_Qty is a pre-waste estimate, Required_Pieces is the
-			// target. Issued_Qty may now legitimately exceed Required_Qty on a
-			// fabric row - that is the model, not a defect.
-			//
-			// Only ever RAISES the budget. Whichever is larger wins, so a row
-			// whose metres estimate was already generous is not cut back.
-			//--------------------------------------------------------------
-			if(isFab == true && outPieces > 0 && cutW > 0 && cutL > 0 && fabricWidthCm >= cutW)
-			{
-				perRowB = (fabricWidthCm / cutW).floor();
-				if(perRowB > 0)
+				//--------------------------------------------------------------
+				// FABRIC IS BUDGETED IN PIECES, NOT METRES.
+				//
+				// outstanding is the sum of Required_Qty - Issued_Qty, and
+				// Required_Qty is written once at plan time and never topped up.
+				// It is ceil(P/perRow) * cutL for the WHOLE order - ONE rounding
+				// up. But cloth is only usable in whole marker rows, so every
+				// separate handover rounds up again, and k handovers can genuinely
+				// need up to (k-1) * cutL more cloth than the plan estimated.
+				//
+				// The old cap refused that difference, and the failure was silent
+				// and permanent:
+				//
+				//   100 pieces, 3 per mrq, 55cm cut -> Required_Qty 18.70m
+				//   issue 10.00m -> 18 whole rows, 54 pieces, 10cm thrown away
+				//   46 pieces left need 16 rows = 8.80m; budget left is 8.70m
+				//   -> 45 issued, ONE PIECE STRANDED FOR GOOD
+				//
+				// receiveMaterials gates fabric readiness on PIECES, so that item
+				// never leaves Awaiting_Material and the plan never reaches
+				// Material Ready. And nothing says so: the "nothing outstanding"
+				// error needs outstanding <= 0 AND outPieces <= 0, so with a piece
+				// still owed it never fires - Issue just does nothing.
+				//
+				// So for fabric the budget is RECOMPUTED from the pieces actually
+				// outstanding. This is CLAUDE.md's rule applied to the metres:
+				// Required_Qty is a pre-waste estimate, Required_Pieces is the
+				// target. Issued_Qty may now legitimately exceed Required_Qty on a
+				// fabric mrq - that is the model, not a defect.
+				//
+				// Only ever RAISES the budget. Whichever is larger wins, so a mrq
+				// whose metres estimate was already generous is not cut back.
+				//--------------------------------------------------------------
+				if(isFab == true && outPieces > 0 && cutW > 0 && cutL > 0 && fabricWidthCm >= cutW)
 				{
-					// * 1.0 first - an integer quotient truncates before
-					// .ceil() sees it, which would budget one row too few.
-					rowsB = ((outPieces * 1.0) / perRowB).ceil();
-					pieceBudget = (rowsB * cutL) / 100;
-					if(pieceBudget > outstanding)
+					perRowB = (fabricWidthCm / cutW).floor();
+					if(perRowB > 0)
 					{
-						outstanding = pieceBudget;
+						// * 1.0 first - an integer quotient truncates before
+						// .ceil() sees it, which would budget one mrq too few.
+						rowsB = ((outPieces * 1.0) / perRowB).ceil();
+						pieceBudget = (rowsB * cutL) / 100;
+						if(pieceBudget > outstanding)
+						{
+							outstanding = pieceBudget;
+						}
 					}
 				}
-			}
-
-			//--------------------------------------------------------------
-			// Pass 2 - validate every waste pick BEFORE consuming any of them.
-			// A half-applied issue would leave pieces missing from stock with
-			// nothing booked against them.
-			//--------------------------------------------------------------
-			pickErr = "";
-			// Two DIFFERENT counts, and conflating them is what stopped
-			// Required_Pieces ever closing:
-			//   physicalPcs      - waste pieces physically handed over
-			//   piecesFromWaste  - CUT pieces those yield, which is the unit
-			//                      Required_Pieces is measured in
-			// One 300x400 remnant yields two 187x137 cuts: 1 vs 2.
-			physicalPcs = 0;
-			piecesFromWaste = 0;
-			// The same yield again, split by WHOSE it is. A pick that names a
-			// Plan_Item may only close that item's rows; one that names nothing
-			// is spendable by any row the fan reaches, exactly as before. Two
-			// buckets rather than one map with a "" key, because the free pool is
-			// offered to every row and the pinned ones are not - putting them in
-			// one map would need the "" entry read on every row anyway.
-			wPinTot = Map();
-			wFree = 0;
-			// Dimensions and yield per pick, kept for the Issued movements
-			// written further down. Keyed by waste record id - one pick per row,
-			// so the key is unique.
-			pkW = Map();
-			pkL = Map();
-			pkYield = Map();
-			for each  pkRaw in picks
-			{
-				pk = pkRaw.toMap();
-				wId = ifnull(pk.get("wasteId"),"").toString().trim();
-				pcStr = ifnull(pk.get("pieces"),"0").toString().trim();
-				if(pcStr == "")
+				//--------------------------------------------------------------
+				// Pass 2 - validate every waste pick BEFORE consuming any of them.
+				// A half-applied issue would leave pieces missing from stock with
+				// nothing booked against them.
+				//--------------------------------------------------------------
+				pickErr = "";
+				// Two DIFFERENT counts, and conflating them is what stopped
+				// Required_Pieces ever closing:
+				//   physicalPcs      - waste pieces physically handed over
+				//   piecesFromWaste  - CUT pieces those yield, which is the unit
+				//                      Required_Pieces is measured in
+				// One 300x400 remnant yields two 187x137 cuts: 1 vs 2.
+				physicalPcs = 0;
+				piecesFromWaste = 0;
+				// The same yield again, split by WHOSE it is. A pick that names a
+				// Plan_Item may only close that item's rows; one that names nothing
+				// is spendable by any mrq the fan reaches, exactly as before. Two
+				// buckets rather than one map with a "" key, because the free pool is
+				// offered to every mrq and the pinned ones are not - putting them in
+				// one map would need the "" entry read on every mrq anyway.
+				wPinTot = Map();
+				wFree = 0;
+				// Dimensions and yield per pick, kept for the Issued movements
+				// written further down. Keyed by waste record id - one pick per mrq,
+				// so the key is unique.
+				pkW = Map();
+				pkL = Map();
+				pkYield = Map();
+				for each  pkRaw in picks
 				{
-					pcStr = "0";
-				}
-				wantPcs = pcStr.toDecimal().toLong();
-
-				wRecs = Waste_Master[ID == wId.toLong()];
-				if(wId == "" || wRecs.count() == 0)
-				{
-					pickErr = matName + ": waste piece " + wId + " not found";
-				}
-				else
-				{
-					haveStr = ifnull(wRecs.Piece_Count,"0").toString().trim();
-					if(haveStr == "")
+					pk = pkRaw.toMap();
+					wId = ifnull(pk.get("wasteId"),"").toString().trim();
+					pcStr = ifnull(pk.get("pieces"),"0").toString().trim();
+					if(pcStr == "")
 					{
-						haveStr = "0";
+						pcStr = "0";
 					}
-					havePcs = haveStr.toDecimal().toLong();
-
-					if(wRecs.Status != "Available")
+					wantPcs = pcStr.toDecimal().toLong();
+					wRecs = Waste_Master[ID == wId.toLong()];
+					if(wId == "" || wRecs.count() == 0)
 					{
-						pickErr = matName + ": waste piece " + wId + " is no longer available";
-					}
-					else if(ifnull(wRecs.SKU,"").toString() != matId)
-					{
-						pickErr = matName + ": waste piece " + wId + " belongs to a different material";
-					}
-					else if(wantPcs <= 0 || wantPcs > havePcs)
-					{
-						pickErr = matName + ": asked " + wantPcs + " waste pieces but only " + havePcs + " left";
+						pickErr = matName + ": waste piece " + wId + " not found";
 					}
 					else
 					{
-						physicalPcs = physicalPcs + wantPcs;
-
-						wpwStr = ifnull(wRecs.Piece_Width,"0").toString().trim();
-						if(wpwStr == "")
+						haveStr = ifnull(wRecs.Piece_Count,"0").toString().trim();
+						if(haveStr == "")
 						{
-							wpwStr = "0";
+							haveStr = "0";
 						}
-						wplStr = ifnull(wRecs.Piece_Length,"0").toString().trim();
-						if(wplStr == "")
+						havePcs = haveStr.toDecimal().toLong();
+						if(wRecs.Status != "Available")
 						{
-							wplStr = "0";
+							pickErr = matName + ": waste piece " + wId + " is no longer available";
 						}
-						wpw = wpwStr.toDecimal();
-						wpl = wplStr.toDecimal();
-
-						// How many cut pieces do these actually yield? Same
-						// grain-fixed maths as the allocation: across the piece
-						// width, down its length, never rotated.
-						//
-						// A REMNANT TOO SMALL FOR THE CUT YIELDS ZERO, NOT ONE, and
-						// the difference is a silent-loss bug of the exact family
-						// CLAUDE.md already records four of.
-						//
-						// The fallback used to be a flat 1 for every case the guard
-						// rejected, which lumped "this row is not counted in cut
-						// pieces at all" together with "this offcut cannot take this
-						// cut". The second credits Pieces_From_Waste with a piece
-						// nobody can cut: the requirement closes, the item goes
-						// Ready_For_Production, and the supervisor is holding a
-						// remnant narrower than his marker. Fabric fulfilment is
-						// counted in CUT PIECES - a row whose pieces read as issued
-						// looks complete however little cloth it has.
-						//
-						// The widget never offers such a pick (remnantYield returns 0
-						// and the scorer skips it), but this is a Custom API and the
-						// payload is not evidence. The printed-piece block below
-						// already gets this right - `if(pcAcross > 0 && pcAlong > 0)`
-						// - and this is the same rule for offcuts.
-						//
-						// Zero rather than a refusal, deliberately. The remnant still
-						// physically goes with him and its metres still leave the
-						// rack; what must not happen is the requirement being told it
-						// was covered. Under-crediting leaves the line open and the
-						// store issues real cloth, which is the recoverable
-						// direction - exactly what a too-small printed piece does.
-						//
-						// The flat 1 survives only where pieces are not the unit:
-						// a non-fabric row, or a fabric row planned before
-						// Required_Pieces existed and so carrying no cut size.
-						yieldPer = 1;
-						if(isFab == true && cutW > 0 && cutL > 0)
+						else if(ifnull(wRecs.SKU,"").toString() != matId)
 						{
-							yieldPer = 0;
-							if(wpw >= cutW && wpl >= cutL)
-							{
-								yieldPer = (wpw / cutW).floor() * (wpl / cutL).floor();
-							}
-							else
-							{
-								info "waste piece " + wId + " (" + wpw + "x" + wpl + ") cannot take a " + cutW + "x" + cutL + " cut - issued, but credited 0 pieces";
-							}
+							pickErr = matName + ": waste piece " + wId + " belongs to a different material";
 						}
-						piecesFromWaste = piecesFromWaste + (wantPcs * yieldPer);
-
-						pkPin = ifnull(pk.get("planItemId"),"").toString().trim();
-						if(pkPin == "")
+						else if(wantPcs <= 0 || wantPcs > havePcs)
 						{
-							wFree = wFree + (wantPcs * yieldPer);
+							pickErr = matName + ": asked " + wantPcs + " waste pieces but only " + havePcs + " left";
 						}
 						else
 						{
-							wpPrev = ifnull(wPinTot.get(pkPin),"0").toString().trim();
-							if(wpPrev == "")
+							physicalPcs = physicalPcs + wantPcs;
+							wpwStr = ifnull(wRecs.Piece_Width,"0").toString().trim();
+							if(wpwStr == "")
 							{
-								wpPrev = "0";
+								wpwStr = "0";
 							}
-							wPinTot.put(pkPin,wpPrev.toLong() + (wantPcs * yieldPer));
-						}
-
-						pkW.put(wId,wpw);
-						pkL.put(wId,wpl);
-						pkYield.put(wId,yieldPer);
-					}
-				}
-			}
-
-			// A remnant can yield more cuts than are still needed. The surplus
-			// is not booked against the requirement - it becomes waste again
-			// once the supervisor has cut what he needs.
-			//
-			// wFree/wPinTot are deliberately NOT trimmed to match. They say what
-			// each row is ALLOWED to draw on, not how much exists; the running
-			// total below is the one that says that, and every give is capped
-			// against it. Trimming a total across two buckets would need a rule
-			// for which bucket loses, and there isn't an honest one.
-			if(piecesFromWaste > outPieces)
-			{
-				piecesFromWaste = outPieces;
-			}
-
-			//--------------------------------------------------------------
-			// Pass 2b - VALIDATE EVERY LOT BEFORE CONSUMING ANY.
-			//
-			// Same rule as the waste picks above: a half-applied issue takes
-			// cloth off a lot with nothing booked against it, and there is no
-			// transaction in Deluge to roll that back with.
-			//
-			// A lot line is checked for: existing, belonging to THIS material,
-			// not Blocked, and holding enough WASHED cloth. Fabric only ever
-			// leaves as washed metres, so Wash_Quantity is the figure - a lot
-			// full of unwashed cloth is not issuable however much it holds.
-			//--------------------------------------------------------------
-			//
-			// TWO KEYS, and they are not the same key.
-			//   lotOrder / lotSum / lotHave / lotName - per LOT, because stock is
-			//     held by the lot and a lot named on three lines can only give
-			//     what it has once.
-			//   passOrder / lotWant / lotOf / pinOf   - per LOT x PLAN ITEM,
-			//     because that pair is what a pass may fan into. Two items of one
-			//     order sharing a lot is the ordinary case, and summing them onto
-			//     the lot would put the pair back into one pass with no way to
-			//     say which item each metre was for.
-			// A line with no planItemId keys on the lot alone (pin ""), so an
-			// older widget produces exactly one pass per lot, as it always did.
-			//
-			lotOrder = List();
-			passOrder = List();
-			lotSum = Map();
-			lotWant = Map();
-			lotOf = Map();
-			pinOf = Map();
-			noteOf = Map();
-			fromOf = Map();
-			cutSummOf = Map();
-			lotHave = Map();
-			lotName = Map();
-			passEmitted = Map();
-			// Pass key -> "pieceId:count,pieceId:count". Empty for every roll
-			// lot, so the whole piece path below is unreachable on the flow that
-			// existed before printing.
-			passPieces = Map();
-			// ONE ORDER, ONE LOT - checked here rather than trusted.
-			//
-			// The widget allocates per order and cannot produce a straddling
-			// order, but a Custom API is callable from anywhere and the guarantee
-			// is worth exactly as much as its weakest caller. Two shades in one
-			// order is the defect lots exist to prevent, and unlike a stock
-			// shortfall it cannot be undone once the cloth is cut.
-			//
-			// planId -> the lot that order is taking from. Empty on an older
-			// widget, which then behaves exactly as it did before.
-			orderLot = Map();
-			lotErr = "";
-			lotTotal = 0.0;
-
-			for each  laRaw in lotLines
-			{
-				la = laRaw.toMap();
-				laId = ifnull(la.get("lotId"),"").toString().trim();
-				laPin = ifnull(la.get("planItemId"),"").toString().trim();
-				laOrd = ifnull(la.get("planId"),"").toString().trim();
-
-				laqS = ifnull(la.get("qty"),"0").toString().trim();
-				if(laqS == "")
-				{
-					laqS = "0";
-				}
-				laQ = laqS.toDecimal();
-
-				// A zero line is not an error - the widget sends a row per lot
-				// on screen and he only fills the ones he is taking from.
-				if(laQ > 0)
-				{
-					if(laId == "")
-					{
-						lotErr = matName + ": a lot line arrived with no lot";
-					}
-					else
-					{
-						// The SAME lot twice in one payload is summed, not
-						// treated as two lines. Two rows against one lot would
-						// each be checked against the full stock separately and
-						// could together take more than it holds. This is the
-						// LOT total and stays the lot total even when the lines
-						// are for different items - the shelf does not care who
-						// the cloth is for.
-						prevWant = ifnull(lotSum.get(laId),"0").toString().trim();
-						if(prevWant == "")
-						{
-							prevWant = "0";
-						}
-
-						if(prevWant.toDecimal() == 0)
-						{
-							lotRecs2 = Raw_Material_Lot[ID == laId.toLong()];
-							if(lotRecs2.count() == 0)
+							wplStr = ifnull(wRecs.Piece_Length,"0").toString().trim();
+							if(wplStr == "")
 							{
-								lotErr = matName + ": lot " + laId + " not found";
+								wplStr = "0";
+							}
+							wpw = wpwStr.toDecimal();
+							wpl = wplStr.toDecimal();
+							// How many cut pieces do these actually yield? Same
+							// grain-fixed maths as the allocation: across the piece
+							// width, down its length, never rotated.
+							//
+							// A REMNANT TOO SMALL FOR THE CUT YIELDS ZERO, NOT ONE, and
+							// the difference is a silent-loss bug of the exact family
+							// CLAUDE.md already records four of.
+							//
+							// The fallback used to be a flat 1 for every case the guard
+							// rejected, which lumped "this mrq is not counted in cut
+							// pieces at all" together with "this offcut cannot take this
+							// cut". The second credits Pieces_From_Waste with a piece
+							// nobody can cut: the requirement closes, the item goes
+							// Ready_For_Production, and the supervisor is holding a
+							// remnant narrower than his marker. Fabric fulfilment is
+							// counted in CUT PIECES - a mrq whose pieces read as issued
+							// looks complete however little cloth it has.
+							//
+							// The widget never offers such a pick (remnantYield returns 0
+							// and the scorer skips it), but this is a Custom API and the
+							// payload is not evidence. The printed-piece block below
+							// already gets this right - `if(pcAcross > 0 && pcAlong > 0)`
+							// - and this is the same rule for offcuts.
+							//
+							// Zero rather than a refusal, deliberately. The remnant still
+							// physically goes with him and its metres still leave the
+							// rack; what must not happen is the requirement being told it
+							// was covered. Under-crediting leaves the line open and the
+							// store issues real cloth, which is the recoverable
+							// direction - exactly what a too-small printed piece does.
+							//
+							// The flat 1 survives only where pieces are not the unit:
+							// a non-fabric mrq, or a fabric mrq planned before
+							// Required_Pieces existed and so carrying no cut size.
+							yieldPer = 1;
+							if(isFab == true && cutW > 0 && cutL > 0)
+							{
+								yieldPer = 0;
+								if(wpw >= cutW && wpl >= cutL)
+								{
+									yieldPer = (wpw / cutW).floor() * (wpl / cutL).floor();
+								}
+								else
+								{
+									info "waste piece " + wId + " (" + wpw + "x" + wpl + ") cannot take a " + cutW + "x" + cutL + " cut - issued, but credited 0 pieces";
+								}
+							}
+							piecesFromWaste = piecesFromWaste + wantPcs * yieldPer;
+							pkPin = ifnull(pk.get("planItemId"),"").toString().trim();
+							if(pkPin == "")
+							{
+								wFree = wFree + wantPcs * yieldPer;
 							}
 							else
 							{
-								for each  lrec in lotRecs2
+								wpPrev = ifnull(wPinTot.get(pkPin),"0").toString().trim();
+								if(wpPrev == "")
 								{
-									if(ifnull(lrec.Material,"").toString().trim() != matId)
-									{
-										lotErr = matName + ": lot " + laId + " belongs to a different material";
-									}
-									else if(ifnull(lrec.Status,"Active").toString().trim() == "Blocked")
-									{
-										lotErr = matName + ": lot " + ifnull(lrec.Lot_Number,laId).toString() + " is blocked";
-									}
-									else
-									{
-										lhS = ifnull(lrec.Wash_Quantity,"0").toString().trim();
-										if(lhS == "")
-										{
-											lhS = "0";
-										}
-										
-										// If the lot form is Pieces, Wash_Quantity may be out of sync. 
-										// Live-calculate it from the actual pieces on the rack.
-										if(ifnull(lrec.Form,"").toString().trim() == "Pieces")
-										{
-											pSum = 0.0;
-											for each  fp in Fabric_Piece[Lot == lrec.ID && Piece_Status == "Available"]
-											{
-												fpSt = ifnull(fp.State,"Wash").toString().trim();
-												if(fpSt == "Wash")
-												{
-													fpLen = ifnull(fp.Piece_Length_Cm,"0").toString().toDecimal() / 100;
-													fpCnt = ifnull(fp.Piece_Count,"0").toString().toDecimal();
-													pSum = pSum + (fpLen * fpCnt);
-												}
-											}
-											lhS = pSum.toString();
-										}
-										
-										lotHave.put(laId,lhS.toDecimal());
-										lotName.put(laId,ifnull(lrec.Lot_Number,laId).toString());
-										lotOrder.add(laId);
-									}
+									wpPrev = "0";
 								}
+								wPinTot.put(pkPin,wpPrev.toLong() + wantPcs * yieldPer);
 							}
-						}
-
-						lotSum.put(laId,prevWant.toDecimal() + laQ);
-
-						// THE ORDER MAY NAME ONLY ONE LOT. Two lines of the same
-						// order against two lots is rejected outright - the whole
-						// material line is refused rather than one of the two
-						// silently winning, because there is no way to tell from
-						// here which shade the finished pieces should be.
-						if(laOrd != "")
-						{
-							prevOrdLot = ifnull(orderLot.get(laOrd),"").toString().trim();
-							if(prevOrdLot == "")
-							{
-								orderLot.put(laOrd,laId);
-							}
-							else if(prevOrdLot != laId)
-							{
-								lotErr = matName + ": one order cannot be cut from two lots";
-							}
-						}
-
-						// The pass this line belongs to. Registered once, in
-						// payload order, so a lot split across two items still
-						// gets one pass each and the metres are never merged.
-						passKey = laId + "|" + laPin;
-						prevPass = ifnull(lotWant.get(passKey),"0").toString().trim();
-						if(prevPass == "")
-						{
-							prevPass = "0";
-						}
-						if(prevPass.toDecimal() == 0)
-						{
-							passOrder.add(passKey);
-							lotOf.put(passKey,laId);
-							pinOf.put(passKey,laPin);
-							// A DELIBERATE TONE OVERRIDE, and the only record of it.
-							//
-							// The order was cut from one lot, that lot ran out, and
-							// the store person accepted a visible mismatch to finish
-							// it. Issued_Lot deliberately keeps the ORIGINAL, so
-							// without this the handover shows a different lot and
-							// nothing anywhere says a person chose that rather than a
-							// rule slipping. Empty on every ordinary issue.
-							noteOf.put(passKey,ifnull(la.get("note"),"").toString().trim().replaceAll("\"","'"));
-							fromOf.put(passKey,ifnull(la.get("overrideFrom"),"").toString().trim());
-							cutSummOf.put(passKey,ifnull(la.get("cutSummary"),"").toString().trim());
-						}
-						lotWant.put(passKey,prevPass.toDecimal() + laQ);
-
-						//--------------------------------------------------
-						// THE PHYSICAL PIECES, on a lot held as pieces.
-						//
-						// COLLECTED, NEVER DERIVED. Three 3.00 m pieces are
-						// 9.00 m, and 9.00 m against a 55 cm cut divides to
-						// floor(900/55) = 16 marker rows - but each piece is
-						// cut on its own and yields floor(300/55) = 5, so the
-						// truth is 15. Crediting the 16th is a piece nobody can
-						// cut: the requirement closes early, the item never
-						// leaves Awaiting_Material, and pressing Issue again
-						// does nothing because the "nothing outstanding" test
-						// needs both metres and pieces spent. That is the same
-						// silent-loss shape CLAUDE.md already records four of.
-						//
-						// Held as two parallel lists per pass, flattened into
-						// "id:count" strings - Deluge has no nested collection
-						// that survives a Map value cleanly, and this is read
-						// back exactly once, in the pass loop.
-						pcRaw = ifnull(la.get("pieces"),"[]").toString().toJSONList();
-
-						if(pcRaw.size() > 0)
-						{
-							prevPc = ifnull(passPieces.get(passKey),"").toString();
-
-							for each  pcOne in pcRaw
-							{
-								pcM = pcOne.toMap();
-								pcIdTxt = ifnull(pcM.get("pieceId"),"").toString().trim();
-								pcCntS = ifnull(pcM.get("count"),"0").toString().trim();
-								if(pcCntS == "")
-								{
-									pcCntS = "0";
-								}
-								pcLenS = ifnull(pcM.get("cutLengthCm"),"").toString().trim();
-
-								if(pcIdTxt != "" && pcCntS.toDecimal() > 0)
-								{
-									if(prevPc != "")
-									{
-										prevPc = prevPc + ",";
-									}
-									if(pcLenS != "")
-									{
-										prevPc = prevPc + pcIdTxt + ":" + pcCntS.toDecimal() + ":" + pcLenS.toDecimal();
-									}
-									else
-									{
-										prevPc = prevPc + pcIdTxt + ":" + pcCntS.toDecimal();
-									}
-								}
-							}
-
-							passPieces.put(passKey,prevPc);
-						}
-
-						lotTotal = lotTotal + laQ;
-					}
-				}
-			}
-
-			// Stock check AFTER summing, so a lot named twice is measured once
-			// against what it actually holds. Against lotSum, NOT lotWant - the
-			// per-pass figures are shares of this and each one is under the
-			// lot's stock on its own even when together they are not.
-			for each  lchkId in lotOrder
-			{
-				wantHere = ifnull(lotSum.get(lchkId),"0").toString().trim();
-				if(wantHere == "")
-				{
-					wantHere = "0";
-				}
-				haveHere = ifnull(lotHave.get(lchkId),"0").toString().trim();
-				if(haveHere == "")
-				{
-					haveHere = "0";
-				}
-				if(wantHere.toDecimal() > haveHere.toDecimal())
-				{
-					lotErr = matName + ": lot " + ifnull(lotName.get(lchkId),lchkId).toString() + " has " + haveHere.toDecimal() + " washed, asked " + wantHere.toDecimal();
-				}
-			}
-
-			//--------------------------------------------------------------
-			// THE PIECES THEMSELVES, VALIDATED HERE - BEFORE ANYTHING IS
-			// WRITTEN.
-			//
-			// These four tests already existed, at :1137-1152, under a
-			// comment reading "EVERY ONE OF THESE IS A REFUSAL, NOT A TRIM".
-			// They refused nothing. They sit inside the write branch, ~370
-			// lines PAST the gate that reads lotErr, and lotErr is never read
-			// again and is reset per material - so what they actually did was
-			// worse than no check at all:
-			//
-			//   EVERY PIECE FAILS -> passIsPieces stays false, so the
-			//     thisQty = pcMetres override at :1265 never fires and the
-			//     pass falls through to the ROLL path. The lot's
-			//     Wash_Quantity is decremented anyway - :1690 is
-			//     unconditional - while the piece decrement is skipped,
-			//     because :1708 is guarded on passIsPieces. Metres leave the
-			//     lot and NO PIECE LEAVES THE RACK. The header and its
-			//     Fabric_Piece rows then disagree, which is precisely what
-			//     the comment at :1697 says that block exists to prevent, and
-			//     the pieces stay Available to be offered again next render.
-			//
-			//   SOME FAIL -> passIsPieces is true and thisQty is the metres of
-			//     the survivors only. A silent trim: the handover records less
-			//     cloth than he handed over, the requirement never closes, and
-			//     the item sits at Awaiting_Material with nothing saying why.
-			//
-			// A PIECE THAT NO LONGER EXISTS is refused too. The write-side
-			// loop cannot see that case at all - its for-each simply does not
-			// run - so a deleted piece took the same roll-path fall as a
-			// failing one.
-			//
-			// PURELY ADDITIVE. The checks at :1137-1152 are left exactly where
-			// they are. They become unreachable in the failing cases because
-			// this refuses the whole material line first, and they stay as a
-			// defensive guard against anything this loop does not model.
-			//
-			// passOrder / lotOf / passPieces are all built above, and passIds
-			// below is passOrder itself for fabric - so this validates exactly
-			// the passes that would execute, never a pass that would not.
-			//--------------------------------------------------------------
-			for each  pvKey in passOrder
-			{
-				pvSpec = ifnull(passPieces.get(pvKey),"").toString().trim();
-
-				if(pvSpec != "" && cutW > 0 && cutL > 0)
-				{
-					pvLot = ifnull(lotOf.get(pvKey),"").toString().trim();
-
-					for each  pvTok in pvSpec.toList(",")
-					{
-						pvBits = pvTok.toString().trim().toList(":");
-
-						if(pvBits.size() == 2)
-						{
-							pvId = pvBits.get(0).toString().trim();
-							pvN = pvBits.get(1).toString().trim().toDecimal();
-
-							if(pvId != "" && pvN > 0)
-							{
-								pvFound = false;
-
-								for each  pvRec in Fabric_Piece[ID == pvId.toLong()]
-								{
-									pvFound = true;
-
-									pvPcS = ifnull(pvRec.Piece_Count,"0").toString().trim();
-									if(pvPcS == "")
-									{
-										pvPcS = "0";
-									}
-
-									if(ifnull(pvRec.Lot,"").toString().trim() != pvLot)
-									{
-										lotErr = matName + ": a piece in this handover is not on the lot it names";
-									}
-									else if(ifnull(pvRec.Piece_Status,"").toString().trim() != "Available")
-									{
-										lotErr = matName + ": a piece in this handover is no longer available";
-									}
-									else if(ifnull(pvRec.State,"").toString().trim() != "Wash")
-									{
-										lotErr = matName + ": a greige piece cannot be issued - it has to be washed first";
-									}
-									else if(pvN > pvPcS.toDecimal())
-									{
-										lotErr = matName + ": only " + pvPcS.toDecimal() + " of that piece are on the rack";
-									}
-								}
-
-								if(pvFound == false)
-								{
-									lotErr = matName + ": a piece in this handover no longer exists";
-								}
-							}
+							pkW.put(wId,wpw);
+							pkL.put(wId,wpl);
+							pkYield.put(wId,yieldPer);
 						}
 					}
 				}
-			}
-
-			//--------------------------------------------------------------
-			// FOR FABRIC THE LOTS ARE THE ASK. The payload's qty is advisory
-			// and is overridden, for the same reason Pieces_From_Raw is
-			// recomputed rather than trusted: this function is the ledger.
-			//
-			// Fabric with no lot at all is REFUSED rather than issued off the
-			// parent total. Letting it through would move Raw_Material without
-			// moving any lot, so the parent and the sum of its lots would
-			// silently disagree - and nothing downstream could say which cloth
-			// the supervisor is holding, which is what receipt and disputes
-			// both need.
-			//--------------------------------------------------------------
-			if(isFab == true)
-			{
-				askQty = lotTotal;
-				if(lotErr == "" && lotTotal <= 0 && picks.size() == 0)
-				{
-					lotErr = matName + ": choose which lot the cloth comes from";
-				}
-			}
-
-			if(askQty < 0)
-			{
-				if(errJson != "")
-				{
-					errJson = errJson + ",";
-				}
-				errJson = errJson + "\"" + matName + ": quantity cannot be negative\"";
-			}
-			else if(askQty == 0 && picks.size() == 0)
-			{
-				if(errJson != "")
-				{
-					errJson = errJson + ",";
-				}
-				errJson = errJson + "\"" + matName + ": nothing to issue\"";
-			}
-			else if(pickErr != "")
-			{
-				if(errJson != "")
-				{
-					errJson = errJson + ",";
-				}
-				errJson = errJson + "\"" + pickErr.replaceAll("\"","'") + "\"";
-			}
-			else if(lotErr != "")
-			{
-				if(errJson != "")
-				{
-					errJson = errJson + ",";
-				}
-				errJson = errJson + "\"" + lotErr.replaceAll("\"","'") + "\"";
-			}
-			else if(outstanding <= 0 && outPieces <= 0)
-			{
-				if(errJson != "")
-				{
-					errJson = errJson + ",";
-				}
-				errJson = errJson + "\"" + matName + ": nothing outstanding for this supervisor\"";
-			}
-			else if(askQty > available)
-			{
-				if(errJson != "")
-				{
-					errJson = errJson + ",";
-				}
-				errJson = errJson + "\"" + matName + ": asked " + askQty + " but only " + available + " in stock\"";
-			}
-			else
-			{
-				// Never issue more than the supervisor still needs - the extra
-				// would decrement real stock with nowhere to book it.
-				issueQty = askQty;
-				if(issueQty > outstanding)
-				{
-					issueQty = outstanding;
-				}
-
-				//----------------------------------------------------------
-				// Consume the waste pieces. Validation already passed, so
-				// this loop cannot fail partway.
-				//----------------------------------------------------------
-				for each  pkRaw2 in picks
-				{
-					pk2 = pkRaw2.toMap();
-					wId2 = ifnull(pk2.get("wasteId"),"").toString().trim();
-					pcStr2 = ifnull(pk2.get("pieces"),"0").toString().trim();
-					if(pcStr2 == "")
-					{
-						pcStr2 = "0";
-					}
-					takePcs = pcStr2.toDecimal().toLong();
-
-					for each  wRec in Waste_Master[ID == wId2.toLong()]
-					{
-						haveStr2 = ifnull(wRec.Piece_Count,"0").toString().trim();
-						if(haveStr2 == "")
-						{
-							haveStr2 = "0";
-						}
-						transStr2 = ifnull(wRec.In_Transit_Count,"0").toString().trim();
-						if(transStr2 == "")
-						{
-							transStr2 = "0";
-						}
-						leftPcs = haveStr2.toDecimal().toLong() - takePcs;
-
-						// Handed over, NOT yet consumed. The pieces leave the
-						// rack so nobody can be offered them twice, but they do
-						// not leave the company until the supervisor confirms
-						// he is holding them. Between those two moments they
-						// are in transit and belong to neither side.
-						wRec.Piece_Count = leftPcs;
-						wRec.In_Transit_Count = transStr2.toDecimal().toLong() + takePcs;
-
-						// A piece is always consumed whole, so an emptied row
-						// is off the rack - but "Issued" not "Consumed", which
-						// now means confirmed received.
-						if(leftPcs <= 0)
-						{
-							wRec.Status = "Issued";
-						}
-					}
-				}
-
-				//----------------------------------------------------------
-				// THE PASSES - one per lot the cloth comes off, and per item
-				// when the widget named one.
+				// A remnant can yield more cuts than are still needed. The surplus
+				// is not booked against the requirement - it becomes waste again
+				// once the supervisor has cut what he needs.
 				//
-				// Non-fabric gets a single pass with an empty key, so it walks
-				// exactly the same code and behaves exactly as before.
-				//----------------------------------------------------------
-				passIds = List();
+				// wFree/wPinTot are deliberately NOT trimmed to match. They say what
+				// each mrq is ALLOWED to draw on, not how much exists; the running
+				// total below is the one that says that, and every give is capped
+				// against it. Trimming a total across two buckets would need a rule
+				// for which bucket loses, and there isn't an honest one.
+				if(piecesFromWaste > outPieces)
+				{
+					piecesFromWaste = outPieces;
+				}
+				//--------------------------------------------------------------
+				// Pass 2b - VALIDATE EVERY LOT BEFORE CONSUMING ANY.
+				//
+				// Same rule as the waste picks above: a half-applied issue takes
+				// cloth off a lot with nothing booked against it, and there is no
+				// transaction in Deluge to roll that back with.
+				//
+				// A lot line is checked for: existing, belonging to THIS material,
+				// not Blocked, and holding enough WASHED cloth. Fabric only ever
+				// leaves as washed metres, so Wash_Quantity is the figure - a lot
+				// full of unwashed cloth is not issuable however much it holds.
+				//--------------------------------------------------------------
+				//
+				// TWO KEYS, and they are not the same key.
+				//   lotOrder / lotSum / lotHave / lotName - per LOT, because stock is
+				//     held by the lot and a lot named on three lines can only give
+				//     what it has once.
+				//   passOrder / lotWant / lotOf / pinOf   - per LOT x PLAN ITEM,
+				//     because that pair is what a pass may fan into. Two items of one
+				//     order sharing a lot is the ordinary case, and summing them onto
+				//     the lot would put the pair back into one pass with no way to
+				//     say which item each metre was for.
+				// A line with no planItemId keys on the lot alone (pin ""), so an
+				// older widget produces exactly one pass per lot, as it always did.
+				//
+				lotOrder = List();
+				passOrder = List();
+				lotSum = Map();
+				lotWant = Map();
+				lotOf = Map();
+				pinOf = Map();
+				noteOf = Map();
+				fromOf = Map();
+				cutSummOf = Map();
+				lotHave = Map();
+				lotName = Map();
+				passEmitted = Map();
+				// Pass key -> "pieceId:count,pieceId:count". Empty for every roll
+				// lot, so the whole piece path below is unreachable on the flow that
+				// existed before printing.
+				passPieces = Map();
+				// ONE ORDER, ONE LOT - checked here rather than trusted.
+				//
+				// The widget allocates per order and cannot produce a straddling
+				// order, but a Custom API is callable from anywhere and the guarantee
+				// is worth exactly as much as its weakest caller. Two shades in one
+				// order is the defect lots exist to prevent, and unlike a stock
+				// shortfall it cannot be undone once the cloth is cut.
+				//
+				// planId -> the lot that order is taking from. Empty on an older
+				// widget, which then behaves exactly as it did before.
+				orderLot = Map();
+				lotErr = "";
+				lotTotal = 0.0;
+				for each  laRaw in lotLines
+				{
+					la = laRaw.toMap();
+					laId = ifnull(la.get("lotId"),"").toString().trim();
+					laPin = ifnull(la.get("planItemId"),"").toString().trim();
+					laOrd = ifnull(la.get("planId"),"").toString().trim();
+					laqS = ifnull(la.get("qty"),"0").toString().trim();
+					if(laqS == "")
+					{
+						laqS = "0";
+					}
+					laQ = laqS.toDecimal();
+					// A zero line is not an error - the widget sends a mrq per lot
+					// on screen and he only fills the ones he is taking from.
+					if(laQ > 0)
+					{
+						if(laId == "")
+						{
+							lotErr = matName + ": a lot line arrived with no lot";
+						}
+						else
+						{
+							// The SAME lot twice in one payload is summed, not
+							// treated as two lines. Two rows against one lot would
+							// each be checked against the full stock separately and
+							// could together take more than it holds. This is the
+							// LOT total and stays the lot total even when the lines
+							// are for different items - the shelf does not care who
+							// the cloth is for.
+							prevWant = ifnull(lotSum.get(laId),"0").toString().trim();
+							if(prevWant == "")
+							{
+								prevWant = "0";
+							}
+							if(prevWant.toDecimal() == 0)
+							{
+								lotRecs2 = Raw_Material_Lot[ID == laId.toLong()];
+								if(lotRecs2.count() == 0)
+								{
+									lotErr = matName + ": lot " + laId + " not found";
+								}
+								else
+								{
+									for each  lrec in lotRecs2
+									{
+										if(ifnull(lrec.Material,"").toString().trim() != matId)
+										{
+											lotErr = matName + ": lot " + laId + " belongs to a different material";
+										}
+										else if(ifnull(lrec.Status,"Active").toString().trim() == "Blocked")
+										{
+											lotErr = matName + ": lot " + ifnull(lrec.Lot_Number,laId).toString() + " is blocked";
+										}
+										else
+										{
+											lhS = ifnull(lrec.Wash_Quantity,"0").toString().trim();
+											if(lhS == "")
+											{
+												lhS = "0";
+											}
+											// If the lot form is Pieces, Wash_Quantity may be out of sync. 
+											// Live-calculate it from the actual pieces on the rack.
+											if(ifnull(lrec.Form,"").toString().trim() == "Pieces")
+											{
+												pSum = 0.0;
+												for each  fp in Fabric_Piece[Lot == lrec.ID && Piece_Status == "Available"]
+												{
+													fpSt = ifnull(fp.State,"Wash").toString().trim();
+													if(fpSt == "Wash")
+													{
+														fpLen = ifnull(fp.Piece_Length_Cm,"0").toString().toDecimal() / 100;
+														fpCnt = ifnull(fp.Piece_Count,"0").toString().toDecimal();
+														pSum = pSum + fpLen * fpCnt;
+													}
+												}
+												lhS = pSum.toString();
+											}
+											lotHave.put(laId,lhS.toDecimal());
+											lotName.put(laId,ifnull(lrec.Lot_Number,laId).toString());
+											lotOrder.add(laId);
+										}
+									}
+								}
+							}
+							lotSum.put(laId,prevWant.toDecimal() + laQ);
+							// THE ORDER MAY NAME ONLY ONE LOT. Two lines of the same
+							// order against two lots is rejected outright - the whole
+							// material line is refused rather than one of the two
+							// silently winning, because there is no way to tell from
+							// here which shade the finished pieces should be.
+							if(laOrd != "")
+							{
+								prevOrdLot = ifnull(orderLot.get(laOrd),"").toString().trim();
+								if(prevOrdLot == "")
+								{
+									orderLot.put(laOrd,laId);
+								}
+								else if(prevOrdLot != laId)
+								{
+									lotErr = matName + ": one order cannot be cut from two lots";
+								}
+							}
+							// The pass this line belongs to. Registered once, in
+							// payload order, so a lot split across two items still
+							// gets one pass each and the metres are never merged.
+							passKey = laId + "|" + laPin;
+							prevPass = ifnull(lotWant.get(passKey),"0").toString().trim();
+							if(prevPass == "")
+							{
+								prevPass = "0";
+							}
+							if(prevPass.toDecimal() == 0)
+							{
+								passOrder.add(passKey);
+								lotOf.put(passKey,laId);
+								pinOf.put(passKey,laPin);
+								// A DELIBERATE TONE OVERRIDE, and the only record of it.
+								//
+								// The order was cut from one lot, that lot ran out, and
+								// the store person accepted a visible mismatch to finish
+								// it. Issued_Lot deliberately keeps the ORIGINAL, so
+								// without this the handover shows a different lot and
+								// nothing anywhere says a person chose that rather than a
+								// rule slipping. Empty on every ordinary issue.
+								noteOf.put(passKey,ifnull(la.get("note"),"").toString().trim().replaceAll("\"","'"));
+								fromOf.put(passKey,ifnull(la.get("overrideFrom"),"").toString().trim());
+								cutSummOf.put(passKey,ifnull(la.get("cutSummary"),"").toString().trim());
+							}
+							lotWant.put(passKey,prevPass.toDecimal() + laQ);
+							//--------------------------------------------------
+							// THE PHYSICAL PIECES, on a lot held as pieces.
+							//
+							// COLLECTED, NEVER DERIVED. Three 3.00 m pieces are
+							// 9.00 m, and 9.00 m against a 55 cm cut divides to
+							// floor(900/55) = 16 marker rows - but each piece is
+							// cut on its own and yields floor(300/55) = 5, so the
+							// truth is 15. Crediting the 16th is a piece nobody can
+							// cut: the requirement closes early, the item never
+							// leaves Awaiting_Material, and pressing Issue again
+							// does nothing because the "nothing outstanding" test
+							// needs both metres and pieces spent. That is the same
+							// silent-loss shape CLAUDE.md already records four of.
+							//
+							// Held as two parallel lists per pass, flattened into
+							// "id:count" strings - Deluge has no nested collection
+							// that survives a Map value cleanly, and this is read
+							// back exactly once, in the pass loop.
+							pcRaw = ifnull(la.get("pieces"),"[]").toString().toJSONList();
+							if(pcRaw.size() > 0)
+							{
+								prevPc = ifnull(passPieces.get(passKey),"").toString();
+								for each  pcOne in pcRaw
+								{
+									pcM = pcOne.toMap();
+									pcIdTxt = ifnull(pcM.get("pieceId"),"").toString().trim();
+									pcCntS = ifnull(pcM.get("count"),"0").toString().trim();
+									if(pcCntS == "")
+									{
+										pcCntS = "0";
+									}
+									pcLenS = ifnull(pcM.get("cutLengthCm"),"").toString().trim();
+									if(pcIdTxt != "" && pcCntS.toDecimal() > 0)
+									{
+										if(prevPc != "")
+										{
+											prevPc = prevPc + ",";
+										}
+										if(pcLenS != "")
+										{
+											prevPc = prevPc + pcIdTxt + ":" + pcCntS.toDecimal() + ":" + pcLenS.toDecimal();
+										}
+										else
+										{
+											prevPc = prevPc + pcIdTxt + ":" + pcCntS.toDecimal();
+										}
+									}
+								}
+								passPieces.put(passKey,prevPc);
+							}
+							lotTotal = lotTotal + laQ;
+						}
+					}
+				}
+				// Stock check AFTER summing, so a lot named twice is measured once
+				// against what it actually holds. Against lotSum, NOT lotWant - the
+				// per-pass figures are shares of this and each one is under the
+				// lot's stock on its own even when together they are not.
+				for each  lchkId in lotOrder
+				{
+					wantHere = ifnull(lotSum.get(lchkId),"0").toString().trim();
+					if(wantHere == "")
+					{
+						wantHere = "0";
+					}
+					haveHere = ifnull(lotHave.get(lchkId),"0").toString().trim();
+					if(haveHere == "")
+					{
+						haveHere = "0";
+					}
+					if(wantHere.toDecimal() > haveHere.toDecimal())
+					{
+						lotErr = matName + ": lot " + ifnull(lotName.get(lchkId),lchkId).toString() + " has " + haveHere.toDecimal() + " washed, asked " + wantHere.toDecimal();
+					}
+				}
+				//--------------------------------------------------------------
+				// THE PIECES THEMSELVES, VALIDATED HERE - BEFORE ANYTHING IS
+				// WRITTEN.
+				//
+				// These four tests already existed, at :1137-1152, under a
+				// comment reading "EVERY ONE OF THESE IS A REFUSAL, NOT A TRIM".
+				// They refused nothing. They sit inside the write branch, ~370
+				// lines PAST the gate that reads lotErr, and lotErr is never read
+				// again and is reset per material - so what they actually did was
+				// worse than no check at all:
+				//
+				//   EVERY PIECE FAILS -> passIsPieces stays false, so the
+				//     thisQty = pcMetres override at :1265 never fires and the
+				//     pass falls through to the ROLL path. The lot's
+				//     Wash_Quantity is decremented anyway - :1690 is
+				//     unconditional - while the piece decrement is skipped,
+				//     because :1708 is guarded on passIsPieces. Metres leave the
+				//     lot and NO PIECE LEAVES THE RACK. The header and its
+				//     Fabric_Piece rows then disagree, which is precisely what
+				//     the comment at :1697 says that block exists to prevent, and
+				//     the pieces stay Available to be offered again next render.
+				//
+				//   SOME FAIL -> passIsPieces is true and thisQty is the metres of
+				//     the survivors only. A silent trim: the handover records less
+				//     cloth than he handed over, the requirement never closes, and
+				//     the item sits at Awaiting_Material with nothing saying why.
+				//
+				// A PIECE THAT NO LONGER EXISTS is refused too. The write-side
+				// loop cannot see that case at all - its for-each simply does not
+				// run - so a deleted piece took the same roll-path fall as a
+				// failing one.
+				//
+				// PURELY ADDITIVE. The checks at :1137-1152 are left exactly where
+				// they are. They become unreachable in the failing cases because
+				// this refuses the whole material line first, and they stay as a
+				// defensive guard against anything this loop does not model.
+				//
+				// passOrder / lotOf / passPieces are all built above, and passIds
+				// below is passOrder itself for fabric - so this validates exactly
+				// the passes that would execute, never a pass that would not.
+				//--------------------------------------------------------------
+				for each  pvKey in passOrder
+				{
+					pvSpec = ifnull(passPieces.get(pvKey),"").toString().trim();
+					if(pvSpec != "" && cutW > 0 && cutL > 0)
+					{
+						pvLot = ifnull(lotOf.get(pvKey),"").toString().trim();
+						for each  pvTok in pvSpec.toList(",")
+						{
+							pvBits = pvTok.toString().trim().toList(":");
+							if(pvBits.size() == 2)
+							{
+								pvId = pvBits.get(0).toString().trim();
+								pvN = pvBits.get(1).toString().trim().toDecimal();
+								if(pvId != "" && pvN > 0)
+								{
+									pvFound = false;
+									for each  pvRec in Fabric_Piece[ID == pvId.toLong()]
+									{
+										pvFound = true;
+										pvPcS = ifnull(pvRec.Piece_Count,"0").toString().trim();
+										if(pvPcS == "")
+										{
+											pvPcS = "0";
+										}
+										if(ifnull(pvRec.Lot,"").toString().trim() != pvLot)
+										{
+											lotErr = matName + ": a piece in this handover is not on the lot it names";
+										}
+										else if(ifnull(pvRec.Piece_Status,"").toString().trim() != "Available")
+										{
+											lotErr = matName + ": a piece in this handover is no longer available";
+										}
+										else if(ifnull(pvRec.State,"").toString().trim() != "Wash")
+										{
+											lotErr = matName + ": a greige piece cannot be issued - it has to be washed first";
+										}
+										else if(pvN > pvPcS.toDecimal())
+										{
+											lotErr = matName + ": only " + pvPcS.toDecimal() + " of that piece are on the rack";
+										}
+									}
+									if(pvFound == false)
+									{
+										lotErr = matName + ": a piece in this handover no longer exists";
+									}
+								}
+							}
+						}
+					}
+				}
+				//--------------------------------------------------------------
+				// FOR FABRIC THE LOTS ARE THE ASK. The payload's qty is advisory
+				// and is overridden, for the same reason Pieces_From_Raw is
+				// recomputed rather than trusted: this function is the ledger.
+				//
+				// Fabric with no lot at all is REFUSED rather than issued off the
+				// parent total. Letting it through would move Raw_Material without
+				// moving any lot, so the parent and the sum of its lots would
+				// silently disagree - and nothing downstream could say which cloth
+				// the supervisor is holding, which is what receipt and disputes
+				// both need.
+				//--------------------------------------------------------------
 				if(isFab == true)
 				{
-					// Which PINS already own a pass. A pinned pass only ever visits its
-					// own item's rows, so a pin with no pass is an item the fan never
-					// reaches - and its waste credit has nowhere to land.
-					pinSeen = List();
-
-					for each  lpId in passOrder
+					askQty = lotTotal;
+					if(lotErr == "" && lotTotal <= 0 && picks.size() == 0)
 					{
-						passIds.add(lpId);
-
-						lpPin = ifnull(pinOf.get(lpId),"").toString().trim();
-
-						if(pinSeen.contains(lpPin) == false)
-						{
-							pinSeen.add(lpPin);
-						}
+						lotErr = matName + ": choose which lot the cloth comes from";
 					}
-
-					// A FABRIC LINE COVERED ENTIRELY BY OFFCUTS HAS NO LOT LINE,
-					// so it had no pass at all - and the fan that credits
-					// Pieces_From_Waste lives inside the pass loop.
-					//
-					// The remnants were taken off the rack and moved to
-					// In_Transit_Count above regardless, so they left the store
-					// with NOTHING booking them: the requirement stayed open at
-					// its full piece count and the pieces were gone. Silent, and
-					// the okJson line even reported piecesFromWaste as though it
-					// had been credited.
-					//
-					// One pass carrying no lot moves no cloth - thisQty comes out
-					// 0 and the stock block below is skipped - and lets the waste
-					// credit land where it belongs.
-					// AN ITEM COVERED ENTIRELY BY OFFCUTS HAS NO LOT LINE, SO IT HAS NO
-					// PASS - AND WITHOUT A PASS IT IS NEVER FANNED.
-					//
-					// This guard used to be `passIds.size() == 0`, which caught only the
-					// case where the whole LINE had no lot at all. On a card holding two
-					// orders it is false: order A is offcut-complete and contributes no
-					// lot line, order B draws fresh cloth from the same lot and
-					// contributes one. Every executed pass is then pinned to B, the fan
-					// visits only B's rows, and A's Pieces_From_Waste credit is never
-					// made.
-					//
-					// A's remnants have ALREADY moved to In_Transit_Count by this point,
-					// so they leave the rack booking nothing and A's requirement stays
-					// open at its full piece count for ever. The next press is worse:
-					// those remnants now fail validation as "no longer available", so the
-					// store is asked for REAL cloth to cover pieces the offcuts already
-					// covered. Silent loss, then over-issue.
-					//
-					// So every pin holding waste credit gets a pass of its own when it
-					// has none - an empty lot with that pin, keyed the same "lot|pin" way
-					// as a real pass. It moves no cloth: lotWant has no entry, thisQty
-					// comes out 0 and the stock block is skipped. It exists purely so the
-					// fan reaches those rows.
-					for each  wpPinRaw in wPinTot.keys()
+				}
+				if(askQty < 0)
+				{
+					if(errJson != "")
 					{
-						wpPin = ifnull(wpPinRaw,"").toString().trim();
-						wpHaveS = ifnull(wPinTot.get(wpPin),"0").toString().trim();
-
-						if(wpHaveS == "")
-						{
-							wpHaveS = "0";
-						}
-
-						if(wpPin != "" && wpHaveS.toLong() > 0 && pinSeen.contains(wpPin) == false)
-						{
-							synKey = "|" + wpPin;
-
-							// Registered in the same maps the pass loop reads, so it is
-							// indistinguishable from a real pass except that it names no lot.
-							lotOf.put(synKey,"");
-							pinOf.put(synKey,wpPin);
-
-							passIds.add(synKey);
-							pinSeen.add(wpPin);
-						}
+						errJson = errJson + ",";
 					}
-
-					// UNPINNED credit needs an UNPINNED pass - only a pass with no pin
-					// visits every row. Tested on wFree, not picks.size(): a pick
-					// allocated to an item is already covered by the pinned passes above.
-					if(wFree > 0 && pinSeen.contains("") == false)
+					errJson = errJson + "\"" + matName + ": quantity cannot be negative\"";
+				}
+				else if(askQty == 0 && picks.size() == 0)
+				{
+					if(errJson != "")
 					{
-						passIds.add("");
-						pinSeen.add("");
+						errJson = errJson + ",";
 					}
+					errJson = errJson + "\"" + matName + ": nothing to issue\"";
+				}
+				else if(pickErr != "")
+				{
+					if(errJson != "")
+					{
+						errJson = errJson + ",";
+					}
+					errJson = errJson + "\"" + pickErr.replaceAll("\"","'") + "\"";
+				}
+				else if(lotErr != "")
+				{
+					if(errJson != "")
+					{
+						errJson = errJson + ",";
+					}
+					errJson = errJson + "\"" + lotErr.replaceAll("\"","'") + "\"";
+				}
+				else if(outstanding <= 0 && outPieces <= 0)
+				{
+					if(errJson != "")
+					{
+						errJson = errJson + ",";
+					}
+					errJson = errJson + "\"" + matName + ": nothing outstanding for this supervisor\"";
+				}
+				else if(askQty > available)
+				{
+					if(errJson != "")
+					{
+						errJson = errJson + ",";
+					}
+					errJson = errJson + "\"" + matName + ": asked " + askQty + " but only " + available + " in stock\"";
 				}
 				else
 				{
-					passIds.add("");
-				}
-
-				// Waste credit belongs to the ISSUE, not to any one lot, so it
-				// is carried across the passes and spent by the first rows that
-				// need it. The second pass simply finds it already spent.
-				fanWaste = piecesFromWaste;
-				// A physical remnant cannot be split across two plans, so the
-				// Issued movements are attached to the FIRST plan that takes
-				// waste credit for this material and cut size, and carry that
-				// row's Plan_Item. If an issue happens to span two plans the
-				// handover is recorded against the older one. Set OUTSIDE the
-				// pass loop so a two-lot issue still logs them exactly once.
-				wasteLogged = false;
-				piecesFromRawTotal = 0;
-				issuedTotal = 0.0;
-				// Declared out here as well as inside the guard below: a pinned
-				// pass whose item turns out to need nothing is skipped entirely,
-				// and with every pass skipped the okJson line at the end would
-				// otherwise read a variable that was never assigned.
-				piecesFromRaw = 0;
-
-				perRowP = 0;
-				canPiece = false;
-				if(isFab == true && cutW > 0 && cutL > 0 && fabricWidthCm >= cutW)
-				{
-					perRowP = (fabricWidthCm / cutW).floor();
-					if(perRowP > 0)
+					// Never issue more than the supervisor still needs - the extra
+					// would decrement real stock with nowhere to book it.
+					issueQty = askQty;
+					if(issueQty > outstanding)
 					{
-						canPiece = true;
+						issueQty = outstanding;
 					}
-				}
-
-				for each  passId in passIds
-				{
-					//------------------------------------------------------
-					// WHICH LOT, AND FOR WHOM.
-					//
-					// passId is the pass key, not the lot - the lot has to come
-					// back out of it for the stock movement and the handover
-					// line, both of which are about cloth and not about items.
-					// Non-fabric has neither, and both read back as "".
-					//------------------------------------------------------
-					passLot = ifnull(lotOf.get(passId),"").toString().trim();
-					passPin = ifnull(pinOf.get(passId),"").toString().trim();
-
-					//------------------------------------------------------
-					// A PINNED PASS IS BUDGETED AGAINST ITS OWN ITEM, LIVE.
-					//
-					// The ceilings further down - how many metres this pass may
-					// take, how many pieces its cloth may be credited with - are
-					// computed from what is still owed. Unpinned that is the
-					// whole line's outstanding, held in outPieces/outstanding
-					// from pass 1. Pinned it must be THIS ITEM's, and using the
-					// line's total instead is not a cosmetic overstatement:
-					//
-					//   A and B each owe 10 pieces at 2 per row. The widget sends
-					//   5.50m for A and 5.50m for B. A's pass sees 20 pieces
-					//   outstanding, so nothing caps it, counts its 5.50m as 20
-					//   pieces of credit, and books 10 of them - A's rows will
-					//   take no more. B's pass then reads 0 pieces still owed,
-					//   caps its metres at 0 and moves nothing. B is left owing
-					//   everything, with no error, and the 2.75m of A's cloth
-					//   that no row absorbed has left the lot unbooked.
-					//
-					// Read off the RECORDS rather than kept in a running map,
-					// because earlier passes have already written Issued_Qty,
-					// Pieces_From_Raw and Pieces_From_Waste onto them - the rows
-					// are the tally, and a second tally beside them would be one
-					// more thing to keep in step. Costs one scan per pinned pass,
-					// the same scan the fan below already does.
-					//------------------------------------------------------
-					pinPcsLeft = 0;
-					pinQtyLeft = 0.0;
-					if(passPin != "")
+					//----------------------------------------------------------
+					// Consume the waste pieces. Validation already passed, so
+					// this loop cannot fail partway.
+					//----------------------------------------------------------
+					for each  pkRaw2 in picks
 					{
-						// Narrowed to the plans carrying this material - see matPlanIdx.
-						for each  planTok in matPlanFor
+						pk2 = pkRaw2.toMap();
+						wId2 = ifnull(pk2.get("wasteId"),"").toString().trim();
+						pcStr2 = ifnull(pk2.get("pieces"),"0").toString().trim();
+						if(pcStr2 == "")
 						{
-							for each  row in Material_Requirement[Plan == planTok.toLong()]
+							pcStr2 = "0";
+						}
+						takePcs = pcStr2.toDecimal().toLong();
+						for each  wRec in Waste_Master[ID == wId2.toLong()]
+						{
+							haveStr2 = ifnull(wRec.Piece_Count,"0").toString().trim();
+							if(haveStr2 == "")
 							{
-								if(row.Material != null && row.Material.toString() == matId)
+								haveStr2 = "0";
+							}
+							transStr2 = ifnull(wRec.In_Transit_Count,"0").toString().trim();
+							if(transStr2 == "")
+							{
+								transStr2 = "0";
+							}
+							leftPcs = haveStr2.toDecimal().toLong() - takePcs;
+							// Handed over, NOT yet consumed. The pieces leave the
+							// rack so nobody can be offered them twice, but they do
+							// not leave the company until the supervisor confirms
+							// he is holding them. Between those two moments they
+							// are in transit and belong to neither side.
+							wRec.Piece_Count=leftPcs;
+							wRec.In_Transit_Count=transStr2.toDecimal().toLong() + takePcs;
+							// A piece is always consumed whole, so an emptied mrq
+							// is off the rack - but "Issued" not "Consumed", which
+							// now means confirmed received.
+							if(leftPcs <= 0)
+							{
+								wRec.Status="Issued";
+							}
+						}
+					}
+					//----------------------------------------------------------
+					// THE PASSES - one per lot the cloth comes off, and per item
+					// when the widget named one.
+					//
+					// Non-fabric gets a single pass with an empty key, so it walks
+					// exactly the same code and behaves exactly as before.
+					//----------------------------------------------------------
+					passIds = List();
+					if(isFab == true)
+					{
+						// Which PINS already own a pass. A pinned pass only ever visits its
+						// own item's rows, so a pin with no pass is an item the fan never
+						// reaches - and its waste credit has nowhere to land.
+						pinSeen = List();
+						for each  lpId in passOrder
+						{
+							passIds.add(lpId);
+							lpPin = ifnull(pinOf.get(lpId),"").toString().trim();
+							if(pinSeen.contains(lpPin) == false)
+							{
+								pinSeen.add(lpPin);
+							}
+						}
+						// A FABRIC LINE COVERED ENTIRELY BY OFFCUTS HAS NO LOT LINE,
+						// so it had no pass at all - and the fan that credits
+						// Pieces_From_Waste lives inside the pass loop.
+						//
+						// The remnants were taken off the rack and moved to
+						// In_Transit_Count above regardless, so they left the store
+						// with NOTHING booking them: the requirement stayed open at
+						// its full piece count and the pieces were gone. Silent, and
+						// the okJson line even reported piecesFromWaste as though it
+						// had been credited.
+						//
+						// One pass carrying no lot moves no cloth - thisQty comes out
+						// 0 and the stock block below is skipped - and lets the waste
+						// credit land where it belongs.
+						// AN ITEM COVERED ENTIRELY BY OFFCUTS HAS NO LOT LINE, SO IT HAS NO
+						// PASS - AND WITHOUT A PASS IT IS NEVER FANNED.
+						//
+						// This guard used to be `passIds.size() == 0`, which caught only the
+						// case where the whole LINE had no lot at all. On a card holding two
+						// orders it is false: order A is offcut-complete and contributes no
+						// lot line, order B draws fresh cloth from the same lot and
+						// contributes one. Every executed pass is then pinned to B, the fan
+						// visits only B's rows, and A's Pieces_From_Waste credit is never
+						// made.
+						//
+						// A's remnants have ALREADY moved to In_Transit_Count by this point,
+						// so they leave the rack booking nothing and A's requirement stays
+						// open at its full piece count for ever. The next press is worse:
+						// those remnants now fail validation as "no longer available", so the
+						// store is asked for REAL cloth to cover pieces the offcuts already
+						// covered. Silent loss, then over-issue.
+						//
+						// So every pin holding waste credit gets a pass of its own when it
+						// has none - an empty lot with that pin, keyed the same "lot|pin" way
+						// as a real pass. It moves no cloth: lotWant has no entry, thisQty
+						// comes out 0 and the stock block is skipped. It exists purely so the
+						// fan reaches those rows.
+						for each  wpPinRaw in wPinTot.keys()
+						{
+							wpPin = ifnull(wpPinRaw,"").toString().trim();
+							wpHaveS = ifnull(wPinTot.get(wpPin),"0").toString().trim();
+							if(wpHaveS == "")
+							{
+								wpHaveS = "0";
+							}
+							if(wpPin != "" && wpHaveS.toLong() > 0 && pinSeen.contains(wpPin) == false)
+							{
+								synKey = "|" + wpPin;
+								// Registered in the same maps the pass loop reads, so it is
+								// indistinguishable from a real pass except that it names no lot.
+								lotOf.put(synKey,"");
+								pinOf.put(synKey,wpPin);
+								passIds.add(synKey);
+								pinSeen.add(wpPin);
+							}
+						}
+						// UNPINNED credit needs an UNPINNED pass - only a pass with no pin
+						// visits every mrq. Tested on wFree, not picks.size(): a pick
+						// allocated to an item is already covered by the pinned passes above.
+						if(wFree > 0 && pinSeen.contains("") == false)
+						{
+							passIds.add("");
+							pinSeen.add("");
+						}
+					}
+					else
+					{
+						passIds.add("");
+					}
+					// Waste credit belongs to the ISSUE, not to any one lot, so it
+					// is carried across the passes and spent by the first rows that
+					// need it. The second pass simply finds it already spent.
+					fanWaste = piecesFromWaste;
+					// A physical remnant cannot be split across two plans, so the
+					// Issued movements are attached to the FIRST plan that takes
+					// waste credit for this material and cut size, and carry that
+					// mrq's Plan_Item. If an issue happens to span two plans the
+					// handover is recorded against the older one. Set OUTSIDE the
+					// pass loop so a two-lot issue still logs them exactly once.
+					wasteLogged = false;
+					piecesFromRawTotal = 0;
+					issuedTotal = 0.0;
+					// Declared out here as well as inside the guard below: a pinned
+					// pass whose item turns out to need nothing is skipped entirely,
+					// and with every pass skipped the okJson line at the end would
+					// otherwise read a variable that was never assigned.
+					piecesFromRaw = 0;
+					perRowP = 0;
+					canPiece = false;
+					if(isFab == true && cutW > 0 && cutL > 0 && fabricWidthCm >= cutW)
+					{
+						perRowP = (fabricWidthCm / cutW).floor();
+						if(perRowP > 0)
+						{
+							canPiece = true;
+						}
+					}
+					for each  passId in passIds
+					{
+						//------------------------------------------------------
+						// WHICH LOT, AND FOR WHOM.
+						//
+						// passId is the pass key, not the lot - the lot has to come
+						// back out of it for the stock movement and the handover
+						// line, both of which are about cloth and not about items.
+						// Non-fabric has neither, and both read back as "".
+						//------------------------------------------------------
+						passLot = ifnull(lotOf.get(passId),"").toString().trim();
+						passPin = ifnull(pinOf.get(passId),"").toString().trim();
+						//------------------------------------------------------
+						// A PINNED PASS IS BUDGETED AGAINST ITS OWN ITEM, LIVE.
+						//
+						// The ceilings further down - how many metres this pass may
+						// take, how many pieces its cloth may be credited with - are
+						// computed from what is still owed. Unpinned that is the
+						// whole line's outstanding, held in outPieces/outstanding
+						// from pass 1. Pinned it must be THIS ITEM's, and using the
+						// line's total instead is not a cosmetic overstatement:
+						//
+						//   A and B each owe 10 pieces at 2 per mrq. The widget sends
+						//   5.50m for A and 5.50m for B. A's pass sees 20 pieces
+						//   outstanding, so nothing caps it, counts its 5.50m as 20
+						//   pieces of credit, and books 10 of them - A's rows will
+						//   take no more. B's pass then reads 0 pieces still owed,
+						//   caps its metres at 0 and moves nothing. B is left owing
+						//   everything, with no error, and the 2.75m of A's cloth
+						//   that no mrq absorbed has left the lot unbooked.
+						//
+						// Read off the RECORDS rather than kept in a running map,
+						// because earlier passes have already written Issued_Qty,
+						// Pieces_From_Raw and Pieces_From_Waste onto them - the rows
+						// are the tally, and a second tally beside them would be one
+						// more thing to keep in step. Costs one scan per pinned pass,
+						// the same scan the fan below already does.
+						//------------------------------------------------------
+						pinPcsLeft = 0;
+						pinQtyLeft = 0.0;
+						if(passPin != "")
+						{
+							for each  mrq in allMatReqs
+							{
+								if(ifnull(mrq.Plan_Item,"").toString() == passPin)
 								{
 									pinOk = true;
 									if(isFab == true)
 									{
-										if(ifnull(row.Cut_Size_Width,0) != cutW || ifnull(row.Cut_Size_Length,0) != cutL)
+										if(ifnull(mrq.Cut_Size_Width,0) != cutW || ifnull(mrq.Cut_Size_Length,0) != cutL)
 										{
 											pinOk = false;
 										}
 									}
-									rowSrcP = ifnull(row.Source,"").toString().trim();
+									rowSrcP = ifnull(mrq.Source,"").toString().trim();
 									if(rowSrcP != "Reissue")
 									{
 										rowSrcP = "Plan";
@@ -1270,18 +1264,18 @@ string issueMaterials(string supervisorId, string issuesJson)
 									}
 									// Lookup fields hold record ids, so this is an
 									// id against the id the payload carried.
-									if(ifnull(row.Plan_Item,"").toString().trim() != passPin)
+									if(ifnull(mrq.Plan_Item,"").toString().trim() != passPin)
 									{
 										pinOk = false;
 									}
 									if(pinOk == true)
 									{
-										reqStrP = ifnull(row.Required_Qty,"0").toString().trim();
+										reqStrP = ifnull(mrq.Required_Qty,"0").toString().trim();
 										if(reqStrP == "")
 										{
 											reqStrP = "0";
 										}
-										issStrP = ifnull(row.Issued_Qty,"0").toString().trim();
+										issStrP = ifnull(mrq.Issued_Qty,"0").toString().trim();
 										if(issStrP == "")
 										{
 											issStrP = "0";
@@ -1293,7 +1287,7 @@ string issueMaterials(string supervisorId, string issuesJson)
 										}
 										if(isFab == true)
 										{
-											pcsP = ifnull(row.Required_Pieces,0) - (ifnull(row.Pieces_From_Waste,0) + ifnull(row.Pieces_From_Raw,0));
+											pcsP = ifnull(mrq.Required_Pieces,0) - (ifnull(mrq.Pieces_From_Waste,0) + ifnull(mrq.Pieces_From_Raw,0));
 											if(pcsP > 0)
 											{
 												pinPcsLeft = pinPcsLeft + pcsP;
@@ -1303,1203 +1297,1181 @@ string issueMaterials(string supervisorId, string issuesJson)
 								}
 							}
 						}
-					}
-
-					// Waste credit this pass's rows could still take. Pinned
-					// picks for THIS item plus the free pool, and never more than
-					// is actually left unspent. Subtracted from the piece budget
-					// for the same reason the unpinned line subtracts
-					// piecesFromWaste: cloth is not needed for a piece an offcut
-					// is about to cover.
-					wForPin = ifnull(wPinTot.get(passPin),"0").toString().trim();
-					if(wForPin == "")
-					{
-						wForPin = "0";
-					}
-					wAvail = wFree + wForPin.toLong();
-					if(wAvail > fanWaste)
-					{
-						wAvail = fanWaste;
-					}
-
-					//------------------------------------------------------
-					// HOW MUCH COMES OFF THIS LOT.
-					//
-					// Recomputed here, per pass, from the pieces still owed at
-					// this moment - NOT carved out of a budget worked out once
-					// for the whole issue.
-					//
-					// That distinction is the whole reason this is a loop.
-					// Cloth is usable only in whole marker rows, and each lot
-					// is cut on its own, so the part-row at the end of one lot
-					// cannot be finished with cloth from the next. A budget
-					// computed once, as if the metres were one continuous
-					// piece, is therefore SHORT by up to a row per extra lot -
-					// and the shortfall is the stranded-piece failure CLAUDE.md
-					// already records: the item never leaves Awaiting_Material,
-					// the plan never reaches Material Ready, and pressing Issue
-					// again does nothing because the "nothing outstanding" test
-					// needs both metres and pieces to be spent.
-					//
-					// 100 pieces at 2 per row is 50 rows = 27.50m in one piece.
-					// Split 20 + 7.50 it yields 36 + 13 = 49 rows, 98 pieces.
-					// Budgeting the second pass from the 28 pieces still owed
-					// asks for 7.70m instead, gets 14 rows, and closes it.
-					//
-					// So a split issue can spend slightly MORE metres than the
-					// plan estimated. That is the documented model, not a leak:
-					// Required_Qty is a pre-waste estimate and rounds up once,
-					// while every separate cut rounds up again.
-					//------------------------------------------------------
-					//----------------------------------------------------------
-					// IS THIS PASS A STACK OF PIECES RATHER THAN A ROLL?
-					//
-					// Printed cloth comes back as discrete full-width pieces and
-					// its yield is NOT its metres. Each piece is cut on its own,
-					// so it gives floor(len/cutL) rows and strands the tail below
-					// one cut length - on EVERY piece. Three 3.00 m pieces are
-					// 9.00 m and yield 15 rows of a 55 cm cut, where 9.00
-					// continuous metres would give 16. Crediting that 16th row is
-					// a piece nobody can cut: the requirement closes early, the
-					// item never leaves Awaiting_Material, and pressing Issue
-					// again does nothing because the "nothing outstanding" test
-					// needs both metres and pieces spent.
-					//
-					// So for a pieces pass NOTHING comes off the metres. The
-					// metres come from the pieces, and so does the yield.
-					//
-					// RE-READ OFF THE FORM, never trusted from the payload. A
-					// Custom API is callable from anywhere, and a payload naming
-					// its own lengths could book cloth that does not exist.
-					//
-					// pcSpec is empty for every roll lot, so all of this is
-					// unreachable on the flow that existed before printing.
-					//----------------------------------------------------------
-					passIsPieces = false;
-					pcYield = 0;
-					pcMetres = 0.0;
-					pcSpec = ifnull(passPieces.get(passId),"").toString().trim();
-
-					if(isFab == true && pcSpec != "" && cutW > 0 && cutL > 0)
-					{
-						for each  pcTok in pcSpec.toList(",")
+						// Waste credit this pass's rows could still take. Pinned
+						// picks for THIS item plus the free pool, and never more than
+						// is actually left unspent. Subtracted from the piece budget
+						// for the same reason the unpinned line subtracts
+						// piecesFromWaste: cloth is not needed for a piece an offcut
+						// is about to cover.
+						wForPin = ifnull(wPinTot.get(passPin),"0").toString().trim();
+						if(wForPin == "")
 						{
-							pcBits = pcTok.toString().trim().toList(":");
-							if(pcBits.size() >= 2)
+							wForPin = "0";
+						}
+						wAvail = wFree + wForPin.toLong();
+						if(wAvail > fanWaste)
+						{
+							wAvail = fanWaste;
+						}
+						//------------------------------------------------------
+						// HOW MUCH COMES OFF THIS LOT.
+						//
+						// Recomputed here, per pass, from the pieces still owed at
+						// this moment - NOT carved out of a budget worked out once
+						// for the whole issue.
+						//
+						// That distinction is the whole reason this is a loop.
+						// Cloth is usable only in whole marker rows, and each lot
+						// is cut on its own, so the part-mrq at the end of one lot
+						// cannot be finished with cloth from the next. A budget
+						// computed once, as if the metres were one continuous
+						// piece, is therefore SHORT by up to a mrq per extra lot -
+						// and the shortfall is the stranded-piece failure CLAUDE.md
+						// already records: the item never leaves Awaiting_Material,
+						// the plan never reaches Material Ready, and pressing Issue
+						// again does nothing because the "nothing outstanding" test
+						// needs both metres and pieces to be spent.
+						//
+						// 100 pieces at 2 per mrq is 50 rows = 27.50m in one piece.
+						// Split 20 + 7.50 it yields 36 + 13 = 49 rows, 98 pieces.
+						// Budgeting the second pass from the 28 pieces still owed
+						// asks for 7.70m instead, gets 14 rows, and closes it.
+						//
+						// So a split issue can spend slightly MORE metres than the
+						// plan estimated. That is the documented model, not a leak:
+						// Required_Qty is a pre-waste estimate and rounds up once,
+						// while every separate cut rounds up again.
+						//------------------------------------------------------
+						//----------------------------------------------------------
+						// IS THIS PASS A STACK OF PIECES RATHER THAN A ROLL?
+						//
+						// Printed cloth comes back as discrete full-width pieces and
+						// its yield is NOT its metres. Each piece is cut on its own,
+						// so it gives floor(len/cutL) rows and strands the tail below
+						// one cut length - on EVERY piece. Three 3.00 m pieces are
+						// 9.00 m and yield 15 rows of a 55 cm cut, where 9.00
+						// continuous metres would give 16. Crediting that 16th mrq is
+						// a piece nobody can cut: the requirement closes early, the
+						// item never leaves Awaiting_Material, and pressing Issue
+						// again does nothing because the "nothing outstanding" test
+						// needs both metres and pieces spent.
+						//
+						// So for a pieces pass NOTHING comes off the metres. The
+						// metres come from the pieces, and so does the yield.
+						//
+						// RE-READ OFF THE FORM, never trusted from the payload. A
+						// Custom API is callable from anywhere, and a payload naming
+						// its own lengths could book cloth that does not exist.
+						//
+						// pcSpec is empty for every roll lot, so all of this is
+						// unreachable on the flow that existed before printing.
+						//----------------------------------------------------------
+						passIsPieces = false;
+						pcYield = 0;
+						pcMetres = 0.0;
+						pcSpec = ifnull(passPieces.get(passId),"").toString().trim();
+						if(isFab == true && pcSpec != "" && cutW > 0 && cutL > 0)
+						{
+							for each  pcTok in pcSpec.toList(",")
 							{
-								pcWantId = pcBits.get(0).toString().trim();
-								pcWantN = pcBits.get(1).toString().trim().toDecimal();
-								pcCutLen = 0.0;
-								if(pcBits.size() >= 3)
+								pcBits = pcTok.toString().trim().toList(":");
+								if(pcBits.size() >= 2)
 								{
-									pcCutLen = pcBits.get(2).toString().trim().toDecimal();
-								}
-
-								if(pcWantId != "" && pcWantN > 0)
-								{
-									for each  fpChk in Fabric_Piece[ID == pcWantId.toLong()]
+									pcWantId = pcBits.get(0).toString().trim();
+									pcWantN = pcBits.get(1).toString().trim().toDecimal();
+									pcCutLen = 0.0;
+									if(pcBits.size() >= 3)
 									{
-										fpLotTxt = ifnull(fpChk.Lot,"").toString().trim();
-										fpStat = ifnull(fpChk.Piece_Status,"").toString().trim();
-										fpStateTxt = ifnull(fpChk.State,"").toString().trim();
-
-										fpcS = ifnull(fpChk.Piece_Count,"0").toString().trim();
-										if(fpcS == "")
+										pcCutLen = pcBits.get(2).toString().trim().toDecimal();
+									}
+									if(pcWantId != "" && pcWantN > 0)
+									{
+										for each  fpChk in Fabric_Piece[ID == pcWantId.toLong()]
 										{
-											fpcS = "0";
-										}
-										fplS = ifnull(fpChk.Piece_Length_Cm,"0").toString().trim();
-										if(fplS == "")
-										{
-											fplS = "0";
-										}
-										fpwS = ifnull(fpChk.Piece_Width_Cm,"0").toString().trim();
-										if(fpwS == "")
-										{
-											fpwS = "0";
-										}
-										
-										if(pcCutLen <= 0)
-										{
-											// Legacy 2-part payload: whole piece goes out
-											pcCutLen = fplS.toDecimal();
-										}
-
-										// EVERY ONE OF THESE IS A REFUSAL, NOT A TRIM.
-										// Silently taking less is what produced handovers
-										// that looked complete and were not.
-										if(fpLotTxt != passLot)
-										{
-											lotErr = matName + ": a piece in this handover is not on the lot it names";
-										}
-										else if(fpStat != "Available")
-										{
-											lotErr = matName + ": a piece in this handover is no longer available";
-										}
-										else if(fpStateTxt != "Wash")
-										{
-											lotErr = matName + ": a greige piece cannot be issued - it has to be washed first";
-										}
-										else if(pcWantN > fpcS.toDecimal())
-										{
-											lotErr = matName + ": only " + fpcS.toDecimal() + " of that piece are on the rack";
-										}
-										else if(pcCutLen > fplS.toDecimal())
-										{
-											lotErr = matName + ": asking to cut " + pcCutLen + " cm from a piece that is only " + fplS.toDecimal() + " cm long";
-										}
-										else
-										{
-											// Option B: pieces act as mini-rolls and yield from their CUT size.
-											pcAcross = (fpwS.toDecimal() / cutW).floor();
-											pcAlong = (pcCutLen / cutL).floor();
-
-											if(pcAcross > 0 && pcAlong > 0)
+											fpLotTxt = ifnull(fpChk.Lot,"").toString().trim();
+											fpStat = ifnull(fpChk.Piece_Status,"").toString().trim();
+											fpStateTxt = ifnull(fpChk.State,"").toString().trim();
+											fpcS = ifnull(fpChk.Piece_Count,"0").toString().trim();
+											if(fpcS == "")
 											{
-												pcYield = pcYield + (pcAcross * pcAlong * pcWantN);
+												fpcS = "0";
 											}
-
-											pcMetres = pcMetres + ((pcCutLen * pcWantN) / 100);
-											passIsPieces = true;
+											fplS = ifnull(fpChk.Piece_Length_Cm,"0").toString().trim();
+											if(fplS == "")
+											{
+												fplS = "0";
+											}
+											fpwS = ifnull(fpChk.Piece_Width_Cm,"0").toString().trim();
+											if(fpwS == "")
+											{
+												fpwS = "0";
+											}
+											if(pcCutLen <= 0)
+											{
+												// Legacy 2-part payload: whole piece goes out
+												pcCutLen = fplS.toDecimal();
+											}
+											// EVERY ONE OF THESE IS A REFUSAL, NOT A TRIM.
+											// Silently taking less is what produced handovers
+											// that looked complete and were not.
+											if(fpLotTxt != passLot)
+											{
+												lotErr = matName + ": a piece in this handover is not on the lot it names";
+											}
+											else if(fpStat != "Available")
+											{
+												lotErr = matName + ": a piece in this handover is no longer available";
+											}
+											else if(fpStateTxt != "Wash")
+											{
+												lotErr = matName + ": a greige piece cannot be issued - it has to be washed first";
+											}
+											else if(pcWantN > fpcS.toDecimal())
+											{
+												lotErr = matName + ": only " + fpcS.toDecimal() + " of that piece are on the rack";
+											}
+											else if(pcCutLen > fplS.toDecimal())
+											{
+												lotErr = matName + ": asking to cut " + pcCutLen + " cm from a piece that is only " + fplS.toDecimal() + " cm long";
+											}
+											else
+											{
+												// Option B: pieces act as mini-rolls and yield from their CUT size.
+												pcAcross = (fpwS.toDecimal() / cutW).floor();
+												pcAlong = (pcCutLen / cutL).floor();
+												if(pcAcross > 0 && pcAlong > 0)
+												{
+													pcYield = pcYield + pcAcross * pcAlong * pcWantN;
+												}
+												pcMetres = pcMetres + (pcCutLen * pcWantN) / 100;
+												passIsPieces = true;
+											}
 										}
 									}
 								}
 							}
 						}
-					}
-
-					thisQty = 0.0;
-					if(isFab == true)
-					{
-						lpWantS = ifnull(lotWant.get(passId),"0").toString().trim();
-						if(lpWantS == "")
+						thisQty = 0.0;
+						if(isFab == true)
 						{
-							lpWantS = "0";
-						}
-						thisQty = lpWantS.toDecimal();
-
-						capQty = 0.0;
-						if(canPiece == true)
-						{
-							pcsLeft = outPieces - piecesFromWaste - piecesFromRawTotal;
-							if(passPin != "")
+							lpWantS = ifnull(lotWant.get(passId),"0").toString().trim();
+							if(lpWantS == "")
 							{
-								// The scan above already read what earlier passes
-								// booked onto the rows, so there is nothing to
-								// subtract here but the waste still to be placed.
-								pcsLeft = pinPcsLeft - wAvail;
+								lpWantS = "0";
 							}
-							if(pcsLeft > 0)
+							thisQty = lpWantS.toDecimal();
+							capQty = 0.0;
+							if(canPiece == true)
 							{
-								// * 1.0 first - an integer quotient truncates
-								// before .ceil() sees it, budgeting a row short.
-								rowsCap = ((pcsLeft * 1.0) / perRowP).ceil();
-								capQty = (rowsCap * cutL) / 100;
+								pcsLeft = outPieces - piecesFromWaste - piecesFromRawTotal;
+								if(passPin != "")
+								{
+									// The scan above already read what earlier passes
+									// booked onto the rows, so there is nothing to
+									// subtract here but the waste still to be placed.
+									pcsLeft = pinPcsLeft - wAvail;
+								}
+								if(pcsLeft > 0)
+								{
+									// * 1.0 first - an integer quotient truncates
+									// before .ceil() sees it, budgeting a mrq short.
+									rowsCap = ((pcsLeft * 1.0) / perRowP).ceil();
+									capQty = (rowsCap * cutL) / 100;
+								}
+							}
+							else
+							{
+								// No piece data to count with - a mrq planned before
+								// Required_Pieces existed, or a fabric whose width was
+								// never recorded. Fall back to the metres balance.
+								capQty = outstanding - issuedTotal;
+								if(passPin != "")
+								{
+									// Live off the rows again, so no issuedTotal to
+									// take off - what earlier passes gave this item is
+									// already in its Issued_Qty.
+									capQty = pinQtyLeft;
+								}
+							}
+							if(thisQty > capQty)
+							{
+								thisQty = capQty;
+							}
+							//--------------------------------------------------
+							// WHOLE MARKER ROWS ONLY.
+							//
+							// A mrq consumes cutL off the roll, so any part of a mrq
+							// is cloth that cannot yield one piece of this cut. Let
+							// 5.00m through against a 55cm cut and 9 rows come off
+							// it - the odd 5cm walks out with the supervisor as a
+							// full-width strip and is binned.
+							//
+							// Rounded DOWN, so the remainder stays on the roll in the
+							// store where the next issue can use it. The widget snaps
+							// as he types, but this is a Custom API and is callable
+							// from anywhere, so the ledger enforces it too.
+							//
+							// It also makes piecesFromRaw exact rather than merely
+							// guarded: the floor below can no longer discard anything,
+							// because there is nothing left to discard.
+							//--------------------------------------------------
+							if(cutL > 0)
+							{
+								rowsFit = ((thisQty * 100) / cutL).floor();
+								thisQty = (rowsFit * cutL) / 100;
+							}
+							// A PIECES PASS OVERRIDES ALL OF THAT.
+							//
+							// The metres are the pieces' own metres - not the
+							// payload's figure, not a budget, and NOT snapped to
+							// whole marker rows. A piece is issued whole: snapping
+							// 9.00 m of three 3.00 m pieces down to 8.80 would send
+							// out cloth the lot never lost, and there is no such
+							// thing as 0.20 m of a piece to leave behind.
+							//
+							// The budget still did its job above - it is what the
+							// widget sized the piece pick against - but it cannot
+							// trim a physical object.
+							if(passIsPieces == true)
+							{
+								thisQty = pcMetres;
 							}
 						}
 						else
 						{
-							// No piece data to count with - a row planned before
-							// Required_Pieces existed, or a fabric whose width was
-							// never recorded. Fall back to the metres balance.
-							capQty = outstanding - issuedTotal;
-							if(passPin != "")
-							{
-								// Live off the rows again, so no issuedTotal to
-								// take off - what earlier passes gave this item is
-								// already in its Issued_Qty.
-								capQty = pinQtyLeft;
-							}
+							thisQty = issueQty - issuedTotal;
 						}
-
-						if(thisQty > capQty)
+						if(thisQty < 0)
 						{
-							thisQty = capQty;
+							thisQty = 0.0;
 						}
-
-						//--------------------------------------------------
-						// WHOLE MARKER ROWS ONLY.
+						// Deluge has no reliable break; the body is guarded instead.
+						// A lot whose share came out at zero - everything already
+						// covered - costs one comparison and moves no stock.
 						//
-						// A row consumes cutL off the roll, so any part of a row
-						// is cloth that cannot yield one piece of this cut. Let
-						// 5.00m through against a 55cm cut and 9 rows come off
-						// it - the odd 5cm walks out with the supervisor as a
-						// full-width strip and is binned.
-						//
-						// Rounded DOWN, so the remainder stays on the roll in the
-						// store where the next issue can use it. The widget snaps
-						// as he types, but this is a Custom API and is callable
-						// from anywhere, so the ledger enforces it too.
-						//
-						// It also makes piecesFromRaw exact rather than merely
-						// guarded: the floor below can no longer discard anything,
-						// because there is nothing left to discard.
-						//--------------------------------------------------
-						if(cutL > 0)
+						// fanWaste keeps the body alive for a pass with no metres at
+						// all, which is what a requirement covered entirely by
+						// offcuts looks like. Without it the pieces move and nothing
+						// books them.
+						if(thisQty > 0 || fanWaste > 0)
 						{
-							rowsFit = ((thisQty * 100) / cutL).floor();
-							thisQty = (rowsFit * cutL) / 100;
-						}
-
-						// A PIECES PASS OVERRIDES ALL OF THAT.
-						//
-						// The metres are the pieces' own metres - not the
-						// payload's figure, not a budget, and NOT snapped to
-						// whole marker rows. A piece is issued whole: snapping
-						// 9.00 m of three 3.00 m pieces down to 8.80 would send
-						// out cloth the lot never lost, and there is no such
-						// thing as 0.20 m of a piece to leave behind.
-						//
-						// The budget still did its job above - it is what the
-						// widget sized the piece pick against - but it cannot
-						// trim a physical object.
-						if(passIsPieces == true)
-						{
-							thisQty = pcMetres;
-						}
-					}
-					else
-					{
-						thisQty = issueQty - issuedTotal;
-					}
-
-					if(thisQty < 0)
-					{
-						thisQty = 0.0;
-					}
-
-					// Deluge has no reliable break; the body is guarded instead.
-					// A lot whose share came out at zero - everything already
-					// covered - costs one comparison and moves no stock.
-					//
-					// fanWaste keeps the body alive for a pass with no metres at
-					// all, which is what a requirement covered entirely by
-					// offcuts looks like. Without it the pieces move and nothing
-					// books them.
-					if(thisQty > 0 || fanWaste > 0)
-					{
-
-					//------------------------------------------------------
-					// How many pieces did THIS LOT'S cloth cover? Off its own
-					// metres, never off the combined total.
-					//------------------------------------------------------
-					piecesFromRaw = 0;
-					if(canPiece == true)
-					{
-						perRow = perRowP;
-						rowsIssued = ((thisQty * 100) / cutL).floor();
-						piecesFromRaw = perRow * rowsIssued;
-
-						// THE ONE LINE THIS WHOLE FEATURE EXISTS FOR.
-						//
-						// On a stack of pieces the division above is WRONG and
-						// wrong in the dangerous direction - it credits more
-						// pieces than the cloth can yield, because it treats the
-						// tails as if they joined up. pcYield was summed per
-						// piece from the pieces themselves, so it is the truth.
-						if(passIsPieces == true)
-						{
-							piecesFromRaw = pcYield;
-						}
-						stillNeeded = outPieces - piecesFromWaste - piecesFromRawTotal;
-						if(passPin != "")
-						{
-							// Same budget the metres were capped against a few
-							// lines up, and it has to be the same one: credit this
-							// pass with pieces its rows cannot absorb and the next
-							// pass reads them as already covered.
-							stillNeeded = pinPcsLeft - wAvail;
-						}
-						if(piecesFromRaw > stillNeeded)
-						{
-							piecesFromRaw = stillNeeded;
-						}
-						if(piecesFromRaw < 0)
-						{
+							//------------------------------------------------------
+							// How many pieces did THIS LOT'S cloth cover? Off its own
+							// metres, never off the combined total.
+							//------------------------------------------------------
 							piecesFromRaw = 0;
-						}
-					}
-					piecesFromRawTotal = piecesFromRawTotal + piecesFromRaw;
-					issuedTotal = issuedTotal + thisQty;
-
-				//----------------------------------------------------------
-				// Pass 3 - fan this lot's qty across the pending rows.
-				//
-				// "Pending rows" is narrowed by the pin: a pass the widget named
-				// an item for may only reach that item's rows. Same kind of test
-				// as cut size and Source below - a row belonging to another item
-				// is not this pass's row, however well the material matches - and
-				// it is the one that stops an order straddling two lots.
-				//----------------------------------------------------------
-				toFan = thisQty;
-				fanRaw = piecesFromRaw;
-				// Narrowed to the plans carrying this material - see matPlanIdx.
-				for each  planTok in matPlanFor
-				{
-					for each  row in Material_Requirement[Plan == planTok.toLong()]
-					{
-						if(row.Material != null && row.Material.toString() == matId)
-						{
-							sizeOk2 = true;
-							if(isFab == true)
+							if(canPiece == true)
 							{
-								if(ifnull(row.Cut_Size_Width,0) != cutW || ifnull(row.Cut_Size_Length,0) != cutL)
+								perRow = perRowP;
+								rowsIssued = ((thisQty * 100) / cutL).floor();
+								piecesFromRaw = perRow * rowsIssued;
+								// THE ONE LINE THIS WHOLE FEATURE EXISTS FOR.
+								//
+								// On a stack of pieces the division above is WRONG and
+								// wrong in the dangerous direction - it credits more
+								// pieces than the cloth can yield, because it treats the
+								// tails as if they joined up. pcYield was summed per
+								// piece from the pieces themselves, so it is the truth.
+								if(passIsPieces == true)
 								{
-									sizeOk2 = false;
+									piecesFromRaw = pcYield;
+								}
+								stillNeeded = outPieces - piecesFromWaste - piecesFromRawTotal;
+								if(passPin != "")
+								{
+									// Same budget the metres were capped against a few
+									// lines up, and it has to be the same one: credit this
+									// pass with pieces its rows cannot absorb and the next
+									// pass reads them as already covered.
+									stillNeeded = pinPcsLeft - wAvail;
+								}
+								if(piecesFromRaw > stillNeeded)
+								{
+									piecesFromRaw = stillNeeded;
+								}
+								if(piecesFromRaw < 0)
+								{
+									piecesFromRaw = 0;
 								}
 							}
-							// Same rule as cut size: a row of the WRONG KIND is not this line's
-							// row, however well the material matches. Empty reads as "Plan".
-							rowSrc2 = ifnull(row.Source,"").toString().trim();
-							if(rowSrc2 != "Reissue")
+							piecesFromRawTotal = piecesFromRawTotal + piecesFromRaw;
+							issuedTotal = issuedTotal + thisQty;
+							//----------------------------------------------------------
+							// Pass 3 - fan this lot's qty across the pending rows.
+							//
+							// "Pending rows" is narrowed by the pin: a pass the widget named
+							// an item for may only reach that item's rows. Same kind of test
+							// as cut size and Source below - a mrq belonging to another item
+							// is not this pass's mrq, however well the material matches - and
+							// it is the one that stops an order straddling two lots.
+							//----------------------------------------------------------
+							toFan = thisQty;
+							fanRaw = piecesFromRaw;
+							matPlanForThisPass3 = List();
+							if(passPin != "")
 							{
-								rowSrc2 = "Plan";
-							}
-							if(rowSrc2 != srcWanted)
-							{
-								sizeOk2 = false;
-							}
-							// WHOSE ROW THIS IS. Lookup fields hold record ids, so
-							// this compares an id with the id the payload carried.
-							// An unpinned pass leaves it alone and fans exactly as
-							// it always did, which is what keeps an older widget
-							// working.
-							rowPin = ifnull(row.Plan_Item,"").toString().trim();
-							if(passPin != "" && rowPin != passPin)
-							{
-								sizeOk2 = false;
-							}
-							if(sizeOk2 == true)
-							{
-								if(toFan > 0)
+								for each  pRow in allMatReqs
 								{
-									reqStr2 = ifnull(row.Required_Qty,"0").toString().trim();
-									if(reqStr2 == "")
+									if(ifnull(pRow.Plan_Item,"").toString() == passPin)
 									{
-										reqStr2 = "0";
-									}
-									issStr2 = ifnull(row.Issued_Qty,"0").toString().trim();
-									if(issStr2 == "")
-									{
-										issStr2 = "0";
-									}
-									alreadyIssued = issStr2.toDecimal();
-									rowRem = reqStr2.toDecimal() - alreadyIssued;
-
-									//------------------------------------------
-									// WHAT THIS ROW STILL NEEDS, IN PIECES.
-									//
-									// For a piece-tracked row this REPLACES the
-									// metres balance rather than merely raising
-									// it, and both directions matter.
-									//
-									// UP, or the fix upstairs leaks. The budget is
-									// piece-derived and can exceed the sum of
-									// Required_Qty - Issued_Qty across these rows,
-									// so the fan would run out of room, leave
-									// toFan unspent, and the difference would come
-									// off real stock with no Issued_Qty anywhere
-									// to book it.
-									//
-									// DOWN, or a lot's cloth lands on the wrong
-									// item. Required_Qty is the PRE-WASTE estimate
-									// and is never topped up or trimmed, so a row
-									// whose pieces were partly covered by offcuts
-									// keeps a metres residue it does not need. On
-									// a one-lot issue that was cosmetic. Once the
-									// passes are per lot it is not: the residue
-									// swallows the NEXT lot's cloth, and the
-									// Issue_Lines row records that item as having
-									// come off a lot it never touched.
-									//
-									//   20 pieces, 6 already off offcuts, 2/row:
-									//   needs 7 rows = 3.85m, but Required_Qty
-									//   still says 5.50m. Pass 1 fills it from L1.
-									//   Pass 2's first 1.65m then lands on the
-									//   SAME row - off lot L2 - and the item is
-									//   stamped with two tones it never had.
-									//
-									// Two tones on one item is the exact thing the
-									// lot system exists to prevent, and it would
-									// also route that item's offcuts back to the
-									// wrong lot.
-									//
-									// It cannot under-absorb: the sum of the
-									// per-row ceilings is always at least the
-									// aggregate ceiling, because
-									// ceil(a/n) + ceil(b/n) >= ceil((a+b)/n).
-									//
-									// Required_Pieces == 0 means the row is not
-									// piece-tracked - planned before the field
-									// existed - and it keeps the metres balance it
-									// has always used.
-									//------------------------------------------
-									if(isFab == true && cutW > 0 && cutL > 0 && fabricWidthCm >= cutW)
-									{
-										perRowF = (fabricWidthCm / cutW).floor();
-										rowPcsReq = ifnull(row.Required_Pieces,0);
-										rowPcsRem = rowPcsReq - (ifnull(row.Pieces_From_Waste,0) + ifnull(row.Pieces_From_Raw,0));
-										if(perRowF > 0 && rowPcsReq > 0)
+										pIdStr = ifnull(pRow.Plan,"").toString();
+										if(pIdStr != "" && matPlanForThisPass3.contains(pIdStr) == false)
 										{
-											rowCap = 0.0;
-											if(rowPcsRem > 0)
-											{
-												rowsF = ((rowPcsRem * 1.0) / perRowF).ceil();
-												rowCap = (rowsF * cutL) / 100;
-											}
-											rowRem = rowCap;
+											matPlanForThisPass3.add(pIdStr);
 										}
 									}
-
-									if(rowRem > 0)
+								}
+							}
+							else
+							{
+								matPlanForThisPass3 = matPlanFor;
+							}
+							// Narrowed to the plans carrying this material - see matPlanIdx.
+							plansFanned = 0;
+							// Legacy variable, keep for local reference if needed
+							for each  mrPlanTok3 in matPlanForThisPass3
+							{
+								runThisPlan = true;
+								if(toFan <= 0 && isFab == false)
+								{
+									runThisPlan = false;
+									// Finished distributing trim, skip remaining plans
+								}
+								else if(passPin == "" && globalPlansFanned >= 25 && toFan > 0)
+								{
+									fanningCapped = true;
+									runThisPlan = false;
+									// Statement limit safety cap - resume on next API call
+								}
+								if(runThisPlan == true)
+								{
+									if(passPin == "")
 									{
-										give = rowRem;
-										if(toFan < rowRem)
+										info "Fanning generic trim " + matName + " to plan " + mrPlanTok3 + " (Global Plan " + (globalPlansFanned + 1) + " of 25 limit)";
+									}
+									localReqs = allMatReqs;
+									if(passPin == "")
+									{
+										localReqs = Material_Requirement[Plan == mrPlanTok3.toLong() && Material == matId.toLong()];
+										globalPlansFanned = globalPlansFanned + 1;
+									}
+									for each  mrq in localReqs
+									{
+										if(passPin != "" && ifnull(mrq.Plan,"").toString() != mrPlanTok3)
 										{
-											give = toFan;
+											// Skip rows not matching the plan when iterating allMatReqs for pinned passes
 										}
-										row.Issued_Qty = alreadyIssued + give;
-										toFan = toFan - give;
-
-										// Same pass that writes the balance records
-										// the event, so the two can never disagree.
-										if(give > 0)
+										else
 										{
-											if(primaryPlanId == 0)
+											sizeOk2 = true;
+											if(isFab == true)
 											{
-												primaryPlanId = planTok.toLong();
-											}
-
-											//--------------------------------------
-											// STAMP THE TONE, ONCE AND FOR EVER.
-											//
-											// Issued_Lot is what this row was first
-											// cut from, and every later issue against
-											// it - a reissue for a ruined panel, a
-											// remake three weeks on - has to match or
-											// the finished pieces do not.
-											//
-											// WRITTEN ONLY WHEN EMPTY. The first lot
-											// decides; a second write would rewrite
-											// history, and history is the whole value
-											// of the field. It is also what the store
-											// screen reads back to pin the next issue,
-											// so overwriting it would quietly move the
-											// target rather than fail visibly.
-											//
-											// Metres only. A pass with no lot behind it
-											// is non-fabric, which has no tone.
-											//--------------------------------------
-											if(passLot != "")
-											{
-												curLot = ifnull(row.Issued_Lot,"").toString().trim();
-												if(curLot == "")
+												if(ifnull(mrq.Cut_Size_Width,0) != cutW || ifnull(mrq.Cut_Size_Length,0) != cutL)
 												{
-													row.Issued_Lot = passLot.toLong();
+													sizeOk2 = false;
 												}
 											}
-
-											//--------------------------------------
-											// PRINTED FABRIC PIECES: one Issue_Line
-											// per physical piece so the supervisor
-											// can receive each piece individually.
-											//
-											// The cutSummary field is non-empty only
-											// on a pieces-lot cut by the allocator.
-											// When present, the pcSpec tokens name
-											// each physical piece and its cut length.
-											// One Issue_Line per token lets the
-											// supervisor settle each piece on its
-											// own Settled_Qty row.
-											//--------------------------------------
-											passCutSumm = ifnull(cutSummOf.get(passId),"").toString();
-											pcSpecLn = ifnull(passPieces.get(passId),"").toString();
-
-											if(passCutSumm != "" && pcSpecLn != "")
+											// Same rule as cut size: a mrq of the WRONG KIND is not this line's
+											// mrq, however well the material matches. Empty reads as "Plan".
+											rowSrc2 = ifnull(mrq.Source,"").toString().trim();
+											if(rowSrc2 != "Reissue")
 											{
-												// Guard: Emit pieces only once per pass, even if it fans across multiple rows
-												if(passEmitted.get(passId) == null)
+												rowSrc2 = "Plan";
+											}
+											if(rowSrc2 != srcWanted)
+											{
+												sizeOk2 = false;
+											}
+											// WHOSE ROW THIS IS. Lookup fields hold record ids, so
+											// this compares an id with the id the payload carried.
+											// An unpinned pass leaves it alone and fans exactly as
+											// it always did, which is what keeps an older widget
+											// working.
+											rowPin = ifnull(mrq.Plan_Item,"").toString().trim();
+											if(passPin != "" && rowPin != passPin)
+											{
+												sizeOk2 = false;
+											}
+											if(sizeOk2 == true)
+											{
+												if(toFan > 0)
 												{
-													passEmitted.put(passId, true);
-													
-													// One Issue_Line per piece token
-													for each  pcLnTok in pcSpecLn.toList(",")
+													reqStr2 = ifnull(mrq.Required_Qty,"0").toString().trim();
+													if(reqStr2 == "")
 													{
-														pcLnBits = pcLnTok.toString().trim().toList(":");
-														if(pcLnBits.size() >= 3)
+														reqStr2 = "0";
+													}
+													issStr2 = ifnull(mrq.Issued_Qty,"0").toString().trim();
+													if(issStr2 == "")
+													{
+														issStr2 = "0";
+													}
+													alreadyIssued = issStr2.toDecimal();
+													rowRem = reqStr2.toDecimal() - alreadyIssued;
+													//------------------------------------------
+													// WHAT THIS ROW STILL NEEDS, IN PIECES.
+													//
+													// For a piece-tracked mrq this REPLACES the
+													// metres balance rather than merely raising
+													// it, and both directions matter.
+													//
+													// UP, or the fix upstairs leaks. The budget is
+													// piece-derived and can exceed the sum of
+													// Required_Qty - Issued_Qty across these rows,
+													// so the fan would run out of room, leave
+													// toFan unspent, and the difference would come
+													// off real stock with no Issued_Qty anywhere
+													// to book it.
+													//
+													// DOWN, or a lot's cloth lands on the wrong
+													// item. Required_Qty is the PRE-WASTE estimate
+													// and is never topped up or trimmed, so a mrq
+													// whose pieces were partly covered by offcuts
+													// keeps a metres residue it does not need. On
+													// a one-lot issue that was cosmetic. Once the
+													// passes are per lot it is not: the residue
+													// swallows the NEXT lot's cloth, and the
+													// Issue_Lines mrq records that item as having
+													// come off a lot it never touched.
+													//
+													//   20 pieces, 6 already off offcuts, 2/mrq:
+													//   needs 7 rows = 3.85m, but Required_Qty
+													//   still says 5.50m. Pass 1 fills it from L1.
+													//   Pass 2's first 1.65m then lands on the
+													//   SAME mrq - off lot L2 - and the item is
+													//   stamped with two tones it never had.
+													//
+													// Two tones on one item is the exact thing the
+													// lot system exists to prevent, and it would
+													// also route that item's offcuts back to the
+													// wrong lot.
+													//
+													// It cannot under-absorb: the sum of the
+													// per-mrq ceilings is always at least the
+													// aggregate ceiling, because
+													// ceil(a/n) + ceil(b/n) >= ceil((a+b)/n).
+													//
+													// Required_Pieces == 0 means the mrq is not
+													// piece-tracked - planned before the field
+													// existed - and it keeps the metres balance it
+													// has always used.
+													//------------------------------------------
+													if(isFab == true && cutW > 0 && cutL > 0 && fabricWidthCm >= cutW)
+													{
+														perRowF = (fabricWidthCm / cutW).floor();
+														rowPcsReq = ifnull(mrq.Required_Pieces,0);
+														rowPcsRem = rowPcsReq - (ifnull(mrq.Pieces_From_Waste,0) + ifnull(mrq.Pieces_From_Raw,0));
+														if(perRowF > 0 && rowPcsReq > 0)
 														{
-															pcLnCutCm = pcLnBits.get(2).toString().trim().toDecimal();
-															pcLnN = pcLnBits.get(1).toString().trim().toDecimal();
-															pcLnMtr = (pcLnCutCm * pcLnN) / 100;
-	
-															lnMap = Map();
-															lnMap.put("req",row.ID);
-															lnMap.put("planItem",row.Plan_Item);
-															lnMap.put("lot",passLot);
-															
-															// Include PRINTED_PIECE and the allocator's human summary
-															baseNote = ifnull(noteOf.get(passId),"").toString();
-															if(baseNote != "")
+															rowCap = 0.0;
+															if(rowPcsRem > 0)
 															{
-																baseNote = baseNote + " | ";
+																rowsF = ((rowPcsRem * 1.0) / perRowF).ceil();
+																rowCap = (rowsF * cutL) / 100;
 															}
-															lnMap.put("note", baseNote + "PRINTED_PIECE | " + passCutSumm);
-															
-															lnMap.put("fromLot",ifnull(fromOf.get(passId),"").toString());
-															lnMap.put("qty",pcLnMtr);
-															lnMap.put("unit",ifnull(row.Unit,"").toString());
-															lnMap.put("cutW",cutW);
-															lnMap.put("cutL",cutL);
-															lnMap.put("matId",matId);
-															lnMap.put("matName",matName);
-															lnMap.put("matDisp",matDisp);
-															issueLines.add(lnMap);
+															rowRem = rowCap;
+														}
+													}
+													if(rowRem > 0)
+													{
+														give = rowRem;
+														if(toFan < rowRem)
+														{
+															give = toFan;
+														}
+														mrq.Issued_Qty=alreadyIssued + give;
+														toFan = toFan - give;
+														// Same pass that writes the balance records
+														// the event, so the two can never disagree.
+														if(give > 0)
+														{
+															if(primaryPlanId == 0)
+															{
+																primaryPlanId = mrq.Plan.toLong();
+															}
+															//--------------------------------------
+															// STAMP THE TONE, ONCE AND FOR EVER.
+															//
+															// Issued_Lot is what this mrq was first
+															// cut from, and every later issue against
+															// it - a reissue for a ruined panel, a
+															// remake three weeks on - has to match or
+															// the finished pieces do not.
+															//
+															// WRITTEN ONLY WHEN EMPTY. The first lot
+															// decides; a second write would rewrite
+															// history, and history is the whole value
+															// of the field. It is also what the store
+															// screen reads back to pin the next issue,
+															// so overwriting it would quietly move the
+															// target rather than fail visibly.
+															//
+															// Metres only. A pass with no lot behind it
+															// is non-fabric, which has no tone.
+															//--------------------------------------
+															if(passLot != "")
+															{
+																curLot = ifnull(mrq.Issued_Lot,"").toString().trim();
+																if(curLot == "")
+																{
+																	mrq.Issued_Lot=passLot.toLong();
+																}
+															}
+															//--------------------------------------
+															// PRINTED FABRIC PIECES: one Issue_Line
+															// per physical piece so the supervisor
+															// can receive each piece individually.
+															//
+															// The cutSummary field is non-empty only
+															// on a pieces-lot cut by the allocator.
+															// When present, the pcSpec tokens name
+															// each physical piece and its cut length.
+															// One Issue_Line per token lets the
+															// supervisor settle each piece on its
+															// own Settled_Qty mrq.
+															//--------------------------------------
+															passCutSumm = ifnull(cutSummOf.get(passId),"").toString();
+															pcSpecLn = ifnull(passPieces.get(passId),"").toString();
+															if(passCutSumm != "" && pcSpecLn != "")
+															{
+																// Guard: Emit pieces only once per pass, even if it fans across multiple rows
+																if(passEmitted.get(passId) == null)
+																{
+																	passEmitted.put(passId,true);
+																	// One Issue_Line per piece token
+																	for each  pcLnTok in pcSpecLn.toList(",")
+																	{
+																		pcLnBits = pcLnTok.toString().trim().toList(":");
+																		if(pcLnBits.size() >= 3)
+																		{
+																			pcLnCutCm = pcLnBits.get(2).toString().trim().toDecimal();
+																			pcLnN = pcLnBits.get(1).toString().trim().toDecimal();
+																			pcLnMtr = (pcLnCutCm * pcLnN) / 100;
+																			lnMap = Map();
+																			lnMap.put("req",mrq.ID);
+																			lnMap.put("planItem",mrq.Plan_Item);
+																			lnMap.put("lot",passLot);
+																			// Include PRINTED_PIECE and the allocator's human summary
+																			baseNote = ifnull(noteOf.get(passId),"").toString();
+																			if(baseNote != "")
+																			{
+																				baseNote = baseNote + " | ";
+																			}
+																			lnMap.put("note",baseNote + "PRINTED_PIECE | " + passCutSumm);
+																			lnMap.put("fromLot",ifnull(fromOf.get(passId),"").toString());
+																			lnMap.put("qty",pcLnMtr);
+																			lnMap.put("unit",ifnull(mrq.Unit,"").toString());
+																			lnMap.put("cutW",cutW);
+																			lnMap.put("cutL",cutL);
+																			lnMap.put("matId",matId);
+																			lnMap.put("matName",matName);
+																			lnMap.put("matDisp",matDisp);
+																			issueLines.add(lnMap);
+																		}
+																	}
+																}
+															}
+															else
+															{
+																// Regular fabric: single Issue_Line
+																lnMap = Map();
+																lnMap.put("req",mrq.ID);
+																lnMap.put("planItem",mrq.Plan_Item);
+																lnMap.put("lot",passLot);
+																lnMap.put("note",ifnull(noteOf.get(passId),"").toString());
+																lnMap.put("fromLot",ifnull(fromOf.get(passId),"").toString());
+																lnMap.put("qty",give);
+																lnMap.put("unit",ifnull(mrq.Unit,"").toString());
+																lnMap.put("cutW",cutW);
+																lnMap.put("cutL",cutL);
+																lnMap.put("matId",matId);
+																lnMap.put("matName",matName);
+																lnMap.put("matDisp",matDisp);
+																issueLines.add(lnMap);
+															}
+														}
+													}
+												}
+												if(isFab == true && fanWaste > 0 || fanRaw > 0)
+												{
+													alreadyW = ifnull(mrq.Pieces_From_Waste,0);
+													alreadyR = ifnull(mrq.Pieces_From_Raw,0);
+													pRem2 = ifnull(mrq.Required_Pieces,0) - (alreadyW + alreadyR);
+													if(pRem2 > 0)
+													{
+														// Waste first - it is the scarcer,
+														// already-paid-for source, so it should
+														// close the oldest rows.
+														//
+														// WHAT THIS ROW MAY DRAW ON is its own
+														// pinned picks plus the unpinned pool - a
+														// remnant the widget allocated to another
+														// item is not on offer here, however
+														// short this mrq is. With no pin anywhere
+														// the free pool is everything and this is
+														// the old `giveW = fanWaste` exactly.
+														//
+														// fanWaste is still the ceiling: the two
+														// buckets were never trimmed to the
+														// "more cuts than needed" clamp above, so
+														// only the running total knows what is
+														// really left.
+														pinHave = ifnull(wPinTot.get(rowPin),"0").toString().trim();
+														if(pinHave == "")
+														{
+															pinHave = "0";
+														}
+														giveW = wFree + pinHave.toLong();
+														if(giveW > fanWaste)
+														{
+															giveW = fanWaste;
+														}
+														if(giveW > pRem2)
+														{
+															giveW = pRem2;
+														}
+														if(wasteLogged == false)
+														{
+															wasteLogged = true;
+															for each  pkRaw3 in picks
+															{
+																pk3 = pkRaw3.toMap();
+																wId3 = ifnull(pk3.get("wasteId"),"").toString().trim();
+																pcs3 = ifnull(pk3.get("pieces"),"0").toString().trim();
+																if(pcs3 == "")
+																{
+																	pcs3 = "0";
+																}
+																nPcs3 = pcs3.toDecimal().toLong();
+																if(nPcs3 > 0 && pkYield.get(wId3) != null)
+																{
+																	// STEP 4b: an Issued movement replaces the
+																	// Waste_Issued subform mrq. No Received_Count
+																	// here - receipt is its own movement pointing
+																	// back at this one, so a short receipt leaves
+																	// both numbers and both dates on the record
+																	// instead of one mutable counter.
+																	newMvId = insert into Waste_Movement
+																	[
+																		Movement_Type="Issued"
+																		Piece_Width=pkW.get(wId3)
+																		Piece_Length=pkL.get(wId3)
+																		Piece_Count=nPcs3
+																		Cut_Size_Width=cutW
+																		Cut_Size_Length=cutL
+																		Pieces_Yielded=nPcs3 * pkYield.get(wId3)
+																		Moved_On=zoho.currentdate
+																		Added_User=zoho.loginuser
+																	];
+																	// Lookups after the insert - a null cannot go
+																	// in the insert block.
+																	for each  mv in Waste_Movement[ID == newMvId.toLong()]
+																	{
+																		mv.Waste_Piece=wId3.toLong();
+																		mv.Plan=mrq.Plan.toLong();
+																		mv.Plan_Item=mrq.Plan_Item;
+																		mv.Moved_By=supId;
+																	}
+																}
+															}
+														}
+														if(giveW > 0)
+														{
+															mrq.Pieces_From_Waste=alreadyW + giveW;
+															fanWaste = fanWaste - giveW;
+															pRem2 = pRem2 - giveW;
+															// Spend the pinned pieces before the
+															// free ones. They can go nowhere else,
+															// while the pool can still serve any
+															// mrq the fan reaches after this.
+															useP = giveW;
+															if(useP > pinHave.toLong())
+															{
+																useP = pinHave.toLong();
+															}
+															if(useP > 0)
+															{
+																wPinTot.put(rowPin,pinHave.toLong() - useP);
+															}
+															wFree = wFree - (giveW - useP);
+															if(wFree < 0)
+															{
+																wFree = 0;
+															}
+														}
+														giveR = fanRaw;
+														if(giveR > pRem2)
+														{
+															giveR = pRem2;
+														}
+														if(giveR > 0)
+														{
+															mrq.Pieces_From_Raw=alreadyR + giveR;
+															fanRaw = fanRaw - giveR;
 														}
 													}
 												}
 											}
-											else
-											{
-												// Regular fabric: single Issue_Line
-												lnMap = Map();
-												lnMap.put("req",row.ID);
-												lnMap.put("planItem",row.Plan_Item);
-												lnMap.put("lot",passLot);
-												lnMap.put("note",ifnull(noteOf.get(passId),"").toString());
-												lnMap.put("fromLot",ifnull(fromOf.get(passId),"").toString());
-												lnMap.put("qty",give);
-												lnMap.put("unit",ifnull(row.Unit,"").toString());
-												lnMap.put("cutW",cutW);
-												lnMap.put("cutL",cutL);
-												lnMap.put("matId",matId);
-												lnMap.put("matName",matName);
-												lnMap.put("matDisp",matDisp);
-												issueLines.add(lnMap);
-											}
 										}
 									}
 								}
-
-								if(isFab == true && (fanWaste > 0 || fanRaw > 0))
+							}
+							//------------------------------------------------------
+							// Move THIS LOT'S stock, in the same pass that booked it.
+							//
+							// The lot holds the truth; Raw_Material below holds the
+							// maintained total. Both move for the same metres, here and
+							// there, so they cannot drift apart.
+							//
+							// Washed only - fabric never leaves the shelf unwashed, and
+							// the validation above already refused a lot that could not
+							// cover this from Wash_Quantity.
+							//------------------------------------------------------
+							if(passLot != "")
+							{
+								for each  lotMv in Raw_Material_Lot[ID == passLot.toLong()]
 								{
-									alreadyW = ifnull(row.Pieces_From_Waste,0);
-									alreadyR = ifnull(row.Pieces_From_Raw,0);
-									pRem2 = ifnull(row.Required_Pieces,0) - (alreadyW + alreadyR);
-									if(pRem2 > 0)
+									lmwS = ifnull(lotMv.Wash_Quantity,"0").toString().trim();
+									if(lmwS == "")
 									{
-										// Waste first - it is the scarcer,
-										// already-paid-for source, so it should
-										// close the oldest rows.
-										//
-										// WHAT THIS ROW MAY DRAW ON is its own
-										// pinned picks plus the unpinned pool - a
-										// remnant the widget allocated to another
-										// item is not on offer here, however
-										// short this row is. With no pin anywhere
-										// the free pool is everything and this is
-										// the old `giveW = fanWaste` exactly.
-										//
-										// fanWaste is still the ceiling: the two
-										// buckets were never trimmed to the
-										// "more cuts than needed" clamp above, so
-										// only the running total knows what is
-										// really left.
-										pinHave = ifnull(wPinTot.get(rowPin),"0").toString().trim();
-										if(pinHave == "")
+										lmwS = "0";
+									}
+									lmtS = ifnull(lotMv.In_Transit_Qty,"0").toString().trim();
+									if(lmtS == "")
+									{
+										lmtS = "0";
+									}
+									lotMv.Wash_Quantity=lmwS.toDecimal() - thisQty;
+									lotMv.In_Transit_Qty=lmtS.toDecimal() + thisQty;
+								}
+								//--------------------------------------------------
+								// AND THE PIECES THEMSELVES COME OFF THE RACK.
+								//
+								// The lot's metres moved above; on a Pieces lot those
+								// metres are the MAINTAINED SUM of these rows, so
+								// leaving the rows alone would make the header and its
+								// pieces disagree - the lot claiming it had given cloth
+								// away while every piece still sat there to be offered
+								// again on the next render.
+								//
+								// Decremented, never deleted: the mrq is the provenance
+								// of the cloth and of the print job it came from. A mrq
+								// reaching zero simply stops being Available stock,
+								// which is what getStoreMaterialRequirements filters on.
+								if(passIsPieces == true)
+								{
+									for each  pcMvTok in pcSpec.toList(",")
+									{
+										pcMvBits = pcMvTok.toString().trim().toList(":");
+										if(pcMvBits.size() >= 2)
 										{
-											pinHave = "0";
-										}
-										giveW = wFree + pinHave.toLong();
-										if(giveW > fanWaste)
-										{
-											giveW = fanWaste;
-										}
-										if(giveW > pRem2)
-										{
-											giveW = pRem2;
-										}
-										if(wasteLogged == false)
-										{
-											wasteLogged = true;
-											for each  pkRaw3 in picks
+											pcMvId = pcMvBits.get(0).toString().trim();
+											pcMvN = pcMvBits.get(1).toString().trim().toDecimal();
+											pcMvCutLen = 0.0;
+											if(pcMvBits.size() >= 3)
 											{
-												pk3 = pkRaw3.toMap();
-												wId3 = ifnull(pk3.get("wasteId"),"").toString().trim();
-												pcs3 = ifnull(pk3.get("pieces"),"0").toString().trim();
-												if(pcs3 == "")
+												pcMvCutLen = pcMvBits.get(2).toString().trim().toDecimal();
+											}
+											if(pcMvId != "" && pcMvN > 0)
+											{
+												for each  fpMv in Fabric_Piece[ID == pcMvId.toLong()]
 												{
-													pcs3 = "0";
-												}
-												nPcs3 = pcs3.toDecimal().toLong();
-												if(nPcs3 > 0 && pkYield.get(wId3) != null)
-												{
-													// STEP 4b: an Issued movement replaces the
-													// Waste_Issued subform row. No Received_Count
-													// here - receipt is its own movement pointing
-													// back at this one, so a short receipt leaves
-													// both numbers and both dates on the record
-													// instead of one mutable counter.
-													newMvId = insert into Waste_Movement
-													[
-														Movement_Type="Issued"
-														Piece_Width=pkW.get(wId3)
-														Piece_Length=pkL.get(wId3)
-														Piece_Count=nPcs3
-														Cut_Size_Width=cutW
-														Cut_Size_Length=cutL
-														Pieces_Yielded=nPcs3 * pkYield.get(wId3)
-														Moved_On=zoho.currentdate
-														Added_User=zoho.loginuser
-													];
-
-													// Lookups after the insert - a null cannot go
-													// in the insert block.
-													for each  mv in Waste_Movement[ID == newMvId.toLong()]
+													fpMvS = ifnull(fpMv.Piece_Count,"0").toString().trim();
+													if(fpMvS == "")
 													{
-														mv.Waste_Piece = wId3.toLong();
-														mv.Plan = planTok.toLong();
-														mv.Plan_Item = row.Plan_Item;
-														mv.Moved_By = supId;
+														fpMvS = "0";
+													}
+													fpOrigLenS = ifnull(fpMv.Piece_Length_Cm,"0").toString().trim();
+													if(pcMvCutLen <= 0)
+													{
+														// Legacy 2-part payload
+														pcMvCutLen = fpOrigLenS.toDecimal();
+													}
+													fpMvLeft = fpMvS.toDecimal() - pcMvN;
+													isClamped = false;
+													if(fpMvLeft < 0)
+													{
+														// Cannot happen - the validation
+														// above refuses it - but a count
+														// below zero would be a phantom
+														// the allocator could never
+														// reconcile, so it is clamped and
+														// said out loud rather than left.
+														info "issueMaterials: piece " + pcMvId + " would go negative - clamped";
+														fpMvLeft = 0;
+														isClamped = true;
+													}
+													fpMv.Piece_Count=fpMvLeft;
+													fpMvRemainder = fpOrigLenS.toDecimal() - pcMvCutLen;
+													if(fpMvRemainder > 0 && isClamped == false)
+													{
+														// Option B: create a new piece for the remainder that was put back
+														insert into Fabric_Piece
+														[
+															Added_User=zoho.loginuser
+															Material=fpMv.Material
+															Lot=fpMv.Lot
+															Piece_Length_Cm=fpMvRemainder
+															Piece_Width_Cm=fpMv.Piece_Width_Cm
+															Piece_Count=pcMvN
+															State=fpMv.State
+															Piece_Status="Available"
+															Carton_Number=fpMv.Carton_Number
+															Print_Job=fpMv.Print_Job
+														]
 													}
 												}
 											}
 										}
-										if(giveW > 0)
-										{
-											row.Pieces_From_Waste = alreadyW + giveW;
-											fanWaste = fanWaste - giveW;
-											pRem2 = pRem2 - giveW;
-
-											// Spend the pinned pieces before the
-											// free ones. They can go nowhere else,
-											// while the pool can still serve any
-											// row the fan reaches after this.
-											useP = giveW;
-											if(useP > pinHave.toLong())
-											{
-												useP = pinHave.toLong();
-											}
-											if(useP > 0)
-											{
-												wPinTot.put(rowPin,pinHave.toLong() - useP);
-											}
-											wFree = wFree - (giveW - useP);
-											if(wFree < 0)
-											{
-												wFree = 0;
-											}
-										}
-										giveR = fanRaw;
-										if(giveR > pRem2)
-										{
-											giveR = pRem2;
-										}
-										if(giveR > 0)
-										{
-											row.Pieces_From_Raw = alreadyR + giveR;
-											fanRaw = fanRaw - giveR;
-										}
 									}
 								}
 							}
 						}
+						// end of the thisQty > 0 guard
+					}
+					// end of the per-lot pass loop
+					// Every pass has run; this is what actually left the shelf.
+					// issueQty was only ever the pre-pass estimate, and for a split
+					// across lots the passes can legitimately total more.
+					issueQty = issuedTotal;
+					//----------------------------------------------------------
+					// Move the stock, do NOT consume it.
+					//
+					// The shelf figure drops so the same cloth cannot be promised
+					// to a second supervisor, but the company still owns it - it is
+					// on a trolley, not in a garment. It is consumed only when the
+					// supervisor confirms receipt, and only for the amount he
+					// actually confirms.
+					//
+					// So Wash_Quantity/Quantity now means "on the shelf", not "what
+					// we own". Total holdings = on hand + in transit + disputed.
+					//----------------------------------------------------------
+					balance = available - issueQty;
+					if(isFab == true)
+					{
+						matRec.Wash_Quantity=balance;
+						qU = ifnull(matRec.Unwash_Quantity,"0").toString().trim();
+						qA = ifnull(matRec.Unallocated_Qty,"0").toString().trim();
+						matRec.Quantity=balance + if(qU == "",0.0,qU.toDecimal()) + if(qA == "",0.0,qA.toDecimal());
+					}
+					else
+					{
+						matRec.Quantity=balance;
+					}
+					transStr = ifnull(matRec.In_Transit_Qty,"0").toString().trim();
+					if(transStr == "")
+					{
+						transStr = "0";
+					}
+					matRec.In_Transit_Qty=transStr.toDecimal() + issueQty;
+					if(okJson != "")
+					{
+						okJson = okJson + ",";
+					}
+					// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+					okJson = okJson + "{\"materialId\":\"" + matId + "\",\"sku\":\"" + matName + "\",\"qty\":" + issueQty + ",\"balance\":" + balance + ",\"wastePiecesIssued\":" + physicalPcs + ",\"piecesFromWaste\":" + piecesFromWaste + ",\"piecesFromRaw\":" + piecesFromRawTotal + "}";
+					if(issueQty < askQty)
+					{
+						if(errJson != "")
+						{
+							errJson = errJson + ",";
+						}
+						if(fanningCapped == true)
+						{
+							errJson = errJson + "\"" + matName + ": partially issued " + issueQty + " across 25 plans. Press Issue again to continue issuing the remaining " + (askQty - issueQty) + "\"";
+						}
+						else
+						{
+							errJson = errJson + "\"" + matName + ": only " + issueQty + " was needed, issued that instead of " + askQty + "\"";
+						}
 					}
 				}
-
-					//------------------------------------------------------
-					// Move THIS LOT'S stock, in the same pass that booked it.
-					//
-					// The lot holds the truth; Raw_Material below holds the
-					// maintained total. Both move for the same metres, here and
-					// there, so they cannot drift apart.
-					//
-					// Washed only - fabric never leaves the shelf unwashed, and
-					// the validation above already refused a lot that could not
-					// cover this from Wash_Quantity.
-					//------------------------------------------------------
-					if(passLot != "")
+			}
+		}
+		//------------------------------------------------------------------------
+		// Write the handover record. Deliberately in its own try/catch: by this
+		// point stock has already been decremented and balances already moved, so a
+		// failure to LOG the handover must never fail the handover itself. Losing
+		// the audit mrq is bad; rolling back cloth that is physically on the counter
+		// is worse, and Deluge has no transaction to roll back with anyway.
+		//------------------------------------------------------------------------
+		try 
+		{
+			if(issueLines.size() > 0)
+			{
+				//------------------------------------------------------------
+				// THE VOUCHER NUMBER. One per handover, because one handover is
+				// one record - the store issues again, that is a new record and a
+				// new number.
+				//
+				// GENERATED HERE, NOT BY A FORM WORKFLOW. An "on add" workflow
+				// using input.Voucher_No fires only when a human opens the Creator
+				// form and types a record. Nothing ever does: every Material_Issue
+				// in this app is created by the insert below, so a workflow would
+				// leave every voucher blank. Same reason Plan_No is built inside
+				// createProductionPlans rather than on the form.
+				//
+				// SORTED ON ID, NOT ON Voucher_No, AND THAT IS NOT A DETAIL.
+				//
+				// "sort by Voucher_No desc" is a TEXT sort. Zero padding makes it
+				// agree with the numeric order only while the width stays the same -
+				// the moment SIV-100000 exists beside SIV-99999, text order puts
+				// SIV-9... above SIV-1..., the highest reads as 99999, and the next
+				// handover is issued SIV-100000 for the SECOND time. A duplicate
+				// voucher number that nothing would notice until two transfer orders
+				// quoted it.
+				//
+				// Record ids are monotonic, so the newest mrq always holds the
+				// highest number whatever its width, and the ceiling disappears.
+				//
+				// TEN ROWS, NOT ONE. Sorting by id means the top mrq is the NEWEST,
+				// not the highest - and a mrq with an empty Voucher_No at the top
+				// would restart numbering at 1 and duplicate everything. Nothing
+				// writes a blank today, but a record added by hand in Creator would,
+				// and so would this very field the day before it was filled in.
+				// Walking a few rows and keeping the largest costs nothing and
+				// cannot be tripped by one bad mrq.
+				//
+				// Bounded either way. The plan numberer scans every plan ever to
+				// read one integer and is listed in docs/scaling.md for it; there
+				// was no reason to copy that.
+				//
+				// NOT SAFE AGAINST TWO STORE PEOPLE ISSUING IN THE SAME INSTANT -
+				// both would read the same last number. There is one store counter
+				// and one person at it, and Deluge has no sequence to lock; if that
+				// ever changes this needs a different mechanism, not a retry.
+				//------------------------------------------------------------
+				// sort by on its own assignment, never inline in a for-each header.
+				lastVouchers = Material_Issue[ID != 0] sort by ID desc range from 1 to 10;
+				lastVNum = 0;
+				for each  lv in lastVouchers
+				{
+					lvTxt = ifnull(lv.Voucher_No,"").toString().trim();
+					if(lvTxt != "")
 					{
-						for each  lotMv in Raw_Material_Lot[ID == passLot.toLong()]
+						// Split rather than substring - toList/get is the string
+						// idiom this app already relies on, and it does not care how
+						// many dashes a hand-edited number picked up.
+						vParts = lvTxt.toList("-");
+						if(vParts.size() > 1)
 						{
-							lmwS = ifnull(lotMv.Wash_Quantity,"0").toString().trim();
-							if(lmwS == "")
+							vNumTxt = vParts.get(vParts.size() - 1).trim();
+							if(vNumTxt.isNumber() == true)
 							{
-								lmwS = "0";
-							}
-							lmtS = ifnull(lotMv.In_Transit_Qty,"0").toString().trim();
-							if(lmtS == "")
-							{
-								lmtS = "0";
-							}
-							lotMv.Wash_Quantity = lmwS.toDecimal() - thisQty;
-							lotMv.In_Transit_Qty = lmtS.toDecimal() + thisQty;
-						}
-
-						//--------------------------------------------------
-						// AND THE PIECES THEMSELVES COME OFF THE RACK.
-						//
-						// The lot's metres moved above; on a Pieces lot those
-						// metres are the MAINTAINED SUM of these rows, so
-						// leaving the rows alone would make the header and its
-						// pieces disagree - the lot claiming it had given cloth
-						// away while every piece still sat there to be offered
-						// again on the next render.
-						//
-						// Decremented, never deleted: the row is the provenance
-						// of the cloth and of the print job it came from. A row
-						// reaching zero simply stops being Available stock,
-						// which is what getStoreMaterialRequirements filters on.
-						if(passIsPieces == true)
-						{
-							for each  pcMvTok in pcSpec.toList(",")
-							{
-								pcMvBits = pcMvTok.toString().trim().toList(":");
-								if(pcMvBits.size() >= 2)
+								vSeen = vNumTxt.toLong();
+								if(vSeen > lastVNum)
 								{
-									pcMvId = pcMvBits.get(0).toString().trim();
-									pcMvN = pcMvBits.get(1).toString().trim().toDecimal();
-									pcMvCutLen = 0.0;
-									if(pcMvBits.size() >= 3)
-									{
-										pcMvCutLen = pcMvBits.get(2).toString().trim().toDecimal();
-									}
-
-									if(pcMvId != "" && pcMvN > 0)
-									{
-										for each  fpMv in Fabric_Piece[ID == pcMvId.toLong()]
-										{
-											fpMvS = ifnull(fpMv.Piece_Count,"0").toString().trim();
-											if(fpMvS == "")
-											{
-												fpMvS = "0";
-											}
-											
-											fpOrigLenS = ifnull(fpMv.Piece_Length_Cm,"0").toString().trim();
-											if(pcMvCutLen <= 0)
-											{
-												// Legacy 2-part payload
-												pcMvCutLen = fpOrigLenS.toDecimal();
-											}
-											
-											fpMvLeft = fpMvS.toDecimal() - pcMvN;
-											isClamped = false;
-											if(fpMvLeft < 0)
-											{
-												// Cannot happen - the validation
-												// above refuses it - but a count
-												// below zero would be a phantom
-												// the allocator could never
-												// reconcile, so it is clamped and
-												// said out loud rather than left.
-												info "issueMaterials: piece " + pcMvId + " would go negative - clamped";
-												fpMvLeft = 0;
-												isClamped = true;
-											}
-											fpMv.Piece_Count = fpMvLeft;
-											
-											fpMvRemainder = fpOrigLenS.toDecimal() - pcMvCutLen;
-											
-											if(fpMvRemainder > 0 && isClamped == false)
-											{
-												// Option B: create a new piece for the remainder that was put back
-												insert into Fabric_Piece
-												[
-													Added_User = zoho.loginuser
-													Material = fpMv.Material
-													Lot = fpMv.Lot
-													Piece_Length_Cm = fpMvRemainder
-													Piece_Width_Cm = fpMv.Piece_Width_Cm
-													Piece_Count = pcMvN
-													State = fpMv.State
-													Piece_Status = "Available"
-													Carton_Number = fpMv.Carton_Number
-													Print_Job = fpMv.Print_Job
-												];
-											}
-										}
-									}
+									lastVNum = vSeen;
 								}
 							}
 						}
 					}
-
-					}
-					// end of the thisQty > 0 guard
 				}
-				// end of the per-lot pass loop
-
-				// Every pass has run; this is what actually left the shelf.
-				// issueQty was only ever the pre-pass estimate, and for a split
-				// across lots the passes can legitimately total more.
-				issueQty = issuedTotal;
-
-				//----------------------------------------------------------
-				// Move the stock, do NOT consume it.
-				//
-				// The shelf figure drops so the same cloth cannot be promised
-				// to a second supervisor, but the company still owns it - it is
-				// on a trolley, not in a garment. It is consumed only when the
-				// supervisor confirms receipt, and only for the amount he
-				// actually confirms.
-				//
-				// So Wash_Quantity/Quantity now means "on the shelf", not "what
-				// we own". Total holdings = on hand + in transit + disputed.
-				//----------------------------------------------------------
-				balance = available - issueQty;
-				if(isFab == true)
+				nextVNum = lastVNum + 1;
+				if(nextVNum < 10)
 				{
-					matRec.Wash_Quantity = balance;
-					qU = ifnull(matRec.Unwash_Quantity,"0").toString().trim();
-					qA = ifnull(matRec.Unallocated_Qty,"0").toString().trim();
-					matRec.Quantity = balance + if(qU=="",0.0,qU.toDecimal()) + if(qA=="",0.0,qA.toDecimal());
+					vPad = "0000" + nextVNum;
+				}
+				else if(nextVNum < 100)
+				{
+					vPad = "000" + nextVNum;
+				}
+				else if(nextVNum < 1000)
+				{
+					vPad = "00" + nextVNum;
+				}
+				else if(nextVNum < 10000)
+				{
+					vPad = "0" + nextVNum;
 				}
 				else
 				{
-					matRec.Quantity = balance;
+					vPad = "" + nextVNum;
 				}
-
-				transStr = ifnull(matRec.In_Transit_Qty,"0").toString().trim();
-				if(transStr == "")
+				voucherNo = "SIV-" + vPad;
+				// Transfer_Status is set so the state is READABLE on the record.
+				// Nothing depends on it: postTransferOrders reads every recent
+				// handover and filters in code, because a Creator criteria drops an
+				// empty field whether the test is "==" or "!=" - which is how a
+				// voucher with a blank status stayed invisible to two different
+				// queries in a mrq.
+				//
+				// NO COMMENTS INSIDE THE BLOCK BELOW. A Deluge insert-into field
+				// list is parsed specially and a "//" line in it is a syntax error -
+				// reported against the "try" a thousand lines above, with no hint
+				// that an insert is involved at all.
+				newIssueId = insert into Material_Issue
+				[
+					Voucher_No=voucherNo
+					Issue_Date=zoho.currentdate
+					Issue_Status="Issued"
+					Transfer_Status="Pending"
+					Added_User=zoho.loginuser
+				];
+				for each  mi in Material_Issue[ID == newIssueId.toLong()]
 				{
-					transStr = "0";
-				}
-				matRec.In_Transit_Qty = transStr.toDecimal() + issueQty;
-
-				if(okJson != "")
-				{
-					okJson = okJson + ",";
-				}
-				// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-				okJson = okJson + "{\"materialId\":\"" + matId + "\",\"sku\":\"" + matName + "\",\"qty\":" + issueQty + ",\"balance\":" + balance + ",\"wastePiecesIssued\":" + physicalPcs + ",\"piecesFromWaste\":" + piecesFromWaste + ",\"piecesFromRaw\":" + piecesFromRawTotal + "}";
-
-				if(issueQty < askQty)
-				{
-					if(errJson != "")
+					// Lookups after the insert - a null cannot go in the insert block.
+					if(primaryPlanId != 0)
 					{
-						errJson = errJson + ",";
+						mi.Plan=primaryPlanId;
 					}
-					errJson = errJson + "\"" + matName + ": only " + issueQty + " was needed, issued that instead of " + askQty + "\"";
-				}
-			}
-		}
-	}
-
-	//------------------------------------------------------------------------
-	// Write the handover record. Deliberately in its own try/catch: by this
-	// point stock has already been decremented and balances already moved, so a
-	// failure to LOG the handover must never fail the handover itself. Losing
-	// the audit row is bad; rolling back cloth that is physically on the counter
-	// is worse, and Deluge has no transaction to roll back with anyway.
-	//------------------------------------------------------------------------
-	try
-	{
-		if(issueLines.size() > 0)
-		{
-			//------------------------------------------------------------
-			// THE VOUCHER NUMBER. One per handover, because one handover is
-			// one record - the store issues again, that is a new record and a
-			// new number.
-			//
-			// GENERATED HERE, NOT BY A FORM WORKFLOW. An "on add" workflow
-			// using input.Voucher_No fires only when a human opens the Creator
-			// form and types a record. Nothing ever does: every Material_Issue
-			// in this app is created by the insert below, so a workflow would
-			// leave every voucher blank. Same reason Plan_No is built inside
-			// createProductionPlans rather than on the form.
-			//
-			// SORTED ON ID, NOT ON Voucher_No, AND THAT IS NOT A DETAIL.
-			//
-			// "sort by Voucher_No desc" is a TEXT sort. Zero padding makes it
-			// agree with the numeric order only while the width stays the same -
-			// the moment SIV-100000 exists beside SIV-99999, text order puts
-			// SIV-9... above SIV-1..., the highest reads as 99999, and the next
-			// handover is issued SIV-100000 for the SECOND time. A duplicate
-			// voucher number that nothing would notice until two transfer orders
-			// quoted it.
-			//
-			// Record ids are monotonic, so the newest row always holds the
-			// highest number whatever its width, and the ceiling disappears.
-			//
-			// TEN ROWS, NOT ONE. Sorting by id means the top row is the NEWEST,
-			// not the highest - and a row with an empty Voucher_No at the top
-			// would restart numbering at 1 and duplicate everything. Nothing
-			// writes a blank today, but a record added by hand in Creator would,
-			// and so would this very field the day before it was filled in.
-			// Walking a few rows and keeping the largest costs nothing and
-			// cannot be tripped by one bad row.
-			//
-			// Bounded either way. The plan numberer scans every plan ever to
-			// read one integer and is listed in docs/scaling.md for it; there
-			// was no reason to copy that.
-			//
-			// NOT SAFE AGAINST TWO STORE PEOPLE ISSUING IN THE SAME INSTANT -
-			// both would read the same last number. There is one store counter
-			// and one person at it, and Deluge has no sequence to lock; if that
-			// ever changes this needs a different mechanism, not a retry.
-			//------------------------------------------------------------
-			// sort by on its own assignment, never inline in a for-each header.
-			lastVouchers = Material_Issue[ID != 0] sort by ID desc range from 1 to 10;
-
-			lastVNum = 0;
-
-			for each  lv in lastVouchers
-			{
-				lvTxt = ifnull(lv.Voucher_No,"").toString().trim();
-
-				if(lvTxt != "")
-				{
-					// Split rather than substring - toList/get is the string
-					// idiom this app already relies on, and it does not care how
-					// many dashes a hand-edited number picked up.
-					vParts = lvTxt.toList("-");
-
-					if(vParts.size() > 1)
+					mi.Issued_To=supId;
+					// Set here rather than in the insert block - a Time field wants
+					// "HH:mm", and this whole block is already inside its own catch.
+					mi.Issue_Time=zoho.currenttime.toString("HH:mm");
+					for each  lnRaw in issueLines
 					{
-						vNumTxt = vParts.get(vParts.size() - 1).trim();
-
-						if(vNumTxt.isNumber() == true)
+						liRow = Material_Issue.Issue_Lines();
+						liRow.Material=lnRaw.get("matId").toLong();
+						// Material_Name gets the readable NAME, not the SKU it used to
+						// be given. The field finally says what it contains.
+						//
+						// The SKU is NOT written to a second field - there is no text
+						// field on this subform to hold it. Material is a LOOKUP whose
+						// display column happens to be the SKU, which is why Creator's
+						// own form shows "RM-00005" there; Deluge reading that field
+						// gets the record id instead. getStoreIssueHistory resolves the
+						// code from a catalogue map it builds in one query, so nothing
+						// here has to.
+						liRow.Material_Name=lnRaw.get("matDisp");
+						liRow.Qty=lnRaw.get("qty");
+						liRow.Unit=lnRaw.get("unit");
+						liRow.Cut_Size_Width=lnRaw.get("cutW");
+						liRow.Cut_Size_Length=lnRaw.get("cutL");
+						// Nothing confirmed yet. receiveMaterials settles against
+						// this, oldest line first, to know which lot to take the
+						// in-transit cloth off - so it has to start at a real 0
+						// rather than the EMPTY a Creator numeric otherwise holds.
+						liRow.Settled_Qty=0;
+						lotTxt = ifnull(lnRaw.get("lot"),"").toString().trim();
+						if(lotTxt != "")
 						{
-							vSeen = vNumTxt.toLong();
-
-							if(vSeen > lastVNum)
+							liRow.Lot=lotTxt.toLong();
+						}
+						noteTxt = ifnull(lnRaw.get("note"),"").toString().trim();
+						if(noteTxt != "")
+						{
+							fromTxt = ifnull(lnRaw.get("fromLot"),"").toString().trim();
+							if(fromTxt != "")
 							{
-								lastVNum = vSeen;
+								liRow.Lot_Override_From=fromTxt.toLong();
 							}
+							liRow.Lot_Override_Note=noteTxt;
 						}
-					}
-				}
-			}
-
-			nextVNum = lastVNum + 1;
-
-			if(nextVNum < 10)
-			{
-				vPad = "0000" + nextVNum;
-			}
-			else if(nextVNum < 100)
-			{
-				vPad = "000" + nextVNum;
-			}
-			else if(nextVNum < 1000)
-			{
-				vPad = "00" + nextVNum;
-			}
-			else if(nextVNum < 10000)
-			{
-				vPad = "0" + nextVNum;
-			}
-			else
-			{
-				vPad = "" + nextVNum;
-			}
-
-			voucherNo = "SIV-" + vPad;
-
-			// Transfer_Status is set so the state is READABLE on the record.
-			// Nothing depends on it: postTransferOrders reads every recent
-			// handover and filters in code, because a Creator criteria drops an
-			// empty field whether the test is "==" or "!=" - which is how a
-			// voucher with a blank status stayed invisible to two different
-			// queries in a row.
-			//
-			// NO COMMENTS INSIDE THE BLOCK BELOW. A Deluge insert-into field
-			// list is parsed specially and a "//" line in it is a syntax error -
-			// reported against the "try" a thousand lines above, with no hint
-			// that an insert is involved at all.
-			newIssueId = insert into Material_Issue
-			[
-				Voucher_No=voucherNo
-				Issue_Date=zoho.currentdate
-				Issue_Status="Issued"
-				Transfer_Status="Pending"
-				Added_User=zoho.loginuser
-			];
-
-			for each  mi in Material_Issue[ID == newIssueId.toLong()]
-			{
-				// Lookups after the insert - a null cannot go in the insert block.
-				if(primaryPlanId != 0)
-				{
-					mi.Plan = primaryPlanId;
-				}
-				mi.Issued_To = supId;
-				// Set here rather than in the insert block - a Time field wants
-				// "HH:mm", and this whole block is already inside its own catch.
-				mi.Issue_Time = zoho.currenttime.toString("HH:mm");
-
-				for each  lnRaw in issueLines
-				{
-					liRow = Material_Issue.Issue_Lines();
-					liRow.Material=lnRaw.get("matId").toLong();
-
-					// Material_Name gets the readable NAME, not the SKU it used to
-					// be given. The field finally says what it contains.
-					//
-					// The SKU is NOT written to a second field - there is no text
-					// field on this subform to hold it. Material is a LOOKUP whose
-					// display column happens to be the SKU, which is why Creator's
-					// own form shows "RM-00005" there; Deluge reading that field
-					// gets the record id instead. getStoreIssueHistory resolves the
-					// code from a catalogue map it builds in one query, so nothing
-					// here has to.
-					liRow.Material_Name=lnRaw.get("matDisp");
-					liRow.Qty=lnRaw.get("qty");
-					liRow.Unit=lnRaw.get("unit");
-					liRow.Cut_Size_Width=lnRaw.get("cutW");
-					liRow.Cut_Size_Length=lnRaw.get("cutL");
-
-					// Nothing confirmed yet. receiveMaterials settles against
-					// this, oldest line first, to know which lot to take the
-					// in-transit cloth off - so it has to start at a real 0
-					// rather than the EMPTY a Creator numeric otherwise holds.
-					liRow.Settled_Qty=0;
-
-					lotTxt = ifnull(lnRaw.get("lot"),"").toString().trim();
-					if(lotTxt != "")
-					{
-						liRow.Lot=lotTxt.toLong();
-					}
-
-					noteTxt = ifnull(lnRaw.get("note"),"").toString().trim();
-
-					if(noteTxt != "")
-					{
-						fromTxt = ifnull(lnRaw.get("fromLot"),"").toString().trim();
-						if(fromTxt != "")
+						if(lnRaw.get("req") != null)
 						{
-							liRow.Lot_Override_From=fromTxt.toLong();
+							liRow.Requirement=lnRaw.get("req");
 						}
-						liRow.Lot_Override_Note=noteTxt;
+						if(lnRaw.get("planItem") != null)
+						{
+							liRow.Plan_Item=lnRaw.get("planItem");
+						}
+						mi.Issue_Lines.insert(liRow);
 					}
-					if(lnRaw.get("req") != null)
-					{
-						liRow.Requirement=lnRaw.get("req");
-					}
-					if(lnRaw.get("planItem") != null)
-					{
-						liRow.Plan_Item=lnRaw.get("planItem");
-					}
-					mi.Issue_Lines.insert(liRow);
 				}
 			}
-		}
-	}
-	catch (e2)
-	{
-		// Not returned to the widget - the issue succeeded, and telling the store
-		// person "handover not logged" would only make him issue it again.
-		info "Material_Issue not written: " + e2.toString();
-	}
-
-	//------------------------------------------------------------------------
-	// TELL THE SUPERVISOR HIS MATERIAL IS READY.
-	//
-	// ONE mail per handover, not per material - a handover of eight materials is
-	// one trip to the counter, and eight mails describing it would be eight
-	// chances to stop reading them.
-	//
-	// Its own try/catch, and last. The cloth is already on the counter and the
-	// stock is already moved by this point; a mail that fails - quota, a
-	// transient error - must never make a completed handover look failed, and
-	// must never leave the store person issuing it a second time.
-	//
-	// ADDRESSING, and its one honest limitation: there is no Email field on
-	// Employee, so this cannot reach the supervisor directly. It goes to the
-	// admin address and NAMES him in the subject and the body, which is the
-	// agreed behaviour for a missing address - the notification is never lost,
-	// and the gap is visible in every mail until it is closed.
-	//   TO SWITCH ON once Employee.Email exists: read it in the supName loop
-	//   below and use it as `to`, keeping this address as the fallback.
-	//------------------------------------------------------------------------
-	notifyTo = "gurdhian.helios@gmail.com";
-
-	try
-	{
-		if(issueLines.size() > 0)
+		}		catch (e2)
 		{
-			supName = "";
-			for each  supEmp in Employee[ID == supId]
-			{
-				supName = ifnull(supEmp.Employee_Name,"").toString().replaceAll("\"","'");
-			}
-			if(supName == "")
-			{
-				supName = "Supervisor";
-			}
-
-			// One row per MATERIAL, summed. issueLines carries a row per plan
-			// requirement, so the same material appears several times when one
-			// handover feeds several orders - and he carried it once. Same rule
-			// his own Receive screen states: one line per physical thing.
-			nFont = "-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif";
-			nTh = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:left;font-weight:600";
-			nThR = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:right;font-weight:600";
-			nTd = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a";
-			nTdR = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a;text-align:right;font-weight:600";
-
-			mailKeys = List();
-			mailQty = Map();
-			mailUnit = Map();
-
-			for each  mlRaw in issueLines
-			{
-				// Name AND unit in the key: the same material in Mtr and in Pcs
-				// is two different things and must never be added together.
-				mlName = ifnull(mlRaw.get("matDisp"),"").toString();
-				mlUnitTxt = ifnull(mlRaw.get("unit"),"").toString();
-				mlKey = mlName + " | " + mlUnitTxt;
-
-				mlHave = ifnull(mailQty.get(mlKey),"").toString().trim();
-				if(mlHave == "")
-				{
-					mailKeys.add(mlKey);
-					mailQty.put(mlKey,ifnull(mlRaw.get("qty"),0));
-					mailUnit.put(mlKey,mlUnitTxt);
-				}
-				else
-				{
-					mailQty.put(mlKey,mlHave.toDecimal() + ifnull(mlRaw.get("qty"),0));
-				}
-			}
-
-			rowsHtml = "";
-			for each  mlKey2 in mailKeys
-			{
-				mlShow = mlKey2.substring(0,mlKey2.lastIndexOf(" | "));
-				rowsHtml = rowsHtml + "<tr><td style='" + nTd + "'>" + mlShow + "</td><td style='" + nTdR + "'>" + mailQty.get(mlKey2) + " <span style='color:#64748b;font-weight:400'>" + ifnull(mailUnit.get(mlKey2),"") + "</span></td></tr>";
-			}
-
-			inner = "<div style='font-size:14px;color:#0f172a'><b>" + supName + "</b>, the store has issued material against your orders. It is ready to collect.</div>";
-			inner = inner + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;margin-top:14px;border:1px solid #e2e8f0;border-radius:6px'>";
-			inner = inner + "<tr><th style='" + nTh + "'>Material</th><th style='" + nThR + "'>Quantity</th></tr>";
-			inner = inner + rowsHtml + "</table>";
-			inner = inner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>Confirm what you actually received on the <b>Receive</b> tab. Anything short of this goes to a dispute rather than quietly disappearing - stock is only consumed when you confirm it.</div>";
-
-			mailHtml = thisapp.buildNotificationEmail("Collect your material from the store","For " + supName + " &middot; " + zoho.currentdate.toString("dd MMM yyyy") + " " + zoho.currenttime.toString("HH:mm"),"#2563eb",inner);
-
-			sendmail
-			[
-				from :zoho.adminuserid
-				to :notifyTo
-				subject :"Material ready to collect from the store"
-				message :mailHtml
-			]
-			info "Issue notification sent for " + supName;
+			// Not returned to the widget - the issue succeeded, and telling the store
+			// person "handover not logged" would only make him issue it again.
+			info "Material_Issue not written: " + e2.toString();
 		}
-	}
-	catch (e3)
-	{
-		// Logged, never rethrown, never returned. The handover happened.
-		info "Issue notification not sent: " + e3.toString();
-	}
-
-	}
-	catch (e)
+		//------------------------------------------------------------------------
+		// TELL THE SUPERVISOR HIS MATERIAL IS READY.
+		//
+		// ONE mail per handover, not per material - a handover of eight materials is
+		// one trip to the counter, and eight mails describing it would be eight
+		// chances to stop reading them.
+		//
+		// Its own try/catch, and last. The cloth is already on the counter and the
+		// stock is already moved by this point; a mail that fails - quota, a
+		// transient error - must never make a completed handover look failed, and
+		// must never leave the store person issuing it a second time.
+		//
+		// ADDRESSING, and its one honest limitation: there is no Email field on
+		// Employee, so this cannot reach the supervisor directly. It goes to the
+		// admin address and NAMES him in the subject and the body, which is the
+		// agreed behaviour for a missing address - the notification is never lost,
+		// and the gap is visible in every mail until it is closed.
+		//   TO SWITCH ON once Employee.Email exists: read it in the supName loop
+		//   below and use it as `to`, keeping this address as the fallback.
+		//------------------------------------------------------------------------
+		notifyTo = "gurdhian.helios@gmail.com";
+		try 
+		{
+			if(issueLines.size() > 0)
+			{
+				supName = "";
+				for each  supEmp in Employee[ID == supId]
+				{
+					supName = ifnull(supEmp.Employee_Name,"").toString().replaceAll("\"","'");
+				}
+				if(supName == "")
+				{
+					supName = "Supervisor";
+				}
+				// One mrq per MATERIAL, summed. issueLines carries a mrq per plan
+				// requirement, so the same material appears several times when one
+				// handover feeds several orders - and he carried it once. Same rule
+				// his own Receive screen states: one line per physical thing.
+				nFont = "-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif";
+				nTh = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:left;font-weight:600";
+				nThR = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:right;font-weight:600";
+				nTd = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a";
+				nTdR = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a;text-align:right;font-weight:600";
+				mailKeys = List();
+				mailQty = Map();
+				mailUnit = Map();
+				for each  mlRaw in issueLines
+				{
+					// Name AND unit in the key: the same material in Mtr and in Pcs
+					// is two different things and must never be added together.
+					mlName = ifnull(mlRaw.get("matDisp"),"").toString();
+					mlUnitTxt = ifnull(mlRaw.get("unit"),"").toString();
+					mlKey = mlName + " | " + mlUnitTxt;
+					mlHave = ifnull(mailQty.get(mlKey),"").toString().trim();
+					if(mlHave == "")
+					{
+						mailKeys.add(mlKey);
+						mailQty.put(mlKey,ifnull(mlRaw.get("qty"),0));
+						mailUnit.put(mlKey,mlUnitTxt);
+					}
+					else
+					{
+						mailQty.put(mlKey,mlHave.toDecimal() + ifnull(mlRaw.get("qty"),0));
+					}
+				}
+				rowsHtml = "";
+				for each  mlKey2 in mailKeys
+				{
+					mlShow = mlKey2.substring(0,mlKey2.lastIndexOf(" | "));
+					rowsHtml = rowsHtml + "<tr><td style='" + nTd + "'>" + mlShow + "</td><td style='" + nTdR + "'>" + mailQty.get(mlKey2) + " <span style='color:#64748b;font-weight:400'>" + ifnull(mailUnit.get(mlKey2),"") + "</span></td></tr>";
+				}
+				inner = "<div style='font-size:14px;color:#0f172a'><b>" + supName + "</b>, the store has issued material against your orders. It is ready to collect.</div>";
+				inner = inner + "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;margin-top:14px;border:1px solid #e2e8f0;border-radius:6px'>";
+				inner = inner + "<tr><th style='" + nTh + "'>Material</th><th style='" + nThR + "'>Quantity</th></tr>";
+				inner = inner + rowsHtml + "</table>";
+				inner = inner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>Confirm what you actually received on the <b>Receive</b> tab. Anything short of this goes to a dispute rather than quietly disappearing - stock is only consumed when you confirm it.</div>";
+				mailHtml = thisapp.buildNotificationEmail("Collect your material from the store","For " + supName + " &middot; " + zoho.currentdate.toString("dd MMM yyyy") + " " + zoho.currenttime.toString("HH:mm"),"#2563eb",inner);
+				// sendmail
+				// [
+				// 	from :zoho.adminuserid
+				// 	to :notifyTo
+				// 	subject :"Material ready to collect from the store"
+				// 	message :mailHtml
+				// ]
+				// info "Issue notification sent for " + supName;
+			}
+		}		catch (e3)
+		{
+			// Logged, never rethrown, never returned. The handover happened.
+			info "Issue notification not sent: " + e3.toString();
+		}
+	}	catch (e)
 	{
 		// Surfaces as an alert in the widget via the existing errors[] handling.
 		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"issued\":[]}";
 	}
-
 	// Built by hand - List.toString() does not reliably wrap in [].
 	return "{\"errors\":[" + errJson + "],\"issued\":[" + okJson + "]}";
 }
