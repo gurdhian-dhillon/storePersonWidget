@@ -1,0 +1,148 @@
+string getOutsourceRateHistory(string payloadJson)
+{
+	// What each subcontractor last charged for a given garment, per stage - so the
+	// send-out popup can show a rate and fill it in when a vendor is picked.
+	//
+	// Custom API, POST, one argument: payloadJson.
+	//   { "itemSku":"NAP-6",
+	//     "stages":["Stitching","Embroidery"],
+	//     "partyIds":["5","8"] }
+	//
+	// 100% local Creator - reads Stage_Assignment history, the same rows
+	// sendToThirdParty writes. No Inventory call.
+	//
+	// For each (party, stage) it returns the most recent rate on a job that
+	// carried the SAME item SKU, and - if there is none - the most recent rate for
+	// that stage on ANY item, flagged otherItem:true so the popup can grey it.
+	//
+	// Returns
+	//   { "success":true,
+	//     "rates":[ {"partyId":"5","stage":"Stitching","rate":12.5,
+	//                "sentOn":"2026-08-15","otherItem":false} , ... ] }
+
+	res = "{\"success\":false,\"error\":\"Nothing ran\"}";
+	try
+	{
+		inp = payloadJson.toMap();
+
+		wantSku = ifnull(inp.get("itemSku"),"").toString().trim().toLowerCase();
+
+		stagesRaw = ifnull(inp.get("stages"),list());
+		partyRaw = ifnull(inp.get("partyIds"),list());
+
+		// party id (as text) -> "1", so a row's party can be tested with a map get
+		// rather than a list scan, and mixed-type comparison is avoided.
+		wantParty = map();
+		for each  pr in partyRaw
+		{
+			wantParty.put(pr.toString().trim(),"1");
+		}
+
+		// SKU text is on Item_Master, reached through the Plan_Item.Item_Sku
+		// lookup. Resolved once per Plan_Item seen, not once per history row.
+		skuByItem = map();
+
+		outList = list();
+
+		for each  stgRaw in stagesRaw
+		{
+			stageName = stgRaw.toString().trim();
+			if(stageName != "")
+			{
+				// Bounded: newest 40 outsourced rows for this stage. A per-row
+				// query over unbounded history is the shape that hits the
+				// uncatchable statement limit.
+				histRows = Stage_Assignment[Phase_Name == stageName && Third_Party != null && Rate > 0] sort by Sent_On desc range from 1 to 40;
+
+				// Best hit per party: prefer a same-SKU job; fall back to any.
+				bestRate = map();
+				bestOn = map();
+				bestOther = map();
+
+				for each  h in histRows
+				{
+					pTxt = ifnull(h.Third_Party,"").toString().trim();
+					takeIt = "no";
+					if(wantParty.size() == 0)
+					{
+						takeIt = "yes";
+					}
+					else if(ifnull(wantParty.get(pTxt),"") == "1")
+					{
+						takeIt = "yes";
+					}
+
+					if(takeIt == "yes")
+					{
+						itmTxt = ifnull(h.Plan_Item,"").toString().trim();
+						rowSku = ifnull(skuByItem.get(itmTxt),"__none__").toString();
+						if(rowSku == "__none__")
+						{
+							rowSku = "";
+							for each  pi in Plan_Item[ID == itmTxt.toLong()]
+							{
+								for each  im in Item_Master[ID == pi.Item_Sku]
+								{
+									rowSku = ifnull(im.SKU,"").toString().trim().toLowerCase();
+								}
+							}
+							skuByItem.put(itmTxt,rowSku);
+						}
+
+						isSame = (wantSku != "" && rowSku == wantSku);
+
+						rateVal = ifnull(h.Rate,0).toDecimal();
+						sentOnTxt = ifnull(h.Sent_On,"").toString();
+
+						haveOther = ifnull(bestOther.get(pTxt),"none").toString();
+
+						// Rows arrive newest-first, so the FIRST hit for a party
+						// wins its tier. A same-SKU hit always replaces an
+						// other-item one; once a same-SKU rate is set it is kept.
+						if(isSame == true)
+						{
+							if(haveOther != "false")
+							{
+								bestRate.put(pTxt,rateVal);
+								bestOn.put(pTxt,sentOnTxt);
+								bestOther.put(pTxt,"false");
+							}
+						}
+						else
+						{
+							if(haveOther == "none")
+							{
+								bestRate.put(pTxt,rateVal);
+								bestOn.put(pTxt,sentOnTxt);
+								bestOther.put(pTxt,"true");
+							}
+						}
+					}
+				}
+
+				for each  pKey in bestRate.keys()
+				{
+					rObj = "{\"partyId\":\"" + pKey + "\",\"stage\":\"" + stageName.replaceAll("\"","'") + "\",\"rate\":" + bestRate.get(pKey) + ",\"sentOn\":\"" + ifnull(bestOn.get(pKey),"").toString() + "\",\"otherItem\":" + ifnull(bestOther.get(pKey),"true").toString() + "}";
+					outList.add(rObj);
+				}
+			}
+		}
+
+		joined = "";
+		for each  o in outList
+		{
+			if(joined != "")
+			{
+				joined = joined + ",";
+			}
+			joined = joined + o;
+		}
+
+		res = "{\"success\":true,\"rates\":[" + joined + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+	return res;
+}

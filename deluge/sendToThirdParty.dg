@@ -5,7 +5,20 @@ string sendToThirdParty(string payloadJson)
 	// Custom API, POST, one argument: payloadJson.
 	//   { "planId":"1", "planItemId":"9", "partyId":"5",
 	//     "sentOn":"2026-08-06", "sentTime":"15:40", "qty":"10", "qtyIn":"100",
-	//     "sequences":[2,3], "remarks":"" }
+	//     "sequences":[2,3],
+	//     "rates":{ "2":12.5, "3":8 },
+	//     "itemSku":"NAP-6", "itemName":"Napkin Set 6pc", "remarks":"" }
+	//
+	// rates is per SEQUENCE (same pieces flow the whole block, but each stage is
+	// priced separately). A missing or zero entry just means "not priced" - the
+	// share still goes out, and no PO line is raised for it.
+	//
+	// AFTER the shares are written this calls raiseThirdPartyPO to create ONE
+	// draft Purchase Order in Zoho Inventory (one line per priced stage, all
+	// against a shared "Job Work Charges" service item so no stock moves). That
+	// call is in its own try/catch: a PO failure must never fail a send that has
+	// already written records. Its PO number, when it comes, is stamped on every
+	// share in the block.
 	//
 	// A THIRD PARTY IS AN OPERATOR. That is the whole shape of this function.
 	//
@@ -95,12 +108,13 @@ string sendToThirdParty(string payloadJson)
 	}
 	sendQty = qStr.toDecimal().toLong();
 	
-	rateStr = ifnull(inp.get("rate"),"0").toString().trim();
-	if(rateStr == "")
-	{
-		rateStr = "0";
-	}
-	sendRate = rateStr.toDecimal();
+	// Per-sequence rates. Keyed as text so a get by sequence number is like
+	// with like. A missing entry is "not priced" - handled at read time, never
+	// here, because an empty string would throw on toDecimal().
+	rateBySeq = ifnull(inp.get("rates"),map());
+
+	itemSkuTxt = ifnull(inp.get("itemSku"),"").toString().trim();
+
 	if(sendQty <= 0)
 	{
 		return "{\"success\":false,\"error\":\"Quantity to send must be more than zero\"}";
@@ -118,6 +132,7 @@ string sendToThirdParty(string payloadJson)
 
 	sentOnTxt = ifnull(inp.get("sentOn"),"").toString().trim();
 	sentTimeTxt = ifnull(inp.get("sentTime"),"").toString().trim();
+	expectedBackTxt = ifnull(inp.get("expectedBack"),"").toString().trim();
 	remarkTxt = ifnull(inp.get("remarks"),"").toString();
 
 	seqRaw = ifnull(inp.get("sequences"),list());
@@ -425,6 +440,13 @@ string sendToThirdParty(string payloadJson)
 			}
 			else
 			{
+				seqRateStr = ifnull(rateBySeq.get(sq4.toString()),"0").toString().trim();
+				if(seqRateStr == "")
+				{
+					seqRateStr = "0";
+				}
+				seqRate = seqRateStr.toDecimal();
+
 				newAsg = insert into Stage_Assignment
 				[
 					Stage_Log=logIdTxt.toLong()
@@ -439,7 +461,7 @@ string sendToThirdParty(string payloadJson)
 					Outsource_Ref=osRef
 					Remarks=remarkTxt
 					Added_User=zoho.loginuser
-					Rate=sendRate
+					Rate=seqRate
 				];
 
 				asgNewId = newAsg.toLong();
@@ -487,10 +509,69 @@ string sendToThirdParty(string payloadJson)
 		}
 	}
 
-	logLines.add("Done. Stages sent: " + madeCount + " | ref " + osRef);
+	//----------------------------------------------------------------------
+	// The Purchase Order. Own try/catch - the shares are written, and a PO
+	// failure (Inventory down, service item missing, vendor unmapped) must not
+	// undo a send that happened. The number, if it comes, is stamped on every
+	// share in the block so a later reader can reconcile the document.
+	//----------------------------------------------------------------------
+	poNumberTxt = "";
+	poErrTxt = "";
+	try
+	{
+		poLines = list();
+		for each  sqP in seqList
+		{
+			phP = phaseBySeq.get(sqP.toString()).toString();
+			rP = ifnull(rateBySeq.get(sqP.toString()),"0").toString().trim();
+			if(rP == "")
+			{
+				rP = "0";
+			}
+			lnP = map();
+			lnP.put("stage",phP);
+			lnP.put("qty",sendQty);
+			lnP.put("rate",rP.toDecimal());
+			poLines.add(lnP);
+		}
+
+		poReq = map();
+		poReq.put("partyId",partyId.toString());
+		poReq.put("outsourceRef",osRef);
+		poReq.put("itemSku",itemSkuTxt);
+		poReq.put("itemName",itemName);
+		poReq.put("deliveryDate",expectedBackTxt);
+		poReq.put("lines",poLines);
+
+		poResTxt = thisapp.raiseThirdPartyPO(poReq.toString());
+		logLines.add("raiseThirdPartyPO -> " + poResTxt);
+		poResMap = poResTxt.toMap();
+		if(ifnull(poResMap.get("success"),false) == true)
+		{
+			poNumberTxt = ifnull(poResMap.get("poNumber"),"").toString();
+			if(poNumberTxt != "")
+			{
+				for each  asPO in Stage_Assignment[Outsource_Ref == osRef]
+				{
+					asPO.PO_Number = poNumberTxt;
+				}
+			}
+		}
+		else
+		{
+			poErrTxt = ifnull(poResMap.get("error"),"PO not raised").toString();
+		}
+	}
+	catch (poErr)
+	{
+		poErrTxt = poErr.toString();
+		logLines.add("raiseThirdPartyPO threw: " + poErrTxt);
+	}
+
+	logLines.add("Done. Stages sent: " + madeCount + " | ref " + osRef + " | PO " + poNumberTxt);
 	info logLines;
 
-	res = "{\"success\":true,\"outsourceRef\":\"" + osRef + "\",\"stages\":" + madeCount + ",\"item\":\"" + itemName.replaceAll("\"","'") + "\",\"assigned\":" + (alreadyQty + sendQty) + ",\"qtyIn\":" + stageIn + "}";
+	res = "{\"success\":true,\"outsourceRef\":\"" + osRef + "\",\"stages\":" + madeCount + ",\"item\":\"" + itemName.replaceAll("\"","'") + "\",\"assigned\":" + (alreadyQty + sendQty) + ",\"qtyIn\":" + stageIn + ",\"poNumber\":\"" + poNumberTxt.replaceAll("\"","'") + "\",\"poError\":\"" + poErrTxt.replaceAll("\"","'").replaceAll("\n"," | ").replaceAll("\r","") + "\"}";
 	}
 	catch (e)
 	{

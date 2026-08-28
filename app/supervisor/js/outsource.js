@@ -234,19 +234,20 @@ function openSendDialog(plan, item, seed) {
 
             '<div id="os-warn"></div>' +
 
-            // Its own block with a rule above it. The two questions were running
-            // straight into each other — one list of rows, then a heading, then a
-            // dropdown, with nothing saying where the first step ended and the
-            // second began.
+            // Its own block with a rule above it. Pick the stages, then the party.
             '<div class="os-party-block">' +
-                '<div id="os-party-comparison" class="os-party-comparison hidden"></div>' +
-                '<select id="os-party" class="hidden"><option value="">&mdash; Pick a party &mdash;</option></select>' +
+                '<div class="os-step-head">Who is it going to?</div>' +
+                '<select id="os-party"><option value="">&mdash; Pick a party &mdash;</option></select>' +
                 '<p class="exc-hint" id="os-party-hint">Pick the stages first &mdash; the list ' +
                     'shows only parties that do all of them.</p>' +
-                '<div id="os-party-details" class="os-party-details hidden"></div>' +
             '</div>' +
 
-            '<div class="os-grid" style="grid-template-columns: repeat(4, 1fr);">' +
+            // One rate box per ticked stage, seeded from what this vendor last
+            // charged for this SKU (still editable). Rebuilt on every stage /
+            // party change by syncRateRows.
+            '<div id="os-rate-rows" class="os-rate-rows"></div>' +
+
+            '<div class="os-grid" style="grid-template-columns: repeat(2, 1fr);">' +
                 // CAPPED AT WHAT IS LEFT TO HAND OUT, not at what the stage
                 // received. Pieces already with a cutter are not his to send, and
                 // the server refuses it — this is only so he finds out before the
@@ -257,8 +258,10 @@ function openSendDialog(plan, item, seed) {
                     ' value="' + (Number(seed.qty) || 0) + '">' +
                     (seed.max > 0 ? '<p class="exc-hint">' + seed.max + ' left to hand out</p>' : '') +
                 '</div>' +
-                '<div><label for="os-rate">Rate / Piece (₹)</label>' +
-                    '<input type="number" id="os-rate" min="0" step="0.01" placeholder="₹0.00"></div>' +
+                // Goes on the PO as its delivery_date, so Inventory shows when the
+                // work is due back. Optional — left blank means no date on the PO.
+                '<div><label for="os-due">Expected back by</label>' +
+                    '<input type="date" id="os-due"></div>' +
                 '<div><label for="os-date">Sent on</label>' +
                     '<input type="date" id="os-date"></div>' +
                 '<div><label for="os-time">Time</label>' +
@@ -277,10 +280,29 @@ function openSendDialog(plan, item, seed) {
         '</div>';
 
     var d = new Date();
-    document.getElementById('os-date').value =
-        d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    var todayStr = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
         String(d.getDate()).padStart(2, '0');
+    var sentEl = document.getElementById('os-date');
+    var dueEl = document.getElementById('os-due');
+    sentEl.value = todayStr;
     document.getElementById('os-time').value = nowHHMM();
+
+    // Expected-back cannot be before it was sent. Seeded to the sent date, and
+    // its floor tracks the sent date if he changes that.
+    dueEl.value = todayStr;
+    dueEl.min = todayStr;
+    sentEl.addEventListener('change', function () {
+        dueEl.min = sentEl.value || '';
+        if (dueEl.value && sentEl.value && dueEl.value < sentEl.value) {
+            dueEl.value = sentEl.value;
+        }
+    });
+    dueEl.addEventListener('change', function () {
+        if (dueEl.value && sentEl.value && dueEl.value < sentEl.value) {
+            alert('Expected back cannot be before the date it was sent.');
+            dueEl.value = sentEl.value;
+        }
+    });
 
     // The quantity arrived from the share picker, so syncSendDialog must not
     // overwrite it with the stage's full input — which is the number this whole
@@ -436,13 +458,11 @@ function syncSendDialog() {
     if (able.length > 0) {
         hint.textContent = able.length + ' part' + (able.length === 1 ? 'y does' : 'ies do') +
             ' all ' + picked.length + ' stage' + (picked.length === 1 ? '' : 's');
-        hint.classList.add('hidden');
+        hint.classList.remove('hidden');
     } else if ((typeof parties === 'undefined' ? [] : parties).length === 0) {
         hint.innerHTML = '<b>No third parties loaded.</b> Either none are set up, ' +
             'or <code>getProductionWidgetData</code> has not been re-saved in Creator.';
         hint.classList.remove('hidden');
-        document.getElementById('os-party-comparison').classList.add('hidden');
-        document.getElementById('os-party-details').classList.add('hidden');
     } else {
         var gaps = names.filter(function (n) { return partiesForStage(n).length === 0; });
         hint.innerHTML = gaps.length > 0
@@ -451,28 +471,198 @@ function syncSendDialog() {
             : '<b>No single party does all of ' + escapeHtml(names.join(' + ')) + '.</b> ' +
               'Send a smaller block, or add the missing stages to one party.';
         hint.classList.remove('hidden');
-        document.getElementById('os-party-comparison').classList.add('hidden');
-        document.getElementById('os-party-details').classList.add('hidden');
     }
+
+    // Draw a rate box per ticked stage, then (re)load history for whoever is
+    // selected — or all able parties if none is — so a rate can be quoted before
+    // he commits to a vendor.
+    syncRateRows(names);
 
     sel.onchange = function () {
         btn.disabled = !sel.value;
-        chooseComparisonVendor(sel.value);
+        applyVendorRates(sel.value);
     };
     btn.disabled = !sel.value;
-    
-    if (sel.value) {
-        chooseComparisonVendor(sel.value);
-    } else {
-        if (able.length > 0) {
-            loadAllPartiesHistory(able);
-        } else {
-            var comp = document.getElementById('os-party-comparison');
-            var details = document.getElementById('os-party-details');
-            if (comp) comp.classList.add('hidden');
-            if (details) details.classList.add('hidden');
+
+    var partyIds = sel.value ? [sel.value] : able.map(function (p) { return String(p.id); });
+    loadRateHistory(names, partyIds, sel.value || null);
+}
+
+// ---- Per-stage rate boxes ----
+//
+// One <input> per ticked stage, id os-rate-<seq>. Kept across re-renders when
+// the stage is still ticked, so a rate he typed is not wiped by growing the
+// block. `osRateSeed` holds the last history payload so applyVendorRates can
+// re-seed without another call.
+var osRateSeed = { key: '', rates: [] };
+
+function pickedRateStages() {
+    var out = [];
+    document.querySelectorAll('#os-modal .os-stage').forEach(function (cb) {
+        if (cb.checked) {
+            var r = outsourceCtx.rows[Number(cb.getAttribute('data-i'))];
+            out.push({ seq: r.seq, name: r.name });
         }
+    });
+    return out;
+}
+
+function syncRateRows(names) {
+    var box = document.getElementById('os-rate-rows');
+    if (!box) return;
+    var stages = pickedRateStages();
+    if (stages.length === 0) { box.innerHTML = ''; return; }
+
+    // Preserve anything already there, and whether it was auto-filled from a
+    // vendor's history or typed by hand — a party change overwrites the former
+    // and leaves the latter alone.
+    var kept = {};
+    box.querySelectorAll('input.os-rate-in').forEach(function (inp) {
+        kept[inp.getAttribute('data-seq')] = {
+            value: inp.value,
+            auto: inp.getAttribute('data-autofilled') === '1'
+        };
+    });
+
+    box.innerHTML =
+        '<div class="os-step-head">Rate per piece (₹)</div>' +
+        stages.map(function (s) {
+            var k = kept[String(s.seq)] || { value: '', auto: false };
+            return '<div class="os-rate-row">' +
+                '<span class="os-rate-stage">' + escapeHtml(s.name) + '</span>' +
+                '<input type="number" class="os-rate-in" data-seq="' + s.seq +
+                    '"' + (k.auto ? ' data-autofilled="1"' : '') +
+                    ' min="0" step="0.01" placeholder="0.00" value="' + escapeHtml(k.value) + '">' +
+                '<span class="os-rate-hist" data-seq="' + s.seq + '"></span>' +
+            '</div>';
+        }).join('');
+
+    // Typing clears the auto-filled mark, so a hand-entered rate survives the
+    // next party change.
+    box.querySelectorAll('input.os-rate-in').forEach(function (inp) {
+        inp.addEventListener('input', function () {
+            inp.setAttribute('data-autofilled', '0');
+        });
+    });
+}
+
+// ---- Rate history ----
+//
+// One call to getOutsourceRateHistory. Fills the small "last: ₹X" hint beside
+// each stage's box, and — if a single party is selected — seeds the empty boxes
+// with that party's last rate.
+function loadRateHistory(names, partyIds, selectedId) {
+    var sku = (outsourceCtx.item.sku || '').trim();
+    var key = names.join('|') + '::' + partyIds.slice().sort().join(',');
+
+    if (osRateSeed.key === key) {
+        paintRateHistory(selectedId);
+        return;
     }
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: API.outsourceRateHistory,
+        http_method: 'POST',
+        payload: {
+            payloadJson: JSON.stringify({
+                itemSku: sku,
+                stages: names,
+                partyIds: partyIds
+            })
+        }
+    }).then(function (response) {
+        var parsed;
+        try { parsed = JSON.parse(response.result); }
+        catch (e) {
+            console.error('getOutsourceRateHistory parse failed:', e, response.result);
+            return;
+        }
+        if (!parsed.success) {
+            console.error('getOutsourceRateHistory:', parsed.error);
+            return;
+        }
+        osRateSeed = { key: key, rates: parsed.rates || [] };
+        paintRateHistory(selectedId);
+    }).catch(function (err) {
+        console.error('getOutsourceRateHistory error:', err);
+    });
+}
+
+// rate rows come back as { partyId, stage, rate, sentOn, otherItem }
+function paintRateHistory(selectedId) {
+    var stages = pickedRateStages();
+
+    stages.forEach(function (s) {
+        var hintEl = document.querySelector('#os-rate-rows .os-rate-hist[data-seq="' + s.seq + '"]');
+        if (!hintEl) return;
+
+        // Prefer the selected party's own row; otherwise show the cheapest quote
+        // across the able parties so the number means something before he picks.
+        var mine = null;
+        var cheapest = null;
+        osRateSeed.rates.forEach(function (row) {
+            if (String(row.stage).trim() !== s.name) return;
+            if (selectedId && String(row.partyId) === String(selectedId)) mine = row;
+            if (!cheapest || Number(row.rate) < Number(cheapest.rate)) cheapest = row;
+        });
+
+        var show = mine || cheapest;
+        if (!show) { hintEl.textContent = ''; return; }
+        var who = (mine ? '' : (partyById(show.partyId) ? partyById(show.partyId).name + ' ' : ''));
+        hintEl.textContent = 'last: ' + who + '₹' + Number(show.rate).toFixed(2) +
+            (show.sentOn ? ' (' + show.sentOn + ')' : '') +
+            (show.otherItem ? ' · other item' : '');
+        hintEl.className = 'os-rate-hist' + (show.otherItem ? ' is-other' : '');
+    });
+
+    if (selectedId) applyVendorRates(selectedId);
+}
+
+// Set each rate box to the selected party's last rate for that stage. Overwrites
+// a box that is empty or still carrying an earlier auto-fill; a rate he TYPED
+// (data-autofilled cleared) is left alone. A vendor with no past rate for a
+// stage clears that box's auto-fill rather than leaving another vendor's number.
+function applyVendorRates(partyId) {
+    if (!partyId) return;
+    var stages = pickedRateStages();
+    stages.forEach(function (s) {
+        var inp = document.querySelector('#os-rate-rows input.os-rate-in[data-seq="' + s.seq + '"]');
+        if (!inp) return;
+        var handTyped = inp.value !== '' && inp.getAttribute('data-autofilled') !== '1';
+        if (handTyped) return;
+
+        var row = osRateSeed.rates.find(function (r) {
+            return String(r.partyId) === String(partyId) && String(r.stage).trim() === s.name;
+        });
+        if (row) {
+            inp.value = Number(row.rate).toFixed(2);
+            inp.setAttribute('data-autofilled', '1');
+        } else {
+            inp.value = '';
+            inp.setAttribute('data-autofilled', '0');
+        }
+    });
+    paintSelectedHints(partyId);
+}
+
+function paintSelectedHints(partyId) {
+    var stages = pickedRateStages();
+    stages.forEach(function (s) {
+        var hintEl = document.querySelector('#os-rate-rows .os-rate-hist[data-seq="' + s.seq + '"]');
+        if (!hintEl) return;
+        var row = osRateSeed.rates.find(function (r) {
+            return String(r.partyId) === String(partyId) && String(r.stage).trim() === s.name;
+        });
+        if (row) {
+            hintEl.textContent = 'last: ₹' + Number(row.rate).toFixed(2) +
+                (row.sentOn ? ' (' + row.sentOn + ')' : '') +
+                (row.otherItem ? ' · other item' : '');
+            hintEl.className = 'os-rate-hist' + (row.otherItem ? ' is-other' : '');
+        } else {
+            hintEl.textContent = 'no past rate for this vendor';
+            hintEl.className = 'os-rate-hist is-none';
+        }
+    });
 }
 
 function doSend() {
@@ -497,8 +687,22 @@ function doSend() {
         return;
     }
 
+    var sentOn = document.getElementById('os-date').value;
+    var expectedBack = document.getElementById('os-due').value;
+    if (expectedBack && sentOn && expectedBack < sentOn) {
+        alert('Expected back cannot be before the date it was sent.');
+        return;
+    }
+
+    // Per-sequence rates, keyed by Sequence_No as a string. An empty box is
+    // omitted — "not priced", which the server and the PO both handle.
+    var rates = {};
+    document.querySelectorAll('#os-rate-rows input.os-rate-in').forEach(function (inp) {
+        var v = Number(inp.value);
+        if (v > 0) rates[String(inp.getAttribute('data-seq'))] = v;
+    });
+
     var btn = document.getElementById('os-send');
-    var rate = Number(document.getElementById('os-rate').value) || 0;
     btn.disabled = true;
     btn.textContent = 'Sending…';
 
@@ -511,14 +715,17 @@ function doSend() {
                 planItemId: String(outsourceCtx.item.id),
                 partyId: String(partyId),
                 qty: String(qty),
-                rate: String(rate),
+                rates: rates,
+                itemSku: String(outsourceCtx.item.sku || ''),
+                itemName: String(outsourceCtx.item.name || ''),
                 // What the FIRST stage of the block received. Used only when its
                 // Stage_Log has no figure yet — a stage nobody has been put on
                 // has not been opened, so the server has nothing to measure the
                 // send against and would otherwise refuse it.
                 qtyIn: String(seed.qtyIn || 0),
-                sentOn: document.getElementById('os-date').value,
+                sentOn: sentOn,
                 sentTime: document.getElementById('os-time').value,
+                expectedBack: expectedBack,
                 sequences: picked,
                 remarks: document.getElementById('os-remarks').value
             })
@@ -537,6 +744,13 @@ function doSend() {
             alert(parsed.error || 'Could not send.');
             btn.disabled = false; btn.textContent = 'Send out';
             return;
+        }
+        // The send succeeded. The PO is best-effort — if it failed, say so, but
+        // do not treat the send as failed: the pieces are out and recorded.
+        if (parsed.poError) {
+            console.warn('sendToThirdParty: PO not raised:', parsed.poError);
+            alert('Sent — but the Inventory PO was not created:\n' + parsed.poError +
+                '\n\nThe handover is recorded. Raise the PO in Inventory by hand if needed.');
         }
         closeOsDialog();
         fetchAllData(null);
@@ -726,565 +940,4 @@ function doReceive() {
         alert('Could not reach Creator.');
         btn.disabled = false; btn.textContent = 'Take it back';
     });
-}
-
-function loadPartyDetails(partyId) {
-    var container = document.getElementById('os-party-details');
-    if (!container) return;
-
-    if (!partyId) {
-        container.innerHTML = '';
-        container.classList.add('hidden');
-        if (outsourceCtx) outsourceCtx.partyDetails = null;
-        return;
-    }
-
-    container.classList.remove('hidden');
-
-    // Use cached details if available
-    if (outsourceCtx && outsourceCtx.allPartiesCache) {
-        var cachedParty = outsourceCtx.allPartiesCache.data.find(function(p) { return String(p.partyId) === String(partyId); });
-        if (cachedParty) {
-            renderPartyDetails(cachedParty);
-            return;
-        }
-    }
-
-    container.innerHTML = '<div class="os-loading"><span class="os-spinner"></span> Loading party details...</div>';
-    
-    // Fallback: If not cached, fetch single party history
-    ZOHO.CREATOR.DATA.invokeCustomApi({
-        api_name: API.getThirdPartyHistory,
-        http_method: 'POST',
-        payload: {
-            payloadJson: JSON.stringify({
-                partyIds: [String(partyId)]
-            })
-        }
-    }).then(function (response) {
-        var parsed;
-        try {
-            parsed = JSON.parse(response.result);
-        } catch (e) {
-            console.error('getThirdPartyHistory parse failed:', e, response.result);
-            container.innerHTML = '<div class="exc-error">Could not read party details.</div>';
-            return;
-        }
-
-        if (!parsed.success || !parsed.parties || parsed.parties.length === 0) {
-            container.innerHTML = '<div class="exc-error">' + escapeHtml(parsed.error || 'Failed to load details.') + '</div>';
-            return;
-        }
-
-        var partyData = parsed.parties[0];
-        renderPartyDetails(partyData);
-    }).catch(function (err) {
-        console.error('getThirdPartyHistory error:', err);
-        container.innerHTML = '<div class="exc-error">Could not connect to fetch party details.</div>';
-    });
-}
-
-function loadAllPartiesHistory(ableParties) {
-    var container = document.getElementById('os-party-comparison');
-    if (!container) return;
-
-    container.classList.remove('hidden');
-
-    var partyIds = ableParties.map(function (p) { return String(p.id); });
-    
-    // Use cached comparison details if available
-    if (outsourceCtx && outsourceCtx.allPartiesCache && 
-        outsourceCtx.allPartiesCache.key === partyIds.join(',')) {
-        renderPartiesComparison(outsourceCtx.allPartiesCache.data);
-        return;
-    }
-
-    container.innerHTML = '<div class="os-loading"><span class="os-spinner"></span> Loading contractor details & rate comparison...</div>';
-
-    ZOHO.CREATOR.DATA.invokeCustomApi({
-        api_name: API.getThirdPartyHistory,
-        http_method: 'POST',
-        payload: {
-            payloadJson: JSON.stringify({
-                partyIds: partyIds
-            })
-        }
-    }).then(function (response) {
-        var parsed;
-        try {
-            parsed = JSON.parse(response.result);
-        } catch (e) {
-            console.error('getThirdPartyHistory parse failed:', e, response.result);
-            container.innerHTML = '<div class="exc-error">Could not read contractor histories from Creator.</div>';
-            return;
-        }
-
-        if (!parsed.success) {
-            container.innerHTML = '<div class="exc-error">' + escapeHtml(parsed.error || 'Failed to load contractor comparison.') + '</div>';
-            return;
-        }
-
-        if (outsourceCtx) {
-            outsourceCtx.allPartiesCache = {
-                key: partyIds.join(','),
-                data: parsed.parties || []
-            };
-        }
-        renderPartiesComparison(parsed.parties || []);
-    }).catch(function (err) {
-        console.error('getThirdPartyHistory error:', err);
-        container.innerHTML = '<div class="exc-error">Could not connect to fetch contractor histories.</div>';
-    });
-}
-
-function renderPartiesComparison(partiesList) {
-    var container = document.getElementById('os-party-comparison');
-    if (!container) return;
-
-    if (partiesList.length === 0) {
-        container.innerHTML = '<p class="os-no-data">No active parties cover the selected stages.</p>';
-        return;
-    }
-
-    var pickedStages = [];
-    document.querySelectorAll('#os-modal .os-stage').forEach(function (cb) {
-        if (cb.checked) {
-            pickedStages.push(outsourceCtx.rows[Number(cb.getAttribute('data-i'))].name);
-        }
-    });
-
-    var currentItemSku = (outsourceCtx.item.sku || '').toLowerCase().trim();
-    var currentItemName = (outsourceCtx.item.name || '').toLowerCase().trim();
-
-    var html = '<h4>Compare Subcontractors</h4>' +
-        '<table class="os-pd-table os-comp-table">' +
-        '<thead>' +
-            '<tr>' +
-                '<th>Subcontractor</th>' +
-                '<th>Active Pricing (Ticked Stages)</th>' +
-                '<th>Last Job (Creator)</th>' +
-                '<th>Action</th>' +
-            '</tr>' +
-        '</thead>' +
-        '<tbody>';
-
-    partiesList.forEach(function (party) {
-        var details = party.vendorDetails || {};
-        var bills = party.bills || [];
-        var localHistory = party.localHistory || [];
-
-        // Determine rate matches for selected stages
-        var ratesText = '';
-        if (pickedStages.length > 0) {
-            var foundRates = {};
-            var chronologicalBills = bills.slice().reverse();
-            
-            // Step 1: Product-specific
-            chronologicalBills.forEach(function (b) {
-                (b.line_items || []).forEach(function (item) {
-                    var itemNameLower = (item.name || '').toLowerCase();
-                    var itemDescLower = (item.description || '').toLowerCase();
-                    
-                    pickedStages.forEach(function (stage) {
-                        var stageLower = stage.toLowerCase();
-                        var matchesStage = (itemNameLower.indexOf(stageLower) !== -1 || itemDescLower.indexOf(stageLower) !== -1);
-                        var matchesProduct = false;
-                        
-                        if (currentItemSku && (itemNameLower.indexOf(currentItemSku) !== -1 || itemDescLower.indexOf(currentItemSku) !== -1)) {
-                            matchesProduct = true;
-                        } else if (currentItemName && (itemNameLower.indexOf(currentItemName) !== -1 || itemDescLower.indexOf(currentItemName) !== -1)) {
-                            matchesProduct = true;
-                        }
-                        
-                        if (matchesStage && matchesProduct) {
-                            foundRates[stage] = { rate: item.rate, isProductSpecific: true };
-                        }
-                    });
-                });
-            });
-
-            // Step 2: Generic fallback
-            chronologicalBills.forEach(function (b) {
-                (b.line_items || []).forEach(function (item) {
-                    var itemNameLower = (item.name || '').toLowerCase();
-                    var itemDescLower = (item.description || '').toLowerCase();
-                    
-                    pickedStages.forEach(function (stage) {
-                        if (foundRates[stage] && foundRates[stage].isProductSpecific) return;
-                        
-                        var stageLower = stage.toLowerCase();
-                        var matchesStage = (itemNameLower.indexOf(stageLower) !== -1 || itemDescLower.indexOf(stageLower) !== -1);
-                        
-                        if (matchesStage) {
-                            foundRates[stage] = { rate: item.rate, isProductSpecific: false };
-                        }
-                    });
-                });
-            });
-
-            var rateLines = [];
-            pickedStages.forEach(function (stage) {
-                var info = foundRates[stage];
-                if (info) {
-                    var label = info.isProductSpecific ? ' (Product Specific)' : ' (Generic)';
-                    rateLines.push('<b>' + escapeHtml(stage) + ':</b> ₹' + Number(info.rate).toFixed(2) + '<span class="os-pd-remarks">' + label + '</span>');
-                } else {
-                    rateLines.push('<b>' + escapeHtml(stage) + ':</b> <span class="text-muted italic">No rate</span>');
-                }
-            });
-            ratesText = rateLines.join('<br>');
-        } else {
-            ratesText = '<span class="text-muted">Select stages above to view rates</span>';
-        }
-
-        var invStatusText = party.vendorFound
-            ? '<span class="os-badge-comp os-badge-success" title="Vendor mapped in Inventory">✓ Mapped</span>'
-            : '<span class="os-badge-comp os-badge-warn" title="Vendor not found in Inventory">⚠ Unmapped</span>';
-
-        var historyText = '';
-        var matchHistories = [];
-        localHistory.forEach(function (h) {
-            var isItemMatch = (h.item_name || '').toLowerCase() === currentItemName;
-            var isStageMatch = pickedStages.some(function (stg) {
-                return (h.stage || '').toLowerCase() === stg.toLowerCase();
-            });
-            if (isItemMatch && isStageMatch) {
-                var returnedDate = h.returned_on && h.returned_on !== 'null' ? h.returned_on : '—';
-                var rateText = h.rate ? ' at ₹' + Number(h.rate).toFixed(2) : '';
-                matchHistories.push(
-                    '<b>' + escapeHtml(h.stage) + '</b>: ' + h.qty_sent + ' pcs' + rateText + ' on ' + escapeHtml(h.sent_on || '—') +
-                    ' <span class="text-muted">(Returned ' + h.qty_returned + ' on ' + escapeHtml(returnedDate) + ')</span>'
-                );
-            }
-        });
-
-        if (matchHistories.length > 0) {
-            historyText = matchHistories.slice(0, 2).join('<br>');
-        } else {
-            if (localHistory.length === 0) {
-                historyText = '<span class="text-primary font-semibold">★ New Vendor</span><br><span class="text-muted italic">No Creator history yet</span>';
-            } else {
-                historyText = '<span class="text-muted italic">No past ' + escapeHtml(pickedStages.join('/') || 'selected') + ' run for this item</span>';
-            }
-        }
-
-        var isSelected = document.getElementById('os-party').value === String(party.partyId);
-        var rowClass = isSelected ? 'class="os-selected-row"' : '';
-        var btnText = isSelected ? 'Selected' : 'Choose Vendor';
-        var btnClass = isSelected ? 'outsource-btn is-out' : 'outsource-btn';
-
-        html += '<tr ' + rowClass + '>' +
-            '<td>' +
-                '<strong>' + escapeHtml(details.name || '') + '</strong> ' + invStatusText + '<br>' +
-                '<span class="text-muted">Contact: ' + escapeHtml(details.contact || '—') + ' · Ph: ' + escapeHtml(details.phone || '—') + '</span>' +
-            '</td>' +
-            '<td>' + ratesText + '</td>' +
-            '<td>' + historyText + '</td>' +
-            '<td>' +
-                '<button type="button" class="' + btnClass + '" onclick="chooseComparisonVendor(\'' + party.partyId + '\')">' + btnText + '</button>' +
-            '</td>' +
-        '</tr>';
-    });
-
-    html += '</tbody></table>';
-    container.innerHTML = html;
-}
-
-function chooseComparisonVendor(partyId) {
-    var sel = document.getElementById('os-party');
-    if (!sel) return;
-
-    sel.value = partyId;
-
-    var btn = document.getElementById('os-send');
-    if (btn) btn.disabled = !sel.value;
-
-    if (outsourceCtx && outsourceCtx.allPartiesCache) {
-        renderPartiesComparison(outsourceCtx.allPartiesCache.data);
-    }
-
-    var partiesList = outsourceCtx.allPartiesCache ? outsourceCtx.allPartiesCache.data : [];
-    var chosenParty = partiesList.find(function(p) { return String(p.partyId) === String(partyId); });
-    
-    var totalRate = 0;
-    if (chosenParty) {
-        var pickedStages = [];
-        document.querySelectorAll('#os-modal .os-stage').forEach(function (cb) {
-            if (cb.checked) {
-                pickedStages.push(outsourceCtx.rows[Number(cb.getAttribute('data-i'))].name);
-            }
-        });
-
-        var currentItemSku = (outsourceCtx.item.sku || '').toLowerCase().trim();
-        var currentItemName = (outsourceCtx.item.name || '').toLowerCase().trim();
-        var bills = chosenParty.bills || [];
-        
-        var foundRates = {};
-        var chronologicalBills = bills.slice().reverse();
-        
-        // Step 1: Product-specific
-        chronologicalBills.forEach(function (b) {
-            (b.line_items || []).forEach(function (item) {
-                var itemNameLower = (item.name || '').toLowerCase();
-                var itemDescLower = (item.description || '').toLowerCase();
-                pickedStages.forEach(function (stage) {
-                    var stageLower = stage.toLowerCase();
-                    var matchesStage = (itemNameLower.indexOf(stageLower) !== -1 || itemDescLower.indexOf(stageLower) !== -1);
-                    var matchesProduct = false;
-                    if (currentItemSku && (itemNameLower.indexOf(currentItemSku) !== -1 || itemDescLower.indexOf(currentItemSku) !== -1)) {
-                        matchesProduct = true;
-                    } else if (currentItemName && (itemNameLower.indexOf(currentItemName) !== -1 || itemDescLower.indexOf(currentItemName) !== -1)) {
-                        matchesProduct = true;
-                    }
-                    if (matchesStage && matchesProduct) {
-                        foundRates[stage] = item.rate;
-                    }
-                });
-            });
-        });
-
-        // Step 2: Generic fallback
-        chronologicalBills.forEach(function (b) {
-            (b.line_items || []).forEach(function (item) {
-                var itemNameLower = (item.name || '').toLowerCase();
-                var itemDescLower = (item.description || '').toLowerCase();
-                pickedStages.forEach(function (stage) {
-                    if (foundRates[stage]) return;
-                    var stageLower = stage.toLowerCase();
-                    var matchesStage = (itemNameLower.indexOf(stageLower) !== -1 || itemDescLower.indexOf(stageLower) !== -1);
-                    if (matchesStage) {
-                        foundRates[stage] = item.rate;
-                    }
-                });
-            });
-        });
-
-        pickedStages.forEach(function (stage) {
-            totalRate += Number(foundRates[stage] || 0);
-        });
-
-        var rateInput = document.getElementById('os-rate');
-        if (rateInput) {
-            rateInput.value = totalRate > 0 ? totalRate.toFixed(2) : '';
-        }
-
-        var detailsContainer = document.getElementById('os-party-details');
-        if (detailsContainer) {
-            detailsContainer.classList.remove('hidden');
-            renderPartyDetails(chosenParty);
-        }
-    }
-
-    if (outsourceCtx) {
-        outsourceCtx.selectedRate = totalRate;
-    }
-}
-
-function renderPartyDetails(data) {
-    var container = document.getElementById('os-party-details');
-    if (!container) return;
-
-    var details = data.vendorDetails || {};
-    var bills = data.bills || [];
-    var localHistory = data.localHistory || [];
-
-    // 1. Get the list of currently selected stage names in the modal
-    var pickedStages = [];
-    document.querySelectorAll('#os-modal .os-stage').forEach(function (cb) {
-        if (cb.checked) {
-            pickedStages.push(outsourceCtx.rows[Number(cb.getAttribute('data-i'))].name);
-        }
-    });
-
-    // Header info (Inventory integration status)
-    var headerHtml = '<div class="os-pd-header">';
-    if (data.vendorFound) {
-        headerHtml += '<span class="os-badge os-badge-success">✓ Zoho Inventory Vendor Mapped</span>';
-    } else {
-        headerHtml += '<span class="os-badge os-badge-warn">⚠ Zoho Inventory Vendor Not Found (Name mismatch?)</span>';
-    }
-    headerHtml += '</div>';
-
-    // Contact info grid
-    var contactHtml = '<div class="os-pd-info-grid">' +
-        '<div><strong>Contact Person:</strong> ' + escapeHtml(details.contact || '—') + '</div>' +
-        '<div><strong>Phone:</strong> ' + escapeHtml(details.phone || '—') + '</div>' +
-        '<div><strong>Email:</strong> ' + escapeHtml(details.email || '—') + '</div>' +
-    '</div>';
-
-    // 2. Active Pricing for Selected Stages (Extracted from bills)
-    var activeRatesHtml = '';
-    if (data.vendorFound && pickedStages.length > 0 && bills.length > 0) {
-        var foundRates = {};
-        var currentItemSku = (outsourceCtx.item.sku || '').toLowerCase().trim();
-        var currentItemName = (outsourceCtx.item.name || '').toLowerCase().trim();
-
-        // Scan bills in reverse chronological order (oldest to newest, so newest overwrites and wins)
-        var chronologicalBills = bills.slice().reverse();
-        
-        // Step 1: Look for product-specific service rates (matching product name/SKU AND stage name)
-        chronologicalBills.forEach(function (b) {
-            (b.line_items || []).forEach(function (item) {
-                var itemNameLower = (item.name || '').toLowerCase();
-                var itemDescLower = (item.description || '').toLowerCase();
-                
-                pickedStages.forEach(function (stage) {
-                    var stageLower = stage.toLowerCase();
-                    
-                    var matchesStage = (itemNameLower.indexOf(stageLower) !== -1 || itemDescLower.indexOf(stageLower) !== -1);
-                    var matchesProduct = false;
-                    
-                    if (currentItemSku && (itemNameLower.indexOf(currentItemSku) !== -1 || itemDescLower.indexOf(currentItemSku) !== -1)) {
-                        matchesProduct = true;
-                    } else if (currentItemName && (itemNameLower.indexOf(currentItemName) !== -1 || itemDescLower.indexOf(currentItemName) !== -1)) {
-                        matchesProduct = true;
-                    }
-                    
-                    if (matchesStage && matchesProduct) {
-                        foundRates[stage] = {
-                            rate: item.rate,
-                            billNumber: b.bill_number,
-                            date: b.date,
-                            isProductSpecific: true,
-                            matchedName: item.name
-                        };
-                    }
-                });
-            });
-        });
-
-        // Step 2: For any selected stages that didn't find a product-specific rate, check for a generic stage rate
-        chronologicalBills.forEach(function (b) {
-            (b.line_items || []).forEach(function (item) {
-                var itemNameLower = (item.name || '').toLowerCase();
-                var itemDescLower = (item.description || '').toLowerCase();
-                
-                pickedStages.forEach(function (stage) {
-                    // Skip if we already found a product-specific rate
-                    if (foundRates[stage] && foundRates[stage].isProductSpecific) return;
-                    
-                    var stageLower = stage.toLowerCase();
-                    var matchesStage = (itemNameLower.indexOf(stageLower) !== -1 || itemDescLower.indexOf(stageLower) !== -1);
-                    
-                    if (matchesStage) {
-                        foundRates[stage] = {
-                            rate: item.rate,
-                            billNumber: b.bill_number,
-                            date: b.date,
-                            isProductSpecific: false,
-                            matchedName: item.name
-                        };
-                    }
-                });
-            });
-        });
-
-        var rateRows = [];
-        pickedStages.forEach(function (stage) {
-            var info = foundRates[stage];
-            if (info) {
-                var rateTypeLabel = info.isProductSpecific ? ' (Product Specific)' : ' (Generic Rate)';
-                rateRows.push(
-                    '<tr>' +
-                        '<td><strong>' + escapeHtml(stage) + '</strong><span class="os-pd-remarks">' + rateTypeLabel + '</span></td>' +
-                        '<td class="font-semibold text-primary">₹' + Number(info.rate).toFixed(2) + '</td>' +
-                        '<td class="os-bill-ref">from Bill <b>' + escapeHtml(info.billNumber) + '</b> (' + escapeHtml(info.date) + ')</td>' +
-                    '</tr>'
-                );
-            } else {
-                rateRows.push(
-                    '<tr>' +
-                        '<td><strong>' + escapeHtml(stage) + '</strong></td>' +
-                        '<td class="text-muted italic">No rate found</td>' +
-                        '<td class="os-bill-ref text-muted">Create a bill in Inventory with this product SKU & stage service name</td>' +
-                    '</tr>'
-                );
-            }
-        });
-
-        if (rateRows.length > 0) {
-            activeRatesHtml = '<h4>Active Pricing for Selected Stages</h4>' +
-                '<table class="os-active-rates-table">' +
-                    '<tbody>' +
-                        rateRows.join('') +
-                    '</tbody>' +
-                '</table>';
-        }
-    }
-
-    // Prices & Bills section (Zoho Inventory)
-    var billsHtml = '<h4>Zoho Inventory Service Billing & Rates (All History)</h4>';
-    if (!data.vendorFound) {
-        billsHtml += '<p class="os-no-data">Cannot retrieve bills: Vendor is not mapped in Zoho Inventory. Please ensure the vendor exists with the display name matching "<b>' + escapeHtml(details.name || '') + '</b>".</p>';
-    } else if (bills.length === 0) {
-        billsHtml += '<p class="os-no-data">No bills found for this vendor in Zoho Inventory.</p>';
-    } else {
-        billsHtml += '<table class="os-pd-table">' +
-            '<thead>' +
-                '<tr>' +
-                    '<th>Bill #</th>' +
-                    '<th>Date</th>' +
-                    '<th>Status</th>' +
-                    '<th>Service Item & Rates</th>' +
-                    '<th class="text-right">Total</th>' +
-                '</tr>' +
-            '</thead>' +
-            '<tbody>' +
-                bills.map(function (b) {
-                    var itemsText = (b.line_items || []).map(function (item) {
-                        return escapeHtml(item.name) + ' (' + item.qty + ' × ₹' + Number(item.rate).toFixed(2) + ')';
-                    }).join('<br>');
-                    
-                    var statusClass = 'os-status-' + String(b.status || '').toLowerCase();
-                    var statusLabel = String(b.status || '').toUpperCase();
-                    
-                    return '<tr>' +
-                        '<td><span class="os-bill-no">' + escapeHtml(b.bill_number) + '</span></td>' +
-                        '<td>' + escapeHtml(b.date) + '</td>' +
-                        '<td><span class="os-status-badge ' + statusClass + '">' + escapeHtml(statusLabel) + '</span></td>' +
-                        '<td class="os-bill-items">' + (itemsText || '—') + '</td>' +
-                        '<td class="text-right font-semibold">₹' + Number(b.total || 0).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '</td>' +
-                    '</tr>';
-                }).join('') +
-            '</tbody>' +
-        '</table>';
-    }
-
-    // Local Creator history section
-    var historyHtml = '<h4>Creator Production Job History</h4>';
-    if (localHistory.length === 0) {
-        historyHtml += '<p class="os-no-data">No previous production outsourcing recorded in Zoho Creator.</p>';
-    } else {
-        historyHtml += '<table class="os-pd-table">' +
-            '<thead>' +
-                '<tr>' +
-                    '<th>Date Sent</th>' +
-                    '<th>Item Name</th>' +
-                    '<th>Stage</th>' +
-                    '<th>Sent</th>' +
-                    '<th>Returned</th>' +
-                    '<th>Status</th>' +
-                '</tr>' +
-            '</thead>' +
-            '<tbody>' +
-                localHistory.map(function (h) {
-                    var statusClass = h.status === 'Done' ? 'os-status-done' : 'os-status-progress';
-                    var statusLabel = h.status === 'Done' ? 'Returned' : 'Out';
-                    var returnedDate = h.returned_on && h.returned_on !== 'null' ? h.returned_on : '—';
-                    var remarksText = h.remarks ? '<div class="os-pd-remarks" title="' + escapeHtml(h.remarks) + '">Note: ' + escapeHtml(h.remarks) + '</div>' : '';
-
-                    return '<tr>' +
-                        '<td>' + escapeHtml(h.sent_on || '—') + '</td>' +
-                        '<td>' + escapeHtml(h.item_name || '—') + remarksText + '</td>' +
-                        '<td>' + escapeHtml(h.stage || '—') + '</td>' +
-                        '<td>' + h.qty_sent + '</td>' +
-                        '<td>' + h.qty_returned + ' (' + returnedDate + ')</td>' +
-                        '<td><span class="os-status-badge ' + statusClass + '">' + statusLabel + '</span></td>' +
-                    '</tr>';
-                }).join('') +
-            '</tbody>' +
-        '</table>';
-    }
-
-    container.innerHTML = headerHtml + contactHtml + activeRatesHtml + billsHtml + historyHtml;
 }

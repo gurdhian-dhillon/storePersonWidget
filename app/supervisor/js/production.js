@@ -8,7 +8,7 @@ const API = {
 	saveWaste: "saveWasteFromCutting",
 	sendToThirdParty: "sendToThirdParty",
 	receiveFromThirdParty: "receiveFromThirdParty",
-	getThirdPartyHistory: "getThirdPartyHistory",
+	outsourceRateHistory: "getOutsourceRateHistory",
 };
 
 // Cutting is the only stage that produces remnants.

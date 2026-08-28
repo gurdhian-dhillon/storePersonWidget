@@ -1,31 +1,21 @@
 void syncThirdParties()
 {
-	// Scheduled Deluge script to sync subcontractors from Zoho Inventory to Zoho Creator.
-	//
-	// It pulls all vendors from Zoho Inventory, filters by Department == "Third Party Vendor",
-	// and creates/updates records in Zoho Creator's Third_Party form.
-	
 	baseUrl = "https://www.zohoapis.in/inventory/v1/";
 	orgId = "60076905558";
-	
-	// Fetch all vendors from Zoho Inventory
 	vendorsResp = invokeurl
 	[
 		url :baseUrl + "contacts?contact_type=vendor&organization_id=" + orgId + "&per_page=200"
 		type :GET
 		connection:"inventory_connection"
 	];
-	
-	vendorsCode = ifnull(vendorsResp.get("code"), -1).toLong();
+	vendorsCode = ifnull(vendorsResp.get("code"),-1).toLong();
 	if(vendorsCode == 0)
 	{
 		contacts = vendorsResp.get("contacts");
-		for each contact in contacts
+		for each  contact in contacts
 		{
 			cId = contact.get("contact_id").toString();
-			cName = ifnull(contact.get("contact_name"), "").toString().trim();
-			
-			// To check the department, we need to fetch the detailed contact record
+			cName = ifnull(contact.get("contact_name"),"").toString().trim();
 			detUrl = baseUrl + "contacts/" + cId + "?organization_id=" + orgId;
 			detResp = invokeurl
 			[
@@ -33,73 +23,68 @@ void syncThirdParties()
 				type :GET
 				connection:"inventory_connection"
 			];
-			
-			detCode = ifnull(detResp.get("code"), -1).toLong();
+			detCode = ifnull(detResp.get("code"),-1).toLong();
 			if(detCode == 0)
 			{
 				contactDetail = detResp.get("contact");
-				cDept = ifnull(contactDetail.get("department"), "").toString().trim();
-				cDesignation = ifnull(contactDetail.get("designation"), "").toString().trim();
-				
-				// Extract primary contact details from contact_persons list
+				partyType = "";
+				cfList = ifnull(contactDetail.get("custom_fields"),list());
+				for each  cf in cfList
+				{
+					cfLabel = ifnull(cf.get("label"),"").toString().trim();
+					if(cfLabel.equalsIgnoreCase("Type"))
+					{
+						partyType = ifnull(cf.get("value"),"").toString().trim();
+					}
+				}
 				firstName = "";
 				lastName = "";
 				email = "";
 				phone = "";
-				
 				cpersonsList = contactDetail.get("contact_persons");
 				if(cpersonsList != null && cpersonsList.size() > 0)
 				{
 					firstPerson = cpersonsList.get(0);
-					firstName = ifnull(firstPerson.get("first_name"), "").toString().trim();
-					lastName = ifnull(firstPerson.get("last_name"), "").toString().trim();
-					email = ifnull(firstPerson.get("email"), "").toString().trim();
-					phone = ifnull(firstPerson.get("phone"), "").toString().trim();
+					firstName = ifnull(firstPerson.get("first_name"),"").toString().trim();
+					lastName = ifnull(firstPerson.get("last_name"),"").toString().trim();
+					email = ifnull(firstPerson.get("email"),"").toString().trim();
+					phone = ifnull(firstPerson.get("phone"),"").toString().trim();
 				}
-				
-				// Fallback to root level details if nested is blank
 				if(email == "")
 				{
-					email = ifnull(contactDetail.get("email"), "").toString().trim();
+					email = ifnull(contactDetail.get("email"),"").toString().trim();
 				}
 				if(phone == "")
 				{
-					phone = ifnull(contactDetail.get("phone"), "").toString().trim();
+					phone = ifnull(contactDetail.get("phone"),"").toString().trim();
 				}
-				
 				cPerson = (firstName + " " + lastName).trim();
 				cPhone = phone;
 				cEmail = email;
-				
-				// Differentiate vendors by Department == "Third Party Vendor" (or designation)
-				if(cDept.equalsIgnoreCase("Third Party Vendor") || cDesignation.equalsIgnoreCase("Third Party Vendor"))
+				if(partyType.equalsIgnoreCase("Job Work"))
 				{
-					// Check if this Third Party already exists in Zoho Creator
 					existingTpCount = Third_Party[Party_Name == cName].count();
-					
 					if(existingTpCount == 0)
 					{
-						// Create a new Third_Party record in Creator
-						// Note: By default, set the status to Active
 						newTp = insert into Third_Party
 						[
 							Party_Name = cName
 							Contact_Person = cPerson
 							Phone = cPhone
 							Email = cEmail
+							Inventory_Contact_ID = cId
 							Status = "Active"
 							Remarks = "Synced from Zoho Inventory Vendor"
 						];
 					}
 					else
 					{
-						// Update the existing Third_Party record in Creator
-						for each tp in Third_Party[Party_Name == cName]
+						for each  tp in Third_Party[Party_Name == cName]
 						{
 							tp.Contact_Person = cPerson;
 							tp.Phone = cPhone;
 							tp.Email = cEmail;
-							// Leave Applicable_Stages and Status alone so local configurations are preserved
+							tp.Inventory_Contact_ID = cId;
 						}
 					}
 				}

@@ -1,0 +1,201 @@
+string raiseThirdPartyPO(string payloadJson)
+{
+	// Creates ONE draft Purchase Order in Zoho Inventory for a job-work block sent
+	// to a subcontractor - one line per stage, priced at the per-piece rate the
+	// supervisor entered.
+	//
+	// Custom API, POST, one argument: payloadJson.
+	//   { "partyId":"5", "outsourceRef":"OS-9-20260828...",
+	//     "itemSku":"NAP-6", "itemName":"Napkin Set 6pc",
+	//     "deliveryDate":"2026-09-05",
+	//     "lines":[ {"stage":"Stitching","qty":40,"rate":12.5},
+	//               {"stage":"Embroidery","qty":40,"rate":8} ] }
+	//
+	// deliveryDate is optional - the supervisor's "expected back by" date. Set on
+	// the PO as delivery_date when present.
+	//
+	// NO GARMENT ITEM IS PUT ON THE PO. Every line points at ONE shared service
+	// item ("Job Work Charges") so posting the PO - and any bill raised against it
+	// later - moves no stock. A service item has no inventory. The stage name goes
+	// in the line's name and the SKU / garment in its description, so the document
+	// still says what the money was for.
+	//
+	// Needs in Zoho Inventory:
+	//   - a Service-type item named exactly "Job Work Charges"
+	//   - the vendor's contact_id stored on Third_Party.Inventory_Contact_ID
+	//     (written by syncThirdParties)
+	//
+	// This is called from sendToThirdParty AFTER the shares are written, in its own
+	// try/catch there - a PO failure must not fail the send. It returns
+	//   { "success":true, "poNumber":"PO-00042" }
+	// or { "success":false, "error":"..." } and the caller logs it and carries on.
+
+	res = "{\"success\":false,\"error\":\"Nothing ran\"}";
+	try
+	{
+		orgId = "60076905558";
+		baseUrl = "https://www.zohoapis.in/inventory/v1/";
+		jobWorkItemName = "Job Work Charges";
+
+		inp = payloadJson.toMap();
+
+		partyTxt = ifnull(inp.get("partyId"),"").toString().trim();
+		if(partyTxt == "" || partyTxt.isNumber() == false)
+		{
+			return "{\"success\":false,\"error\":\"partyId is required\"}";
+		}
+		partyId = partyTxt.toLong();
+
+		osRef = ifnull(inp.get("outsourceRef"),"").toString().trim();
+		itemSku = ifnull(inp.get("itemSku"),"").toString().trim();
+		itemName = ifnull(inp.get("itemName"),"").toString().trim();
+		deliveryDate = ifnull(inp.get("deliveryDate"),"").toString().trim();
+
+		linesRaw = ifnull(inp.get("lines"),list());
+		if(linesRaw.size() == 0)
+		{
+			return "{\"success\":false,\"error\":\"No lines to bill\"}";
+		}
+
+		//------------------------------------------------------------------
+		// The vendor's Inventory contact_id. Stored on the Third_Party by
+		// syncThirdParties so no name-match is needed here.
+		//------------------------------------------------------------------
+		vendorInvId = "";
+		vendorName = "";
+		for each  tp in Third_Party[ID == partyId]
+		{
+			vendorInvId = ifnull(tp.Inventory_Contact_ID,"").toString().trim();
+			vendorName = ifnull(tp.Party_Name,"").toString().trim();
+		}
+		if(vendorInvId == "")
+		{
+			return "{\"success\":false,\"error\":\"" + vendorName.replaceAll("\"","'") + " has no Inventory contact id - run syncThirdParties\"}";
+		}
+
+		//------------------------------------------------------------------
+		// The one shared service item, looked up by name.
+		//------------------------------------------------------------------
+		jobWorkItemId = "";
+		itemSearchUrl = baseUrl + "items?name=" + zoho.encryption.urlEncode(jobWorkItemName) + "&organization_id=" + orgId;
+		itemSearchResp = invokeurl
+		[
+			url :itemSearchUrl
+			type :GET
+			connection:"inventory_connection"
+		];
+		if(ifnull(itemSearchResp.get("code"),-1).toLong() == 0)
+		{
+			foundItems = ifnull(itemSearchResp.get("items"),list());
+			for each  fi in foundItems
+			{
+				if(jobWorkItemId == "" && ifnull(fi.get("name"),"").toString().trim().equalsIgnoreCase(jobWorkItemName))
+				{
+					jobWorkItemId = ifnull(fi.get("item_id"),"").toString().trim();
+				}
+			}
+		}
+		if(jobWorkItemId == "")
+		{
+			return "{\"success\":false,\"error\":\"Service item '" + jobWorkItemName + "' not found in Inventory - create it first\"}";
+		}
+
+		//------------------------------------------------------------------
+		// One line per stage.
+		//------------------------------------------------------------------
+		descTail = "";
+		if(itemSku != "")
+		{
+			descTail = itemSku;
+		}
+		if(itemName != "")
+		{
+			if(descTail != "")
+			{
+				descTail = descTail + " - ";
+			}
+			descTail = descTail + itemName;
+		}
+		if(osRef != "")
+		{
+			if(descTail != "")
+			{
+				descTail = descTail + " - ";
+			}
+			descTail = descTail + "ref " + osRef;
+		}
+
+		lineItems = list();
+		for each  lnRaw in linesRaw
+		{
+			lnMap = lnRaw.toMap();
+			stageName = ifnull(lnMap.get("stage"),"").toString().trim();
+
+			qStr = ifnull(lnMap.get("qty"),"0").toString().trim();
+			if(qStr == "")
+			{
+				qStr = "0";
+			}
+			lnQty = qStr.toDecimal();
+
+			rStr = ifnull(lnMap.get("rate"),"0").toString().trim();
+			if(rStr == "")
+			{
+				rStr = "0";
+			}
+			lnRate = rStr.toDecimal();
+
+			if(lnQty > 0 && lnRate > 0 && stageName != "")
+			{
+				li = map();
+				li.put("item_id",jobWorkItemId);
+				li.put("name",stageName);
+				li.put("description",descTail);
+				li.put("quantity",lnQty);
+				li.put("rate",lnRate);
+				lineItems.add(li);
+			}
+		}
+
+		if(lineItems.size() == 0)
+		{
+			return "{\"success\":false,\"error\":\"Every line was zero-rate or zero-qty - nothing to raise\"}";
+		}
+
+		poPayload = map();
+		poPayload.put("vendor_id",vendorInvId);
+		poPayload.put("status","draft");
+		if(osRef != "")
+		{
+			poPayload.put("reference_number",osRef);
+		}
+		if(deliveryDate != "")
+		{
+			poPayload.put("delivery_date",deliveryDate);
+		}
+		poPayload.put("line_items",lineItems);
+
+		apiResp = invokeurl
+		[
+			url :baseUrl + "purchaseorders?organization_id=" + orgId
+			type :POST
+			parameters:poPayload.toString()
+			connection:"inventory_connection"
+		];
+
+		if(ifnull(apiResp.get("code"),-1).toLong() != 0)
+		{
+			return "{\"success\":false,\"error\":\"Inventory API: " + ifnull(apiResp.get("message"),"").toString().replaceAll("\"","'") + "\"}";
+		}
+
+		poObj = apiResp.get("purchaseorder");
+		poNumber = ifnull(poObj.get("purchaseorder_number"),"").toString();
+
+		res = "{\"success\":true,\"poNumber\":\"" + poNumber.replaceAll("\"","'") + "\"}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+	return res;
+}
