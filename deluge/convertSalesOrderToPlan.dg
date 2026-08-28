@@ -1,0 +1,100 @@
+string convertSalesOrderToPlan(string soIdTxt)
+{
+	// MANUAL "Convert to plan" from the admin dashboard's Pending tab.
+	//
+	// The whole planning body already exists and is already idempotent:
+	// createPlanForOneOrder is what the CreateProductionPlan batch workflow
+	// calls once per Pending record. This wraps it so a widget can call it for
+	// ONE order the admin picked, and turns its plain-text return into JSON the
+	// dashboard can act on.
+	//
+	// createPlanForOneOrder:
+	//   - "CREATE <planNo> -> SO <no>"      plan built, order moved to In Progress
+	//   - "SKIP (plan exists) -> SO <no>"   already planned, order moved on
+	//   - "REJECT -> SO <no> | <reasons>"   cannot be planned, stays Pending,
+	//                                       Plan_Reject_Reason written
+	// and it writes Batch_Run_Outcome on the Sales_Order every time, which is the
+	// authoritative record - this parse of the string is only for the immediate
+	// response.
+	//
+	// NO CROSS-CHECK that the order is still Pending: createPlanForOneOrder
+	// handles every state itself (the SKIP branch covers an already-planned one),
+	// and racing the batch workflow just means one of the two writes the plan and
+	// the other SKIPs it.
+	//
+	// Response:
+	// { "success":true, "outcome":"Created"|"Skipped"|"Rejected",
+	//   "planNo":"PLAN-00042", "reason":"", "message":"<raw return>" }
+
+	res = "{\"success\":false,\"outcome\":\"Error\",\"planNo\":\"\",\"reason\":\"Nothing ran\",\"message\":\"\"}";
+
+	try
+	{
+		soId = ifnull(soIdTxt,"").toString().trim();
+		if(soId == "" || soId.isNumber() == false)
+		{
+			return "{\"success\":false,\"outcome\":\"Error\",\"planNo\":\"\",\"reason\":\"No sales order id supplied\",\"message\":\"\"}";
+		}
+
+		raw = thisapp.createPlanForOneOrder(soId.toLong());
+		rawFlat = ifnull(raw,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
+		outcome = "Error";
+		planNo = "";
+		reason = "";
+		ok = false;
+
+		if(rawFlat.startsWith("CREATE "))
+		{
+			ok = true;
+			outcome = "Created";
+			// "CREATE <planNo> -> SO <no>"
+			afterCreate = rawFlat.substring(7).trim();
+			arrowAt = afterCreate.indexOf(" -> ");
+			if(arrowAt > 0)
+			{
+				planNo = afterCreate.substring(0,arrowAt).trim();
+			}
+			else
+			{
+				planNo = afterCreate;
+			}
+		}
+		else if(rawFlat.startsWith("SKIP"))
+		{
+			ok = true;
+			outcome = "Skipped";
+			reason = "A plan already exists for this order - it has been moved to In Progress.";
+		}
+		else if(rawFlat.startsWith("REJECT"))
+		{
+			ok = false;
+			outcome = "Rejected";
+			// "REJECT -> SO <no> | <reasons>"
+			barAt = rawFlat.indexOf(" | ");
+			if(barAt > 0)
+			{
+				reason = rawFlat.substring(barAt + 3).trim();
+			}
+			else
+			{
+				reason = "The order could not be planned - see the order for the recorded reason.";
+			}
+		}
+		else
+		{
+			// createPlanForOneOrder returned something unexpected, or nothing.
+			ok = false;
+			outcome = "Error";
+			reason = "Unrecognised planner response";
+		}
+
+		res = "{\"success\":" + ok + ",\"outcome\":\"" + outcome + "\",\"planNo\":\"" + planNo + "\",\"reason\":\"" + reason + "\",\"message\":\"" + rawFlat + "\"}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"outcome\":\"Error\",\"planNo\":\"\",\"reason\":\"" + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ") + "\",\"message\":\"\"}";
+	}
+
+	return res;
+}

@@ -92,7 +92,13 @@ string getStoreRequests()
 	for each  ex in excs
 	{
 		exStatus = ifnull(ex.Status,"").toString();
-		exType = ifnull(ex.Type,"").toString();
+		// raiseMaterialException writes "Type"; getStoreMaterialRequirements
+		// reads "Type_field". Read one, fall back to the other.
+		exType = ifnull(ex.Type,"").toString().trim();
+		if(exType == "")
+		{
+			exType = ifnull(ex.Type_field,"").toString().trim();
+		}
 
 		// Creator fields that were never written are EMPTY, not null, and
 		// toDecimal() throws on empty - normalise to string first.
@@ -118,6 +124,50 @@ string getStoreRequests()
 		{
 			showStatus = washStatusByExc.get(myKey);
 			gotQty = washGotByExc.get(myKey);
+		}
+
+		// A PO Shortage ticket is DONE the moment stock covers what it asked
+		// for - this app has no purchase-receipt step that closes it, only
+		// syncPurchaseInflow bumping Raw_Material. resolvePurchaseShortages
+		// writes Status = "Resolved" from runPurchaseInflow, but the webhook
+		// may not have fired yet, so show it as Resolved on read too rather
+		// than have the My requests tab lie until the next inflow. gotQty is
+		// set to the on-hand so the Received column shows something.
+		exPoNo = ifnull(ex.PO_Number,"").toString().trim();
+		if(exType == "Shortage" && exPoNo != "" && (showStatus == "Open" || showStatus == "Pending"))
+		{
+			needCov = rStr.toDecimal();
+			exMatId = ifnull(ex.SKU,"").toString().trim();
+			onHandCov = 0.0;
+			if(exMatId != "" && exMatId.isNumber() == true && needCov > 0)
+			{
+				for each  rmCov in Raw_Material[ID == exMatId.toLong()]
+				{
+					if(ifnull(rmCov.Is_Fabric,false) == true)
+					{
+						cwStr = ifnull(rmCov.Wash_Quantity,"0").toString().trim();
+						if(cwStr == "")
+						{
+							cwStr = "0";
+						}
+						onHandCov = cwStr.toDecimal();
+					}
+					else
+					{
+						cqStr = ifnull(rmCov.Quantity,"0").toString().trim();
+						if(cqStr == "")
+						{
+							cqStr = "0";
+						}
+						onHandCov = cqStr.toDecimal();
+					}
+				}
+				if(onHandCov >= needCov)
+				{
+					showStatus = "Resolved";
+					gotQty = needCov;
+				}
+			}
 		}
 
 		raisedOn = "";

@@ -23,6 +23,16 @@
 var DATA = null;
 var PIPELINE_STATUS = 'In Progress';
 
+// Sales orders still at "Pending" — the ones the CreateProductionPlan batch
+// workflow has not turned into a plan yet. Loaded alongside the pipeline counts,
+// shown when the Pending card is selected, each with its last reject reason and
+// a Convert to plan button. null = not loaded yet.
+var PENDING_ORDERS = null;
+var PENDING_ERROR = '';
+// soId currently being converted, so its button can show a spinner and the rest
+// stay clickable.
+var CONVERTING = {};
+
 // Which rows are expanded, keyed by employee id. Survives a re-render so
 // refreshing does not collapse everything that was open.
 var OPEN = {};
@@ -303,27 +313,37 @@ function renderPipeline() {
         tab.addEventListener('click', function () {
             PIPELINE_STATUS = tab.getAttribute('data-status');
             renderPipeline();
+            // Lazy-load the pending list the first time that card is opened.
+            if (PIPELINE_STATUS === 'Pending' && PENDING_ORDERS === null && !PENDING_ERROR) {
+                loadPendingOrders();
+            }
         });
     });
+
+    bindPendingButtons();
 }
 
 function renderInProgressOrders() {
+    if (PIPELINE_STATUS === 'Pending') {
+        return renderPendingOrders();
+    }
+
     var orders = DATA && Array.isArray(DATA.progressOrders) ? DATA.progressOrders : null;
     var h = '<section class="progress-section"><div class="pipeline-header">' +
-        '<h2>' + esc(PIPELINE_STATUS) + ' Orders</h2>';
+        '<h2>' + esc(PIPELINE_STATUS) + ' orders</h2>';
 
     if (PIPELINE_STATUS !== 'In Progress') {
-        return h + '</div><p class="progress-empty">Choose In Progress to see the live production stage, quantities and next step.</p></section>';
+        return h + '</div><p class="progress-empty">Select <strong>In Progress</strong> above to see live production stage, quantities and the next step for each order, or <strong>Pending</strong> to convert orders into plans.</p></section>';
     }
 
     if (orders === null) {
-        return h + '<span class="pipe-total">Loading live order progress…</span></div></section>';
+        return h + '</div><p class="progress-empty">Loading live order progress…</p></section>';
     }
     if (!orders.length) {
-        return h + '</div><p class="progress-empty">No sales orders are currently In Progress.</p></section>';
+        return h + '</div><p class="progress-empty">No sales orders are currently in progress.</p></section>';
     }
 
-    h += '<span class="pipe-total">' + orders.length + ' live orders</span></div>' +
+    h += '<span class="pipe-total">' + orders.length + ' live order' + (orders.length === 1 ? '' : 's') + '</span></div>' +
         '<div class="table-wrapper"><table class="progress-table"><thead><tr>' +
         '<th>Sales order</th><th>Plan</th><th>Supervisor</th><th>Current stage</th>' +
         '<th class="r">Produced / ordered</th><th>Next step</th></tr></thead><tbody>';
@@ -364,6 +384,153 @@ function renderInProgressOrders() {
             '<td>' + esc(order.nextStep || '—') + '</td></tr>';
     });
     return h + '</tbody></table></div></section>';
+}
+
+// ---- pending sales orders + manual convert ----
+
+function renderPendingOrders() {
+    var h = '<section class="progress-section"><div class="pipeline-header">' +
+        '<h2>Pending sales orders</h2>';
+
+    if (PENDING_ERROR) {
+        return h + '</div><p class="pipeline-error">Could not load pending orders: ' + esc(PENDING_ERROR) + '</p></section>';
+    }
+    if (PENDING_ORDERS === null) {
+        return h + '</div><p class="progress-empty">Loading pending sales orders…</p></section>';
+    }
+    if (!PENDING_ORDERS.length) {
+        return h + '</div><p class="progress-empty">No sales orders are waiting. Every pending order has been turned into a plan.</p></section>';
+    }
+
+    h += '<span class="pipe-total">' + PENDING_ORDERS.length + ' waiting</span></div>' +
+        '<p class="progress-hint">These have not been turned into production plans yet. ' +
+        'The scheduled run retries them automatically; use <strong>Convert to plan</strong> to do one now. ' +
+        'A rejected order stays here with its reason until the blocker is fixed.</p>' +
+        '<div class="table-wrapper"><table class="progress-table"><thead><tr>' +
+        '<th>Sales order</th><th>Customer</th><th>Order date</th><th>Source</th>' +
+        '<th class="r">Items</th><th>Last attempt</th><th class="r">Action</th>' +
+        '</tr></thead><tbody>';
+
+    PENDING_ORDERS.forEach(function (o) {
+        var outcome = String(o.lastOutcome || '').trim();
+        var reason = String(o.rejectReason || '').trim();
+
+        var statusCell;
+        if (outcome === 'Rejected' || reason) {
+            statusCell = '<span class="pill pill-rejected">Rejected</span>' +
+                (reason ? '<div class="reject-reason">' + esc(reason) + '</div>' : '');
+        } else if (outcome === 'Skipped') {
+            statusCell = '<span class="pill pill-running">Plan exists</span>';
+        } else if (outcome === 'Created') {
+            statusCell = '<span class="pill pill-ok">Planned</span>';
+        } else {
+            statusCell = '<span class="muted">Not tried yet</span>';
+        }
+
+        var busy = CONVERTING[String(o.id)];
+        var btn = '<button type="button" class="convert-btn" data-so-id="' + esc(String(o.id)) + '"' +
+            (busy ? ' disabled' : '') + '>' +
+            (busy ? 'Converting…' : 'Convert to plan') + '</button>';
+
+        h += '<tr>' +
+            '<td><strong>' + esc(o.salesOrder || '—') + '</strong></td>' +
+            '<td>' + esc(o.customer || '—') + '</td>' +
+            '<td>' + esc(o.orderDate || '—') + '</td>' +
+            '<td>' + esc(o.source || '—') + '</td>' +
+            '<td class="r">' + n(o.itemCount) + '</td>' +
+            '<td>' + statusCell + '</td>' +
+            '<td class="r">' + btn + '</td>' +
+            '</tr>';
+    });
+
+    h += '</tbody></table></div></section>';
+    return h;
+}
+
+function bindPendingButtons() {
+    var el = document.getElementById('pipeline-section');
+    if (!el) return;
+    Array.prototype.forEach.call(el.querySelectorAll('.convert-btn'), function (b) {
+        b.addEventListener('click', function () {
+            var id = b.getAttribute('data-so-id');
+            if (id) convertOrderToPlan(id);
+        });
+    });
+}
+
+function loadPendingOrders() {
+    PENDING_ERROR = '';
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getPendingSalesOrders',
+        http_method: 'GET'
+    }).then(function (response) {
+        try {
+            var result = response && response.result !== undefined ? response.result : response;
+            var data = typeof result === 'string' ? JSON.parse(result) : result;
+            if (data && data.data !== undefined) data = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
+            if (!data || !Array.isArray(data.orders)) throw new Error('Response did not contain a pending order list');
+            PENDING_ORDERS = data.orders;
+            if (data.errors && data.errors.length) {
+                console.warn('getPendingSalesOrders returned errors:', data.errors);
+            }
+            renderPipeline();
+        } catch (e) {
+            console.error('getPendingSalesOrders parse failed:', e, response);
+            PENDING_ORDERS = [];
+            PENDING_ERROR = e.message || String(e);
+            renderPipeline();
+        }
+    }).catch(function (err) {
+        console.error('getPendingSalesOrders error:', err);
+        PENDING_ORDERS = [];
+        PENDING_ERROR = (err && (err.message || err.toString())) || 'Request failed';
+        renderPipeline();
+    });
+}
+
+function convertOrderToPlan(soId) {
+    if (CONVERTING[String(soId)]) return;
+    CONVERTING[String(soId)] = true;
+    renderPipeline();
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'convertSalesOrderToPlan',
+        http_method: 'POST',
+        payload: { soIdTxt: String(soId) }
+    }).then(function (response) {
+        var parsed = null;
+        try {
+            var result = response && response.result !== undefined ? response.result : response;
+            parsed = typeof result === 'string' ? JSON.parse(result) : result;
+            if (parsed && parsed.data !== undefined) parsed = typeof parsed.data === 'string' ? JSON.parse(parsed.data) : parsed.data;
+        } catch (e) {
+            parsed = null;
+        }
+
+        delete CONVERTING[String(soId)];
+
+        if (parsed && parsed.success) {
+            alert(parsed.outcome === 'Skipped'
+                ? (parsed.reason || 'A plan already existed — the order has been moved on.')
+                : 'Plan ' + (parsed.planNo || '') + ' created.');
+        } else {
+            alert('Could not convert this order: ' +
+                ((parsed && parsed.reason) || 'unknown error') +
+                (parsed && parsed.outcome === 'Rejected'
+                    ? '\n\nFix the blocker on the sales order, then try again.'
+                    : ''));
+        }
+
+        // Reload both the counts and the pending list so the row leaves (or
+        // shows its new reject reason) and the pipeline totals move.
+        loadPipeline();
+        loadPendingOrders();
+    }).catch(function (err) {
+        console.error('convertSalesOrderToPlan error:', err);
+        delete CONVERTING[String(soId)];
+        alert('Failed to reach the server. Check the browser console.');
+        renderPipeline();
+    });
 }
 
 function activateTab(name) {
@@ -1417,6 +1584,7 @@ document.addEventListener('DOMContentLoaded', function () {
         activateTab('pipeline');
         loadPipeline();
         loadSalesOrderProgress();
+        if (PIPELINE_STATUS === 'Pending') loadPendingOrders();
     });
     document.getElementById('materials-tab').addEventListener('click', function () {
         activateTab('materials');
@@ -1456,6 +1624,9 @@ document.addEventListener('DOMContentLoaded', function () {
         load();
         loadPipeline();
         loadSalesOrderProgress();
+        if (PENDING_ORDERS !== null || PIPELINE_STATUS === 'Pending') {
+            loadPendingOrders();
+        }
         if (tabsLoaded['materials']) {
             loadMaterials();
         }

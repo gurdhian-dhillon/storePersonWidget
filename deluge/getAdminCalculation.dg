@@ -259,7 +259,11 @@ string getAdminCalculation(string salesOrderId)
 	storeOk = false;
 	try
 	{
-		storeTxt = thisapp.getStoreMaterialRequirements();
+		// Second arg "" = legacy chained mode. This cross-function call reads
+		// only the FIRST page (it always has - it never walked plansConsumed),
+		// so its behaviour is unchanged; the arg is added only because the
+		// signature now requires it.
+		storeTxt = thisapp.getStoreMaterialRequirements("","");
 		storeOk = true;
 	}
 	catch (eCall)

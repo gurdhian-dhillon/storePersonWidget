@@ -1,0 +1,76 @@
+string verifyLotSync()
+{
+	errors = list();
+	try 
+	{
+		for each  rm in Raw_Material[ID != 0]
+		{
+			sku = ifnull(rm.SKU,"").toString().trim();
+			if(sku == "" || sku.indexOf("RM-") != 0)
+			{
+				continue;
+			}
+			isFab = ifnull(rm.Is_Fabric,false);
+			
+			// Only check fabrics, since non-fabrics don't use lots
+			if(isFab == true)
+			{
+				rmWash = ifnull(rm.Wash_Quantity,"0").toString().toDecimal().round(2);
+				rmUnwash = ifnull(rm.Unwash_Quantity,"0").toString().toDecimal().round(2);
+				rmTransit = ifnull(rm.In_Transit_Qty,"0").toString().toDecimal().round(2);
+				rmDisputed = ifnull(rm.Disputed_Qty,"0").toString().toDecimal().round(2);
+				rmQty = ifnull(rm.Quantity,"0").toString().toDecimal().round(2);
+				
+				lotsWash = 0.0;
+				lotsUnwash = 0.0;
+				lotsTransit = 0.0;
+				lotsDisputed = 0.0;
+				
+				for each  lot in Raw_Material_Lot[Material == rm.ID]
+				{
+					lotsWash = lotsWash + ifnull(lot.Wash_Quantity,"0").toString().toDecimal();
+					lotsUnwash = lotsUnwash + ifnull(lot.Unwash_Quantity,"0").toString().toDecimal();
+					lotsTransit = lotsTransit + ifnull(lot.In_Transit_Qty,"0").toString().toDecimal();
+					lotsDisputed = lotsDisputed + ifnull(lot.Disputed_Qty,"0").toString().toDecimal();
+				}
+				
+				lotsWash = lotsWash.round(2);
+				lotsUnwash = lotsUnwash.round(2);
+				lotsTransit = lotsTransit.round(2);
+				lotsDisputed = lotsDisputed.round(2);
+				
+				// 1. Check parent internal consistency (Qty == Wash + Unwash + Transit + Disputed)
+				calcParentQty = (rmWash + rmUnwash + rmTransit + rmDisputed).round(2);
+				if(rmQty != calcParentQty)
+				{
+					errors.add(sku + " -> Parent QTY mismatch! Qty is " + rmQty + " but Wash+Unwash+Transit+Disputed is " + calcParentQty);
+				}
+				
+				// 2. Check Lots sum vs Parent
+				if(rmWash != lotsWash)
+				{
+					errors.add(sku + " -> WASH mismatch! Parent: " + rmWash + ", Sum of Lots: " + lotsWash);
+				}
+				if(rmUnwash != lotsUnwash)
+				{
+					errors.add(sku + " -> UNWASH mismatch! Parent: " + rmUnwash + ", Sum of Lots: " + lotsUnwash);
+				}
+				if(rmTransit != lotsTransit)
+				{
+					errors.add(sku + " -> TRANSIT mismatch! Parent: " + rmTransit + ", Sum of Lots: " + lotsTransit);
+				}
+				if(rmDisputed != lotsDisputed)
+				{
+					errors.add(sku + " -> DISPUTED mismatch! Parent: " + rmDisputed + ", Sum of Lots: " + lotsDisputed);
+				}
+			}
+		}
+		
+		res = "{\"status\":\"" + if(errors.size() > 0,"FAILED","SUCCESS") + "\", \"errorCount\":" + errors.size() + ", \"errors\": " + errors.toString() + "}";
+	}
+	catch (e)
+	{
+		res = "{\"status\":\"ERROR\", \"message\":\"" + e.toString().replaceAll("\"","'") + "\"}";
+	}
+	return res;
+}

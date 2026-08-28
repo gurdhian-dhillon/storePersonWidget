@@ -155,11 +155,28 @@ string getStoreWasteHistory(string offsetTxt, string limitTxt)
 		pStatus = "";
 		matName = "";
 		skuId = null;
+		lotRefTxt = "";
+		cartonNo = "";
 
 		for each  wp in Waste_Master[ID == mv.Waste_Piece]
 		{
 			pStatus = ifnull(wp.Status,"").toString();
 			skuId = wp.SKU;
+			// Which lot it was cut from and which carton it is sitting in - the
+			// same two the pending-receipt list already shows, so the store
+			// person can walk to the piece from the history too. Lot is a
+			// lookup (record id); the readable number comes off the lot record.
+			lotRefTxt = ifnull(wp.Lot,"").toString().trim();
+			cartonNo = ifnull(wp.Carton_Number,"").toString().trim().replaceAll("\"","'");
+		}
+
+		lotNo = "";
+		if(lotRefTxt != "")
+		{
+			for each  lrec in Raw_Material_Lot[ID == lotRefTxt.toLong()]
+			{
+				lotNo = ifnull(lrec.Lot_Number,"").toString().trim().replaceAll("\"","'");
+			}
 		}
 
 		if(skuId != null)
@@ -193,7 +210,7 @@ string getStoreWasteHistory(string offsetTxt, string limitTxt)
 			rowsJson = rowsJson + ",";
 		}
 		// Ids forced to string - an 18-digit id breaks JSON.parse on the widget.
-		rowsJson = rowsJson + "{\"id\":\"" + mv.ID + "\",\"material\":\"" + matName + "\",\"width\":" + ifnull(mv.Piece_Width,0) + ",\"length\":" + ifnull(mv.Piece_Length,0) + ",\"count\":" + ifnull(mv.Piece_Count,0) + ",\"status\":\"" + pStatus + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"supervisor\":\"" + supName + "\",\"declaredOn\":\"" + declaredOn + "\"}";
+		rowsJson = rowsJson + "{\"id\":\"" + mv.ID + "\",\"material\":\"" + matName + "\",\"width\":" + ifnull(mv.Piece_Width,0) + ",\"length\":" + ifnull(mv.Piece_Length,0) + ",\"count\":" + ifnull(mv.Piece_Count,0) + ",\"status\":\"" + pStatus + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"supervisor\":\"" + supName + "\",\"lot\":\"" + lotNo + "\",\"carton\":\"" + cartonNo + "\",\"declaredOn\":\"" + declaredOn + "\"}";
 	}
 	}
 	catch (e)

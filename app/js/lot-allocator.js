@@ -803,9 +803,17 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                     cSumm = 'Cuts: ' + parts.join(', ');
                 }
 
+                // fromRaw / fromWaste ARE THE CREDIT, carried so the payload
+                // builder never recomputes them. The server adds these straight
+                // to Pieces_From_Raw / Pieces_From_Waste — a widget recompute
+                // that rounded differently, or missed lotFill's cap at `owed`,
+                // would over-close the requirement. fromWaste per line is the
+                // remnant yield the SAME fill() assigned to this demand; the
+                // physical remnant picks travel separately in `picks`.
                 r.lotLines.push({ lotId: lot.lotId, lotNumber: lot.lotNumber,
                                   qty: fill.metresPer[i], planItemId: d.planItemId,
                                   planId: d.planId, pieces: lnPieces, cutSummary: cSumm,
+                                  fromRaw: fill.fromFresh[i], fromWaste: fill.fromWaste[i],
                                   note: noteOn, overrideFrom: fromOn });
             }
             // KEYED BY REMNANT **AND** ITEM.

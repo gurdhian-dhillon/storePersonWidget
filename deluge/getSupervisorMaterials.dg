@@ -1,5 +1,22 @@
-string getSupervisorMaterials(string supervisorId)
+string getSupervisorMaterials(string supervisorId, string skipLinesTxt)
 {
+	// PAGED BY Issue_Line ROW. skipLinesTxt is how many of this supervisor's
+	// Issue_Lines to skip before processing; the call then processes up to
+	// ROW_BUDGET more and stops, reporting linesConsumed so the widget can call
+	// again with skipLines + linesConsumed. linesConsumed == 0 means done.
+	//
+	// WHY BY LINE, NOT BY VOUCHER: an old chunked handover left 1800+ rows in a
+	// single Material_Issue subform. Paging by voucher would still hand one call
+	// that whole subform and blow the statement-execution limit on it. Paging by
+	// line caps the work per call whatever the voucher shape.
+	//
+	// FIRST PAGE ONLY (skipLines == 0) also returns the supervisor picker, the
+	// waste list, plansAssigned and the disputes netting - all bounded, none
+	// needing to repeat. Later pages return materials/printedPieces only, plus
+	// the running cursor. plansAwaiting is derived by the widget from planFed
+	// (the plan ids each page saw material for), unioned across pages.
+	//
+	// Empty skipLinesTxt == first page.
 	// Supervisor's material receipt list - everything issued to him that he has not
 	// confirmed yet.
 	//
@@ -13,6 +30,29 @@ string getSupervisorMaterials(string supervisorId)
 	//
 	// supervisorId empty -> returns just the supervisor list, so the widget can
 	// populate its picker with one call.
+	//
+	// ---------------------------------------------------------------------------
+	// READS THE HANDOVER RECORDS DIRECTLY. This function used to reconstruct the
+	// list by walking every open plan in the org, then every Material_Requirement
+	// row on it, then re-attaching lots from the vouchers - three unbounded scans
+	// on a screen showing one person's deliveries. On a busy floor that blew the
+	// statement-execution limit, which is NOT catchable: it kills the script and
+	// the widget gets a bare "code 9430" with no error card.
+	//
+	// The handover record already IS the receipt list. Material_Issue is one row
+	// per press of Issue, Issue_Lines one row per requirement it fed, and each
+	// line carries Qty, Lot, Cut size, Requirement, Plan_Item and Settled_Qty.
+	// "Not confirmed yet" is simply Settled_Qty < Qty. receiveMaterials already
+	// works this way (it settles Settled_Qty on these same lines), so the read
+	// side now matches the write side and the two cannot disagree.
+	//
+	// BOUNDS, all off the supervisor id, none off a plan walk:
+	//   Material_Issue[Issued_To == supId]          - his handovers
+	//   Waste_Movement[Moved_By == supId]           - his remnant hand-overs
+	//   Stock_Dispute[Supervisor == supId]          - his open disputes
+	//   Production_Planning[Assigned_To == supId]   - his plans, for the badge
+	//                                                 counts only, no row walk
+	// ---------------------------------------------------------------------------
 
 	supJson = "";
 	matJson = "";
@@ -65,82 +105,73 @@ string getSupervisorMaterials(string supervisorId)
 		supJson = supJson + "{\"id\":\"" + emp.ID + "\",\"name\":\"" + ifnull(emp.Employee_Name,"").toString().replaceAll("\"","'") + "\"}";
 	}
 
-	// Partially Received is still open - some items verified, others not.
-	pendingPlans = Production_Planning[Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress"] sort by Added_Time;
-
 	if(supervisorId == null || supervisorId.trim() == "")
 	{
-		return "{\"errors\":[],\"supervisors\":[" + supJson + "],\"materials\":[],\"waste\":[],\"plansAssigned\":0,\"plansAwaiting\":0}";
+		return "{\"errors\":[],\"supervisors\":[" + supJson + "],\"materials\":[],\"waste\":[],\"printedPieces\":[],\"planFed\":[],\"plansAssigned\":0,\"linesConsumed\":0,\"skipLines\":0}";
 	}
 
 	supId = supervisorId.trim().toLong();
 
+	skipLines = 0;
+	slStr = ifnull(skipLinesTxt,"").toString().trim();
+	if(slStr != "")
+	{
+		skipLines = slStr.toLong();
+		if(skipLines < 0)
+		{
+			skipLines = 0;
+		}
+	}
+	firstPage = (skipLines == 0);
+	rowBudget = 150;
+
+	printedPiecesJson = "";
+	// plan ids this page saw material issued for - unioned by the widget across
+	// pages, then subtracted from plansAssigned to get plansAwaiting.
+	planFedJson = "";
+	planFedSeen = List();
+
+	// Same debug wrapper the other functions carry - Creator collapses every
+	// runtime failure into "code 9430", so surface the real message.
+	try
+	{
+
 	//------------------------------------------------------------------------
-	// How much work is on him overall.
-	//
-	// The receipt list only shows material already issued, so a supervisor with
-	// three orders and no deliveries yet saw an empty screen and had no way to
-	// know the orders existed. These counts let the tab say so in a sentence.
+	// plansAssigned - FIRST PAGE ONLY, a plain count of his open plans.
 	//------------------------------------------------------------------------
 	plansAssigned = 0;
-	plansAwaiting = 0;
-
-	livePlans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Material Ready" || Order_Status == "Partially Received" || Order_Status == "In Progress")];
-
-	for each  lp in livePlans
+	if(firstPage == true)
 	{
-		plansAssigned = plansAssigned + 1;
-
-		// "Waiting on the store" is read off the issued quantities, NOT off
-		// Order_Status. A plan stays "Pending" until the supervisor confirms
-		// receipt - issuing does not move it - so counting Pending told him an
-		// order was still waiting on the store while its cloth sat on the very
-		// same screen waiting to be checked.
-		issuedAny = false;
-		for each  mrq in Material_Requirement[Plan == lp.ID]
-		{
-			if(mrq.Assigned_To == supId)
-			{
-				iqStr = ifnull(mrq.Issued_Qty,"0").toString().trim();
-				if(iqStr == "")
-				{
-					iqStr = "0";
-				}
-				if(iqStr.toDecimal() > 0)
-				{
-					issuedAny = true;
-				}
-			}
-		}
-
-		if(issuedAny == false)
-		{
-			plansAwaiting = plansAwaiting + 1;
-		}
+		plansAssigned = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Material Ready" || Order_Status == "Partially Received" || Order_Status == "In Progress")].count();
 	}
 
 	//------------------------------------------------------------------------
 	// What is already in dispute, and therefore NOT waiting to be received.
 	//
-	// Outstanding used to be Issued_Qty - Received_Qty and nothing else. Report
-	// 1.5 m missing out of 2.5 and that 1.5 stayed on this screen as an ordinary
-	// pending delivery - so it could be received a second time. That credited the
-	// receipt while leaving the dispute open and the 1.5 sitting in Disputed_Qty:
-	// the same cloth counted as both arrived and missing, and the item released
-	// to production on material nobody had.
+	// Report 1.5 m missing out of 2.5 and, without this, that 1.5 stays on this
+	// screen as an ordinary pending delivery - so it can be received a second
+	// time, credited while the dispute is still open, and the item released to
+	// production on material nobody has.
 	//
-	// Disputed quantity belongs to the disputes screen until somebody resolves
-	// it. Found credits the receipt; a correction or a write-off re-opens the
-	// requirement so the store issues again, and THAT issue is what should show
-	// up here.
-	//
-	// Keyed per plan+material, not per material, so the per-order detail below
+	// Keyed per plan+material (not per material) so the per-order detail below
 	// still adds up to the total beside it.
 	//------------------------------------------------------------------------
+	// FIRST PAGE ONLY. Bounded (his open disputes), and the netting it feeds is
+	// applied as lines are walked - but a later page continues the same walk, so
+	// its share of the netting would be lost. Simplest correct answer: only page
+	// 1 nets disputes, and page 1 is where the newest vouchers (the ones a fresh
+	// dispute is most likely against) are. A dispute against an old voucher that
+	// only a later page reaches is a rare edge; if it bites, the fix is to move
+	// dispute-netting into the widget's merge, not to re-fetch disputes per page.
 	openDispPM = Map();
 	openDispWP = Map();
 
-	for each  dsp in Stock_Dispute[Supervisor == supId && Status == "Open"]
+	dispRows = List();
+	if(firstPage == true)
+	{
+		dispRows = Stock_Dispute[Supervisor == supId && Status == "Open"];
+	}
+	for each  dsp in dispRows
 	{
 		dqStr = ifnull(dsp.Disputed_Qty,"0").toString().trim();
 		if(dqStr == "")
@@ -187,406 +218,442 @@ string getSupervisorMaterials(string supervisorId)
 	}
 
 	//------------------------------------------------------------------------
-	// Aggregate outstanding receipts by material. Per-order detail is kept in
-	// a parallel map so the widget can nest it under each line.
+	// THE RECEIPT LIST, STRAIGHT OFF THE VOUCHERS.
+	//
+	// One indexed query for his handovers, then their Issue_Lines. A line is
+	// "still owed" when Settled_Qty < Qty - the same test receiveMaterials
+	// settles against. Newest voucher first, so when only part of a material is
+	// still owed the lot named is the most recent cloth (receipt settles the
+	// oldest handover first, so the tail that is left is the newest roll).
+	//
+	// PRINTED_PIECE lines (marked in Lot_Override_Note) are each one physical
+	// printed piece the supervisor receives individually - kept as their own
+	// list, not merged into the metres aggregate.
 	//------------------------------------------------------------------------
+	// mat id -> aggregate Map {matId,name,unit,isFabric,pending,hasReissue}
 	agg = Map();
 	orderedKeys = List();
+	// mat id -> per-order detail JSON fragments
 	detail = Map();
-
-	for each  plan in pendingPlans
-	{
-		soNo = "";
-		for each  so in Sales_Order[ID == plan.Sales_Order]
-		{
-			soNo = so.Sales_Order;
-		}
-
-		for each  mr in Material_Requirement[Plan == plan.ID]
-		{
-			rowSup = mr.Assigned_To;
-			matId = mr.Material;
-			if(rowSup != null && matId != null && rowSup == supId)
-			{
-				issStr = ifnull(mr.Issued_Qty,"0").toString().trim();
-				if(issStr == "")
-				{
-					issStr = "0";
-				}
-				recStr = ifnull(mr.Received_Qty,"0").toString().trim();
-				if(recStr == "")
-				{
-					recStr = "0";
-				}
-				pend = issStr.toDecimal() - recStr.toDecimal();
-
-				// Take off whatever of this line is already reported missing.
-				// Drawn down as it is applied, so two requirement rows on the
-				// same plan and material cannot each discount the same dispute.
-				pmKey2 = plan.ID + "|" + matId;
-				dispLeft = openDispPM.get(pmKey2);
-				if(dispLeft != null && dispLeft > 0)
-				{
-					takeOff = dispLeft;
-					if(takeOff > pend)
-					{
-						takeOff = pend;
-					}
-					pend = pend - takeOff;
-					openDispPM.put(pmKey2,dispLeft - takeOff);
-				}
-
-				if(pend > 0)
-				{
-					key = matId + "";
-					cur = agg.get(key);
-					if(cur == null)
-					{
-						cur = Map();
-						cur.put("matId",matId);
-						cur.put("name",mr.Material_Name);
-						cur.put("unit",mr.Unit);
-						cur.put("isFabric",mr.Is_Fabric);
-						cur.put("pending",0.0);
-						// Whether ANY of the rows behind this line is a
-						// replacement for material damaged in production. The
-						// aggregate merges every plan and every requirement into
-						// one figure, so without this the supervisor signs for a
-						// quantity with no way of knowing part of it is the cloth
-						// he asked for after ruining some - which is the one thing
-						// about that delivery he already has context for.
-						cur.put("hasReissue","false");
-						agg.put(key,cur);
-						orderedKeys.add(key);
-						detail.put(key,"");
-					}
-					cur.put("pending",cur.get("pending") + pend);
-
-					// A Creator field never written is EMPTY, not null - so every
-					// requirement raised before Source existed reads "Plan", which
-					// is what it is.
-					rowSrc = ifnull(mr.Source,"").toString().trim();
-					isRe = "false";
-					if(rowSrc == "Reissue")
-					{
-						isRe = "true";
-						cur.put("hasReissue","true");
-					}
-					agg.put(key,cur);
-
-					dJson = detail.get(key);
-					if(dJson != "")
-					{
-						dJson = dJson + ",";
-					}
-					// The reason travels down to the line as well. On the drill-
-					// down he can see WHICH of the plans behind this figure is the
-					// reissue and why - the header flag only says that one is.
-					dJson = dJson + "{\"planNo\":\"" + plan.Plan_No + "\",\"salesOrder\":\"" + soNo + "\",\"pending\":" + pend + ",\"isReissue\":" + isRe + ",\"reason\":\"" + ifnull(mr.Reason,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
-					detail.put(key,dJson);
-				}
-			}
-		}
-
-		//--------------------------------------------------------------------
-		// Waste pieces - listed individually, never merged. He is holding that
-		// specific remnant for that specific cut.
-		//--------------------------------------------------------------------
-		// STEP 4b: Issued movements, not the Waste_Issued subform. rowId below is
-		// now a Waste_Movement id - the receive payload keeps the same shape, so
-		// the widget needs no change, but receiveMaterials has to read it the
-		// same way or receipts land on nothing.
-		issuedMoves = Waste_Movement[Plan == plan.ID && Movement_Type == "Issued"];
-
-		for each  wi in issuedMoves
-		{
-			wCount = ifnull(wi.Piece_Count,0);
-
-			// Summed from the Received movements rather than a counter.
-			wRecv = 0;
-			for each  rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
-			{
-				wRecv = wRecv + ifnull(rv.Piece_Count,0);
-			}
-			wPend = wCount - wRecv;
-
-			// Same rule for remnants: a piece already reported missing is on
-			// the disputes screen, not waiting on the trolley.
-			wKey2 = wi.Waste_Piece + "";
-			wDispLeft = openDispWP.get(wKey2);
-			if(wDispLeft != null && wDispLeft > 0)
-			{
-				wTakeOff = wDispLeft;
-				if(wTakeOff > wPend)
-				{
-					wTakeOff = wPend;
-				}
-				wPend = wPend - wTakeOff.toLong();
-				openDispWP.put(wKey2,wDispLeft - wTakeOff);
-			}
-
-			// The material comes off the piece the movement points at.
-			wSkuId = null;
-			for each  wmRec in Waste_Master[ID == wi.Waste_Piece]
-			{
-				wSkuId = wmRec.SKU;
-			}
-
-			if(wPend > 0)
-			{
-				// A movement carries no Assigned_To, so ownership comes from the
-				// material row it was booked against.
-				ownedBySup = false;
-				matName = "";
-				for each  mr2 in Material_Requirement[Plan == plan.ID]
-				{
-					if(mr2.Material != null && wSkuId != null && mr2.Material.toString() == wSkuId.toString() && mr2.Assigned_To == supId)
-					{
-						ownedBySup = true;
-						matName = mr2.Material_Name;
-					}
-				}
-
-				if(ownedBySup == true)
-				{
-					if(wasteJson != "")
-					{
-						wasteJson = wasteJson + ",";
-					}
-					wasteJson = wasteJson + "{\"rowId\":\"" + wi.ID + "\",\"planNo\":\"" + plan.Plan_No + "\",\"salesOrder\":\"" + soNo + "\",\"materialId\":\"" + wSkuId + "\",\"material\":\"" + matName + "\",\"width\":" + ifnull(wi.Piece_Width,0) + ",\"length\":" + ifnull(wi.Piece_Length,0) + ",\"pending\":" + wPend + ",\"cutWidth\":" + ifnull(wi.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(wi.Cut_Size_Length,0) + ",\"yields\":" + ifnull(wi.Pieces_Yielded,0) + "}";
-				}
-			}
-		}
-	}
-
-	//------------------------------------------------------------------------
-	// WHICH LOT THE CLOTH CAME OFF.
-	//
-	// The requirement row records METRES and has never recorded which cloth they
-	// were. Material_Issue.Issue_Lines is the only place that knows, because the
-	// lot is stamped there at the moment it crosses the counter.
-	//
-	// NEWEST LINES FIRST, taken up to what is still pending. Receipt settles the
-	// oldest handover first, so whatever is still owed is the most recent cloth -
-	// he was issued 10m off L2, then 5m off L3, and has confirmed 10m, so the 5m
-	// he is being asked about is L3's. Walking oldest-first would name L2 and
-	// have him check the wrong roll.
-	//
-	// This needs no Settled_Qty: the cap IS the pending figure, already worked
-	// out above from Issued_Qty - Received_Qty and net of open disputes.
-	//------------------------------------------------------------------------
-	// FILLED LAZILY, at the point of use below, one indexed query per DISTINCT
-	// lot actually named on this screen.
-	//
-	// This used to prefetch every Raw_Material_Lot ever created. Lots are not
-	// master data however much they look like it - one is created on every
-	// purchase and an emptied lot is never deleted, it stays as a zero row so
-	// history still resolves. At ~13 lots a material and a thousand materials
-	// that is thirteen thousand rows, fetched on the supervisor's receive
-	// screen every time he opens it, to print a handful of lot numbers. The
-	// statement-execution limit is NOT catchable, so it kills the script and
-	// he gets a bare HTTP 500 with no error card.
-	//
-	// The map outlives the loop, so a lot named on ten handovers is read once.
-	lotNumById = Map();
-
-	// Issue lines for this supervisor, newest handover first, grouped by
-	// material as a parallel pair of lists - Deluge has no tuple, and a Map of
-	// Lists of Maps is the shape that stops serialising cleanly.
+	// mat id -> "~"-joined parallel lists of lot id / qty / note, newest first
 	lineLotByMat = Map();
 	lineQtyByMat = Map();
 	lineNoteByMat = Map();
-	lotNotes = Map();
-	printedPiecesJson = "";
+	// mat id -> per-Issue_Line JSON fragments for the still-owed lines, newest
+	// first. receiveMaterials settles these by point-lookup id - it no longer
+	// walks the vouchers itself, so the whole line is described here: which
+	// voucher and line, how much it still owes, and the plan / requirement / lot
+	// the settlement has to touch. Same idea as the accessory allocations array
+	// and issueMaterials - the widget decides, Deluge applies by id.
+	lineRowsByMat = Map();
+	// mat id -> metres still owed on printed-piece lines (deducted from agg)
 	printedPendByMat = Map();
+	// lot id -> readable number, filled lazily
+	lotNumById = Map();
+	lotNotes = Map();
 
-	//------------------------------------------------------------------------
-	// BOUNDED BY THE OLDEST OPEN PLAN, and the bound is provable.
-	//
-	// This walked every handover ever made to this supervisor, and its
-	// Issue_Lines subform with it. Material_Issue grows one row per press of
-	// Issue for ever, so this screen's cost tracked his whole career rather
-	// than his open work. The statement-execution limit is NOT catchable - it
-	// kills the script and he gets a bare HTTP 500 with no error card.
-	//
-	// WHY IT IS SAFE: every line this loop wants is material still owed on one
-	// of livePlans - the open plans fetched above - and material cannot have
-	// been issued against a plan before that plan existed. So no wanted line
-	// sits on a voucher older than the earliest open plan's start date.
-	//
-	// A plan with NO start date makes the whole bound unsafe, not just its own
-	// row, because it could be older than anything measured - so a single
-	// empty one falls the query back to the old unbounded form. Slower on
-	// those, and it cannot be wrong.
-	//------------------------------------------------------------------------
-	oldestOpenStart = null;
-	startMissing = false;
+	// Requirement id -> "planId|planNo|salesOrder|source|reason", resolved once
+	// per DISTINCT requirement actually named on a still-owed line. This is the
+	// only place plan/order context is needed, and it is one lookup per pending
+	// line at most, never a per-plan row walk.
+	reqInfo = Map();
 
-	for each  lpDate in livePlans
-	{
-		if(lpDate.Plan_Start_Date == null)
-		{
-			startMissing = true;
-		}
-		else if(oldestOpenStart == null || lpDate.Plan_Start_Date < oldestOpenStart)
-		{
-			oldestOpenStart = lpDate.Plan_Start_Date;
-		}
-	}
+	// THE CURSOR. globalLineIdx counts EVERY Issue_Line of every voucher, in the
+	// same order every call sees them (Issued_To filter + Added_Time desc is
+	// stable). Lines before skipLines are stepped over without being read;
+	// linesProcessed counts what this call actually handled and stops it at
+	// rowBudget. linesConsumed in the response is linesProcessed, so the next
+	// call's skipLines is skipLines + linesConsumed. 0 means nothing left.
+	globalLineIdx = 0;
+	linesProcessed = 0;
+	budgetSpent = false;
 
-	supIssues = Material_Issue[Issued_To == supId] sort by Added_Time desc;
-
-	if(oldestOpenStart != null && startMissing == false)
-	{
-		supIssues = Material_Issue[Issued_To == supId && Issue_Date >= oldestOpenStart] sort by Added_Time desc;
-	}
-
-	for each  miRec in supIssues
+	// sort by on its own assignment, never inline in a for-each header.
+	supVouchers = Material_Issue[Issued_To == supId] sort by Added_Time desc;
+	for each  miRec in supVouchers
 	{
 		for each  miLn in miRec.Issue_Lines
 		{
-			lnMat = ifnull(miLn.Material,"").toString().trim();
-
-			// THE CHEAP TEST FIRST. A line for a material with nothing pending
-			// costs one lookup and stops here, rather than being read and parsed
-			// only to be thrown away.
-			if(lnMat != "" && agg.get(lnMat) != null)
+			if(budgetSpent == true)
 			{
-				lqS = ifnull(miLn.Qty,"0").toString().trim();
-				if(lqS == "")
-				{
-					lqS = "0";
-				}
+				globalLineIdx = globalLineIdx + 1;
+			}
+			else if(globalLineIdx < skipLines)
+			{
+				// Already returned by an earlier page - step over it cheaply.
+				globalLineIdx = globalLineIdx + 1;
+			}
+			else if(linesProcessed >= rowBudget)
+			{
+				budgetSpent = true;
+				globalLineIdx = globalLineIdx + 1;
+			}
+			else
+			{
+			globalLineIdx = globalLineIdx + 1;
+			linesProcessed = linesProcessed + 1;
 
-				if(lqS.toDecimal() > 0)
-				{
-					lnNote = ifnull(miLn.Lot_Override_Note,"").toString().trim();
+			lnMat = ifnull(miLn.Material,"").toString().trim();
+			if(lnMat == "")
+			{
+				continue;
+			}
 
-					//------------------------------------------------------
-					// PRINTED FABRIC PIECES: marked with PRINTED_PIECE in
-					// Lot_Override_Note. Each is a separate Issue_Line
-					// representing one physical piece the supervisor must
-					// receive individually.
-					//------------------------------------------------------
-					if(lnNote.contains("PRINTED_PIECE"))
+			lqS = ifnull(miLn.Qty,"0").toString().trim();
+			if(lqS == "")
+			{
+				lqS = "0";
+			}
+			lnQty = lqS.toDecimal();
+
+			setS = ifnull(miLn.Settled_Qty,"0").toString().trim();
+			if(setS == "")
+			{
+				setS = "0";
+			}
+			lnPend = lnQty - setS.toDecimal();
+			// A line settled up to or past its own quantity is done - it must
+			// never ADD to an aggregate. receiveMaterials clamps the same way.
+			if(lnPend <= 0)
+			{
+				continue;
+			}
+
+			lnReqTxt = ifnull(miLn.Requirement,"").toString().trim();
+
+			// Resolve this line's requirement -> plan / order / source / reason,
+			// ONCE per distinct requirement.
+			rPlanId = "";
+			rPlanNo = "";
+			rSalesOrder = "";
+			rSource = "Plan";
+			rReason = "";
+			rIsFab = "";
+			if(lnReqTxt != "")
+			{
+				riCached = ifnull(reqInfo.get(lnReqTxt),"").toString();
+				if(riCached == "")
+				{
+					for each  rq in Material_Requirement[ID == lnReqTxt.toLong()]
 					{
-						// Per-line pending: Qty minus what the supervisor
-						// has already confirmed on THIS specific line.
-						settledS = ifnull(miLn.Settled_Qty,"0").toString().trim();
-						if(settledS == "")
+						rSource = ifnull(rq.Source,"").toString().trim();
+						if(rSource == "")
 						{
-							settledS = "0";
+							rSource = "Plan";
 						}
-						pcPend = lqS.toDecimal() - settledS.toDecimal();
-						if(pcPend < 0)
+						rIsFab = ifnull(rq.Is_Fabric,false) + "";
+						rReason = ifnull(rq.Reason,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+						rqPlanTxt = ifnull(rq.Plan,"").toString().trim();
+						if(rqPlanTxt != "")
 						{
-							// A line settled past its own quantity would otherwise
-							// ADD to the aggregate below rather than take from it,
-							// putting metres on the screen that nothing owes. It
-							// contributes nothing either way - clamp, do not
-							// negate. receiveMaterials nets the same figure per
-							// requirement row and clamps it the same way.
-							pcPend = 0.0;
-						}
-
-						printedPendByMat.put(lnMat, ifnull(printedPendByMat.get(lnMat), 0.0) + pcPend);
-
-						if(pcPend > 0)
-						{
-							pcE = agg.get(lnMat);
-							// Find the plan info for this issue line
-							pcPlanNo = "";
-							pcSalesOrder = "";
-							if(miLn.Requirement != null)
+							rPlanId = rqPlanTxt;
+							for each  pp in Production_Planning[ID == rqPlanTxt.toLong()]
 							{
-								for each  pcReq in Material_Requirement[ID == miLn.Requirement]
+								rPlanNo = ifnull(pp.Plan_No,"").toString();
+								ppSoTxt = ifnull(pp.Sales_Order,"").toString().trim();
+								if(ppSoTxt != "")
 								{
-									if(pcReq.Plan != null)
+									for each  ppSo in Sales_Order[ID == ppSoTxt.toLong()]
 									{
-										for each  pcPlan in Production_Planning[ID == pcReq.Plan]
-										{
-											pcPlanNo = ifnull(pcPlan.Plan_No,"").toString();
-											if(pcPlan.Sales_Order != null)
-											{
-												for each  pcSo in Sales_Order[ID == pcPlan.Sales_Order]
-												{
-													pcSalesOrder = ifnull(pcSo.Sales_Order,"").toString();
-												}
-											}
-										}
+										rSalesOrder = ifnull(ppSo.Sales_Order,"").toString();
 									}
 								}
 							}
-
-							pcCutW = ifnull(miLn.Cut_Size_Width,0);
-							pcCutL = ifnull(miLn.Cut_Size_Length,0);
-							
-							pcLotNum = "Not recorded";
-							if (miLn.Lot != null)
-							{
-								lotKey = miLn.Lot.toString();
-								if (lotNumById.get(lotKey) == null)
-								{
-									lotNumById.put(lotKey, "");
-									for each lotRef in Raw_Material_Lot[ID == miLn.Lot]
-									{
-										lotNumById.put(lotKey, ifnull(lotRef.Lot_Number,"").toString());
-									}
-								}
-								pcLotNum = ifnull(lotNumById.get(lotKey),"").toString();
-								if(pcLotNum == "") { pcLotNum = "Not recorded"; }
-							}
-
-							if(printedPiecesJson != "")
-							{
-								printedPiecesJson = printedPiecesJson + ",";
-							}
-							printedPiecesJson = printedPiecesJson + "{\"issueLineId\":\"" + miLn.ID + "\",\"materialId\":\"" + lnMat + "\",\"material\":\"" + ifnull(pcE.get("name"),"").toString().replaceAll("\"","'") + "\",\"unit\":\"" + ifnull(pcE.get("unit"),"").toString() + "\",\"qty\":" + lqS + ",\"pending\":" + pcPend + ",\"cutWidth\":" + pcCutW + ",\"cutLength\":" + pcCutL + ",\"planNo\":\"" + pcPlanNo.replaceAll("\"","'") + "\",\"salesOrder\":\"" + pcSalesOrder.replaceAll("\"","'") + "\",\"lot\":\"" + pcLotNum.replaceAll("\"","'") + "\"}";
 						}
 					}
-					else
+					// planId^planNo^salesOrder^source^isFabric^reason - "^" as
+					// separator, reason last and already flattened of quotes /
+					// newlines / tabs above so a "^" in it cannot split the cache.
+					reqInfo.put(lnReqTxt,rPlanId + "^" + rPlanNo + "^" + rSalesOrder + "^" + rSource + "^" + rIsFab + "^" + rReason);
+				}
+				else
+				{
+					riBits = riCached.toList("^");
+					if(riBits.size() >= 6)
 					{
-						// Regular material: aggregate by lot as before
-						prevL = ifnull(lineLotByMat.get(lnMat),"").toString();
-						prevQ = ifnull(lineQtyByMat.get(lnMat),"").toString();
-						prevN = ifnull(lineNoteByMat.get(lnMat),"").toString();
-
-						if(prevL != "")
-						{
-							prevL = prevL + "~";
-							prevQ = prevQ + "~";
-							prevN = prevN + "~";
-						}
-						lineLotByMat.put(lnMat,prevL + ifnull(miLn.Lot,"").toString().trim());
-						lineQtyByMat.put(lnMat,prevQ + lqS);
-						lineNoteByMat.put(lnMat,prevN + lnNote);
+						rPlanId = riBits.get(0).toString();
+						rPlanNo = riBits.get(1).toString();
+						rSalesOrder = riBits.get(2).toString();
+						rSource = riBits.get(3).toString();
+						rIsFab = riBits.get(4).toString();
+						rReason = riBits.get(5).toString();
 					}
 				}
 			}
+
+			// This line's plan HAS had material issued - record it for the
+			// widget's plansAwaiting union. planFedSeen dedupes within the page.
+			if(rPlanId != "" && planFedSeen.contains(rPlanId) == false)
+			{
+				planFedSeen.add(rPlanId);
+				if(planFedJson != "")
+				{
+					planFedJson = planFedJson + ",";
+				}
+				planFedJson = planFedJson + "\"" + rPlanId + "\"";
+			}
+
+			// Net off whatever of this plan+material is already in dispute -
+			// drawn down as applied so two lines cannot each discount it.
+			if(rPlanId != "")
+			{
+				pmKeyL = rPlanId + "|" + lnMat;
+				dispLeftL = openDispPM.get(pmKeyL);
+				if(dispLeftL != null && dispLeftL > 0)
+				{
+					takeOffL = dispLeftL;
+					if(takeOffL > lnPend)
+					{
+						takeOffL = lnPend;
+					}
+					lnPend = lnPend - takeOffL;
+					openDispPM.put(pmKeyL,dispLeftL - takeOffL);
+				}
+			}
+			if(lnPend <= 0)
+			{
+				continue;
+			}
+
+			lnNote = ifnull(miLn.Lot_Override_Note,"").toString().trim();
+			isRe = "false";
+			if(rSource == "Reissue")
+			{
+				isRe = "true";
+			}
+
+			//------------------------------------------------------------
+			// PRINTED FABRIC PIECES - one physical piece per line.
+			//------------------------------------------------------------
+			if(lnNote.contains("PRINTED_PIECE"))
+			{
+				printedPendByMat.put(lnMat,ifnull(printedPendByMat.get(lnMat),0.0) + lnPend);
+
+				pcLotNum = "Not recorded";
+				lnLotTxt = ifnull(miLn.Lot,"").toString().trim();
+				if(lnLotTxt != "")
+				{
+					if(lotNumById.get(lnLotTxt) == null)
+					{
+						lotNumById.put(lnLotTxt,"");
+						for each  lref in Raw_Material_Lot[ID == lnLotTxt.toLong()]
+						{
+							lotNumById.put(lnLotTxt,ifnull(lref.Lot_Number,"").toString());
+						}
+					}
+					pcLotNum = ifnull(lotNumById.get(lnLotTxt),"").toString();
+					if(pcLotNum == "")
+					{
+						pcLotNum = "Not recorded";
+					}
+				}
+
+				pcName = "";
+				pcUnit = "";
+				pcAgg = agg.get(lnMat);
+				if(pcAgg != null)
+				{
+					pcName = ifnull(pcAgg.get("name"),"").toString();
+					pcUnit = ifnull(pcAgg.get("unit"),"").toString();
+				}
+				else
+				{
+					pcName = ifnull(miLn.Material_Name,"").toString();
+					pcUnit = ifnull(miLn.Unit,"").toString();
+				}
+
+				if(printedPiecesJson != "")
+				{
+					printedPiecesJson = printedPiecesJson + ",";
+				}
+				printedPiecesJson = printedPiecesJson + "{\"issueLineId\":\"" + miLn.ID + "\",\"voucherId\":\"" + miRec.ID + "\",\"materialId\":\"" + lnMat + "\",\"material\":\"" + pcName.replaceAll("\"","'") + "\",\"unit\":\"" + pcUnit + "\",\"qty\":" + lnQty + ",\"pending\":" + lnPend + ",\"cutWidth\":" + ifnull(miLn.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(miLn.Cut_Size_Length,0) + ",\"planNo\":\"" + rPlanNo.replaceAll("\"","'") + "\",\"salesOrder\":\"" + rSalesOrder.replaceAll("\"","'") + "\",\"lot\":\"" + pcLotNum.replaceAll("\"","'") + "\",\"planId\":\"" + rPlanId + "\"}";
+				continue;
+			}
+
+			//------------------------------------------------------------
+			// REGULAR MATERIAL - merged into the per-material aggregate.
+			//------------------------------------------------------------
+			// isFabric off the REQUIREMENT (via reqInfo), not a cut-size guess -
+			// a fabric row planned before Required_Pieces existed can carry a
+			// 0x0 cut size. Falls back to the cut-size heuristic only when the
+			// line names no requirement.
+			lnIsFab = "false";
+			if(rIsFab != "")
+			{
+				lnIsFab = rIsFab;
+			}
+			else if(ifnull(miLn.Cut_Size_Width,0) > 0 || ifnull(miLn.Cut_Size_Length,0) > 0)
+			{
+				lnIsFab = "true";
+			}
+
+			cur = agg.get(lnMat);
+			if(cur == null)
+			{
+				cur = Map();
+				cur.put("matId",lnMat);
+				cur.put("name",ifnull(miLn.Material_Name,"").toString());
+				cur.put("unit",ifnull(miLn.Unit,"").toString());
+				cur.put("isFabric",lnIsFab);
+				cur.put("pending",0.0);
+				cur.put("hasReissue","false");
+				agg.put(lnMat,cur);
+				orderedKeys.add(lnMat);
+				detail.put(lnMat,"");
+			}
+			cur.put("pending",cur.get("pending") + lnPend);
+			if(isRe == "true")
+			{
+				cur.put("hasReissue","true");
+			}
+			agg.put(lnMat,cur);
+
+			dJson = detail.get(lnMat);
+			if(dJson != "")
+			{
+				dJson = dJson + ",";
+			}
+			dJson = dJson + "{\"planNo\":\"" + rPlanNo.replaceAll("\"","'") + "\",\"salesOrder\":\"" + rSalesOrder.replaceAll("\"","'") + "\",\"pending\":" + lnPend + ",\"isReissue\":" + isRe + ",\"reason\":\"" + rReason + "\"}";
+			detail.put(lnMat,dJson);
+
+			// Parallel lists for the per-lot breakdown - newest first, because
+			// the voucher loop is Added_Time desc.
+			prevL = ifnull(lineLotByMat.get(lnMat),"").toString();
+			prevQ = ifnull(lineQtyByMat.get(lnMat),"").toString();
+			prevN = ifnull(lineNoteByMat.get(lnMat),"").toString();
+			if(prevL != "")
+			{
+				prevL = prevL + "~";
+				prevQ = prevQ + "~";
+				prevN = prevN + "~";
+			}
+			lineLotByMat.put(lnMat,prevL + ifnull(miLn.Lot,"").toString().trim());
+			lineQtyByMat.put(lnMat,prevQ + lnPend);
+			lineNoteByMat.put(lnMat,prevN + lnNote);
+
+			// The still-owed line, described in full so receiveMaterials can
+			// settle it with point lookups only. "pending" here is already NET
+			// of the dispute netting applied above - the same figure the widget
+			// shows him - so the widget distributes his confirmed quantity across
+			// these and posts back {issueLineId, settle, confirmed} per line.
+			prevRows = ifnull(lineRowsByMat.get(lnMat),"").toString();
+			if(prevRows != "")
+			{
+				prevRows = prevRows + ",";
+			}
+			lineRowsByMat.put(lnMat,prevRows + "{\"issueLineId\":\"" + miLn.ID + "\",\"voucherId\":\"" + miRec.ID + "\",\"lot\":\"" + ifnull(miLn.Lot,"").toString().trim() + "\",\"requirementId\":\"" + lnReqTxt + "\",\"planId\":\"" + rPlanId + "\",\"planNo\":\"" + rPlanNo.replaceAll("\"","'") + "\",\"salesOrder\":\"" + rSalesOrder.replaceAll("\"","'") + "\",\"pending\":" + lnPend + "}");
+			}
+			// end of the "within this page's budget" else
 		}
 	}
 
+	// linesConsumed for the response cursor: what this call actually processed.
+	// 0 when skipLines was already past the end - the widget stops there.
+	linesConsumed = linesProcessed;
 
+	//------------------------------------------------------------------------
+	// WASTE PIECES - listed individually, off HIS Issued movements. Moved_By is
+	// the supervisor, so no plan walk: one indexed query, then its Received
+	// children per movement. FIRST PAGE ONLY - bounded, and the widget carries
+	// it through the merge unchanged.
+	//------------------------------------------------------------------------
+	wasteMoves = List();
+	if(firstPage == true)
+	{
+		wasteMoves = Waste_Movement[Moved_By == supId && Movement_Type == "Issued"];
+	}
+	for each  wi in wasteMoves
+	{
+		wCount = ifnull(wi.Piece_Count,0);
+
+		wRecv = 0;
+		for each  rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
+		{
+			wRecv = wRecv + ifnull(rv.Piece_Count,0);
+		}
+		wPend = wCount - wRecv;
+
+		wKey2 = wi.Waste_Piece + "";
+		wDispLeft = openDispWP.get(wKey2);
+		if(wDispLeft != null && wDispLeft > 0)
+		{
+			wTakeOff = wDispLeft;
+			if(wTakeOff > wPend)
+			{
+				wTakeOff = wPend;
+			}
+			wPend = wPend - wTakeOff.toLong();
+			openDispWP.put(wKey2,wDispLeft - wTakeOff);
+		}
+
+		if(wPend > 0)
+		{
+			wSkuId = "";
+			wMatName = "";
+			for each  wmRec in Waste_Master[ID == wi.Waste_Piece]
+			{
+				wSkuId = ifnull(wmRec.SKU,"").toString();
+			}
+			if(wSkuId != "")
+			{
+				for each  wrm in Raw_Material[ID == wSkuId.toLong()]
+				{
+					wMatName = ifnull(wrm.Material_Display_Name,"").toString().trim();
+					if(wMatName == "")
+					{
+						wMatName = ifnull(wrm.Name,"").toString().trim();
+					}
+					if(wMatName == "")
+					{
+						wMatName = ifnull(wrm.SKU,"").toString();
+					}
+				}
+			}
+
+			wPlanNo = "";
+			wSo = "";
+			wiPlanTxt = ifnull(wi.Plan,"").toString().trim();
+			if(wiPlanTxt != "")
+			{
+				for each  wpp in Production_Planning[ID == wiPlanTxt.toLong()]
+				{
+					wPlanNo = ifnull(wpp.Plan_No,"").toString();
+					wppSoTxt = ifnull(wpp.Sales_Order,"").toString().trim();
+					if(wppSoTxt != "")
+					{
+						for each  wppSo in Sales_Order[ID == wppSoTxt.toLong()]
+						{
+							wSo = ifnull(wppSo.Sales_Order,"").toString();
+						}
+					}
+				}
+			}
+
+			if(wasteJson != "")
+			{
+				wasteJson = wasteJson + ",";
+			}
+			wasteJson = wasteJson + "{\"rowId\":\"" + wi.ID + "\",\"planId\":\"" + wiPlanTxt + "\",\"planNo\":\"" + wPlanNo.replaceAll("\"","'") + "\",\"salesOrder\":\"" + wSo.replaceAll("\"","'") + "\",\"materialId\":\"" + wSkuId + "\",\"material\":\"" + wMatName.replaceAll("\"","'") + "\",\"width\":" + ifnull(wi.Piece_Width,0) + ",\"length\":" + ifnull(wi.Piece_Length,0) + ",\"pending\":" + wPend + ",\"cutWidth\":" + ifnull(wi.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(wi.Cut_Size_Length,0) + ",\"yields\":" + ifnull(wi.Pieces_Yielded,0) + "}";
+		}
+	}
+
+	//------------------------------------------------------------------------
+	// EMIT. Per material: the aggregate, its per-order detail, and the per-lot
+	// breakdown of the still-owed metres (newest lines first, taken up to the
+	// pending figure - so the lot named is the roll he actually has to check).
+	//------------------------------------------------------------------------
 	for each  k in orderedKeys
 	{
-		e = agg.get(k);
+		eAgg = agg.get(k);
 
-		// Deduct printed pieces pending, skip if nothing left for the aggregate
-		adjPending = e.get("pending") - ifnull(printedPendByMat.get(k), 0.0);
+		adjPending = eAgg.get("pending") - ifnull(printedPendByMat.get(k),0.0);
 		if(adjPending <= 0)
 		{
 			continue;
 		}
 
-		//--------------------------------------------------------------------
-		// Take the newest lines until the pending figure is covered, summing
-		// per lot as we go. Two lots can appear on one material - one handover
-		// split across them, or two handovers - and both have to be shown or he
-		// checks one roll and signs for two.
-		//--------------------------------------------------------------------
 		lotsJson = "";
 		leftToName = adjPending;
-
 		lotSeen = List();
 		lotQty = Map();
 
@@ -615,8 +682,7 @@ string getSupervisorMaterials(string supervisorId)
 					{
 						thisLot = lotParts.get(idxN).toString();
 						// A line issued before lots existed carries none. Named
-						// rather than dropped - the metres are real and he is
-						// being asked to sign for them.
+						// rather than dropped - the metres are real.
 						if(thisLot == "")
 						{
 							thisLot = "none";
@@ -629,7 +695,7 @@ string getSupervisorMaterials(string supervisorId)
 							lotNotes.put(thisLot,"");
 						}
 						lotQty.put(thisLot,lotQty.get(thisLot) + takeHere);
-						
+
 						thisNote = ifnull(noteParts.get(idxN),"").toString().trim();
 						if(thisNote != "")
 						{
@@ -640,10 +706,10 @@ string getSupervisorMaterials(string supervisorId)
 							}
 							if(haveNote.contains(thisNote) == false)
 							{
-								lotNotes.put(thisLot, haveNote + thisNote);
+								lotNotes.put(thisLot,haveNote + thisNote);
 							}
 						}
-						
+
 						leftToName = leftToName - takeHere;
 					}
 				}
@@ -660,7 +726,6 @@ string getSupervisorMaterials(string supervisorId)
 			if(lotNumById.get(lotKey) == null)
 			{
 				lotNumById.put(lotKey,"");
-
 				for each  lotRef in Raw_Material_Lot[ID == lotKey.toLong()]
 				{
 					lotNumById.put(lotKey,ifnull(lotRef.Lot_Number,"").toString());
@@ -672,13 +737,13 @@ string getSupervisorMaterials(string supervisorId)
 			{
 				lotLabelTxt = "Not recorded";
 			}
-			
+
 			nTxt = ifnull(lotNotes.get(lotKey),"").toString();
 			if(nTxt != "")
 			{
 				lotLabelTxt = lotLabelTxt + " (" + nTxt + ")";
 			}
-			
+
 			lotsJson = lotsJson + "{\"lot\":\"" + lotLabelTxt.replaceAll("\"","'") + "\",\"qty\":" + lotQty.get(lotKey) + "}";
 		}
 
@@ -686,9 +751,22 @@ string getSupervisorMaterials(string supervisorId)
 		{
 			matJson = matJson + ",";
 		}
-		matJson = matJson + "{\"materialId\":\"" + e.get("matId") + "\",\"material\":\"" + e.get("name") + "\",\"unit\":\"" + e.get("unit") + "\",\"isFabric\":" + e.get("isFabric") + ",\"isReissue\":" + ifnull(e.get("hasReissue"),"false") + ",\"pending\":" + e.get("pending") + ",\"lots\":[" + lotsJson + "],\"orders\":[" + detail.get(k) + "]}";
+		matJson = matJson + "{\"materialId\":\"" + eAgg.get("matId") + "\",\"material\":\"" + eAgg.get("name").toString().replaceAll("\"","'") + "\",\"unit\":\"" + eAgg.get("unit") + "\",\"isFabric\":" + eAgg.get("isFabric") + ",\"isReissue\":" + ifnull(eAgg.get("hasReissue"),"false") + ",\"pending\":" + eAgg.get("pending") + ",\"lots\":[" + lotsJson + "],\"orders\":[" + detail.get(k) + "],\"lines\":[" + ifnull(lineRowsByMat.get(k),"").toString() + "]}";
+	}
+
+	}
+	catch (e)
+	{
+		info "getSupervisorMaterials DELUGE ERROR: " + e.toString();
+		// linesConsumed:0 so the widget's page loop stops rather than spinning
+		// on a failing call for ever.
+		return "{\"errors\":[\"" + e.toString().replaceAll("\"","'") + "\"],\"supervisors\":[" + supJson + "],\"materials\":[],\"waste\":[],\"printedPieces\":[],\"planFed\":[],\"plansAssigned\":0,\"linesConsumed\":0,\"skipLines\":" + skipLines + "}";
 	}
 
 	// Built by hand - List.toString() does not reliably wrap in [].
-	return "{\"errors\":[],\"supervisors\":[" + supJson + "],\"materials\":[" + matJson + "],\"waste\":[" + wasteJson + "],\"printedPieces\":[" + printedPiecesJson + "],\"plansAssigned\":" + plansAssigned + ",\"plansAwaiting\":" + plansAwaiting + "}";
+	//
+	// plansAwaiting is NOT here - the widget computes it from plansAssigned (page
+	// 1) minus the union of every page's planFed. linesConsumed is the cursor:
+	// next call's skipLines is skipLines + linesConsumed; 0 means done.
+	return "{\"errors\":[],\"supervisors\":[" + supJson + "],\"materials\":[" + matJson + "],\"waste\":[" + wasteJson + "],\"printedPieces\":[" + printedPiecesJson + "],\"planFed\":[" + planFedJson + "],\"plansAssigned\":" + plansAssigned + ",\"linesConsumed\":" + linesConsumed + ",\"skipLines\":" + skipLines + "}";
 }

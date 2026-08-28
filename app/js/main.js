@@ -745,6 +745,202 @@ function closeProgressModal() {
     progressModalEl().classList.add('hidden');
 }
 
+// ---- Vendor Modal for Bulk PO ----
+
+function vendorModalEl() {
+    var el = document.getElementById('vendor-modal');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'vendor-modal';
+        el.className = 'exc-modal hidden';
+        el.innerHTML =
+            '<div class="exc-panel">' +
+                '<h3 id="vendor-modal-title">Raise purchase order</h3>' +
+                '<p class="exc-sub">A draft PO is created in Zoho Inventory for the quantities below. ' +
+                    'Each material is also logged as a shortage so it drops off this list until the goods arrive.</p>' +
+                '<label class="exc-label" for="vendor-select">Vendor</label>' +
+                '<p id="vendor-modal-text" class="exc-sub">Fetching vendors from Zoho Inventory…</p>' +
+                '<select id="vendor-select"></select>' +
+                '<label class="exc-label">Ordering</label>' +
+                '<div class="table-wrapper po-preview-wrap">' +
+                    '<table class="po-preview-table">' +
+                        '<thead><tr>' +
+                            '<th>Material</th>' +
+                            '<th class="col-num">Order qty</th>' +
+                        '</tr></thead>' +
+                        '<tbody id="vendor-po-lines"></tbody>' +
+                    '</table>' +
+                '</div>' +
+                '<div class="exc-foot">' +
+                    '<button type="button" class="ghost-btn" onclick="closeVendorModal()">Cancel</button>' +
+                    '<button type="button" class="primary-btn" id="vendor-submit-btn" disabled onclick="submitBulkPO()">Raise PO</button>' +
+                '</div>' +
+            '</div>';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+// The line items about to be ordered, drawn from the same s.toBuy the submit
+// reads. Shown so the store person confirms WHAT and HOW MUCH before a draft PO
+// is committed against a real vendor. No rate/cost column — the store screen
+// carries no catalogue rate; raiseBulkPurchaseOrder fills it from Raw_Material.
+function renderVendorPoLines() {
+    var body = document.getElementById('vendor-po-lines');
+    var title = document.getElementById('vendor-modal-title');
+    if (!body) return;
+    var s = window.__summary || { toBuy: [] };
+    var rows = s.toBuy || [];
+
+    if (title) {
+        title.textContent = 'Raise purchase order' +
+            (rows.length ? ' · ' + rows.length + ' item' + (rows.length === 1 ? '' : 's') : '');
+    }
+
+    body.innerHTML = rows.map(function (item) {
+        var e = item.e;
+        return '<tr>' +
+            '<td class="material-name-cell">' +
+                '<div class="mat-name">' + escapeHtml(e.material) + '</div>' +
+                (e.sku ? '<div class="mat-sku">' + escapeHtml(e.sku) + '</div>' : '') +
+            '</td>' +
+            '<td class="col-num col-strong">' + fmt(item.qty) +
+                ' <span class="unit">' + escapeHtml(e.unit || '') + '</span></td>' +
+        '</tr>';
+    }).join('');
+}
+
+function closeVendorModal() {
+    vendorModalEl().classList.add('hidden');
+}
+
+function openVendorModal() {
+    var el = vendorModalEl();
+    var select = document.getElementById('vendor-select');
+    var p = document.getElementById('vendor-modal-text');
+    var btn = document.getElementById('vendor-submit-btn');
+
+    renderVendorPoLines();
+
+    select.style.display = 'none';
+    btn.disabled = true;
+    p.textContent = 'Fetching vendors from Zoho Inventory…';
+    p.style.display = 'block';
+    el.classList.remove('hidden');
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getInventoryVendors',
+        http_method: 'GET'
+    }).then(function (response) {
+        var parsed;
+        try { parsed = JSON.parse(response.result); } catch(e) {}
+        if (parsed && (!parsed.errors || parsed.errors.length === 0) && parsed.vendors) {
+            select.innerHTML = '';
+            var hasVendors = false;
+            parsed.vendors.forEach(function(v) {
+                if (v.type === 'Job Work') {
+                    var opt = document.createElement('option');
+                    opt.value = v.vendor_id;
+                    opt.textContent = v.vendor_name;
+                    select.appendChild(opt);
+                    hasVendors = true;
+                }
+            });
+
+            if (hasVendors) {
+                p.style.display = 'none';
+                select.style.display = 'block';
+                btn.disabled = false;
+            } else {
+                p.textContent = 'No "Job Work" vendors found in Inventory.';
+            }
+        } else {
+            p.textContent = 'Failed to load vendors: ' + (parsed && parsed.errors ? parsed.errors.join(', ') : 'Unknown error');
+        }
+    }).catch(function(err) {
+        p.textContent = 'Network error fetching vendors.';
+    });
+}
+
+function submitBulkPO() {
+    var vendorId = document.getElementById('vendor-select').value;
+    if (!vendorId) return;
+
+    closeVendorModal();
+    if (typeof showProgressModal === 'function') {
+        showProgressModal('Creating Purchase Order', 'Connecting to Zoho Inventory...', 50);
+    }
+
+    // Lock the summary's Raise buttons for the duration - the PO covers every
+    // row in it, so a second click while this is in flight would double-order.
+    Array.prototype.forEach.call(
+        document.querySelectorAll('#sum-raise-all-po, .summary-card .raise-btn'),
+        function (b) { b.disabled = true; }
+    );
+
+    var s = window.__summary || { toBuy: [] };
+    var payload = s.toBuy.map(function(item) {
+        // NO per-order lines. A common trim is on dozens of open plans, so
+        // item.e.lines has dozens/hundreds of entries — and a PO is not split
+        // per order anyway, so they only made the "N orders waiting" figure on
+        // the My requests tab read as "212". The exception still records
+        // Required_Qty / Shortfall_Qty / PO_Number, which is what procurement
+        // acts on. No rate: this screen has none, so raiseBulkPurchaseOrder
+        // falls back to the catalogue Rate; the third-party / print screens
+        // pass a UI rate here instead.
+        return {
+            materialId: item.e.materialId,
+            quantity: item.qty
+        };
+    });
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'raiseBulkPurchaseOrder',
+        http_method: 'POST',
+        payload: {
+            vendorId: vendorId,
+            shortItemsJsonTxt: JSON.stringify(payload)
+        }
+    }).then(function (response) {
+        var parsed;
+        try { parsed = JSON.parse(response.result); } catch(e) {}
+        
+        if (typeof closeProgressModal === 'function') closeProgressModal();
+        
+        if (parsed && (!parsed.errors || parsed.errors.length === 0) && parsed.purchaseorder_number) {
+            var msg = 'Draft PO ' + parsed.purchaseorder_number + ' created in Zoho Inventory.';
+            if (Number(parsed.exceptionsFailed) > 0) {
+                msg += '\n\n' + parsed.exceptionsFailed + ' material(s) could not be logged as a shortage — ' +
+                    'they may reappear in this list. Check the console.';
+            } else {
+                msg += '\nThese materials will drop off "What is missing" until the goods arrive.';
+            }
+            alert(msg);
+            // Reload the Issue tab so the raised materials drop off "What is
+            // missing" (the server now nets their PO qty into `owned`). This
+            // was calling a non-existent fetchWidgetData(), so the stale
+            // section stayed on screen with live buttons until a manual Refresh.
+            loadRequirements();
+        } else {
+            var errStr = parsed && parsed.errors ? parsed.errors.join(', ') : 'Unknown error';
+            alert('Failed to create PO: ' + errStr);
+            // Re-enable the buttons - the PO did not go through, so the rows
+            // are still actionable.
+            Array.prototype.forEach.call(
+                document.querySelectorAll('#sum-raise-all-po, .summary-card .raise-btn'),
+                function (b) { b.disabled = false; }
+            );
+        }
+    }).catch(function(err) {
+        if (typeof closeProgressModal === 'function') closeProgressModal();
+        Array.prototype.forEach.call(
+            document.querySelectorAll('#sum-raise-all-po, .summary-card .raise-btn'),
+            function (b) { b.disabled = false; }
+        );
+        alert('Network error creating PO.');
+    });
+}
+
 
 // ---- Raising the combined request from the summary ----
 
@@ -1126,6 +1322,114 @@ function submitSummaryException(kind, idx) {
         btn.disabled = false;
         btn.textContent = 'Raise it';
     });
+}
+
+// RAISE EVERY OUTSTANDING WASH TICKET IN ONE PRESS.
+//
+// Walks window.__summary.toWash and fires raiseMaterialException for each row
+// that does not already have an open Wash_Needed ticket for its lot. Sequential,
+// so a rate limit on one call does not lose the rest, and so the alert at the
+// end can report a true count. Same payload the per-row Send to wash builds -
+// the only difference is the lot comes from entry.lot (the allocator's choice)
+// instead of a dialog dropdown, and there is no free-text note.
+function raiseAllWashRequests() {
+    var s = window.__summary || { toWash: [] };
+    var btn = document.getElementById('sum-raise-all-wash');
+
+    var todo = [];
+    (s.toWash || []).forEach(function (entry, idx) {
+        var lotId = entry.lot ? String(entry.lot.lotId || '') : '';
+        if (requestState(entry.e, 'wash', lotId) === 'open') return;
+        todo.push({ entry: entry, idx: idx, lotId: lotId });
+    });
+
+    if (todo.length === 0) {
+        alert('Every wash request is already raised.');
+        return;
+    }
+
+    if (btn) { btn.disabled = true; btn.textContent = 'Raising 0/' + todo.length + '…'; }
+    if (typeof showProgressModal === 'function') {
+        showProgressModal('Raising Wash Requests', 'Queuing ' + todo.length + ' job' + (todo.length === 1 ? '' : 's') + '…');
+    }
+
+    var done = 0, ok = 0, failed = 0;
+
+    function next() {
+        if (done >= todo.length) {
+            if (typeof closeProgressModal === 'function') closeProgressModal();
+            if (ok > 0 && typeof loadRequirements === 'function') {
+                // Re-render so the raised rows flip to Requested and the button
+                // recount is correct.
+                loadRequirements();
+            } else if (btn) {
+                btn.disabled = false;
+                btn.textContent = 'Raise all ' + todo.length + ' wash request' + (todo.length === 1 ? '' : 's');
+            }
+            alert(failed === 0
+                ? ok + ' wash request' + (ok === 1 ? '' : 's') + ' raised.'
+                : ok + ' raised, ' + failed + ' failed. Check the console and retry.');
+            return;
+        }
+
+        var job = todo[done];
+        var e = job.entry.e;
+        if (btn) btn.textContent = 'Raising ' + (done + 1) + '/' + todo.length + '…';
+
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'raiseMaterialException',
+            http_method: 'POST',
+            payload: {
+                payloadJson: JSON.stringify({
+                    materialId: e.materialId,
+                    type: 'Wash_Needed',
+                    required: e.needed,
+                    available: e.stock,
+                    unwashed: e.unwashed,
+                    shortfall: job.entry.qty,
+                    unit: e.unit,
+                    note: '',
+                    lotId: job.lotId,
+                    lines: e.lines || []
+                })
+            }
+        }).then(function (response) {
+            var parsed;
+            try { parsed = JSON.parse(response.result); } catch (err) { parsed = null; }
+            if (parsed && parsed.success) {
+                ok++;
+                // Mirror submitSummaryException's local bookkeeping so a
+                // re-render (or no re-render) shows the row as covered.
+                var coveredNow = (e.lines || []).map(function (l) { return String(l.planId); });
+                var existing = openRequestFor(e, 'Wash_Needed', job.lotId);
+                if (existing) {
+                    existing.planIds = coveredNow;
+                } else {
+                    e.openExceptions = (e.openExceptions || []).concat([
+                        { type: 'Wash_Needed', lot: job.lotId, planIds: coveredNow }
+                    ]);
+                }
+                var rowBtn = document.getElementById(summaryBtnId('wash', job.idx));
+                if (rowBtn) {
+                    rowBtn.disabled = true;
+                    rowBtn.classList.remove('is-stale');
+                    rowBtn.textContent = 'Requested';
+                }
+            } else {
+                failed++;
+                console.error('raiseAllWashRequests: ' + e.material + ' failed:', parsed && parsed.error);
+            }
+            done++;
+            next();
+        }).catch(function (err) {
+            failed++;
+            console.error('raiseAllWashRequests: ' + e.material + ' error:', err);
+            done++;
+            next();
+        });
+    }
+
+    next();
 }
 
 // Contention only matters when the stock cannot cover everyone. Two supervisors
@@ -1592,12 +1896,13 @@ function reissueWhy(m) {
         '</div>';
 }
 
-function renderSection(title, note, headCells, rowsHtml) {
+function renderSection(title, note, headCells, rowsHtml, actionHtml) {
     if (!rowsHtml) return '';
     return '' +
         '<div class="mat-section">' +
         '<div class="section-title">' + escapeHtml(title) +
         (note ? '<span class="section-note">' + escapeHtml(note) + '</span>' : '') +
+        (actionHtml || '') +
         '</div>' +
         '<div class="table-wrapper">' +
         '<table>' +
@@ -1668,6 +1973,12 @@ function buildShortfallSummary(data) {
                     // reason a shortfall can look unfixable when it is simply
                     // already being fixed.
                     inWash: Number(m.inWashStock) || 0,
+                    // Cloth already on a raised draft PO — an open Shortage
+                    // ticket with a PO_Number, summed server-side. Counts as
+                    // owned in the buy calc below, so a material with a PO out
+                    // drops off "Short — needs purchase" and its Raise PO button
+                    // disappears until the goods land and the ticket resolves.
+                    poCovered: Number(m.poCoveredQty) || 0,
                     needed: 0,
                     supervisors: [],
                     // One entry per Material_Requirement row, straight from the
@@ -1780,9 +2091,15 @@ function buildShortfallSummary(data) {
         // made up by washing is a purchase question only if the fabric is short
         // overall; otherwise it is the tone override's business, and that lives
         // on the row where the decision is.
+        //
+        // poCovered — cloth already on a raised draft PO — counts as owned. Once
+        // a PO is raised for the gap, the material leaves this list and its
+        // Raise PO button disappears; if demand later outgrows the PO before the
+        // goods land, the residual gap re-appears here on its own.
         var owned = round2((Number(e.stock) || 0) +
             (Number(e.unwashed) || 0) +
-            (Number(e.inWash) || 0));
+            (Number(e.inWash) || 0) +
+            (Number(e.poCovered) || 0));
         var buyQty = round2(e.needed - owned);
         if (buyQty > 0) {
             toBuy.push({ e: e, qty: buyQty, kind: 'buy' });
@@ -1935,18 +2252,41 @@ function renderShortfallSummary(data) {
         '<th class="col-num">Short by</th>' +
         '<th class="col-action"></th>';
 
+    // ONE BUTTON, EVERY WASH TICKET. Raises a Wash_Needed request for each row
+    // in the list that does not already have an open one, using the lot the
+    // allocator picked for that row — same payload as the per-row Send to wash,
+    // just without opening the dialog for each. Only shown when at least one row
+    // still needs raising.
+    var washPending = s.toWash.filter(function (entry) {
+        return requestState(entry.e, 'wash', entry.lot ? entry.lot.lotId : '') !== 'open';
+    }).length;
+    var washAllBtn = washPending > 0
+        ? '<button type="button" class="raise-btn section-action" id="sum-raise-all-wash" ' +
+          'onclick="raiseAllWashRequests()">Raise all ' + washPending +
+          ' wash request' + (washPending === 1 ? '' : 's') + '</button>'
+        : '';
+
+    var poPending = s.toBuy.length;
+    var poAllBtn = poPending > 0
+        ? '<button type="button" class="raise-btn section-action" id="sum-raise-all-po" ' +
+          'onclick="openVendorModal()">Raise PO for ' + poPending +
+          ' short item' + (poPending === 1 ? '' : 's') + '</button>'
+        : '';
+
     var sections =
         renderSection(
             'Needs washing',
             '',
             washHead,
-            s.toWash.map(summaryRow).join('')
+            s.toWash.map(summaryRow).join(''),
+            washAllBtn
         ) +
         renderSection(
             'Short — needs purchase',
             '',
             buyHead,
-            s.toBuy.map(summaryRow).join('')
+            s.toBuy.map(summaryRow).join(''),
+            poAllBtn
         );
 
     var counts = [];
@@ -2299,6 +2639,249 @@ function render(data) {
 
 // ---- Issue action ----
 
+// BUILD THE FABRIC ISSUE LINE FROM THE ALLOCATOR'S OWN OUTPUT.
+//
+// applyLotAllocation (lot-allocator.js) has already decided everything: which
+// lot every order is cut from, how many fresh metres come off it, which
+// remnants, which physical pieces and cut lengths. It left the answer on
+// `m.lotLines[]` and `m.wastePicks[]`. This just reshapes that into the payload
+// issueMaterials applies with point lookups — the server no longer re-derives
+// any of it by fanning across open plans.
+//
+//   allocations  — one per plan item the allocator served: giveQty (metres to
+//                  add to Issued_Qty), giveRaw / giveWaste (cut pieces to add
+//                  to Pieces_From_Raw / Pieces_From_Waste), issuedLot (stamped
+//                  only when the mrq has none). mrqId resolved from m.lines.
+//   lotMoves     — m.lotLines grouped by lot: metres to move Wash_Quantity ->
+//                  In_Transit_Qty, plus the physical pieces on a Pieces lot.
+//   wastePicks   — the ticked remnants, each enriched with its cut-piece yield
+//                  and dimensions for the Waste_Movement record.
+//   issueLines   — one per allocation, expanded one-per-physical-piece for a
+//                  PRINTED_PIECE line so the supervisor can receive each piece.
+//
+// `picks` is the array of { wasteId, pieces, planItemId } gathered from the
+// ticked waste checkboxes.
+function buildFabricIssueLine(m, picks) {
+    var cutW = Number(m.cutWidth) || 0;
+    var cutL = Number(m.cutLength) || 0;
+    var src = m.isReissue === true ? 'Reissue' : 'Plan';
+
+    var lotLines = (m.lotLines || []).filter(function (ln) {
+        return (Number(ln.qty) || 0) > 0;
+    });
+
+    // planItemId -> the mrq it belongs to, and how many cut pieces it still
+    // owes — from the server's per-row lines. The owed figure is the ceiling on
+    // giveRaw + giveWaste: the allocator caps at it too, and adding more than
+    // the row owes to Pieces_From_Raw / Pieces_From_Waste over-closes it.
+    var mrqByItem = {};
+    var planByItem = {};
+    var owedByItem = {};
+    (m.lines || []).forEach(function (ln) {
+        var it = String(ln.planItemId || '');
+        if (it && mrqByItem[it] === undefined) {
+            mrqByItem[it] = ln.mrqId;
+            planByItem[it] = ln.planId;
+            owedByItem[it] = Math.max(0, (Number(ln.reqPieces) || 0) - (Number(ln.issPieces) || 0));
+        }
+    });
+
+    // ---- lotMoves: m.lotLines grouped by lot ----
+    var moveByLot = {};
+    var moveOrder = [];
+    lotLines.forEach(function (ln) {
+        var k = String(ln.lotId);
+        if (!moveByLot[k]) {
+            moveByLot[k] = { lotId: ln.lotId, qty: 0, isPieces: false, pieces: [] };
+            moveOrder.push(k);
+        }
+        moveByLot[k].qty = round2(moveByLot[k].qty + (Number(ln.qty) || 0));
+        (ln.pieces || []).forEach(function (p) {
+            moveByLot[k].isPieces = true;
+            moveByLot[k].pieces.push({
+                pieceId: p.pieceId,
+                count: Number(p.count) || 0,
+                cutLengthCm: Number(p.cutLengthCm) || 0
+            });
+        });
+    });
+    var lotMoves = moveOrder.map(function (k) { return moveByLot[k]; });
+
+    // ---- allocations: one per plan item the allocator served ----
+    // giveQty / giveRaw / giveWaste come STRAIGHT off the allocator's lotLines
+    // (fromRaw / fromWaste added in spend()) — never recomputed here. A demand
+    // covered entirely by offcuts has no lotLine, so its waste credit is
+    // recovered from the physical picks instead.
+    var qtyByItem = {};
+    var rawByItem = {};
+    var wasteByItem = {};
+    var lotByItem = {};
+    var itemOrder = [];
+    var seenItem = {};
+    lotLines.forEach(function (ln) {
+        var it = String(ln.planItemId || '');
+        if (!seenItem[it]) {
+            seenItem[it] = true; itemOrder.push(it);
+            qtyByItem[it] = 0; rawByItem[it] = 0; wasteByItem[it] = 0;
+        }
+        qtyByItem[it] = round2(qtyByItem[it] + (Number(ln.qty) || 0));
+        rawByItem[it] += Number(ln.fromRaw) || 0;
+        wasteByItem[it] += Number(ln.fromWaste) || 0;
+        if (!lotByItem[it]) lotByItem[it] = ln.lotId;
+    });
+
+    // ---- wastePicks payload, and the offcut-only credit fallback ----
+    // Total remnant yield per item from the ticked picks. Used ONLY for a plan
+    // item with no lotLine at all (offcut-complete) — otherwise the allocator's
+    // per-line fromWaste above is authoritative.
+    var wasteYieldByItem = {};
+    var wastePicksOut = [];
+    picks.forEach(function (pk) {
+        var src2 = (m.wastePicks || []).filter(function (x) {
+            return String(x.wasteId) === String(pk.wasteId);
+        })[0] || {};
+        var w = Number(src2.width) || 0;
+        var l = Number(src2.length) || 0;
+        var yieldPer = remnantYield({ width: w, length: l }, cutW, cutL);
+        var it = String(pk.planItemId || src2.planItemId || '');
+        wasteYieldByItem[it] = (wasteYieldByItem[it] || 0) + pk.pieces * yieldPer;
+        wastePicksOut.push({
+            wasteId: pk.wasteId,
+            pieces: pk.pieces,
+            planId: planByItem[it] || '',
+            planItemId: it,
+            yieldPer: yieldPer,
+            pieceWidth: w,
+            pieceLength: l
+        });
+    });
+    Object.keys(wasteYieldByItem).forEach(function (it) {
+        if (it === '') return;
+        if (!seenItem[it]) {
+            // Offcut-complete: no fresh cloth, no lotLine. Credit from the picks.
+            seenItem[it] = true; itemOrder.push(it);
+            qtyByItem[it] = 0; rawByItem[it] = 0;
+            wasteByItem[it] = wasteYieldByItem[it];
+        }
+    });
+
+    var allocations = itemOrder.filter(function (it) {
+        return it !== '' && mrqByItem[it] !== undefined;
+    }).map(function (it) {
+        var owed = owedByItem[it] === undefined ? Infinity : owedByItem[it];
+        var raw = rawByItem[it] || 0;
+        var wst = wasteByItem[it] || 0;
+        // Never credit more pieces than the row still owes — the allocator caps
+        // at this too. Waste first (scarcer, already paid for), then fresh.
+        if (wst > owed) { wst = owed; }
+        if (raw > owed - wst) { raw = Math.max(0, owed - wst); }
+        return {
+            mrqId: mrqByItem[it],
+            planId: planByItem[it] || '',
+            planItemId: it,
+            giveQty: round2(qtyByItem[it] || 0),
+            giveRaw: raw,
+            giveWaste: wst,
+            issuedLot: String(lotByItem[it] || '')
+        };
+    });
+
+    // ---- issueLines: one per allocation, PRINTED_PIECE expanded per piece ----
+    var issueLinesOut = [];
+    allocations.forEach(function (a) {
+        var ln = lotLines.filter(function (x) {
+            return String(x.planItemId || '') === a.planItemId;
+        })[0] || {};
+        if (ln.pieces && ln.pieces.length && ln.cutSummary) {
+            var baseNote = ln.note ? ln.note + ' | ' : '';
+            ln.pieces.forEach(function (p) {
+                issueLinesOut.push({
+                    mrqId: a.mrqId, planItemId: a.planItemId, lotId: a.issuedLot,
+                    qty: round2(((Number(p.cutLengthCm) || 0) * (Number(p.count) || 0)) / 100),
+                    unit: m.unit, cutW: cutW, cutL: cutL,
+                    note: baseNote + 'PRINTED_PIECE | ' + ln.cutSummary,
+                    overrideFrom: ln.overrideFrom || ''
+                });
+            });
+        } else {
+            issueLinesOut.push({
+                mrqId: a.mrqId, planItemId: a.planItemId, lotId: a.issuedLot,
+                qty: a.giveQty, unit: m.unit, cutW: cutW, cutL: cutL,
+                note: ln.note || '', overrideFrom: ln.overrideFrom || ''
+            });
+        }
+    });
+
+    return {
+        materialId: m.materialId,
+        source: src,
+        isFabric: true,
+        cutWidth: cutW,
+        cutLength: cutL,
+        allocations: allocations,
+        lotMoves: lotMoves,
+        wastePicks: wastePicksOut,
+        issueLines: issueLinesOut
+    };
+}
+
+// SPLIT THE ISSUE LINES INTO PAYLOADS OF AT MOST maxAllocs ALLOCATIONS.
+//
+// A payload with hundreds of allocations is too large for one invokeCustomApi —
+// Creator trims it — so pack whole material lines until the next one would
+// overflow, and if a single material line has more than maxAllocs allocations
+// on its own, break IT across payloads too.
+//
+// When a material line is split: its `allocations` and `issueLines` are sliced
+// in lockstep (issueLines has one entry per allocation, except PRINTED_PIECE
+// lines which have several — those keep their whole material line together
+// because they are always well under maxAllocs). `lotMoves` and `wastePicks`
+// ride the FIRST slice only: the lot-metre move and the remnant consumption are
+// each applied once, and issueMaterials re-reads stock per call so the parent
+// Raw_Material move stays correct across the slices.
+function splitIssuesByAllocation(issues, maxAllocs) {
+    var chunks = [];
+    var cur = [];
+    var curCount = 0;
+
+    function flush() {
+        if (cur.length) { chunks.push(cur); cur = []; curCount = 0; }
+    }
+
+    issues.forEach(function (line) {
+        var allocs = line.allocations || [];
+        var hasPrinted = (line.issueLines || []).length !== allocs.length;
+
+        // Fits whole, or is a PRINTED_PIECE line we never slice.
+        if (allocs.length <= maxAllocs || hasPrinted) {
+            if (curCount + allocs.length > maxAllocs) flush();
+            cur.push(line);
+            curCount += allocs.length;
+            return;
+        }
+
+        // Break this one line across payloads.
+        flush();
+        for (var start = 0; start < allocs.length; start += maxAllocs) {
+            var slice = allocs.slice(start, start + maxAllocs);
+            var part = {
+                materialId: line.materialId,
+                source: line.source,
+                isFabric: line.isFabric,
+                cutWidth: line.cutWidth,
+                cutLength: line.cutLength,
+                allocations: slice,
+                issueLines: (line.issueLines || []).slice(start, start + maxAllocs),
+                lotMoves: start === 0 ? (line.lotMoves || []) : [],
+                wastePicks: start === 0 ? (line.wastePicks || []) : []
+            };
+            chunks.push([part]);
+        }
+    });
+    flush();
+    return chunks.length ? chunks : [issues];
+}
+
 function issueForSupervisor(supIdx) {
     var sup = window.__reqData[supIdx];
     var issues = [];
@@ -2335,87 +2918,77 @@ function issueForSupervisor(supIdx) {
             });
         });
 
-        // WHICH CLOTH COMES OFF WHICH LOT, AND FOR WHICH ITEM.
-        //
-        // Taken from the allocation rather than read back off the hidden inputs,
-        // because the inputs are keyed by lot alone and the per-item split is
-        // the whole point: without it the server falls back to fanning metres
-        // across requirement rows in plan order, and an order that was carefully
-        // put on one lot gets its tail cut from the next one.
-        //
-        // The hidden inputs stay — the row's metres box and its validation are
-        // still driven from them — but they are no longer the source of truth
-        // for the payload.
-        var lotLines = (m.lotLines || []).filter(function (ln) {
+        var hasLots = (m.lotLines || []).some(function (ln) {
             return (Number(ln.qty) || 0) > 0;
-        }).map(function (ln) {
-            var out = {
-                lotId: ln.lotId, qty: round2(ln.qty),
-                planItemId: ln.planItemId || '',
-                // The order, so issueMaterials can enforce one lot per
-                // order rather than infer it from the item.
-                planId: ln.planId || ''
-            };
-            // WHICH PHYSICAL PIECES, on a lot held as pieces.
-            //
-            // The server must not work them back out of the metres. Three 3.00 m
-            // pieces are 9.00 m, and 9.00 m against a 55 cm cut divides to 16
-            // marker rows where the pieces only yield 15 — one row nobody can
-            // cut, credited to Pieces_From_Raw, closing the requirement a piece
-            // early and leaving the item at Awaiting_Material for ever with
-            // Issue doing nothing.
-            //
-            // Absent on a roll lot, so the line is unchanged there and an older
-            // server simply never sees the field.
-            if (ln.pieces && ln.pieces.length) out.pieces = ln.pieces;
-            if (ln.cutSummary) out.cutSummary = ln.cutSummary;
-
-            // Only on a deliberate override. The handover records the lot that
-            // actually left the shelf while Issued_Lot keeps the original, and
-            // this says a person decided that rather than a rule slipping.
-            if (ln.note) out.note = ln.note;
-            if (ln.overrideFrom) out.overrideFrom = ln.overrideFrom;
-            return out;
         });
 
         // A fabric row can be worth issuing at 0 metres when waste covers it
         // entirely, so the metres value alone cannot decide this.
         if (val > 0 || picks.length > 0) {
-            // WHICH BLOCK THIS ROW CAME FROM. The screen shows the plan's own
-            // demand and reissues separately, so the server has to credit the
-            // one that was actually ticked — matching on material and cut size
-            // alone let 24 cones issued against the Reissue block land on a
-            // part-issued Plan row, leaving the reissue still reading as owed.
-            var line = {
-                materialId: m.materialId,
-                qty: val,
-                source: m.isReissue === true ? 'Reissue' : 'Plan'
-            };
+            var line;
             if (m.isFabric) {
-                line.cutWidth = m.cutWidth;
-                line.cutLength = m.cutLength;
-                line.wastePicks = picks;
-                // ONLY WHEN THE ROW IS ACTUALLY ASKING FOR CLOTH.
-                //
-                // The lot lines come from the allocation, not from the box, so
-                // unticking the row used to leave them in the payload and the
-                // cloth went out anyway — his only signal that he did not want
-                // it was the zero he had just put in the box. It matters most on
-                // a row whose offcuts are still ticked, because then the line is
-                // sent regardless and the metres ride along with it.
-                line.lots = val > 0 ? lotLines : [];
-
-                // Metres with no lot behind them cannot be issued: the server
-                // would have nothing to take the cloth off, and receipt and
-                // disputes would have no lot to settle against. Caught here so
-                // he is told which row, rather than getting a server error
-                // naming a SKU.
-                if (val > 0 && lotLines.length === 0) {
+                if (val > 0 && !hasLots) {
                     alert('Choose which lot the ' + m.material + ' comes from.');
                     hasInvalid = true;
+                    return;
                 }
+                // Everything — allocations, lotMoves, wastePicks, issueLines —
+                // comes straight from what applyLotAllocation already decided.
+                line = buildFabricIssueLine(m, picks);
+            } else {
+                // ACCESSORIES: fan the typed metres across the owed rows here,
+                // exactly as fabric now does via the allocator. giveRaw /
+                // giveWaste are 0 — pieces are not the unit for a non-fabric mrq.
+                line = {
+                    materialId: m.materialId,
+                    source: m.isReissue === true ? 'Reissue' : 'Plan',
+                    isFabric: false,
+                    cutWidth: 0, cutLength: 0,
+                    allocations: [], lotMoves: [], wastePicks: [], issueLines: []
+                };
+                var remainingToGive = val;
+                for (var i = 0; i < m.lines.length; i++) {
+                    if (remainingToGive <= 0) break;
+                    var aln = m.lines[i];
+                    var rowOwes = (Number(aln.required) || 0) - (Number(aln.issued) || 0);
+                    if (rowOwes > 0) {
+                        var give = Math.min(rowOwes, remainingToGive);
+                        give = Math.round(give * 1000) / 1000; // avoid float drift
+                        line.allocations.push({
+                            mrqId: aln.mrqId, planId: aln.planId,
+                            planItemId: aln.planItemId,
+                            giveQty: give, giveRaw: 0, giveWaste: 0, issuedLot: ''
+                        });
+                        remainingToGive -= give;
+                    }
+                }
+                // Over-issuing beyond every requirement: dump the remainder on
+                // the last row (or the first, if nothing owed) so the qty still
+                // goes out — matches the previous backend behaviour.
+                if (remainingToGive > 0 && line.allocations.length > 0) {
+                    line.allocations[line.allocations.length - 1].giveQty =
+                        Math.round((line.allocations[line.allocations.length - 1].giveQty + remainingToGive) * 1000) / 1000;
+                } else if (remainingToGive > 0 && m.lines.length > 0) {
+                    line.allocations.push({
+                        mrqId: m.lines[0].mrqId, planId: m.lines[0].planId,
+                        planItemId: m.lines[0].planItemId,
+                        giveQty: remainingToGive, giveRaw: 0, giveWaste: 0, issuedLot: ''
+                    });
+                }
+                line.issueLines = line.allocations.map(function (a) {
+                    return {
+                        mrqId: a.mrqId, planItemId: a.planItemId, lotId: '',
+                        qty: a.giveQty, unit: m.unit, cutW: 0, cutL: 0,
+                        note: '', overrideFrom: ''
+                    };
+                });
             }
-            issues.push(line);
+
+            // Nothing resolved to an allocation — no owed row matched. Skip
+            // rather than post an empty line the server would just no-op.
+            if (line.allocations.length > 0 || line.wastePicks.length > 0) {
+                issues.push(line);
+            }
         }
     });
 
@@ -2433,26 +3006,71 @@ function issueForSupervisor(supIdx) {
     btn.dataset.busy = '1';
     btn.disabled = true;
 
-    var CHUNK_SIZE = 10;
-    var issueChunks = [];
-    for (var i = 0; i < issues.length; i += CHUNK_SIZE) {
-        issueChunks.push(issues.slice(i, i + CHUNK_SIZE));
-    }
+    // CHUNK BY ALLOCATION COUNT, not by material. issueMaterials applies an
+    // explicit per-requirement allocation with point lookups, so its cost is
+    // O(allocations in the call) — but one press against a supervisor holding a
+    // big backlog can be thousands of allocations, and that payload is too large
+    // for a single invokeCustomApi (Creator trims the issuesJson string). So
+    // split into chunks of at most MAX_ALLOCS allocations, splitting a fat
+    // material line across chunks when it alone exceeds that.
+    //
+    // SEQUENTIAL, not parallel. Every chunk of one press shares ONE voucher:
+    // chunk 1 sends voucherIn:"" and gets the SIV number back, every later chunk
+    // sends it in and issueMaterials APPENDS its Issue_Lines to that same
+    // Material_Issue. Zoho does not serialise writes to one record, so two
+    // chunks appending to the same subform in parallel can lose rows — the
+    // calls therefore run one after another. Speed comes from MAX_ALLOCS being
+    // large (fewer, fatter calls), not from concurrency.
+    var MAX_ALLOCS = 100;
+    var issueChunks = splitIssuesByAllocation(issues, MAX_ALLOCS);
 
     var allErrors = [];
     var chunkIndex = 0;
+
+    // RATE-LIMIT RECOVERY. Zoho caps API calls per minute. A big handover is
+    // many sequential chunks and can trip that cap partway through — which used
+    // to abort the whole run and leave a partial voucher. Now a throttled chunk
+    // is RETRIED with exponential backoff instead of failing: the run pauses,
+    // waits, and picks up exactly where it left off (same chunkIndex). Only a
+    // non-retryable error, or too many retries, aborts.
+    //
+    // Each chunk is now its OWN Material_Issue (SIV-NNNNN) — no shared voucher
+    // threaded across chunks — so a partial run is just fewer vouchers, not a
+    // broken one. issueMaterials still takes a 3rd arg (Creator can't drop it);
+    // we send "".
+    //
+    // isRateLimited: Zoho surfaces throttling inconsistently — an HTTP 429, a
+    // body code (4834 / "too many requests" / "rate limit"), or a plain
+    // network-ish failure. Match broadly; a false positive just costs one wait.
+    var RETRY_WAITS_MS = [3000, 8000, 20000, 45000, 60000]; // then give up
+    var retryCount = 0;
+
+    function isRateLimited(err) {
+        var s = '';
+        try { s = JSON.stringify(err); } catch (e) { s = String(err); }
+        s = (s + ' ' + (err && err.message ? err.message : '')).toLowerCase();
+        return err && (
+            err.status === 429 || err.statusCode === 429 || err.code === 429 ||
+            s.indexOf('429') >= 0 ||
+            s.indexOf('too many request') >= 0 ||
+            s.indexOf('rate limit') >= 0 ||
+            s.indexOf('rate-limit') >= 0 ||
+            s.indexOf('4834') >= 0 ||
+            s.indexOf('throttl') >= 0 ||
+            s.indexOf('limit exceeded') >= 0
+        );
+    }
 
     function processNextChunk() {
         if (chunkIndex >= issueChunks.length) {
             closeProgressModal();
 
-            // All chunks processed successfully (or with manageable server-side validation errors)
             if (allErrors.length > 0) {
                 alert('Some materials could not be issued:\n' + allErrors.join('\n'));
             }
 
-            // Lock the inputs for this card regardless, then refresh from server
-            // so remaining/stock reflect the real post-issue state.
+            // Lock the inputs for this card, then refresh from server so
+            // remaining/stock reflect the real post-issue state.
             sup.materials.forEach(function (m, matIdx) {
                 var input = document.getElementById(rowInputId(supIdx, matIdx));
                 var checkbox = document.getElementById(rowCheckboxId(supIdx, matIdx));
@@ -2477,57 +3095,92 @@ function issueForSupervisor(supIdx) {
         }
 
         var displayTotal = issueChunks.length;
-        if (displayTotal > 1) {
-            btn.textContent = 'Issuing… (' + (chunkIndex + 1) + '/' + displayTotal + ')';
-        } else {
-            btn.textContent = 'Issuing…';
-        }
+        btn.textContent = displayTotal > 1
+            ? 'Issuing… (' + (chunkIndex + 1) + '/' + displayTotal + ')' : 'Issuing…';
 
-        var pct = ((chunkIndex) / displayTotal) * 100;
-        showProgressModal('Issuing to ' + sup.supervisorName, 'Batch ' + (chunkIndex + 1) + ' of ' + displayTotal, pct);
-
-        var currentChunk = issueChunks[chunkIndex];
+        var pct = (chunkIndex / displayTotal) * 100;
+        showProgressModal('Issuing to ' + sup.supervisorName,
+            'Batch ' + (chunkIndex + 1) + ' of ' + displayTotal, pct);
 
         ZOHO.CREATOR.DATA.invokeCustomApi({
             api_name: 'issueMaterials',
             http_method: 'POST',
             payload: {
                 supervisorId: sup.supervisorId,
-                issuesJson: JSON.stringify(currentChunk)
+                issuesJson: JSON.stringify(issueChunks[chunkIndex]),
+                // Vestigial 3rd arg — issueMaterials mints a fresh SIV-NNNNN per
+                // chunk now. Creator Custom API args can't be removed, so send "".
+                voucherIn: ''
             }
         }).then(function (response) {
             console.log('issue response chunk ' + chunkIndex + ':', response);
             var parsed;
-            try {
-                parsed = JSON.parse(response.result);
-            } catch (e) {
-                parsed = null;
+            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+
+            // A Deluge-side rate-limit can also come back INSIDE the payload as
+            // a DELUGE: error rather than a rejected promise. Treat that the
+            // same — retry the chunk, don't record it as a permanent failure.
+            var delugeThrottled = parsed && parsed.errors &&
+                parsed.errors.some(function (e) { return isRateLimited({ message: e }); });
+            if (delugeThrottled) {
+                scheduleRetry({ message: parsed.errors.join(' ') });
+                return;
             }
 
             if (parsed && parsed.errors && parsed.errors.length > 0) {
                 allErrors = allErrors.concat(parsed.errors);
             }
 
-            // Proceed to the next chunk
+            retryCount = 0;      // this chunk landed — reset for the next one
             chunkIndex++;
-            processNextChunk();
+            // Small gap between chunks so a long run approaches the per-minute
+            // API cap gradually instead of sprinting into it. Cheap insurance —
+            // the retry path above is still the real safety net.
+            setTimeout(processNextChunk, 400);
 
         }).catch(function (err) {
-            closeProgressModal();
-            console.error('issueMaterials error on chunk ' + chunkIndex + ':', err);
-            var batchNum = chunkIndex + 1;
-            alert('Failed to issue batch ' + batchNum + '. Check the console for details.\n\nAny batches before this one were successfully issued. The screen will now reload so you can see which items remain.');
-            
-            delete btn.dataset.busy;
-            btn.disabled = false;
-            btn.textContent = 'Issue to ' + sup.supervisorName;
-
-            // Reload to show what DID succeed before the crash
-            loadRequirements();
+            if (isRateLimited(err)) {
+                scheduleRetry(err);
+                return;
+            }
+            abortRun(err);
         });
     }
 
-    // Start the sequential chunk processing
+    // Wait, then re-run the SAME chunk — chunkIndex is untouched, so the
+    // handover resumes exactly where it stalled.
+    function scheduleRetry(err) {
+        if (retryCount >= RETRY_WAITS_MS.length) {
+            abortRun(err);
+            return;
+        }
+        var waitMs = RETRY_WAITS_MS[retryCount];
+        retryCount++;
+        console.warn('issueMaterials rate-limited on chunk ' + chunkIndex +
+            '; retry ' + retryCount + '/' + RETRY_WAITS_MS.length +
+            ' in ' + (waitMs / 1000) + 's', err);
+        var displayTotal = issueChunks.length;
+        btn.textContent = 'Rate-limited — retrying in ' + Math.round(waitMs / 1000) + 's…';
+        showProgressModal('Issuing to ' + sup.supervisorName,
+            'Batch ' + (chunkIndex + 1) + ' of ' + displayTotal +
+            ' — paused (rate limit), retrying in ' + Math.round(waitMs / 1000) + 's',
+            (chunkIndex / displayTotal) * 100);
+        setTimeout(processNextChunk, waitMs);
+    }
+
+    function abortRun(err) {
+        closeProgressModal();
+        console.error('issueMaterials error on chunk ' + chunkIndex + ':', err);
+        var batchNum = chunkIndex + 1;
+        alert('Issue stopped at batch ' + batchNum + ' of ' + issueChunks.length + '.\n\n' +
+            'Batches before this one went through. Press Issue again to send the rest — ' +
+            'it will pick up where it stopped.');
+        delete btn.dataset.busy;
+        btn.disabled = false;
+        btn.textContent = 'Issue to ' + sup.supervisorName;
+        loadRequirements();
+    }
+
     processNextChunk();
 }
 
@@ -2574,12 +3227,67 @@ function mergeRequirementPages(target, page) {
             }
         }
         if (existing) {
-            existing.materials = existing.materials.concat(block.materials);
+            for (var m = 0; m < block.materials.length; m++) {
+                var bm = block.materials[m];
+                var existingMat = null;
+                for (var n = 0; n < existing.materials.length; n++) {
+                    var em = existing.materials[n];
+                    if (em.materialId === bm.materialId &&
+                        em.cutWidth === bm.cutWidth &&
+                        em.cutLength === bm.cutLength &&
+                        em.isReissue === bm.isReissue) {
+                        existingMat = em;
+                        break;
+                    }
+                }
+                if (existingMat) {
+                    existingMat.required = (existingMat.required || 0) + (bm.required || 0);
+                    existingMat.issued = (existingMat.issued || 0) + (bm.issued || 0);
+                    existingMat.remaining = (existingMat.remaining || 0) + (bm.remaining || 0);
+                    
+                    if (bm.lines) {
+                        existingMat.lines = (existingMat.lines || []).concat(bm.lines);
+                    }
+                    if (existingMat.isFabric) {
+                        existingMat.requiredPieces = (existingMat.requiredPieces || 0) + (bm.requiredPieces || 0);
+                        existingMat.issuedPieces = (existingMat.issuedPieces || 0) + (bm.issuedPieces || 0);
+                        existingMat.wasteIssuedPieces = (existingMat.wasteIssuedPieces || 0) + (bm.wasteIssuedPieces || 0);
+                        existingMat.outstandingPieces = (existingMat.outstandingPieces || 0) + (bm.outstandingPieces || 0);
+                        existingMat.freshMeters = (existingMat.freshMeters || 0) + (bm.freshMeters || 0);
+                        existingMat.piecesCoveredByWaste = (existingMat.piecesCoveredByWaste || 0) + (bm.piecesCoveredByWaste || 0);
+                        existingMat.freshPieces = (existingMat.freshPieces || 0) + (bm.freshPieces || 0);
+                        existingMat.requiredTotal = (existingMat.requiredTotal || 0) + (bm.requiredTotal || 0);
+                        if (bm.wastePicks && bm.wastePicks.length > 0) {
+                            existingMat.wastePicks = (existingMat.wastePicks || []).concat(bm.wastePicks);
+                        }
+                    }
+                } else {
+                    existing.materials.push(bm);
+                }
+            }
         } else {
             target.push(block);
         }
     }
 }
+
+// PARALLEL PAGING. The old flow chained: each getStoreMaterialRequirements call
+// needed the previous call's plansConsumed to know its own skipCount, so a
+// supervisor holding a big backlog meant ~10 sequential round-trips.
+//
+// Now: one cheap getOpenPlanCount() up front, then fire ceil(count / PAGE_PLANS)
+// windows AT ONCE, each with a fixed skipCount it can compute without waiting on
+// anyone. getStoreMaterialRequirements gets a second arg (pagePlans) telling it
+// to process exactly that window and not stop early. Wall time drops from N
+// round-trips to ~2 (count, then all pages in flight together).
+//
+// mergeRequirementPages already reassembles overlapping supervisor blocks, so
+// the render is identical to before — just assembled from parallel responses.
+//
+// FALLBACK: if getOpenPlanCount fails, or returns 0/garbage, fall straight back
+// to the sequential chained walk (loadRequirementsSequential) — the proven path,
+// still there, unchanged.
+var REQ_PAGE_PLANS = 25;
 
 function loadRequirements() {
     var content = document.getElementById('dynamic-content');
@@ -2592,8 +3300,82 @@ function loadRequirements() {
         '<div class="skeleton-line"></div><div class="skeleton-line"></div>' +
         '<div class="skeleton-line w-70"></div></div>';
 
+    function done(merged) {
+        console.log('merged requirements:', merged);
+        refreshBtn.disabled = false;
+        try {
+            render(merged);
+        } catch (e) {
+            console.error('render failed:', e, merged);
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Could not read requirements</h2><p>Check the browser console for details.</p></div>';
+        }
+    }
+    function fail(err) {
+        console.error('loadRequirements error:', err);
+        refreshBtn.disabled = false;
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Failed to load requirements</h2><p>Check the browser console for details.</p></div>';
+    }
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getOpenPlanCount',
+        http_method: 'POST',
+        payload: {}
+    }).then(function (response) {
+        var count = 0;
+        try { count = (JSON.parse(response.result) || {}).count || 0; } catch (e) { count = 0; }
+
+        if (!count || count < 0) {
+            // Nothing open, or the count call gave us nothing usable — the
+            // sequential walk handles both (it returns [] fast when empty).
+            return loadRequirementsSequential(content, done, fail);
+        }
+
+        var pages = Math.ceil(count / REQ_PAGE_PLANS);
+        var merged = [];
+        var pending = pages;
+        var failed = false;
+
+        for (var p = 0; p < pages; p++) {
+            (function (skip) {
+                ZOHO.CREATOR.DATA.invokeCustomApi({
+                    api_name: 'getStoreMaterialRequirements',
+                    http_method: 'POST',
+                    payload: {
+                        skipCountTxt: String(skip),
+                        pagePlansTxt: String(REQ_PAGE_PLANS)
+                    }
+                }).then(function (resp) {
+                    if (failed) return;
+                    var parsed = JSON.parse(resp.result);
+                    mergeRequirementPages(merged, parsed.plans || []);
+                    pending--;
+                    if (pending === 0) done(merged);
+                }).catch(function (err) {
+                    if (failed) return;
+                    failed = true;
+                    // One window failed — fall back to the sequential walk from
+                    // scratch rather than render a half-loaded screen.
+                    console.warn('parallel page at skip ' + skip + ' failed, falling back to sequential', err);
+                    loadRequirementsSequential(content, done, fail);
+                });
+            })(p * REQ_PAGE_PLANS);
+        }
+    }).catch(function (err) {
+        console.warn('getOpenPlanCount failed, falling back to sequential paging', err);
+        loadRequirementsSequential(content, done, fail);
+    });
+}
+
+// THE ORIGINAL CHAINED WALK, kept as the fallback path. Each call's cursor is
+// the previous call's skipCount + plansConsumed; plansConsumed === 0 ends it.
+// Slower (sequential) but proven.
+//
+// pagePlansTxt is sent as "" — Creator Custom API arguments are all MANDATORY
+// (no optional args), so every call must pass it; the empty string is what puts
+// getStoreMaterialRequirements into its legacy chained mode.
+function loadRequirementsSequential(content, done, fail) {
     var merged = [];
-    var MAX_CALLS = 40; // safety cap - real stop condition is plansConsumed===0; this only guards against an unexpected server-side bug looping forever
+    var MAX_CALLS = 40; // safety cap - real stop is plansConsumed===0; this only guards a server bug looping forever
 
     function fetchPage(skipCount, callsSoFar) {
         if (callsSoFar >= MAX_CALLS) {
@@ -2604,7 +3386,8 @@ function loadRequirements() {
             api_name: 'getStoreMaterialRequirements',
             http_method: 'POST',
             payload: {
-                skipCountTxt: String(skipCount)
+                skipCountTxt: String(skipCount),
+                pagePlansTxt: ''
             }
         }).then(function (response) {
             var parsed = JSON.parse(response.result);
@@ -2617,20 +3400,7 @@ function loadRequirements() {
         });
     }
 
-    fetchPage(0, 0).then(function () {
-        console.log('merged requirements:', merged);
-        refreshBtn.disabled = false;
-        try {
-            render(merged);
-        } catch (e) {
-            console.error('render failed:', e, merged);
-            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Could not read requirements</h2><p>Check the browser console for details.</p></div>';
-        }
-    }).catch(function (err) {
-        console.error('invokeCustomApi error:', err);
-        refreshBtn.disabled = false;
-        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Failed to load requirements</h2><p>Check the browser console for details.</p></div>';
-    });
+    fetchPage(0, 0).then(function () { done(merged); }).catch(fail);
 }
 
 // ---- Tabs ----
@@ -3148,14 +3918,16 @@ function wasteHistHtml() {
             '<div class="mat-sku">' + escapeHtml(p.salesOrder || '') +
             (p.planNo ? ' · ' + escapeHtml(p.planNo) : '') + '</div>' +
             '</td>' +
-            '<td class="col-num">' + fmt(p.length) + ' &times; ' + fmt(p.width) +
+            '<td class="col-num col-nowrap">' + fmt(p.length) + ' &times; ' + fmt(p.width) +
             '<span class="unit"> cm</span></td>' +
             '<td class="col-num col-strong">' + p.count +
             '<span class="unit"> pcs</span></td>' +
+            '<td>' + (p.lot ? escapeHtml(p.lot) : '<span class="is-muted">&mdash;</span>') + '</td>' +
+            '<td>' + (p.carton ? escapeHtml(p.carton) : '<span class="is-muted">&mdash;</span>') + '</td>' +
             '<td>' + escapeHtml(p.supervisor || '—') + '</td>' +
             '<td><span class="status-pill ' + st.cls + '">' +
             escapeHtml(st.text) + '</span></td>' +
-            '<td>' + escapeHtml(p.declaredOn || '') + '</td>' +
+            '<td class="col-nowrap">' + escapeHtml(p.declaredOn || '') + '</td>' +
             '</tr>';
     }).join('');
 
@@ -3187,11 +3959,13 @@ function wasteHistHtml() {
         '<div class="table-wrapper">' +
         '<table><thead><tr>' +
         '<th>Piece</th>' +
-        '<th class="col-num">Cut piece size (L &times; W)</th>' +
+        '<th class="col-num col-nowrap">Cut size (L &times; W)</th>' +
         '<th class="col-num">Pieces</th>' +
+        '<th>Lot</th>' +
+        '<th>Carton</th>' +
         '<th>From</th>' +
         '<th>Status</th>' +
-        '<th>Declared</th>' +
+        '<th class="col-nowrap">Declared</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table>' +
         '</div>' +
         '</div>' +
@@ -4162,9 +4936,6 @@ function renderRequests(requests, openCount) {
             escapeHtml(requestKindLabel(r.kind)) + '</span></td>' +
             '<td class="material-name-cell">' +
             '<div class="mat-name">' + escapeHtml(r.material || '—') + '</div>' +
-            (r.orders > 0
-                ? '<div class="mat-sku">' + r.orders + ' order' + (r.orders === 1 ? '' : 's') + ' waiting</div>'
-                : '') +
             '</td>' +
             '<td class="col-num">' + fmt(r.qty) + '<span class="unit">' + escapeHtml(r.unit || '') + '</span></td>' +
             '<td class="col-num col-strong">' +

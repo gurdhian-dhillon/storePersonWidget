@@ -51,10 +51,10 @@ string seedOpeningLots(string skuPrefix, string dryRun)
 			}
 			lotA = (totQ / 2).round(2);
 			lotB = totQ - lotA;
-			unwA = (lotA / 3).round(2);
-			wshA = lotA - unwA;
-			unwB = (lotB / 3).round(2);
-			wshB = lotB - unwB;
+			unwA = 0;
+			wshA = lotA;
+			unwB = 0;
+			wshB = lotB;
 			if(writeAllowed == true)
 			{
 				insert into Raw_Material_Lot

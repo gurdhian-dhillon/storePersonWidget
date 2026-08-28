@@ -445,6 +445,13 @@ tbody tr.row-selected td {
     color: #047857;
 }
 
+/* The bulk "Raise all…" / "Raise PO for…" button in a section header — pushed
+   to the right edge, away from the section label. */
+.section-title .section-action {
+    margin-left: auto;
+    align-self: center;
+}
+
 /* Cut pieces coming out of the waste store instead of fresh fabric. Green
    because it is the good outcome - reuse rather than cutting new cloth. */
 .qty-sub.from-waste {
@@ -555,6 +562,16 @@ tbody tr.row-issued .col-strong {
 
 th.col-num {
     text-align: right;
+}
+
+/* Keep a value on one line — cut sizes like "2,055 × 127.96 cm" and dates
+   wrap badly in a narrow column otherwise. */
+.col-nowrap {
+    white-space: nowrap;
+}
+
+.is-muted {
+    color: var(--text-muted);
 }
 
 .primary-btn {
@@ -896,6 +913,52 @@ th.col-num {
     font-weight: 600;
     color: var(--text-muted);
     margin-bottom: 0.3rem;
+}
+
+/* What the PO is about to order, shown in the vendor modal before it commits. */
+.po-preview-wrap {
+    margin-bottom: 1.1rem;
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.po-preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+}
+
+.po-preview-table thead th {
+    position: sticky;
+    top: 0;
+    background: #f8fafc;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+.po-preview-table thead th.col-num { text-align: right; }
+
+.po-preview-table td {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid #eef2f6;
+    vertical-align: middle;
+}
+
+.po-preview-table tbody tr:last-child td,
+.po-preview-table tr:last-child td { border-bottom: 0; }
+
+.po-preview-table td.col-num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
 }
 
 .exc-panel select,

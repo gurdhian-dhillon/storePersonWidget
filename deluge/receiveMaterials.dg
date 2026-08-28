@@ -2,19 +2,82 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 {
 	// Supervisor confirms what he physically received.
 	//
+	// APPLIER, NOT RECONSTRUCTOR. This function used to rebuild the whole receipt
+	// server-side: walk every Material_Issue of the supervisor, every Issue_Lines
+	// row on each (THREE separate passes), fan the confirmed quantity across
+	// Material_Requirement[Plan==] for every open plan, then sweep every plan item
+	// and its requirements to roll statuses. On a supervisor holding a large old
+	// chunked handover - 1800+ lines on one voucher - each of those passes was
+	// 1800+ statement visits, and the statement-execution limit is NOT catchable:
+	// it kills the script and the widget gets a bare HTTP 500 with no error card.
+	//
+	// The widget already rendered exactly what he is confirming, line by line,
+	// from the PAGED getSupervisorMaterials - which resolves, per still-owed
+	// Issue_Line: the line id, its voucher, the lot, the requirement, the plan,
+	// and how much it still owes (already net of open disputes). So the widget now
+	// sends explicit per-line SETTLEMENTS and this function applies them with
+	// point lookups by record id. Cost is O(lines in THIS receipt), independent of
+	// how many vouchers or plans the supervisor has. Same shape issueMaterials and
+	// the accessory allocations array already use.
+	//
 	// receiptsJson:
 	// {
-	//   "materials":[ {"materialId":"123","received":9.5,"remark":"half metre short"} ],
-	//   "waste":[ {"rowId":"456","received":1,"remark":""} ]
+	//   "materials":[
+	//     { "materialId":"123", "received":9.5, "remark":"half metre short",
+	//       "settlements":[
+	//         { "issueLineId":"555", "voucherId":"77", "lot":"901",
+	//           "requirementId":"888", "planId":"50",
+	//           "settle":5.5,      // metres to take off In_Transit for this line
+	//           "confirmed":5.5 }  // of that, how much arrived (rest = shortfall)
+	//       ] } ],
+	//   "waste":[ {"rowId":"456","received":1,"remark":""} ],
+	//   "printedPieces":[ {"issueLineId":"555","voucherId":"77","received":3,"remark":""} ],
+	//   "plansTouched":["50","51"], // distinct plan ids to run the readiness sweep on
+	//   "finalize":true             // see below
 	// }
 	//
-	// Received quantities fan across his plan rows OLDEST PLAN FIRST - the same rule
-	// issueMaterials uses to spend Issued_Qty. Same rule, same order, same result,
-	// which is why no mapping of issue-to-plan needs storing anywhere.
+	// CHUNKED, LIKE issueMaterials. A big receipt has hundreds of settlements -
+	// too large for one invokeCustomApi payload, and too long for one execution.
+	// The widget splits the settlements / waste / printed rows into chunks and
+	// calls this once per chunk, sequentially, with rate-limit backoff.
+	//
+	// Every settlement this function applies is ADDITIVE per line
+	// (Settled_Qty += settle, Received_Qty += confirmed, In_Transit -= settle), so
+	// splitting them across N calls needs no threading and no shared record - each
+	// chunk just writes its own rows. Disputes are raised per chunk as the
+	// shortfalls land; each is independent.
+	//
+	// "finalize" is the ONLY thing that cannot run per chunk: the readiness sweep
+	// (Item_Status / Order_Status), the Issue_Status flip, and postTransferOrders.
+	// Run per chunk they would sweep on half-applied data and fire N transfer
+	// orders. The widget sends finalize:false on every chunk but the last, and
+	// finalize:true (with the FULL plansTouched list) on the last one - which does
+	// only the sweep + transfer, its settlements arrays already empty or small.
+	// A single unchunked receipt sends finalize:true and behaves exactly as
+	// before.
+	//
+	// TRUST THE WIDGET. The only guards kept are the two that stop a genuinely
+	// broken write: an unknown record id (point lookup finds nothing -> readable
+	// error, skip), and a stock field that would go negative (clamped to 0,
+	// reported, the settlement still recorded on the line).
 	//
 	// A short receipt is RECORDED, never auto-corrected. Stock was already
 	// decremented at issue time; quietly adjusting it here would mean the ledger
-	// changed under the store person without anyone deciding to.
+	// changed under the store person without anyone deciding to. The confirmed
+	// part of each settlement comes off In_Transit_Qty into production; the
+	// shortfall moves to Disputed_Qty and raises one Stock_Dispute per plan.
+	//
+	// WRITE-CONTRACT KEPT for getStoreIssueHistory / postTransferOrders /
+	// getOrderConsumption / resolveDispute:
+	//  - Issue_Lines.Settled_Qty advanced by "settle" (drives postTransferOrders'
+	//    Settled_Qty - Transferred_Qty).
+	//  - Material_Requirement.Received_Qty advanced by "confirmed" (drives the
+	//    readiness test row by row).
+	//  - Raw_Material / Raw_Material_Lot: In_Transit_Qty down by the settled part,
+	//    Disputed_Qty up by the shortfall.
+	//  - Stock_Dispute: one per plan carrying a gap, Direction="Outbound",
+	//    Material / Supervisor / Plan / Plan_Item / Lot stamped.
+	//  - Material_Issue.Issue_Status -> Received / Partially_Received per plan.
 
 	errJson = "";
 	okJson = "";
@@ -35,262 +98,68 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	mats = ifnull(inp.get("materials"),"[]").toString().toJSONList();
 	wastes = ifnull(inp.get("waste"),"[]").toString().toJSONList();
 	printed = ifnull(inp.get("printedPieces"),"[]").toString().toJSONList();
-	info "supId=" + supId + " matLines=" + mats.size() + " wasteLines=" + wastes.size() + " printedLines=" + printed.size();
-
-	// Partially Received is still open - the rest of the plan is yet to arrive.
-	//
-	// SORTED BY Priority_Key, THE SAME KEY issueMaterials USES - and that is not a
-	// preference, it is what makes this function correct. It stores no mapping of
-	// handover to plan and reconstructs which order a receipt belongs to by
-	// re-running the fan in the same order; the whole argument is "the same rule in
-	// the same order gives the same answer".
-	//
-	// It sorted by Added_Time until now, while issueMaterials sorted by
-	// Priority_Key. The two fans were therefore walking different sequences, so a
-	// partial receipt could credit Received_Qty to a different order's row than the
-	// one that was charged Issued_Qty - silently, and only visible as an order that
-	// would not close. Priority_Key came in later and this call was left behind.
-	//
-	// THE REAL FIX IS TO STOP RECONSTRUCTING. Material_Issue.Issue_Lines already
-	// records the Plan_Item, the Lot and the quantity of what actually crossed the
-	// counter, and the lot pass below is already driven from it. Driving the
-	// requirement fan from the same lines would remove the ordering dependency
-	// altogether, so a loose priority rule could never corrupt a ledger. Deferred
-	// deliberately: it restructures the stock and dispute writes in this function
-	// and none of it can be executed outside Creator, where matching the key is one
-	// line and closes today's divergence.
-	plans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress")] sort by Priority_Key;
+	plansTouchedIn = ifnull(inp.get("plansTouched"),"[]").toString().toJSONList();
+	// Absent -> true, so an unchunked receipt (no flag) finalizes as it always
+	// did. Only an explicit "false" from a non-last chunk suppresses the sweep.
+	doFinalize = (ifnull(inp.get("finalize"),"true").toString().trim() != "false");
+	// FINALIZE IS ITSELF RESUMABLE. A common trim received against ~100 open
+	// plans has ~100 plan ids in plansTouched, and the readiness sweep walks
+	// Plan_Item -> Material_Requirement -> Waste_Movement per plan - thousands of
+	// statement visits in one call, past the uncatchable limit. So a finalize
+	// call sweeps at most SWEEP_BUDGET plans, returns which are still to do, and
+	// the widget calls finalize again with just those until none are left. The
+	// warehouse transfer runs only on the finalize call that clears the list.
+	SWEEP_BUDGET = 15;
+	info "supId=" + supId + " matLines=" + mats.size() + " wasteLines=" + wastes.size() + " printedLines=" + printed.size() + " finalize=" + doFinalize + " plansTouched=" + plansTouchedIn.size();
 
 	//------------------------------------------------------------------------
-	// THE HANDOVER LINES, oldest first, fetched ONCE for the whole receipt.
+	// THE PLANS THIS RECEIPT TOUCHES, resolved to order numbers ONCE.
 	//
-	// The requirement rows say how much is owed; they have never said WHICH
-	// cloth it was. Material_Issue.Issue_Lines is the only record of that,
-	// because the lot is stamped there as it crosses the counter - so settling a
-	// lot's In_Transit_Qty has to be driven from here.
-	//
-	// Hoisted out of the materials loop deliberately. Re-querying per material
-	// would be one query per line on the receipt, which is the shape that blows
-	// the statement-execution limit - and that limit is not catchable.
+	// The widget names them (plansTouched) from the line detail it rendered, so
+	// there is no plan walk. A dispute names an order; the readiness sweep at
+	// the bottom only runs on these. Empty list -> nothing to sweep, which is
+	// correct for a receipt of only loose (no-requirement) lines.
 	//------------------------------------------------------------------------
-	//------------------------------------------------------------------------
-	// BOUNDED BY THE OLDEST OPEN PLAN, THE SAME BOUND getSupervisorMaterials
-	// USES, AND THEY HAVE TO MATCH.
-	//
-	// The walk below settles Settled_Qty against the quantity the supervisor
-	// typed - and that figure comes off getSupervisorMaterials, which is now
-	// bounded this way. Settling it against vouchers older than any open plan
-	// would spend his confirmation on cloth that screen never showed him,
-	// which is the same class of divergence the dispute-netting note further
-	// down was written about: the two functions must read the same set.
-	//
-	// The four statuses are getSupervisorMaterials' set, deliberately WIDER
-	// than the three in the plans query above. Narrowing it here would give a
-	// later cutoff than the screen used, so the receive would see fewer
-	// vouchers than the screen did - the exact mismatch this is avoiding.
-	//
-	// WHY NOT Issue_Status, which looks like the natural bound: STEP 4 of this
-	// same function flips it to "Received" for EVERY open handover on the
-	// plan, not just the one being received - so a voucher can read Received
-	// with lines still unsettled. postTransferOrders refuses to trigger on it
-	// for exactly that reason, and filtering on it here would silently stop
-	// settling those lines.
-	//
-	// A plan with no start date falls the query back to its old unbounded
-	// form. Slower, and it cannot be wrong.
-	//------------------------------------------------------------------------
-	oldestOpenStart = null;
-	startMissing = false;
-
-	for each  lpDate in Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Material Ready" || Order_Status == "Partially Received" || Order_Status == "In Progress")]
-	{
-		if(lpDate.Plan_Start_Date == null)
-		{
-			startMissing = true;
-		}
-		else if(oldestOpenStart == null || lpDate.Plan_Start_Date < oldestOpenStart)
-		{
-			oldestOpenStart = lpDate.Plan_Start_Date;
-		}
-	}
-
-	supIssues = Material_Issue[Issued_To == supId] sort by Added_Time;
-
-	if(oldestOpenStart != null && startMissing == false)
-	{
-		supIssues = Material_Issue[Issued_To == supId && Issue_Date >= oldestOpenStart] sort by Added_Time;
-	}
-
-	//------------------------------------------------------------------------
-	// Which order each plan belongs to, resolved ONCE.
-	//
-	// A dispute is raised per plan now, and both the notification mail and the
-	// message the supervisor sees have to name the order it is against - two
-	// rows reading "Stitching Thread / Green, 8 short" with nothing telling them
-	// apart is not something the store can act on. One query per open plan, of
-	// which he has a handful; inside the material loop it would be one per line
-	// on the receipt, which is the shape that blows the statement limit.
-	//------------------------------------------------------------------------
+	touchedPlanIds = List();
 	soNoByPlan = Map();
-	for each  planSo in plans
+	for each  ptRaw in plansTouchedIn
 	{
-		soTxtP = "";
-		for each  soRec in Sales_Order[ID == planSo.Sales_Order]
+		ptTxt = ifnull(ptRaw,"").toString().trim();
+		if(ptTxt != "" && touchedPlanIds.contains(ptTxt) == false)
 		{
-			soTxtP = ifnull(soRec.Sales_Order,"").toString().replaceAll("\"","'");
-		}
-		soNoByPlan.put(planSo.ID + "",soTxtP);
-	}
-
-	//------------------------------------------------------------------------
-	// WHAT IS ALREADY IN DISPUTE, AND THEREFORE NOT PART OF THIS HANDOVER.
-	//
-	// getSupervisorMaterials takes open disputes off the figure it puts on his
-	// screen, so the number he types is already NET of them. This function did
-	// not - it read pending straight off Issued_Qty - Received_Qty - and the two
-	// disagreed by exactly the disputed amount the moment a dispute was left open
-	// while more of the same material was issued against the same plan.
-	//
-	// What that looked like: the screen offers him the new cloth only, he confirms
-	// all of it and is right to, and this reads the confirmation as short by the
-	// OLD dispute's quantity. A second dispute for pieces already disputed, and
-	// Disputed_Qty charged for them twice - the same material counted as missing
-	// twice over, on a receipt where he did nothing wrong. It also settled the
-	// disputed quantity off In_Transit_Qty a second time, which it had already
-	// left on the receipt that raised the dispute.
-	//
-	// Same rule and same key as the screen, drawn down as it is applied so two
-	// requirement rows on one plan and material cannot each discount the same
-	// dispute. The disputed part is never credited to Received_Qty either, which
-	// is correct: it is disputed, not received.
-	//------------------------------------------------------------------------
-	openDispPM = Map();
-	openDispWP = Map();
-
-	for each  dspO in Stock_Dispute[Supervisor == supId && Status == "Open"]
-	{
-		dqStrO = ifnull(dspO.Disputed_Qty,"0").toString().trim();
-		if(dqStrO == "")
-		{
-			dqStrO = "0";
-		}
-
-		resSoFarO = 0.0;
-		for each  rlO in dspO.Resolution_Lines
-		{
-			rqStrO = ifnull(rlO.Resolved_Qty,"0").toString().trim();
-			if(rqStrO == "")
+			touchedPlanIds.add(ptTxt);
+			soTxtP = "";
+			for each  ppRec in Production_Planning[ID == ptTxt.toLong()]
 			{
-				rqStrO = "0";
-			}
-			resSoFarO = resSoFarO + rqStrO.toDecimal();
-		}
-
-		stillOpenO = dqStrO.toDecimal() - resSoFarO;
-
-		if(stillOpenO > 0)
-		{
-			if(ifnull(dspO.Is_Waste,false) == true && dspO.Waste_Piece != null)
-			{
-				wKeyO = dspO.Waste_Piece + "";
-				wHaveO = openDispWP.get(wKeyO);
-				if(wHaveO == null)
+				ppSoTxt = ifnull(ppRec.Sales_Order,"").toString().trim();
+				if(ppSoTxt != "")
 				{
-					wHaveO = 0.0;
-				}
-				openDispWP.put(wKeyO,wHaveO + stillOpenO);
-			}
-			else if(dspO.Plan != null && dspO.Material != null)
-			{
-				pmKeyO = dspO.Plan + "|" + dspO.Material;
-				pmHaveO = openDispPM.get(pmKeyO);
-				if(pmHaveO == null)
-				{
-					pmHaveO = 0.0;
-				}
-				openDispPM.put(pmKeyO,pmHaveO + stillOpenO);
-			}
-		}
-	}
-
-	//------------------------------------------------------------------------
-	// PRINTED FABRIC PIECES ARE SETTLED BY THEIR OWN CARD, NEVER BY THE
-	// AGGREGATE - and this map is what stops the two settling the same metres
-	// twice.
-	//
-	// getSupervisorMaterials shows the material row NET of every open
-	// PRINTED_PIECE line, because each piece is confirmed individually on a
-	// card of its own. The figure the supervisor types is therefore already
-	// net of them. Rebuilding the pending total from Issued_Qty - Received_Qty
-	// below counts those metres a SECOND time, and all three consequences were
-	// live on a material holding both rolls and printed pieces: the shortfall
-	// test raised a dispute over cloth the printed card was about to bring,
-	// In_Transit was drained once by the aggregate and again by the piece
-	// receipt - straight past zero into negative - and the requirement was
-	// credited twice, so Received_Qty could exceed Issued_Qty.
-	//
-	// PER REQUIREMENT ROW, not per material. Received_Qty is what the
-	// readiness test at the bottom of this function reads row by row, so
-	// netting at material level would leave the total right and the individual
-	// rows wrong - which is the shape that strands an item at
-	// Awaiting_Material with nothing saying why.
-	//
-	// Drawn down as it is applied, the same way openDispPM is and for the same
-	// reason: two requirement rows must not each discount the same line.
-	//
-	// A printed line with no Requirement behind it cannot be attributed to any
-	// row, so it is held aside per material and taken off the total instead.
-	//------------------------------------------------------------------------
-	printedPendByReq = Map();
-	printedPendLoose = Map();
-
-	for each  miPP in supIssues
-	{
-		for each  lnPP in miPP.Issue_Lines
-		{
-			if(ifnull(lnPP.Lot_Override_Note,"").toString().contains("PRINTED_PIECE"))
-			{
-				ppQtyS = ifnull(lnPP.Qty,"0").toString().trim();
-				if(ppQtyS == "")
-				{
-					ppQtyS = "0";
-				}
-				ppSetS = ifnull(lnPP.Settled_Qty,"0").toString().trim();
-				if(ppSetS == "")
-				{
-					ppSetS = "0";
-				}
-				ppLeft = ppQtyS.toDecimal() - ppSetS.toDecimal();
-
-				if(ppLeft > 0)
-				{
-					if(lnPP.Requirement != null)
+					for each  soRec in Sales_Order[ID == ppSoTxt.toLong()]
 					{
-						ppKey = lnPP.Requirement + "";
-						ppHave = printedPendByReq.get(ppKey);
-						if(ppHave == null)
-						{
-							ppHave = 0.0;
-						}
-						printedPendByReq.put(ppKey,ppHave + ppLeft);
-					}
-					else if(lnPP.Material != null)
-					{
-						ppMKey = lnPP.Material + "";
-						ppMHave = printedPendLoose.get(ppMKey);
-						if(ppMHave == null)
-						{
-							ppMHave = 0.0;
-						}
-						printedPendLoose.put(ppMKey,ppMHave + ppLeft);
+						soTxtP = ifnull(soRec.Sales_Order,"").toString().replaceAll("\"","'");
 					}
 				}
 			}
+			soNoByPlan.put(ptTxt,soTxtP);
 		}
 	}
 
+	// Vouchers this receipt settled a line on - materials AND printed pieces.
+	// After the settlement passes, each of these is re-checked: a voucher whose
+	// every Issue_Line now has Settled_Qty >= Qty is flipped to "Received", and
+	// one with some still owed to "Partially_Received". This does NOT depend on
+	// Material_Issue.Plan, on plansTouched, or on the finalize call - the old
+	// flip lived only inside the readiness sweep and missed a voucher whose
+	// plan was not in plansTouched or whose Plan field was empty / pointed at a
+	// different plan of a multi-plan handover.
+	touchedVoucherIds = List();
+
 	//------------------------------------------------------------------------
-	// Fungible materials - metres, cones, labels. Fan across the plan rows.
+	// MATERIALS - apply each line settlement the widget computed.
+	//
+	// The widget has already distributed his confirmed quantity across the
+	// still-owed lines oldest-first and worked out, per line, how much to settle
+	// and how much of that actually arrived. This loop only writes it.
 	//------------------------------------------------------------------------
 	for each  mRaw in mats
 	{
@@ -308,6 +177,7 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 		}
 		gotQty = rStr.toDecimal();
 		remark = ifnull(mm.get("remark"),"").toString();
+		setts = ifnull(mm.get("settlements"),"[]").toString().toJSONList();
 
 		if(matId == "" || gotQty < 0)
 		{
@@ -319,192 +189,217 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 		}
 		else
 		{
-			toFan = gotQty;
-			pendingTotal = 0.0;
 			matName = "";
 			matUnit = "";
+			settledTot = 0.0;
+			confirmedTot = 0.0;
+			shortTot = 0.0;
 
-			//--------------------------------------------------------------
-			// THE SHORTFALL IS RECORDED PER PLAN, because that is where it
-			// actually lands and every reader looks for it there.
-			//
-			// The receipt is against a bulk handover that can span orders, and
-			// the fan below credits the confirmed quantity OLDEST PLAN FIRST. So
-			// the gap always ends up on the NEWEST rows - while a single dispute
-			// used to be stamped with the FIRST plan that had anything pending,
-			// which is the opposite end of the same walk.
-			//
-			// Everything downstream keys off that plan. getSupervisorMaterials
-			// discounts open disputes per plan+material; resolveDispute re-opens
-			// Material_Requirement[Plan == dsp.Plan]. Name a plan whose rows were
-			// credited in full and both walk rows with a zero gap: the material
-			// stayed on his receive screen as an ordinary pending delivery, and a
-			// Store_Correction handed the stock back while re-opening nothing, so
-			// the store was never asked to issue it again. Both were live, and
-			// both are the same mistake.
-			//
-			// ONE DISPUTE PER PLAN THAT CARRIES A GAP. A receipt short on one
-			// material across two orders is genuinely two questions - the store
-			// re-issues against each order separately - and it keeps both readers
-			// correct without either of them having to learn about the fan.
-			//
-			// Four parallel maps rather than one of maps: a Deluge Map holding
-			// Maps does not survive being read back reliably, and these are only
-			// ever read by key.
-			//--------------------------------------------------------------
+			// Shortfall gathered PER PLAN - that is where downstream reads look
+			// for it. getSupervisorMaterials discounts open disputes per
+			// plan+material; resolveDispute re-opens Material_Requirement[Plan ==
+			// dsp.Plan]. Four parallel maps, not a Map of Maps - the latter does
+			// not survive being read back reliably in Deluge.
 			shortKeys = List();
 			shortQty = Map();
 			shortPend = Map();
 			shortGot = Map();
 			shortItem = Map();
 
-			for each  plan in plans
+			// Which lot carries the largest shortfall share - the one the
+			// dispute record names (resolveDispute restores to it; the lots
+			// themselves each carry their own share already).
+			dispLotId = "";
+			dispLotShare = 0.0;
+
+			for each  stRaw in setts
 			{
-				for each  row in Material_Requirement[Plan == plan.ID]
+				st = stRaw.toMap();
+				liTxt = ifnull(st.get("issueLineId"),"").toString().trim();
+				vTxt = ifnull(st.get("voucherId"),"").toString().trim();
+				reqTxt = ifnull(st.get("requirementId"),"").toString().trim();
+				planTxt = ifnull(st.get("planId"),"").toString().trim();
+				lotTxt = ifnull(st.get("lot"),"").toString().trim();
+
+				seStr = ifnull(st.get("settle"),"0").toString().trim();
+				if(seStr == "")
 				{
-					if(row.Material != null && row.Material.toString() == matId && row.Assigned_To == supId)
+					seStr = "0";
+				}
+				coStr = ifnull(st.get("confirmed"),"0").toString().trim();
+				if(coStr == "")
+				{
+					coStr = "0";
+				}
+				settleQ = seStr.toDecimal();
+				confirmQ = coStr.toDecimal();
+				if(confirmQ > settleQ)
+				{
+					confirmQ = settleQ;
+				}
+				shortQ = settleQ - confirmQ;
+
+				if(settleQ <= 0)
+				{
+					continue;
+				}
+
+				// --- 1. Settle the Issue_Line, via its voucher (point lookup) ---
+				lineFound = false;
+				if(vTxt != "" && liTxt != "")
+				{
+					if(touchedVoucherIds.contains(vTxt) == false)
 					{
-						matName = row.Material_Name;
-						matUnit = ifnull(row.Unit,"").toString();
-						issStr = ifnull(row.Issued_Qty,"0").toString().trim();
-						if(issStr == "")
+						touchedVoucherIds.add(vTxt);
+					}
+					for each  miRec in Material_Issue[ID == vTxt.toLong()]
+					{
+						for each  miLn in miRec.Issue_Lines
 						{
-							issStr = "0";
-						}
-						recStr = ifnull(row.Received_Qty,"0").toString().trim();
-						if(recStr == "")
-						{
-							recStr = "0";
-						}
-						already = recStr.toDecimal();
-						
-						// If it was null, initialize it so it displays as 0 instead of blank
-						if (row.Received_Qty == null) {
-							row.Received_Qty = already;
-						}
-
-						rowPend = issStr.toDecimal() - already;
-
-						// Net off anything on this plan and material that is
-						// already reported missing. It belongs to the disputes
-						// screen until somebody answers it, and it was not on the
-						// figure he was shown either.
-						pmKeyF = plan.ID + "|" + matId;
-						dispLeftF = openDispPM.get(pmKeyF);
-						if(dispLeftF != null && dispLeftF > 0 && rowPend > 0)
-						{
-							takeOffF = dispLeftF;
-							if(takeOffF > rowPend)
+							if(miLn.ID == liTxt.toLong())
 							{
-								takeOffF = rowPend;
-							}
-							rowPend = rowPend - takeOffF;
-							openDispPM.put(pmKeyF,dispLeftF - takeOffF);
-						}
-
-						// And net off what this row's PRINTED_PIECE lines still
-						// owe - see the map built before this loop. Those metres
-						// are confirmed on their own cards, they were not on the
-						// figure he was shown either, and settling them here as
-						// well is what drove In_Transit negative.
-						ppRowKey = row.ID + "";
-						ppRowLeft = printedPendByReq.get(ppRowKey);
-						if(ppRowLeft != null && ppRowLeft > 0 && rowPend > 0)
-						{
-							ppTake = ppRowLeft;
-							if(ppTake > rowPend)
-							{
-								ppTake = rowPend;
-							}
-							rowPend = rowPend - ppTake;
-							printedPendByReq.put(ppRowKey,ppRowLeft - ppTake);
-						}
-
-						if(rowPend > 0)
-						{
-							pendingTotal = pendingTotal + rowPend;
-
-							// Declared before the branch, not inside it - a name
-							// first assigned inside an if is not safe to read
-							// after a pass where the if did not run.
-							give = 0.0;
-							if(toFan > 0)
-							{
-								give = rowPend;
-								if(toFan < rowPend)
+								lineFound = true;
+								lnSetS = ifnull(miLn.Settled_Qty,"0").toString().trim();
+								if(lnSetS == "")
 								{
-									give = toFan;
+									lnSetS = "0";
 								}
-								row.Received_Qty = already + give;
-								toFan = toFan - give;
-							}
-
-							pKey = plan.ID + "";
-							if(shortQty.get(pKey) == null)
-							{
-								shortKeys.add(pKey);
-								shortQty.put(pKey,0.0);
-								shortPend.put(pKey,0.0);
-								shortGot.put(pKey,0.0);
-								shortItem.put(pKey,"");
-							}
-							shortQty.put(pKey,shortQty.get(pKey) + (rowPend - give));
-							shortPend.put(pKey,shortPend.get(pKey) + rowPend);
-							shortGot.put(pKey,shortGot.get(pKey) + give);
-
-							// The item the ticket points at is the first one that
-							// actually went short, not the first one that had
-							// anything owed. Those are different rows the moment a
-							// plan is part-credited, and the second is the one a
-							// person opening the dispute needs to look at.
-							if((rowPend - give) > 0 && ifnull(shortItem.get(pKey),"").toString() == "")
-							{
-								shortItem.put(pKey,ifnull(row.Plan_Item,"").toString());
+								lnQtyS = ifnull(miLn.Qty,"0").toString().trim();
+								if(lnQtyS == "")
+								{
+									lnQtyS = "0";
+								}
+								room = lnQtyS.toDecimal() - lnSetS.toDecimal();
+								applyS = settleQ;
+								if(applyS > room)
+								{
+									// Line already settled past this point by an
+									// earlier receipt - never drive Settled_Qty
+									// past Qty.
+									applyS = room;
+									if(applyS < 0)
+									{
+										applyS = 0.0;
+									}
+								}
+								miLn.Settled_Qty = lnSetS.toDecimal() + applyS;
+								if(ifnull(miLn.Material_Name,"").toString().trim() != "")
+								{
+									matName = ifnull(miLn.Material_Name,"").toString();
+								}
+								if(ifnull(miLn.Unit,"").toString().trim() != "")
+								{
+									matUnit = ifnull(miLn.Unit,"").toString();
+								}
 							}
 						}
 					}
 				}
-			}
-
-			// PRINTED_PIECE lines that named no requirement could not be
-			// attributed to any row above, so they come off the total here.
-			// Nothing writes such a line today - issueMaterials always stamps
-			// one - but a line whose requirement was later deleted reads the
-			// same way, and counting it would raise a dispute for cloth the
-			// printed card is about to bring.
-			ppLoose = printedPendLoose.get(matId);
-			if(ppLoose != null && ppLoose > 0)
-			{
-				pendingTotal = pendingTotal - ppLoose;
-				if(pendingTotal < 0)
+				if(lineFound == false)
 				{
-					pendingTotal = 0.0;
+					if(errJson != "")
+					{
+						errJson = errJson + ",";
+					}
+					errJson = errJson + "\"Material " + matId + ": issue line " + liTxt + " not found\"";
+					continue;
+				}
+
+				settledTot = settledTot + settleQ;
+				confirmedTot = confirmedTot + confirmQ;
+				shortTot = shortTot + shortQ;
+
+				// --- 2. Credit the requirement's Received_Qty (point lookup) ---
+				if(reqTxt != "")
+				{
+					for each  reqRec in Material_Requirement[ID == reqTxt.toLong()]
+					{
+						rqRcvS = ifnull(reqRec.Received_Qty,"0").toString().trim();
+						if(rqRcvS == "")
+						{
+							rqRcvS = "0";
+						}
+						reqRec.Received_Qty = rqRcvS.toDecimal() + confirmQ;
+						if(matName == "")
+						{
+							matName = ifnull(reqRec.Material_Name,"").toString();
+						}
+						if(matUnit == "")
+						{
+							matUnit = ifnull(reqRec.Unit,"").toString();
+						}
+					}
+				}
+
+				// --- 3. Move the lot's In_Transit -> (production / disputed) ---
+				if(lotTxt != "")
+				{
+					for each  lotSet in Raw_Material_Lot[ID == lotTxt.toLong()]
+					{
+						ltiS = ifnull(lotSet.In_Transit_Qty,"0").toString().trim();
+						if(ltiS == "")
+						{
+							ltiS = "0";
+						}
+						ltdS = ifnull(lotSet.Disputed_Qty,"0").toString().trim();
+						if(ltdS == "")
+						{
+							ltdS = "0";
+						}
+						ltIn = ltiS.toDecimal();
+						offIt = settleQ;
+						if(offIt > ltIn)
+						{
+							// Never drive a lot's in-transit negative - a re-run
+							// or a race would otherwise take it past zero.
+							offIt = ltIn;
+						}
+						lotSet.In_Transit_Qty = ltIn - offIt;
+						if(shortQ > 0)
+						{
+							lotSet.Disputed_Qty = ltdS.toDecimal() + shortQ;
+						}
+					}
+					if(shortQ > dispLotShare)
+					{
+						dispLotShare = shortQ;
+						dispLotId = lotTxt;
+					}
+				}
+
+				// --- 4. Gather the shortfall against its plan ---
+				if(shortQ > 0 && planTxt != "")
+				{
+					if(shortQty.get(planTxt) == null)
+					{
+						shortKeys.add(planTxt);
+						shortQty.put(planTxt,0.0);
+						shortPend.put(planTxt,0.0);
+						shortGot.put(planTxt,0.0);
+						shortItem.put(planTxt,"");
+					}
+					shortQty.put(planTxt,shortQty.get(planTxt) + shortQ);
+					shortPend.put(planTxt,shortPend.get(planTxt) + settleQ);
+					shortGot.put(planTxt,shortGot.get(planTxt) + confirmQ);
+					if(ifnull(shortItem.get(planTxt),"").toString() == "" && reqTxt != "")
+					{
+						for each  reqPi in Material_Requirement[ID == reqTxt.toLong()]
+						{
+							shortItem.put(planTxt,ifnull(reqPi.Plan_Item,"").toString());
+						}
+					}
+				}
+				else if(shortQ > 0)
+				{
+					// A settlement with a shortfall but no plan - a loose line.
+					// Still has to come off In_Transit on the parent below; it
+					// just cannot raise a per-plan dispute.
+					shortPend.put("_loose",ifnull(shortPend.get("_loose"),0.0) + settleQ);
 				}
 			}
 
-			shortBy = pendingTotal - gotQty;
-			if(shortBy < 0)
-			{
-				// More confirmed than went out. Capped rather than trusted -
-				// the extra came from somewhere else, and inventing stock to
-				// match a typo is worse than the typo.
-				shortBy = 0;
-			}
-
-			//--------------------------------------------------------------
-			// THIS is where material actually leaves the company. Everything
-			// the supervisor confirmed comes off In_Transit and is gone into
-			// production; anything missing moves to Disputed, where it stays
-			// owned but unaccounted until somebody explains it.
-			//
-			// The whole pending amount leaves In_Transit either way - the
-			// handover is settled now, one way or the other.
-			//--------------------------------------------------------------
-			settleQty = 0.0;
-			dispLotId = "";
-			dispLotShare = 0.0;
-
-			if(pendingTotal > 0)
+			// --- 5. Move the parent Raw_Material stock, once per material ---
+			if(settledTot > 0)
 			{
 				for each  rmStock in Raw_Material[ID == matId.toLong()]
 				{
@@ -521,173 +416,38 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 					itQty = itStr.toDecimal();
 					dispQty = dispStr.toDecimal();
 
-					settleQty = pendingTotal;
-					if(settleQty > itQty)
+					offParent = settledTot;
+					if(offParent > itQty)
 					{
 						// Cannot settle more than is actually in transit -
-						// otherwise a re-run would drive it negative.
-						settleQty = itQty;
+						// otherwise a re-run drives it negative, and a negative
+						// In_Transit reads as stock the company does not have on
+						// every screen that sums it.
+						offParent = itQty;
 					}
-
-					rmStock.In_Transit_Qty = itQty - settleQty;
-					if(shortBy > 0)
+					rmStock.In_Transit_Qty = itQty - offParent;
+					if(shortTot > 0)
 					{
-						rmStock.Disputed_Qty = dispQty + shortBy;
+						rmStock.Disputed_Qty = dispQty + shortTot;
 					}
 				}
 
-				//------------------------------------------------------------
-				// THE SAME SETTLEMENT, LOT BY LOT.
-				//
-				// A second pass over the handover lines, OLDEST FIRST - the same
-				// order the requirement fan above uses, so the two agree by
-				// construction rather than by a mapping anybody has to maintain.
-				//
-				// Settled_Qty on the line is what makes this resumable across
-				// receipts. It cannot be derived from Received_Qty instead:
-				// a short receipt settles the whole pending amount off in-transit
-				// but only credits the confirmed part to Received_Qty, so the two
-				// diverge by exactly the disputed amount and every later receipt
-				// would settle the wrong lines.
-				//
-				// Within each line the CONFIRMED metres are taken first and the
-				// shortfall falls on what is left. So a receipt that is short
-				// puts the gap on the newest cloth, which is the cloth that did
-				// not turn up.
-				//------------------------------------------------------------
-				settleLeft = settleQty;
-				gotLeft = gotQty;
-
-				for each  miRec in supIssues
-				{
-					for each  miLn in miRec.Issue_Lines
-					{
-						lnMatTxt = ifnull(miLn.Material,"").toString().trim();
-
-						// The cheap test first: a line for another material stops
-						// here rather than being parsed and thrown away.
-						if(settleLeft > 0 && lnMatTxt == matId)
-						{
-							if(ifnull(miLn.Lot_Override_Note,"").toString().contains("PRINTED_PIECE"))
-							{
-								continue;
-							}
-							
-							lnQtyS = ifnull(miLn.Qty,"0").toString().trim();
-							if(lnQtyS == "")
-							{
-								lnQtyS = "0";
-							}
-							lnSetS = ifnull(miLn.Settled_Qty,"0").toString().trim();
-							if(lnSetS == "")
-							{
-								lnSetS = "0";
-							}
-
-							lnRemain = lnQtyS.toDecimal() - lnSetS.toDecimal();
-
-							if(lnRemain > 0)
-							{
-								takeT = lnRemain;
-								if(takeT > settleLeft)
-								{
-									takeT = settleLeft;
-								}
-
-								// Confirmed first, shortfall on the remainder.
-								confT = takeT;
-								if(confT > gotLeft)
-								{
-									confT = gotLeft;
-								}
-								shortT = takeT - confT;
-
-								miLn.Settled_Qty = lnSetS.toDecimal() + takeT;
-								settleLeft = settleLeft - takeT;
-								gotLeft = gotLeft - confT;
-
-								lnLotTxt = ifnull(miLn.Lot,"").toString().trim();
-								if(lnLotTxt != "")
-								{
-									for each  lotSet in Raw_Material_Lot[ID == lnLotTxt.toLong()]
-									{
-										ltiS = ifnull(lotSet.In_Transit_Qty,"0").toString().trim();
-										if(ltiS == "")
-										{
-											ltiS = "0";
-										}
-										ltdS = ifnull(lotSet.Disputed_Qty,"0").toString().trim();
-										if(ltdS == "")
-										{
-											ltdS = "0";
-										}
-
-										ltIn = ltiS.toDecimal();
-										offIt = takeT;
-										if(offIt > ltIn)
-										{
-											// Same guard as the parent: never
-											// drive a lot's in-transit negative.
-											offIt = ltIn;
-										}
-										lotSet.In_Transit_Qty = ltIn - offIt;
-
-										if(shortT > 0)
-										{
-											lotSet.Disputed_Qty = ltdS.toDecimal() + shortT;
-										}
-									}
-
-									// WHICH LOT THE DISPUTE NAMES.
-									//
-									// A Stock_Dispute is one record for the whole
-									// shortfall, so it can hold one lot - but a
-									// short receipt CAN straddle two lines and so
-									// two lots. The lot carrying the LARGEST share
-									// is stamped, because resolveDispute restores
-									// to it and the biggest share is the best
-									// single guess.
-									//
-									// The lots themselves are already correct
-									// above - each carries its own share of
-									// Disputed_Qty - so only the resolution is
-									// approximate, and only when a shortfall
-									// straddles two handovers. If that ever turns
-									// out to happen in practice, the real fix is a
-									// dispute per lot rather than a better guess.
-									if(shortT > dispLotShare)
-									{
-										dispLotShare = shortT;
-										dispLotId = lnLotTxt;
-									}
-								}
-							}
-						}
-					}
-				}
+				// INVENTORY ADJUSTMENT DISABLED FOR NOW. This used to enqueue a
+				// Consumption row (settleQty - shortBy) into Inventory_Post_Queue
+				// via thisapp.queueInventoryPost("Consumption", ...). We are not
+				// creating Zoho Inventory adjustments at the moment, so receiving
+				// material updates Creator only and leaves the external adjustment
+				// queue untouched. The warehouse transfer at the end of this
+				// function is a separate thing and stays.
 			}
 
-			//--------------------------------------------------------------
-			// INVENTORY ADJUSTMENT DISABLED FOR NOW.
-			//
-			// This used to enqueue a Consumption row into Inventory_Post_Queue:
-			//
-			//   consumedQty = settleQty - shortBy;
-			//   if(consumedQty < 0)
-			//   {
-			//       consumedQty = 0;
-			//   }
-			//   if(consumedQty > 0)
-			//   {
-			//       invQRes = thisapp.queueInventoryPost("Consumption","Raw_Material",matId,matId,consumedQty.toString());
-			//   }
-			//
-			// We are not creating Zoho Inventory adjustments at the moment, so
-			// receiving material must update Creator only and leave the external
-			// adjustment queue untouched.
-			//--------------------------------------------------------------
+			if(matName == "")
+			{
+				matName = "Material " + matId;
+			}
 
-			if(shortBy > 0)
+			// --- 6. Raise one Stock_Dispute per plan that carries a gap ---
+			if(shortTot > 0 && shortKeys.size() > 0)
 			{
 				noteTxt = "";
 				if(remark != "")
@@ -695,15 +455,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 					noteTxt = " - " + remark.replaceAll("\"","'");
 				}
 
-				// Reported, never auto-corrected. A dispute is a question for a
-				// person - was it mismeasured, taken by someone else, or lost -
-				// and the system cannot answer any of those.
-				//
-				// His remark is stored on every dispute this receipt raises as
-				// well as echoed back below. The echo is gone the moment he closes
-				// the screen, and the store then opens a dispute with no idea what
-				// he saw. He said it once about one handover, so the same words
-				// belong on each order it turned out to span.
 				for each  pKey2 in shortKeys
 				{
 					planShort = shortQty.get(pKey2);
@@ -713,10 +464,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 
 						try
 						{
-							// Issued and Received are THIS PLAN's share, not the
-							// receipt's total. A ticket saying 188 issued when the
-							// order it names only ever owed 168 sends whoever opens
-							// it looking for twenty cones that were never against it.
 							newDispId = insert into Stock_Dispute
 							[
 								Material_Name=matName
@@ -736,17 +483,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 							{
 								dsp.Material = matId.toLong();
 								dsp.Supervisor = supId;
-								// Where the cloth came off, so a Store_Correction can put
-								// it back on the same lot rather than on the material at
-								// large. Empty on a pre-lot handover, which resolveDispute
-								// treats as "parent only" exactly as it always did.
-								//
-								// ONE LOT FOR THE WHOLE RECEIPT, stamped on each of
-								// these. The lot pass above already charged that lot
-								// the full shortfall, and each resolution restores its
-								// own share capped at what the lot still holds as
-								// disputed - so the parts add back up to the whole
-								// however many orders the gap spanned.
 								if(dispLotId != "")
 								{
 									dsp.Lot = dispLotId.toLong();
@@ -758,9 +494,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 									dsp.Plan_Item = itemTxt.toLong();
 								}
 							}
-							// Gathered for the notification. Inside the try, after the
-							// insert succeeded - a dispute that failed to write must not
-							// be announced as though it exists.
 							dispRows.add(matName + "|" + planSoNo + "|" + matUnit + "|" + shortPend.get(pKey2) + "|" + shortGot.get(pKey2) + "|" + planShort);
 						}
 						catch (e2)
@@ -781,12 +514,13 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 			{
 				okJson = okJson + ",";
 			}
-			okJson = okJson + "{\"materialId\":\"" + matId + "\",\"received\":" + gotQty + ",\"short\":" + shortBy + "}";
+			okJson = okJson + "{\"materialId\":\"" + matId + "\",\"received\":" + confirmedTot + ",\"short\":" + shortTot + "}";
 		}
 	}
 
 	//------------------------------------------------------------------------
-	// Waste pieces - specific rows, no fanning. He is holding that piece.
+	// Waste pieces - rowId is a Waste_Movement id, a top-level record, so this
+	// is already a true point lookup. Unchanged in shape.
 	//------------------------------------------------------------------------
 	for each  wRaw in wastes
 	{
@@ -798,15 +532,8 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 			wrStr = "0";
 		}
 		gotPcs = wrStr.toDecimal().toLong();
-
-		// Why the remnant is short, in his words. Same field, same screen and
-		// same reader as the remark on a material line - a short offcut raises
-		// the same Outbound dispute a short metre does, and the store opens it
-		// on the same list. It was the only one of the two arriving blank.
 		wRemark = ifnull(wm.get("remark"),"").toString();
 
-		// STEP 4b: rowId is a Waste_Movement id now, not a subform row, so the
-		// record is fetched directly instead of walking every plan to find it.
 		if(rowId != "" && rowId.isNumber() == true)
 		{
 			for each  wi in Waste_Movement[ID == rowId.toLong() && Movement_Type == "Issued"]
@@ -819,7 +546,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 					alreadyW = alreadyW + ifnull(rv.Piece_Count,0);
 				}
 
-				// Cannot receive back more than went out.
 				takePcs = gotPcs;
 				if(alreadyW + takePcs > issuedW)
 				{
@@ -830,9 +556,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 					takePcs = 0;
 				}
 
-				// The receipt is its OWN movement pointing at the issue, not an
-				// edit of it. Two receipts against one issue therefore leave two
-				// dated rows rather than one number that has quietly moved twice.
 				if(takePcs > 0)
 				{
 					newRvId = insert into Waste_Movement
@@ -857,33 +580,10 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 					}
 				}
 
-				//------------------------------------------------------
-				// Settle the pieces, same rule as fungible material:
-				// confirmed pieces are consumed, missing ones are disputed.
-				// Whole pieces only - there is no half a remnant.
-				//------------------------------------------------------
 				stillOut = issuedW - (alreadyW + takePcs);
 				if(stillOut < 0)
 				{
 					stillOut = 0;
-				}
-
-				// Same rule as the measured rows above: pieces already reported
-				// missing are on the disputes screen, not still on the trolley.
-				// Without this a piece part-disputed and part-pending raises a
-				// second dispute for the same remnants on the next receipt, and
-				// charges Disputed_Count for them twice.
-				wKeyF = wi.Waste_Piece + "";
-				wDispLeftF = openDispWP.get(wKeyF);
-				if(wDispLeftF != null && wDispLeftF > 0 && stillOut > 0)
-				{
-					wTakeOffF = wDispLeftF;
-					if(wTakeOffF > stillOut)
-					{
-						wTakeOffF = stillOut;
-					}
-					stillOut = stillOut - wTakeOffF.toLong();
-					openDispWP.put(wKeyF,wDispLeftF - wTakeOffF);
 				}
 
 				for each  wmStock in Waste_Master[ID == wi.Waste_Piece]
@@ -913,7 +613,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 						wmStock.Disputed_Count = wdispCount + stillOut;
 					}
 
-					// Nothing left anywhere means the row is finished for good.
 					restStr = ifnull(wmStock.Piece_Count,"0").toString().trim();
 					if(restStr == "")
 					{
@@ -935,17 +634,12 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 							wNoteTxt = " - " + wRemark.replaceAll("\"","'");
 						}
 
-						wDispName = "Waste";
 						wDispMat = null;
 						for each  wmRec2 in Waste_Master[ID == wi.Waste_Piece]
 						{
 							wDispMat = wmRec2.SKU;
 						}
-						// Display name first, Name only as a fallback - the same
-						// rule every other screen follows. Reading Name alone put
-						// the internal name on the dispute while the widgets
-						// showed the display one, so the two disagreed about what
-						// the same material was called.
+						wDispName = "Waste";
 						for each  rmw2 in Raw_Material[ID == wDispMat]
 						{
 							wDispName = ifnull(rmw2.Material_Display_Name,"").toString().trim();
@@ -988,10 +682,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 								wdsp.Plan_Item = wi.Plan_Item;
 							}
 						}
-						// Same six-field shape the measured rows use. A waste
-						// dispute has always been against one plan - the movement
-						// carries it - so this half never had the fan's problem;
-						// it only has to name the order in the mail like the rest.
 						wSoNo = "";
 						if(wi.Plan != null)
 						{
@@ -1015,12 +705,15 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	}
 
 	//------------------------------------------------------------------------
-	// PRINTED FABRIC PIECES: received per piece.
+	// PRINTED FABRIC PIECES: received per piece. issueLineId + voucherId now,
+	// so the parent voucher is a point lookup instead of a scan of every
+	// handover.
 	//------------------------------------------------------------------------
 	for each  pRaw in printed
 	{
 		pm = pRaw.toMap();
 		pIdTxt = ifnull(pm.get("issueLineId"),"").toString().trim();
+		pVTxt = ifnull(pm.get("voucherId"),"").toString().trim();
 		pGotStr = ifnull(pm.get("received"),"0").toString().trim();
 		if(pGotStr == "")
 		{
@@ -1029,7 +722,7 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 		pGot = pGotStr.toDecimal();
 		pNoteTxt = ifnull(pm.get("remark"),"").toString();
 
-		if(pIdTxt == "" || pGot < 0)
+		if(pIdTxt == "" || pVTxt == "" || pGot < 0)
 		{
 			if(errJson != "")
 			{
@@ -1039,9 +732,12 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 		}
 		else
 		{
-			// Find the Issue_Line
+			if(touchedVoucherIds.contains(pVTxt) == false)
+			{
+				touchedVoucherIds.add(pVTxt);
+			}
 			foundLn = false;
-			for each  miRec in supIssues
+			for each  miRec in Material_Issue[ID == pVTxt.toLong()]
 			{
 				for each  miLn in miRec.Issue_Lines
 				{
@@ -1059,7 +755,7 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 							lnSetS = "0";
 						}
 						lnRemain = lnQtyS.toDecimal() - lnSetS.toDecimal();
-						
+
 						takeP = pGot;
 						if(takeP > lnRemain)
 						{
@@ -1069,33 +765,13 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 						miLn.Settled_Qty = lnSetS.toDecimal() + takeP;
 						stillOutP = lnRemain - takeP;
 
-						//----------------------------------------------------
-						// CREDIT THE ROW THE LINE NAMES, CAPPED AT WHAT THAT ROW
-						// IS ACTUALLY OWED, THEN SPILL THE REST TO ITS SIBLINGS.
-						//
-						// issueMaterials emits a pass's piece lines ONCE, stamped
-						// with the first requirement row the pass reached
-						// (issueMaterials.dg:1821). The pass is pinned to one
-						// Plan_Item, so in practice that row is the only one it
-						// can reach - but if a plan item ever carries two
-						// requirement rows for one material at one cut size, the
-						// whole pass lands on the first. Crediting it blind then
-						// pushes Received_Qty past Issued_Qty on that row while
-						// the second stays at zero, and the readiness test below
-						// reads `recQty < issQty` ROW BY ROW: the item sits at
-						// Awaiting_Material for ever with nothing saying why.
-						//
-						// Costs nothing on the ordinary path - the named row
-						// absorbs its own metres and there is nothing to spill.
-						//----------------------------------------------------
 						ppSpill = takeP;
-
 						if(miLn.Requirement != null)
 						{
 							ppItemId = null;
 							ppMatId = "";
 
-							for each req in Material_Requirement[ID == miLn.Requirement]
+							for each  req in Material_Requirement[ID == miLn.Requirement]
 							{
 								ppItemId = req.Plan_Item;
 								ppMatId = ifnull(req.Material,"").toString().trim();
@@ -1124,8 +800,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 								ppSpill = ppSpill - ppRoom;
 							}
 
-							// Siblings of the SAME plan item and material only.
-							// No break in a for each, so the body is guarded.
 							if(ppSpill > 0 && ppItemId != null && ppMatId != "")
 							{
 								for each  reqSib in Material_Requirement[Plan_Item == ppItemId]
@@ -1158,24 +832,20 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 							}
 						}
 
-						// Update Parent Material transit qty
-						if (miLn.Material != null)
+						if(miLn.Material != null)
 						{
-							for each rm in Raw_Material[ID == miLn.Material]
+							for each  rm in Raw_Material[ID == miLn.Material]
 							{
 								ptiS = ifnull(rm.In_Transit_Qty,"0").toString().trim();
-								if(ptiS == "") { ptiS = "0"; }
+								if(ptiS == "")
+								{
+									ptiS = "0";
+								}
 								ptdS = ifnull(rm.Disputed_Qty,"0").toString().trim();
-								if(ptdS == "") { ptdS = "0"; }
-
-								// CANNOT SETTLE MORE THAN IS ACTUALLY IN TRANSIT,
-								// the same floor the aggregate path applies. This
-								// was the one settlement in the function without
-								// it: a re-run, or a receipt racing the aggregate
-								// over a material holding rolls AND pieces, drove
-								// the figure straight past zero - and a negative
-								// In_Transit reads as stock the company does not
-								// have on every screen that sums it.
+								if(ptdS == "")
+								{
+									ptdS = "0";
+								}
 								ptiQty = ptiS.toDecimal();
 								ptDrain = lnRemain;
 								if(ptDrain > ptiQty)
@@ -1187,14 +857,13 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 									ptDrain = 0.0;
 								}
 								rm.In_Transit_Qty = ptiQty - ptDrain;
-								if (stillOutP > 0)
+								if(stillOutP > 0)
 								{
 									rm.Disputed_Qty = ptdS.toDecimal() + stillOutP;
 								}
 							}
 						}
 
-						// Update Lot transit qty
 						if(miLn.Lot != null)
 						{
 							for each  lotSet in Raw_Material_Lot[ID == miLn.Lot]
@@ -1209,10 +878,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 								{
 									ltdS = "0";
 								}
-
-								// Same floor as the parent above. The lot is the
-								// figure the allocator ranks on, so a negative
-								// here offers a tone that is not there.
 								ltiQty = ltiS.toDecimal();
 								ltDrain = lnRemain;
 								if(ltDrain > ltiQty)
@@ -1224,7 +889,7 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 									ltDrain = 0.0;
 								}
 								lotSet.In_Transit_Qty = ltiQty - ltDrain;
-								if (stillOutP > 0)
+								if(stillOutP > 0)
 								{
 									lotSet.Disputed_Qty = ltdS.toDecimal() + stillOutP;
 								}
@@ -1238,11 +903,12 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 
 						if(stillOutP > 0)
 						{
+							pNoteShow = "";
 							if(pNoteTxt != "")
 							{
-								pNoteTxt = " (" + pNoteTxt + ")";
+								pNoteShow = " (" + pNoteTxt + ")";
 							}
-							
+
 							try
 							{
 								pDispName = "";
@@ -1252,12 +918,12 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 									pDispName = ifnull(rm.Material_Name,"").toString();
 									pDispUnit = ifnull(rm.Unit,"").toString();
 								}
-								
+
 								pSoNo = "";
 								pPlanId = null;
 								if(miLn.Requirement != null)
 								{
-									for each req in Material_Requirement[ID == miLn.Requirement]
+									for each  req in Material_Requirement[ID == miLn.Requirement]
 									{
 										if(req.Plan != null)
 										{
@@ -1266,7 +932,7 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 										}
 									}
 								}
-								
+
 								newDispId = insert into Stock_Dispute
 								[
 									Material_Name=pDispName
@@ -1278,11 +944,11 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 									Disputed_Qty=stillOutP
 									Status="Open"
 									Raised_On=zoho.currentdate
-									Raised_Note="Short by " + stillOutP + " Mtr on receipt" + pNoteTxt
+									Raised_Note="Short by " + stillOutP + " Mtr on receipt" + pNoteShow
 									Added_User=zoho.loginuser
 								];
-								
-								for each dsp in Stock_Dispute[ID == newDispId.toLong()]
+
+								for each  dsp in Stock_Dispute[ID == newDispId.toLong()]
 								{
 									dsp.Material = miLn.Material;
 									dsp.Supervisor = supId;
@@ -1296,17 +962,16 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 									}
 									if(miLn.Requirement != null)
 									{
-										// Resolve plan item from requirement
-										for each req in Material_Requirement[ID == miLn.Requirement]
+										for each  req in Material_Requirement[ID == miLn.Requirement]
 										{
-											if (req.Plan_Item != null)
+											if(req.Plan_Item != null)
 											{
 												dsp.Plan_Item = req.Plan_Item;
 											}
 										}
 									}
 								}
-								
+
 								dispRows.add(pDispName + " (printed piece)|" + pSoNo + "|Mtr|" + lnRemain + "|" + takeP + "|" + stillOutP);
 							}
 							catch (e3)
@@ -1318,12 +983,12 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 							{
 								errJson = errJson + ",";
 							}
-							errJson = errJson + "\"Printed piece: " + stillOutP + " of " + lnRemain + " Mtr not received" + pNoteTxt + " - dispute raised\"";
+							errJson = errJson + "\"Printed piece: " + stillOutP + " of " + lnRemain + " Mtr not received" + pNoteShow + " - dispute raised\"";
 						}
 					}
 				}
 			}
-			
+
 			if(foundLn == false)
 			{
 				if(errJson != "")
@@ -1336,205 +1001,266 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	}
 
 	//------------------------------------------------------------------------
-	// Check if any plan items are now completely fulfilled and received.
+	// VOUCHER STATUS, straight off the lines this receipt just settled.
+	//
+	// Runs on EVERY chunk, not just the finalizing one - the flip is per
+	// voucher and each Issue_Line is only ever settled once, so a chunk that
+	// happens to settle a voucher's last line closes it there and then. It does
+	// not wait for finalize, does not look at Material_Issue.Plan, and does not
+	// need the voucher's plan to be in plansTouched - the exact three ways the
+	// sweep-only flip below could miss a voucher.
+	//
+	// Received  = every Issue_Line now has Settled_Qty >= Qty.
+	// Partially_Received = at least one line settled, some still owed.
+	// A voucher already "Received" is left alone (forward only).
 	//------------------------------------------------------------------------
-	for each plan in plans
+	for each  tvId in touchedVoucherIds
 	{
-		planItems = Plan_Item[Plan == plan.ID];
+		try
+		{
+			for each  vRec in Material_Issue[ID == tvId.toLong()]
+			{
+				if(ifnull(vRec.Issue_Status,"").toString().trim() != "Received")
+				{
+					allLinesSettled = true;
+					anyLine = false;
+					for each  vLn in vRec.Issue_Lines
+					{
+						anyLine = true;
+						vlQ = ifnull(vLn.Qty,"0").toString().trim();
+						if(vlQ == "")
+						{
+							vlQ = "0";
+						}
+						vlS = ifnull(vLn.Settled_Qty,"0").toString().trim();
+						if(vlS == "")
+						{
+							vlS = "0";
+						}
+						if(vlS.toDecimal() < vlQ.toDecimal())
+						{
+							allLinesSettled = false;
+						}
+					}
+					if(anyLine == true && allLinesSettled == true)
+					{
+						vRec.Issue_Status = "Received";
+					}
+					else
+					{
+						vRec.Issue_Status = "Partially_Received";
+					}
+				}
+			}
+		}
+		catch (eVs)
+		{
+			info "Issue_Status not set for voucher " + tvId + ": " + eVs.toString();
+		}
+	}
+
+	//------------------------------------------------------------------------
+	// READINESS SWEEP - ONLY the plans this receipt touched, and ONLY on the
+	// finalizing call. A non-last chunk has only half-applied the settlements,
+	// so sweeping now would roll a status on data that is still arriving.
+	//
+	// The widget named the plans; a receipt touches a handful, so this stays
+	// bounded however many plans are open. Same per-item / per-requirement /
+	// per-waste checks as before, and the same forward-only status guard.
+	//------------------------------------------------------------------------
+	// Take at most SWEEP_BUDGET plan ids off the front of the list this call was
+	// given; sweepRemaining is everything past that, handed back for the next
+	// finalize call. sweepAllDone is true only when nothing was left over.
+	sweepPlans = List();
+	sweepRemainingJson = "";
+	sweepAllDone = true;
+	if(doFinalize == true)
+	{
+		swIdx = 0;
+		for each  ptTake in touchedPlanIds
+		{
+			if(swIdx < SWEEP_BUDGET)
+			{
+				sweepPlans.add(ptTake);
+			}
+			else
+			{
+				sweepAllDone = false;
+				if(sweepRemainingJson != "")
+				{
+					sweepRemainingJson = sweepRemainingJson + ",";
+				}
+				sweepRemainingJson = sweepRemainingJson + "\"" + ptTake + "\"";
+			}
+			swIdx = swIdx + 1;
+		}
+	}
+	for each  ptKey in sweepPlans
+	{
+		planId = ptKey.toLong();
+		planStNow = "";
+		for each  planHdr in Production_Planning[ID == planId]
+		{
+			planStNow = ifnull(planHdr.Order_Status,"").toString();
+		}
+
+		planItems = Plan_Item[Plan == planId];
 		allReadyCount = 0;
 		totalItemCount = 0;
-		
-		// Tracked separately to close off Material_Issue records once everything 
-		// that went out has come back, regardless of plan fulfillment state.
-		recvComplete = true; 
 
-		for each pItem in planItems
+		for each  pItem in planItems
 		{
 			totalItemCount = totalItemCount + 1;
 			itemReady = true;
 			reqCount = 0;
 
-			for each row in Material_Requirement[Plan_Item == pItem.ID]
+			for each  row in Material_Requirement[Plan_Item == pItem.ID]
 			{
 				reqCount = reqCount + 1;
 				isFab = row.Is_Fabric;
-				
+
 				reqStr = ifnull(row.Required_Qty,"0").toString().trim();
-				if(reqStr == "") { reqStr = "0"; }
+				if(reqStr == "")
+				{
+					reqStr = "0";
+				}
 				issStr = ifnull(row.Issued_Qty,"0").toString().trim();
-				if(issStr == "") { issStr = "0"; }
+				if(issStr == "")
+				{
+					issStr = "0";
+				}
 				recStr = ifnull(row.Received_Qty,"0").toString().trim();
-				if(recStr == "") { recStr = "0"; }
-				
+				if(recStr == "")
+				{
+					recStr = "0";
+				}
+
 				reqQty = reqStr.toDecimal();
 				issQty = issStr.toDecimal();
 				recQty = recStr.toDecimal();
-				
-				if (recQty < issQty)
+
+				if(recQty < issQty)
 				{
 					itemReady = false;
-					recvComplete = false;
 				}
-				
-				if (isFab == true)
+
+				if(isFab == true)
 				{
 					reqPcs = ifnull(row.Required_Pieces,0);
 					issPcs = ifnull(row.Pieces_From_Waste,0) + ifnull(row.Pieces_From_Raw,0);
-					if (reqPcs <= 0 || issPcs < reqPcs)
+					if(reqPcs <= 0 || issPcs < reqPcs)
 					{
 						itemReady = false;
 					}
 				}
 				else
 				{
-					if (reqQty <= 0 || issQty < reqQty)
+					if(reqQty <= 0 || issQty < reqQty)
 					{
 						itemReady = false;
 					}
 				}
 			}
-			
-			if (reqCount == 0)
+
+			if(reqCount == 0)
 			{
 				itemReady = false;
 			}
-			
-			// Check waste requirements for this specific item. Issued movements
-			// keyed on the Plan_Item, with receipt summed from their children.
+
 			itemIssued = Waste_Movement[Plan_Item == pItem.ID && Movement_Type == "Issued"];
-			for each wi in itemIssued
+			for each  wi in itemIssued
 			{
 				wCount = ifnull(wi.Piece_Count,0);
 				wRecv = 0;
-				for each rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
+				for each  rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
 				{
 					wRecv = wRecv + ifnull(rv.Piece_Count,0);
 				}
-				if (wRecv < wCount)
+				if(wRecv < wCount)
 				{
 					itemReady = false;
 				}
 			}
-			
-			if (itemReady == true && pItem.Item_Status == "Awaiting_Material")
+
+			if(itemReady == true && pItem.Item_Status == "Awaiting_Material")
 			{
 				pItem.Item_Status = "Ready_For_Production";
 			}
-			
-			// Count how many are ready or past ready (In_Production, Complete)
-			if (pItem.Item_Status != "Awaiting_Material")
+
+			if(pItem.Item_Status != "Awaiting_Material")
 			{
 				allReadyCount = allReadyCount + 1;
 			}
 		}
-		
-		// Guarded so a receipt cannot walk the plan backwards. One item can be on
-		// the cutting table while another is still being delivered, and "Material
-		// Ready" would deny work already under way.
-		planStNow = ifnull(plan.Order_Status,"").toString();
 
-		if (totalItemCount > 0 && allReadyCount > 0 && planStNow != "In Progress" && planStNow != "Production Complete")
+		if(totalItemCount > 0 && allReadyCount > 0 && planStNow != "In Progress" && planStNow != "Production Complete")
 		{
-			if (allReadyCount == totalItemCount)
+			if(allReadyCount == totalItemCount)
 			{
-				plan.Order_Status = "Material Ready";
+				for each  planUpd in Production_Planning[ID == planId]
+				{
+					planUpd.Order_Status = "Material Ready";
+				}
 			}
-			else if (planStNow == "Pending")
+			else if(planStNow == "Pending")
 			{
-				plan.Order_Status = "Partially Received";
+				for each  planUpd in Production_Planning[ID == planId]
+				{
+					planUpd.Order_Status = "Partially Received";
+				}
 			}
 		}
 
-		// STEP 4: close off the handover records for this plan. Without this
-		// every Material_Issue sits at "Issued" forever and the event log can
-		// only ever say material left the counter, never that it arrived.
-		//
-		// Own try/catch, same reasoning as the writer in issueMaterials: the
-		// receipt itself has already been recorded by this point, and failing it
-		// over a status flag would be worse than the flag being stale.
-		try
-		{
-			newIssStatus = "Partially_Received";
-			if (recvComplete == true)
-			{
-				newIssStatus = "Received";
-			}
-			for each  mi in Material_Issue[Plan == plan.ID && Issue_Status != "Received"]
-			{
-				mi.Issue_Status = newIssStatus;
-			}
-		}
-		catch (e3)
-		{
-			info "Material_Issue status not updated for plan " + plan.ID + ": " + e3.toString();
-		}
+		// Issue_Status is NOT touched here any more. It used to flip every
+		// Material_Issue[Plan == planId] to Received/Partially_Received off the
+		// plan-level recvComplete flag - which is wrong for a voucher whose own
+		// lines are not all settled, and which missed a voucher whose Plan field
+		// was empty or pointed at another plan of a multi-plan handover. The
+		// per-voucher block above (driven by touchedVoucherIds and each
+		// voucher's own Issue_Lines) is the single place it is set now.
 	}
 
 	//--------------------------------------------------------------------
 	// MOVE THE CLOTH TO THE PRODUCTION WAREHOUSE IN ZOHO INVENTORY.
 	//
-	// STOCK IS CONSUMED AT RECEIPT, NOT ISSUE - the rule this whole app is
-	// built on - and this is the Inventory half of it. Nothing moved
-	// warehouse when the cloth left the counter, because at that moment it
-	// was in transit and belonged to neither side. It has now arrived, so
-	// Main Warehouse -> Production, one transfer order per store issue
-	// voucher with SIV-... on the document.
+	// FINALIZING CALL ONLY - one transfer sweep for the whole receipt, not one
+	// per chunk. It reads Settled_Qty - Transferred_Qty off the lines, which
+	// every chunk before this has been writing, so by here the full receipt is
+	// settled and one "auto" run posts every voucher's difference.
 	//
-	// IT IS NOT TOLD WHAT TO MOVE. postTransferOrders works it out from
-	// Settled_Qty - Transferred_Qty, which the settlement above has just
-	// written, and stamps Transferred_Qty in the same pass it posts. So a
-	// second receipt against the same voucher moves only the difference, and
-	// calling this twice moves nothing the second time.
-	//
-	// "auto" keeps its window to ten vouchers and three orders. The
-	// statement-execution limit is NOT catchable - it kills the script and
-	// the widget gets a bare 500 with no error card - and the receipt is the
-	// thing that must not fail.
-	//
-	// ITS OWN TRY/CATCH, and last inside the block. Stock has already moved,
-	// disputes have already been raised, Item_Status has already rolled. A
-	// transfer that fails - Inventory down, a quota, an unmapped item - must
-	// never make a completed receipt look failed and must never leave the
-	// supervisor confirming the same cloth twice. Nothing is lost by it: the
-	// voucher stays not-Done and the next receipt, or a manual run, picks it
-	// up.
+	// Its own try/catch, and last inside the block. Stock has already moved,
+	// disputes raised, Item_Status rolled. A transfer that fails must never make
+	// a completed receipt look failed.
 	//--------------------------------------------------------------------
-	try
+	if(doFinalize == true && sweepAllDone == true)
 	{
-		info "transfer after receipt -> " + thisapp.postTransferOrders("auto");
-	}
-	catch (eTo)
-	{
-		info "postTransferOrders after receipt threw: " + eTo.toString();
+		try
+		{
+			info "transfer after receipt -> " + thisapp.postTransferOrders("auto");
+		}
+		catch (eTo)
+		{
+			info "postTransferOrders after receipt threw: " + eTo.toString();
+		}
 	}
 
 	}
 	catch (e)
 	{
 		// Surfaces as an alert in the widget via the existing errors[] handling.
-		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"received\":[]}";
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"received\":[],\"sweepRemaining\":[],\"sweepDone\":true}";
 	}
 
 	//------------------------------------------------------------------------
 	// DISPUTE NOTIFICATIONS. Outbound: the SUPERVISOR raised these, so the party
-	// that has to answer is the STORE. Admin gets its own copy.
-	//
-	// TWO mails, not one with two recipients, because they are not the same
-	// message. The store's says "here is what he says is missing, go and check
-	// the shelf"; admin's says "a dispute exists, neither side has answered yet".
-	// A single mail addressed to both would have to be written for whoever reads
-	// it less carefully.
+	// that has to answer is the STORE. Admin gets its own copy. Two mails, not
+	// one with two recipients - they are not the same message.
 	//
 	// Outside the main try/catch and wrapped in its own. Everything is already
-	// written by here - stock settled, disputes raised, statuses moved - and a
-	// mail failure must not turn a completed receipt into an error the supervisor
-	// will try again.
+	// written by here, and a mail failure must not turn a completed receipt into
+	// an error the supervisor will try again.
 	//------------------------------------------------------------------------
 	adminTo = "gurdhian.helios@gmail.com";
-	// No Email field on Employee and no store person at all - the store widget
-	// has no picker, so "the store" is a desk, not a name. Both go to the admin
-	// address for now and each mail says who it was written for, so nothing is
-	// lost and the gap stays visible.
 	storeTo = "gurdhian.helios@gmail.com";
 
 	try
@@ -1557,11 +1283,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 			dTdR = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a;text-align:right;font-weight:600";
 			dTdBad = "padding:10px 12px;border-bottom:1px solid #fee2e2;font-size:13px;color:#991b1b;text-align:right;font-weight:700";
 
-			// ORDER IS A COLUMN NOW. A receipt short on one material across two
-			// orders raises a dispute per order, so without it the mail carries
-			// two rows naming the same material and the store cannot tell which
-			// one it is being asked to look at - or that they are two.
-			// Fields: name|order|unit|issued|received|short.
 			dRowsHtml = "";
 			for each  dr in dispRows
 			{
@@ -1580,7 +1301,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 			}
 			dSubtitle = "Raised by " + dSupName + " &middot; " + zoho.currentdate.toString("dd MMM yyyy") + " " + zoho.currenttime.toString("HH:mm");
 
-			// --- 1. To the STORE: you sent it, he says it did not arrive ---
 			sInner = "<div style='font-size:14px;color:#0f172a'><b>" + dSupName + "</b> has confirmed his receipt and reported <b>" + dispRows.size() + " " + dWord + "</b>. The quantity below left the store but he says it did not reach him.</div>";
 			sInner = sInner + dTable;
 			sInner = sInner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>Check the shelf and answer on the <b>Disputes</b> tab. If the stock is still with the store, <b>Store correction</b> returns it and re-opens the requirement so it can be issued again. Until someone answers, this quantity is neither on the shelf nor with him.</div>";
@@ -1594,7 +1314,6 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 				message :thisapp.buildNotificationEmail("Material disputed on receipt",dSubtitle,"#dc2626",sInner)
 			]
 
-			// --- 2. To ADMIN: a dispute exists and nobody has answered yet ---
 			aInner = "<div style='font-size:14px;color:#0f172a'><b>" + dispRows.size() + " " + dWord + "</b> raised by <b>" + dSupName + "</b> on receipt. Nobody has answered yet.</div>";
 			aInner = aInner + dTable;
 			aInner = aInner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>Direction is <b>Outbound</b> - store to supervisor - so the store answers first. This is for visibility; no action is needed from you unless it stays open.</div>";
@@ -1612,10 +1331,15 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	}
 	catch (eMail)
 	{
-		// Logged, never rethrown. The receipt and the disputes are already written.
 		info "Dispute notification not sent: " + eMail.toString();
 	}
 
 	// Built by hand - List.toString() does not reliably wrap in [].
-	return "{\"errors\":[" + errJson + "],\"received\":[" + okJson + "]}";
+	//
+	// sweepRemaining: plan ids a finalize call did not get to (it caps at
+	// SWEEP_BUDGET). The widget calls finalize again with exactly these until the
+	// list comes back empty; sweepDone == true means the readiness sweep AND the
+	// warehouse transfer are both finished. On a non-finalize chunk both are
+	// their empty / done defaults and the widget ignores them.
+	return "{\"errors\":[" + errJson + "],\"received\":[" + okJson + "],\"sweepRemaining\":[" + sweepRemainingJson + "],\"sweepDone\":" + sweepAllDone + "}";
 }

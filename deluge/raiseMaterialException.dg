@@ -40,9 +40,16 @@ string raiseMaterialException(string payloadJson)
 	// payload:
 	// { "materialId":"123", "type":"Shortage",
 	//   "required":120, "available":100, "unwashed":0, "shortfall":20,
-	//   "unit":"Cone", "note":"",
+	//   "unit":"Cone", "note":"", "poNumber":"",
 	//   "lines":[ {"planId":"1","salesOrder":"SO-0001","planItemId":"9",
 	//              "supervisorId":"456","required":60,"issued":60} ] }
+	//
+	// poNumber (Shortage tickets only): the Zoho Inventory purchaseorder_number
+	// this ticket was raised alongside, when raiseBulkPurchaseOrder created a
+	// draft PO for the shortfall. Stamped on the ticket as PO_Number /
+	// PO_Raised_On so the store screen can see a PO is already out for this
+	// material and stop offering "Raise PO" for it until the ticket is resolved.
+	// Empty on a plain shortage report with no PO behind it, and on wash tickets.
 
 	res = "{\"success\":false,\"error\":\"Nothing was raised\"}";
 
@@ -56,6 +63,7 @@ string raiseMaterialException(string payloadJson)
 	exType = ifnull(inp.get("type"),"Other").toString().trim();
 	note = ifnull(inp.get("note"),"").toString();
 	unitTxt = ifnull(inp.get("unit"),"").toString();
+	poNumber = ifnull(inp.get("poNumber"),"").toString().trim();
 
 	// Creator fields that were never written are EMPTY, not null, and
 	// toDecimal() throws on empty - normalise to string first.
@@ -180,6 +188,15 @@ string raiseMaterialException(string payloadJson)
 				ex.Unwashed_Qty = unwQty;
 				ex.Shortfall_Qty = shortQty;
 				ex.Last_Reported_On = zoho.currentdate;
+				// A PO was raised for this material on this pass - record it. Only
+				// ever SET, never cleared here: the ticket resolving is what ends
+				// the "PO is out" state, so a later plain re-report (poNumber "")
+				// must not wipe a PO number an earlier raise recorded.
+				if(poNumber != "")
+				{
+					ex.PO_Number = poNumber;
+					ex.PO_Raised_On = zoho.currentdate;
+				}
 				exRec = ex;
 				wasAppended = true;
 			}
@@ -216,6 +233,13 @@ string raiseMaterialException(string payloadJson)
 				if(lotIdTxt != "")
 				{
 					ex2.Lot = lotIdTxt.toLong();
+				}
+				// The draft PO this ticket was raised alongside, if any. Set here
+				// for the same reason as Lot - after the insert.
+				if(poNumber != "")
+				{
+					ex2.PO_Number = poNumber;
+					ex2.PO_Raised_On = zoho.currentdate;
 				}
 				exRec = ex2;
 			}
@@ -612,13 +636,18 @@ string raiseMaterialException(string payloadJson)
 			info "Exception notification not sent: " + eMail.toString();
 		}
 
+		exIdTxt = "";
+		if(exRec != null)
+		{
+			exIdTxt = exRec.ID.toString();
+		}
 		if(wasAppended == true)
 		{
-			res = "{\"success\":true,\"appended\":true}";
+			res = "{\"success\":true,\"appended\":true,\"exceptionId\":\"" + exIdTxt + "\"}";
 		}
 		else
 		{
-			res = "{\"success\":true,\"appended\":false}";
+			res = "{\"success\":true,\"appended\":false,\"exceptionId\":\"" + exIdTxt + "\"}";
 		}
 	}
 

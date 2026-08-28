@@ -1,0 +1,28 @@
+string getOpenPlanCount()
+{
+	// How many production plans are still open. GET, no arguments.
+	//
+	// The store screen fetches its requirements in PAGES of plans
+	// (getStoreMaterialRequirements). Those pages used to chain - each call's
+	// cursor was the previous call's plansConsumed, so they could only run one
+	// after another, and a supervisor holding a big backlog meant ten sequential
+	// round-trips. With this the widget learns the total up front, computes how
+	// many fixed-offset pages it needs, and fires them ALL IN PARALLEL.
+	//
+	// "Open" is the exact same status set getStoreMaterialRequirements walks -
+	// Pending, Partially Received, In Progress - so the page count it implies
+	// matches the plans that function will actually return.
+	//
+	// Counts records, reads none. Cheap by construction, same as getStoreCounts.
+	openPlans = 0;
+	try
+	{
+		openPlans = Production_Planning[Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress"].count();
+	}
+	catch (e)
+	{
+		info "getOpenPlanCount DELUGE ERROR: " + e.toString();
+		return "{\"count\":0,\"error\":\"" + e.toString().replaceAll("\"","'") + "\"}";
+	}
+	return "{\"count\":" + openPlans + "}";
+}

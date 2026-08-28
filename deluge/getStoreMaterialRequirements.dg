@@ -1,5 +1,21 @@
-string getStoreMaterialRequirements(string skipCountTxt)
+string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 {
+	// PARALLEL PAGING. pagePlansTxt is the widget saying "process exactly this
+	// many plans from skipCount, and don't stop early". With it, pages no longer
+	// chain: the widget calls getOpenPlanCount once, computes ceil(count /
+	// pagePlans) fixed-offset windows, and fires them ALL AT ONCE - page 3's
+	// skipCount is 2*pagePlans, known before page 1 returns. plansConsumed is
+	// still in the response (it equals the plans this window actually walked)
+	// but the widget no longer needs it to place the next call.
+	//
+	// Empty pagePlansTxt keeps the OLD behaviour exactly: scan up to scanCap,
+	// walk until rowBudget is spent, report plansConsumed, caller chains on
+	// skipCount + plansConsumed. Left intact as the safe fallback.
+	//
+	// rowBudget still applies as a WITHIN-WINDOW clamp in both modes - a single
+	// window that turns out huge is still bounded - but in parallel mode hitting
+	// it logs and keeps going rather than stopping the walk, because there is no
+	// "next call" that would pick up the remainder for this window.
 	// Everything the store person is owed, grouped by supervisor, with fabric
 	// requirements already allocated against reusable offcuts.
 	//
@@ -29,17 +45,15 @@ string getStoreMaterialRequirements(string skipCountTxt)
 	// because pages are no longer a fixed size and a page number cannot
 	// describe where a variable-size walk stopped.
 	//
-	// ROW_BUDGET = 150. Not derived from a formula - chosen with real margin
-	// under the volumes that were tested to fail (a 20-plan page could
-	// exceed several hundred rows once waste/lot/material passes are
-	// included; 150 keeps this call's own aggregation loop, plus everything
-	// downstream that scales with neededMats/lotMats, comfortably inside the
-	// statement ceiling proven safe by the pageSize=10 test). If a single
-	// PLAN alone ever carries more than ROW_BUDGET requirement rows, that one
-	// plan is still consumed whole (never split mid-plan - a partial
-	// aggregation would double-count on the next call) and plansConsumed=1
-	// for that call; whether ROW_BUDGET holds against a plan that size has
-	// not been tested and would need widening if it doesn't.
+	// ROW_BUDGET = 150. Only bounds LEGACY (chained) mode now - the sequential
+	// fallback walk. In PARALLEL mode it is an info-only clamp; that window
+	// always completes its pagePlans plans (see the note near the parallelMode
+	// check below). A bump to 500 was tried and reverted - the real round-trip
+	// win is parallel paging, not fatter sequential pages, and the higher value
+	// was not needed once that landed.
+	// If a single PLAN alone carries more than ROW_BUDGET requirement rows, that
+	// one plan is still consumed whole (never split mid-plan - a partial
+	// aggregation would double-count on the next call) and plansConsumed=1.
 	//
 	// skipCountTxt arrives as a STRING from the Custom API, and empty/invalid
 	// must default to 0 (start from the top), not throw. The signature and
@@ -57,6 +71,19 @@ string getStoreMaterialRequirements(string skipCountTxt)
 			skipCount = 0;
 		}
 	}
+	// Parallel-mode window size. 0/empty = legacy chained mode.
+	pagePlans = 0;
+	ppStr = ifnull(pagePlansTxt,"").toString().trim();
+	if(ppStr != "")
+	{
+		pagePlans = ppStr.toLong();
+		if(pagePlans < 0)
+		{
+			pagePlans = 0;
+		}
+	}
+	parallelMode = (pagePlans > 0);
+
 	plansConsumed = 0;
 	rowCountSoFar = 0;
 	resultJson = "[]";
@@ -138,7 +165,17 @@ string getStoreMaterialRequirements(string skipCountTxt)
 	// queue deeper than 200 is still safe, just scanned in more than one
 	// call, exactly like scanLimit does in createProductionPlans.
 	scanCap = 200;
-	planBatch = Production_Planning[Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress"] sort by Priority_Key range from (skipCount + 1) to (skipCount + scanCap);
+	// Parallel mode fetches EXACTLY its window (pagePlans plans from skipCount);
+	// legacy mode fetches up to scanCap and lets rowBudget decide where to stop.
+	// windowSize is scanCap or pagePlans; the range clause keeps the SAME
+	// (expr + expr) shape the original working line used - a bare variable on
+	// the "to" side of "range from ... to ..." is not reliably parsed here.
+	windowSize = scanCap;
+	if(parallelMode == true)
+	{
+		windowSize = pagePlans;
+	}
+	planBatch = Production_Planning[Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress"] sort by Priority_Key range from (skipCount + 1) to (skipCount + windowSize);
 
 	budgetSpent = false;
 
@@ -157,12 +194,21 @@ string getStoreMaterialRequirements(string skipCountTxt)
 			// plan is consumed whole regardless of its own size (see the
 			// ROW_BUDGET note above the top of this function for what that
 			// means if one plan alone exceeds the budget).
-			if(rowCountSoFar > 0 && (rowCountSoFar + thisPlanRowCount) > rowBudget)
+			// In PARALLEL mode the walk never stops early: this window is the
+			// whole job, there is no next call to pick up a remainder, so
+			// splitting here would silently drop plans. rowBudget still logs if
+			// a window turns out oversized - the widget's PAGE size is what
+			// keeps it sane, and can be tuned - but the walk completes.
+			if(parallelMode == false && rowCountSoFar > 0 && (rowCountSoFar + thisPlanRowCount) > rowBudget)
 			{
 				budgetSpent = true;
 			}
 			else
 			{
+				if(parallelMode == true && rowCountSoFar > 0 && (rowCountSoFar + thisPlanRowCount) > rowBudget)
+				{
+					info "getStoreMaterialRequirements: parallel window at skip " + skipCount + " exceeded rowBudget (" + (rowCountSoFar + thisPlanRowCount) + " > " + rowBudget + ") - completing anyway; consider a smaller PAGE in the widget";
+				}
 				rowCountSoFar = rowCountSoFar + thisPlanRowCount;
 				plansConsumed = plansConsumed + 1;
 
@@ -302,6 +348,7 @@ string getStoreMaterialRequirements(string skipCountTxt)
 				}
 
 				lnMap = Map();
+				lnMap.put("mrqId",mr.ID + "");
 				lnMap.put("planId",plan.ID + "");
 				lnMap.put("salesOrder",soNo);
 				lnMap.put("planItemId",piKey);
@@ -863,9 +910,24 @@ string getStoreMaterialRequirements(string skipCountTxt)
 	// rarely holds more than a handful of rows.
 	//------------------------------------------------------------------------
 	excBySku = Map();
+	// SKU -> total Shortfall_Qty across open Shortage tickets that carry a
+	// PO_Number. This is cloth already ORDERED - a draft PO is out for it - so
+	// the end-of-page shortfall summary treats it as owned and stops asking the
+	// store to raise another PO. Kept separate from availableStock: the
+	// per-supervisor cards still show true physical stock, only the summary's
+	// buy figure is netted (the widget adds this to `owned`).
+	poCoveredBySku = Map();
 	for each  oex in Material_Exception[Status == "Open"]
 	{
-		exT = ifnull(oex.Type_field,"").toString();
+		// raiseMaterialException writes this field as "Type"; some readers in the
+		// repo use "Type_field" (Creator's auto-suffix for the reserved word).
+		// Read Type_field first, fall back to Type, so this works whichever the
+		// form actually resolved to.
+		exT = ifnull(oex.Type_field,"").toString().trim();
+		if(exT == "")
+		{
+			exT = ifnull(oex.Type,"").toString().trim();
+		}
 		exSku = ifnull(oex.SKU,"").toString();
 
 		if(exT != "" && exSku != "")
@@ -880,9 +942,54 @@ string getStoreMaterialRequirements(string skipCountTxt)
 				}
 			}
 
+			exPoNo = ifnull(oex.PO_Number,"").toString().trim();
+			if(exT == "Shortage" && exPoNo != "")
+			{
+				exSfStr = ifnull(oex.Shortfall_Qty,"0").toString().trim();
+				if(exSfStr == "")
+				{
+					exSfStr = "0";
+				}
+				exReqStr = ifnull(oex.Required_Qty,"0").toString().trim();
+				if(exReqStr == "")
+				{
+					exReqStr = "0";
+				}
+
+				// STOP COUNTING THE PO ONCE THE STOCK HAS LANDED. Otherwise
+				// availableStock (which rises when syncPurchaseInflow books the
+				// bill) and this poCoveredQty BOTH count the same cloth, and the
+				// widget's `owned = stock + poCovered` double-counts. On-hand is
+				// already built by here - calcWashByMat for fabric, matQtyByMat
+				// for the rest. resolvePurchaseShortages resolves the ticket for
+				// good on the next inflow; this just keeps the screen honest in
+				// between.
+				exOnHand = ifnull(calcWashByMat.get(exSku),"").toString().trim();
+				if(exOnHand == "")
+				{
+					exOnHand = ifnull(matQtyByMat.get(exSku),"0").toString().trim();
+				}
+				if(exOnHand == "")
+				{
+					exOnHand = "0";
+				}
+				if(exReqStr.toDecimal() <= 0 || exOnHand.toDecimal() < exReqStr.toDecimal())
+				{
+					prevPo = ifnull(poCoveredBySku.get(exSku),"0").toString().trim();
+					if(prevPo == "")
+					{
+						prevPo = "0";
+					}
+					poCoveredBySku.put(exSku,prevPo.toDecimal() + exSfStr.toDecimal());
+				}
+			}
+
 			exMap = Map();
 			exMap.put("type",exT);
 			exMap.put("planIds",coveredPlans);
+			// The PO number this ticket carries, so the widget can label the row
+			// "PO SO-PO-0042 raised" instead of showing a Raise PO button.
+			exMap.put("poNumber",exPoNo);
 			// WHICH LOT'S GREIGE THIS TICKET IS FOR. A wash ticket belongs to a
 			// lot, not to a material: one fabric can have jobs waiting on two
 			// shades at once and each needs its own ticket. Matched on the
@@ -988,6 +1095,13 @@ string getStoreMaterialRequirements(string skipCountTxt)
 			openExList = List();
 		}
 		matEntry.put("openExceptions",openExList);
+
+		// Cloth already on a draft PO (open Shortage ticket with a PO_Number).
+		// The summary adds this to "owned" so the material drops off the buy
+		// list once its PO is raised, and re-appears if fresh demand outgrows
+		// the PO before it lands. availableStock and remaining are untouched.
+		poCov = ifnull(poCoveredBySku.get(matIdTxt),0).toString().toDecimal();
+		matEntry.put("poCoveredQty",poCov);
 
 
 		if(isFab == true)
@@ -1220,7 +1334,7 @@ string getStoreMaterialRequirements(string skipCountTxt)
 				{
 					linesJson = linesJson + ",";
 				}
-				linesJson = linesJson + "{\"planId\":\"" + lnE.get("planId") + "\",\"salesOrder\":\"" + lnE.get("salesOrder").toString().replaceAll("\"","'") + "\",\"planItemId\":\"" + lnE.get("planItemId") + "\",\"item\":\"" + lnE.get("item") + "\",\"isRemake\":" + lnE.get("isRemake") + ",\"supervisorId\":\"" + lnE.get("supervisorId") + "\",\"required\":" + lnE.get("required") + ",\"issued\":" + lnE.get("issued") + ",\"reqPieces\":" + lnE.get("reqPieces") + ",\"issPieces\":" + lnE.get("issPieces") + ",\"issuedLot\":\"" + ifnull(lnE.get("issuedLot"),"").toString() + "\",\"issuedLotNo\":\"" + ifnull(lotNameById.get(ifnull(lnE.get("issuedLot"),"").toString().trim()),"").toString() + "\",\"reason\":\"" + lnE.get("reason") + "\"}";
+				linesJson = linesJson + "{\"mrqId\":\"" + lnE.get("mrqId") + "\",\"planId\":\"" + lnE.get("planId") + "\",\"salesOrder\":\"" + lnE.get("salesOrder").toString().replaceAll("\"","'") + "\",\"planItemId\":\"" + lnE.get("planItemId") + "\",\"item\":\"" + lnE.get("item") + "\",\"isRemake\":" + lnE.get("isRemake") + ",\"supervisorId\":\"" + lnE.get("supervisorId") + "\",\"required\":" + lnE.get("required") + ",\"issued\":" + lnE.get("issued") + ",\"reqPieces\":" + lnE.get("reqPieces") + ",\"issPieces\":" + lnE.get("issPieces") + ",\"issuedLot\":\"" + ifnull(lnE.get("issuedLot"),"").toString() + "\",\"issuedLotNo\":\"" + ifnull(lotNameById.get(ifnull(lnE.get("issuedLot"),"").toString().trim()),"").toString() + "\",\"reason\":\"" + lnE.get("reason") + "\"}";
 			}
 
 			exsJson = "";
@@ -1239,10 +1353,10 @@ string getStoreMaterialRequirements(string skipCountTxt)
 					}
 					pidsJson = pidsJson + "\"" + pidE + "\"";
 				}
-				exsJson = exsJson + "{\"type\":\"" + exE.get("type").toString().replaceAll("\"","'") + "\",\"lot\":\"" + ifnull(exE.get("lot"),"").toString() + "\",\"planIds\":[" + pidsJson + "]}";
+				exsJson = exsJson + "{\"type\":\"" + exE.get("type").toString().replaceAll("\"","'") + "\",\"lot\":\"" + ifnull(exE.get("lot"),"").toString() + "\",\"poNumber\":\"" + ifnull(exE.get("poNumber"),"").toString().replaceAll("\"","'") + "\",\"planIds\":[" + pidsJson + "]}";
 			}
 
-			matsJson = matsJson + "{\"materialId\":\"" + mEnt.get("materialId") + "\",\"material\":\"" + mEnt.get("material").toString().replaceAll("\"","'") + "\",\"sku\":\"" + mEnt.get("sku").toString().replaceAll("\"","'") + "\",\"unit\":\"" + mEnt.get("unit").toString().replaceAll("\"","'") + "\",\"isFabric\":" + mEnt.get("isFabric") + ",\"isReissue\":" + mEnt.get("isReissue") + ",\"required\":" + mEnt.get("required") + ",\"issued\":" + mEnt.get("issued") + ",\"remaining\":" + mEnt.get("remaining") + ",\"availableStock\":" + mEnt.get("availableStock") + ",\"lines\":[" + linesJson + "],\"openExceptions\":[" + exsJson + "]";
+			matsJson = matsJson + "{\"materialId\":\"" + mEnt.get("materialId") + "\",\"material\":\"" + mEnt.get("material").toString().replaceAll("\"","'") + "\",\"sku\":\"" + mEnt.get("sku").toString().replaceAll("\"","'") + "\",\"unit\":\"" + mEnt.get("unit").toString().replaceAll("\"","'") + "\",\"isFabric\":" + mEnt.get("isFabric") + ",\"isReissue\":" + mEnt.get("isReissue") + ",\"required\":" + mEnt.get("required") + ",\"issued\":" + mEnt.get("issued") + ",\"remaining\":" + mEnt.get("remaining") + ",\"availableStock\":" + mEnt.get("availableStock") + ",\"poCoveredQty\":" + ifnull(mEnt.get("poCoveredQty"),0) + ",\"lines\":[" + linesJson + "],\"openExceptions\":[" + exsJson + "]";
 
 			// The fabric-only half. Emitted only when it was populated, so a
 			// non-fabric row carries exactly the keys it did before.
@@ -1322,11 +1436,11 @@ string getStoreMaterialRequirements(string skipCountTxt)
 	}
 	resultJson = resultJson + "]";
 
-	// WRAPPED, NOT A BARE ARRAY ANY MORE. plansConsumed is the whole reason
-	// for the wrapper: pages are now variable-length (bounded by rowBudget,
-	// not by a fixed plan count), so the caller cannot compute where this
-	// call stopped on its own - it has to be told. The next call's
-	// skipCountTxt is this call's skipCount + plansConsumed.
+	// WRAPPED, NOT A BARE ARRAY. plansConsumed is how many top-priority plans
+	// this call walked. In LEGACY (chained) mode the next call's skipCountTxt is
+	// this call's skipCount + plansConsumed. In PARALLEL mode the widget already
+	// knows every window's skipCount up front (from getOpenPlanCount) and only
+	// reads plansConsumed to notice a short final window.
 	resultJson = "{\"plans\":" + resultJson + ",\"plansConsumed\":" + plansConsumed + "}";
 
 	}

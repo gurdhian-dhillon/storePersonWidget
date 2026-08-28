@@ -1,0 +1,65 @@
+string getInventoryVendors()
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		orgId = "60076905558";
+		baseUrl = "https://www.zohoapis.in/inventory/v1/";
+		
+		apiResp = invokeurl
+		[
+			url :baseUrl + "contacts?contact_type=vendor&organization_id=" + orgId
+			type :GET
+			connection:"inventory_connection"
+		];
+		
+		if(apiResp.get("code") != 0)
+		{
+			return "{\"errors\":[\"Inventory API Error: " + ifnull(apiResp.get("message"),"") + "\"]}";
+		}
+		
+		contacts = apiResp.get("contacts");
+		if(contacts == null)
+		{
+			return "{\"errors\":[\"No contacts found in response\"]}";
+		}
+		
+		vendorListStr = "[";
+		first = true;
+		for each  c in contacts
+		{
+			vendorType = "";
+			
+			customFields = c.get("custom_fields");
+			if (customFields != null)
+			{
+				for each  cf in customFields
+				{
+					label = ifnull(cf.get("label"),"").toString().toLowerCase();
+					if (label == "type")
+					{
+						vendorType = ifnull(cf.get("value"),"").toString();
+					}
+				}
+			}
+			
+			if(!first)
+			{
+				vendorListStr = vendorListStr + ",";
+			}
+			vId = ifnull(c.get("contact_id"),"").toString();
+			vName = ifnull(c.get("contact_name"),"").toString().replaceAll("\"","\\\"");
+			vTypeSafe = vendorType.replaceAll("\"","\\\"");
+			vendorListStr = vendorListStr + "{\"vendor_id\":\"" + vId + "\",\"vendor_name\":\"" + vName + "\",\"type\":\"" + vTypeSafe + "\"}";
+			first = false;
+		}
+		vendorListStr = vendorListStr + "]";
+		
+		res = "{\"errors\":[], \"vendors\":" + vendorListStr + "}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

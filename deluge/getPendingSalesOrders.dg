@@ -1,0 +1,95 @@
+string getPendingSalesOrders()
+{
+	// EVERY Sales_Order still at "Pending", for the admin dashboard's Pending
+	// tab - so the admin can see what the batch workflow has not turned into a
+	// plan yet, why (Plan_Reject_Reason from the last attempt), and convert one
+	// by hand.
+	//
+	// "Pending" IS the plan-builder's queue: createPlanForOneOrder moves an
+	// order to "In Progress" the moment it plans it, and leaves it "Pending"
+	// (writing Plan_Reject_Reason / Batch_Run_Outcome) when it cannot. So this
+	// list is exactly the orders the automatic run has not cleared.
+	//
+	// BOUNDED by the Pending filter - that is the whole backlog by definition,
+	// and it only shrinks. No paging: if this ever grows past a few hundred the
+	// batch workflow is not running, which is the real problem to fix.
+	//
+	// Response:
+	// { "errors":[],
+	//   "orders":[
+	//     { "id":"123", "salesOrder":"SO-0001", "customer":"Acme",
+	//       "orderDate":"2026-08-20", "source":"Shopify",
+	//       "itemCount":3, "rejectReason":"", "lastOutcome":"Rejected" } ] }
+
+	errJson = "";
+	ordersJson = "";
+
+	try
+	{
+		custNameById = Map();
+
+		// sort by on its own assignment, never inline in a for-each header.
+		pendingOrders = Sales_Order[Order_Status == "Pending"] sort by Sales_Order_Date;
+		for each  so in pendingOrders
+		{
+			soNo = ifnull(so.Sales_Order,"").toString().replaceAll("\"","'");
+
+			custTxt = "";
+			custId = ifnull(so.Customer,"").toString().trim();
+			if(custId != "")
+			{
+				cached = ifnull(custNameById.get(custId),"").toString();
+				if(cached != "")
+				{
+					custTxt = cached;
+				}
+				else
+				{
+					for each  cu in Customer[ID == custId.toLong()]
+					{
+						custTxt = ifnull(cu.Customer_Name,"").toString().replaceAll("\"","'");
+						if(custTxt == "")
+						{
+							custTxt = ifnull(cu.Name,"").toString().replaceAll("\"","'");
+						}
+					}
+					custNameById.put(custId,custTxt);
+				}
+			}
+
+			odTxt = "";
+			if(so.Sales_Order_Date != null)
+			{
+				odTxt = so.Sales_Order_Date.toString("yyyy-MM-dd");
+			}
+
+			srcTxt = ifnull(so.Order_Source,"").toString().trim().replaceAll("\"","'");
+
+			itemCount = 0;
+			for each  it in so.Item_Table
+			{
+				itemCount = itemCount + 1;
+			}
+
+			// The reason the LAST attempt failed, flattened for JSON. A newline
+			// or a quote in a reject reason otherwise breaks JSON.parse on the
+			// widget side - the whole chain, per CLAUDE.md, not just the quote.
+			rejTxt = ifnull(so.Plan_Reject_Reason,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+			outcomeTxt = ifnull(so.Batch_Run_Outcome,"").toString().trim().replaceAll("\"","'");
+
+			if(ordersJson != "")
+			{
+				ordersJson = ordersJson + ",";
+			}
+			// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+			ordersJson = ordersJson + "{\"id\":\"" + so.ID + "\",\"salesOrder\":\"" + soNo + "\",\"customer\":\"" + custTxt + "\",\"orderDate\":\"" + odTxt + "\",\"source\":\"" + srcTxt + "\",\"itemCount\":" + itemCount + ",\"rejectReason\":\"" + rejTxt + "\",\"lastOutcome\":\"" + outcomeTxt + "\"}";
+		}
+	}
+	catch (e)
+	{
+		errJson = "\"" + e.toString().replaceAll("\"","'") + "\"";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[" + errJson + "],\"orders\":[" + ordersJson + "]}";
+}

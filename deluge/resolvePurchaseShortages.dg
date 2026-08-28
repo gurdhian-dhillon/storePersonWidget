@@ -1,0 +1,122 @@
+string resolvePurchaseShortages()
+{
+	// Closes open Shortage tickets whose PO has landed.
+	//
+	// raiseBulkPurchaseOrder raises a Shortage Material_Exception per material,
+	// stamped with the draft PO number, so the store screen stops asking for
+	// cloth an order is already out for. Nothing then CLOSES that ticket - this
+	// app has no purchase-receipt step that touches Material_Exception, only
+	// syncPurchaseInflow which bumps Raw_Material stock from the Inventory bill.
+	//
+	// So the ticket is done the moment stock rises to cover what it asked for.
+	// This scans open Shortage tickets that carry a PO_Number and marks each one
+	// Resolved once the material's current on-hand >= the ticket's Required_Qty
+	// (the shortfall the PO was raised for). Partial arrivals leave it open.
+	//
+	// Called by runPurchaseInflow right after the sync, and safe to call any
+	// time (the store screen's "Check for arrivals" already runs runPurchaseInflow).
+	// Idempotent: a ticket already Resolved is skipped by the query.
+	//
+	// ON-HAND is read the same way every other store screen reads it:
+	//   fabric      -> Wash_Quantity (issuable washed cloth)
+	//   non-fabric  -> Quantity
+	// A PO for washed fabric lands as Unallocated_Qty first and only becomes
+	// Wash_Quantity once it is put into a lot, so a fabric shortage ticket may
+	// legitimately stay open until that happens - which is correct, the cloth is
+	// not yet issuable.
+
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	resolvedCount = 0;
+	stillOpen = 0;
+
+	try
+	{
+		// raiseMaterialException writes the field as "Type", so the query keys on
+		// that (it is the writer's own name and its own dedup query uses it). If
+		// the form actually resolved the reserved word to "Type_field", widen
+		// this to Material_Exception[Status == "Open"] and test the type in code.
+		openShort = Material_Exception[Status == "Open" && Type == "Shortage"];
+		for each  ex in openShort
+		{
+			poNo = ifnull(ex.PO_Number,"").toString().trim();
+			if(poNo == "")
+			{
+				// A plain shortage report with no PO behind it - not this
+				// function's to close.
+				continue;
+			}
+
+			needStr = ifnull(ex.Required_Qty,"0").toString().trim();
+			if(needStr == "")
+			{
+				needStr = "0";
+			}
+			needQty = needStr.toDecimal();
+			if(needQty <= 0)
+			{
+				// Nothing was actually asked for - close it, it cannot be
+				// waiting on stock.
+				ex.Status = "Resolved";
+				resolvedCount = resolvedCount + 1;
+				continue;
+			}
+
+			matId = ifnull(ex.SKU,"").toString().trim();
+			if(matId == "" || matId.isNumber() == false)
+			{
+				stillOpen = stillOpen + 1;
+				continue;
+			}
+
+			onHand = 0.0;
+			for each  rm in Raw_Material[ID == matId.toLong()]
+			{
+				if(ifnull(rm.Is_Fabric,false) == true)
+				{
+					wStr = ifnull(rm.Wash_Quantity,"0").toString().trim();
+					if(wStr == "")
+					{
+						wStr = "0";
+					}
+					onHand = wStr.toDecimal();
+				}
+				else
+				{
+					qStr = ifnull(rm.Quantity,"0").toString().trim();
+					if(qStr == "")
+					{
+						qStr = "0";
+					}
+					onHand = qStr.toDecimal();
+				}
+			}
+
+			if(onHand >= needQty)
+			{
+				ex.Status = "Resolved";
+				// A dated note so the My requests row and any later reader can
+				// see WHY it closed - the PO arrived, not a manual override.
+				oldNote = ifnull(ex.Note,"").toString();
+				addNote = zoho.currentdate.toString("dd-MMM HH:mm") + " - PO " + poNo + " received, stock now " + onHand + " (needed " + needQty + ") - request closed";
+				if(oldNote != "")
+				{
+					addNote = oldNote + "\n" + addNote;
+				}
+				ex.Note = addNote;
+				resolvedCount = resolvedCount + 1;
+			}
+			else
+			{
+				stillOpen = stillOpen + 1;
+			}
+		}
+
+		res = "{\"errors\":[],\"resolved\":" + resolvedCount + ",\"stillOpen\":" + stillOpen + "}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"resolved\":" + resolvedCount + "}";
+	}
+
+	return res;
+}

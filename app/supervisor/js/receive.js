@@ -566,7 +566,13 @@ function submitReceipt() {
     var supId = document.getElementById('sup-select').value;
     if (!supId) return;
 
-    var payload = { materials: [], waste: [], printedPieces: [] };
+    var payload = { materials: [], waste: [], printedPieces: [], plansTouched: [] };
+
+    // Plans this receipt touches - receiveMaterials runs its readiness sweep on
+    // exactly these instead of walking every open plan (the old statement-limit
+    // path). Union of every settlement line's planId plus every waste/printed
+    // row's plan, deduped.
+    var plansTouched = {};
 
     (data.materials || []).forEach(function (m, i) {
         var input = document.getElementById(matInputId(i));
@@ -578,10 +584,39 @@ function submitReceipt() {
         // more than was issued would settle stock that never moved.
         if (val < 0) val = 0;
         if (val > m.pending) val = m.pending;
+
+        // DISTRIBUTE the confirmed quantity across the still-owed Issue_Lines,
+        // OLDEST FIRST - the same rule receiveMaterials used to run server-side.
+        // getSupervisorMaterials emits m.lines newest-first (voucher loop is
+        // Added_Time desc), so reverse. Each line owes `pending`; the whole of
+        // that is settled off In_Transit either way, and `confirmed` is how much
+        // of it he actually got - the rest becomes the shortfall / dispute.
+        var lines = (m.lines || []).slice().reverse();
+        var confirmLeft = round2(val);
+        var settlements = [];
+        lines.forEach(function (ln) {
+            var owe = Number(ln.pending) || 0;
+            if (owe <= 0) return;
+            var conf = confirmLeft;
+            if (conf > owe) conf = owe;
+            confirmLeft = round2(confirmLeft - conf);
+            settlements.push({
+                issueLineId: ln.issueLineId,
+                voucherId: ln.voucherId,
+                lot: ln.lot || '',
+                requirementId: ln.requirementId || '',
+                planId: ln.planId || '',
+                settle: round2(owe),
+                confirmed: round2(conf)
+            });
+            if (ln.planId) plansTouched[String(ln.planId)] = 1;
+        });
+
         payload.materials.push({
             materialId: m.materialId,
             received: round2(val),
-            remark: note ? note.value : ''
+            remark: note ? note.value : '',
+            settlements: settlements
         });
     });
 
@@ -596,6 +631,7 @@ function submitReceipt() {
             received: val,
             remark: note ? note.value : ''
         });
+        if (w.planId) plansTouched[String(w.planId)] = 1;
     });
 
     (data.printedPieces || []).forEach(function (p, i) {
@@ -606,45 +642,109 @@ function submitReceipt() {
         if (val > p.pending) val = p.pending;
         payload.printedPieces.push({
             issueLineId: p.issueLineId,
+            voucherId: p.voucherId,
             received: round2(val),
             remark: note ? note.value : ''
         });
+        if (p.planId) plansTouched[String(p.planId)] = 1;
     });
+
+    var allPlansTouched = Object.keys(plansTouched);
 
     var btn = document.getElementById('confirm-btn');
     btn.disabled = true;
     btn.textContent = 'Saving…';
 
-    ZOHO.CREATOR.DATA.invokeCustomApi({
-        api_name: 'receiveMaterials',
-        http_method: 'POST',
-        payload: {
-            supervisorId: supId,
-            receiptsJson: JSON.stringify(payload)
-        }
-    }).then(function (response) {
-        console.log('receive response:', response);
-        var parsed;
-        try {
-            parsed = JSON.parse(response.result);
-        } catch (e) {
-            parsed = null;
-        }
-        if (parsed && parsed.errors && parsed.errors.length > 0) {
-            alert('Recorded, with discrepancies:\n' + parsed.errors.join('\n'));
-        }
+    // ---- CHUNKING ----
+    //
+    // A big receipt has hundreds of settlement lines - one invokeCustomApi
+    // payload cannot carry them and one execution cannot apply them (the
+    // statement-execution limit, which is not catchable). Same shape as
+    // issueForSupervisor: split into chunks of at most MAX_ROWS settlement /
+    // waste / printed rows, send them sequentially, recover from rate limiting.
+    //
+    // Every chunk but the last carries finalize:false - it only applies its
+    // rows. The last carries finalize:true and the FULL plansTouched list, and
+    // does the readiness sweep + warehouse transfer once for the whole receipt.
+    var MAX_ROWS = 120;
 
-        // Push the consumption receiveMaterials just queued straight to
-        // Inventory, rather than waiting for the nightly drain.
-        //
-        // Fired from here, not from inside receiveMaterials, for two reasons:
-        // it is a separate execution so it cannot spend that function's
-        // statement budget, and a widget -> Custom API call is unmetered.
-        //
-        // Deliberately not awaited and never surfaced to the supervisor. The
-        // receipt has already been recorded; if this fails the rows stay
-        // Pending and the scheduled drain retries them. Telling him a stock
-        // post failed would be asking him to act on something he cannot fix.
+    // Flatten every settlement into a work list, tagged with its parent material
+    // so a chunk can rebuild the materials[] wrapper. Waste + printed rows ride
+    // along in the same budget.
+    var work = [];
+    payload.materials.forEach(function (m) {
+        (m.settlements || []).forEach(function (s) {
+            work.push({ kind: 'mat', materialId: m.materialId, received: m.received,
+                remark: m.remark, s: s });
+        });
+        if (!m.settlements || m.settlements.length === 0) {
+            // A material with nothing still owed (received === 0 lines) - keep it
+            // so its okJson row is still emitted. Rare; costs one slot.
+            work.push({ kind: 'mat', materialId: m.materialId, received: m.received,
+                remark: m.remark, s: null });
+        }
+    });
+    payload.waste.forEach(function (w) { work.push({ kind: 'waste', w: w }); });
+    payload.printedPieces.forEach(function (p) { work.push({ kind: 'printed', p: p }); });
+
+    // Build the chunk payloads.
+    var chunks = [];
+    for (var off = 0; off < work.length; off += MAX_ROWS) {
+        var slice = work.slice(off, off + MAX_ROWS);
+        var matMap = {};
+        var order = [];
+        var cp = { materials: [], waste: [], printedPieces: [], plansTouched: [],
+            finalize: false };
+        slice.forEach(function (item) {
+            if (item.kind === 'mat') {
+                var mw = matMap[item.materialId];
+                if (!mw) {
+                    mw = { materialId: item.materialId, received: item.received,
+                        remark: item.remark, settlements: [] };
+                    matMap[item.materialId] = mw;
+                    order.push(item.materialId);
+                }
+                if (item.s) mw.settlements.push(item.s);
+            } else if (item.kind === 'waste') {
+                cp.waste.push(item.w);
+            } else {
+                cp.printedPieces.push(item.p);
+            }
+        });
+        order.forEach(function (id) { cp.materials.push(matMap[id]); });
+        chunks.push(cp);
+    }
+    // Every settlement chunk carries finalize:false - it only applies its rows.
+    // The readiness sweep + warehouse transfer run afterwards, in finalizeLoop,
+    // which is itself resumable (receiveMaterials caps the sweep per call and
+    // hands back the plan ids it did not reach).
+    chunks.forEach(function (cp) { cp.finalize = false; });
+
+    var chunkIndex = 0;
+    var retryCount = 0;
+    var RETRY_WAITS_MS = [3000, 8000, 20000, 45000, 60000];
+    var collectedErrors = [];
+
+    // Plan ids still to sweep. Seeded with the whole set; each finalize call
+    // returns sweepRemaining and we go again until sweepDone.
+    var sweepQueue = allPlansTouched.slice();
+    var finalizePass = 0;
+
+    function isRateLimited(err) {
+        var msg = ((err && (err.message || err.error || err.toString())) || '')
+            .toString().toLowerCase();
+        return msg.indexOf('429') >= 0 || msg.indexOf('too many request') >= 0 ||
+            msg.indexOf('rate limit') >= 0 || msg.indexOf('4834') >= 0 ||
+            msg.indexOf('throttl') >= 0 || msg.indexOf('limit exceeded') >= 0;
+    }
+
+    function finishOk() {
+        if (collectedErrors.length > 0) {
+            alert('Recorded, with discrepancies:\n' + collectedErrors.join('\n'));
+        }
+        // Push the consumption straight to Inventory rather than waiting for the
+        // nightly drain. Not awaited, never surfaced - the receipt is recorded;
+        // a failed post is retried by the scheduled run.
         ZOHO.CREATOR.DATA.invokeCustomApi({
             api_name: 'postInventoryQueue',
             http_method: 'POST',
@@ -655,14 +755,178 @@ function submitReceipt() {
             console.warn('inventory drain failed, scheduled run will retry:', drainErr);
         });
 
+        // WAREHOUSE TRANSFER ORDERS - drain the rest.
+        //
+        // receiveMaterials already called postTransferOrders('auto') once on its
+        // finalize pass, but that posts at most maxOrders (10) transfer orders
+        // per execution - and a chunked handover is now MANY small SIV vouchers
+        // (one per issue chunk), so one receipt can leave 15-25 vouchers still
+        // Pending. Each is its own transfer order keyed to its own SIV number;
+        // nothing merges. So keep calling 'auto' - each call its own unmetered
+        // execution - until it reports nothing left waiting, no progress was
+        // made, or a safety cap is hit. Not awaited by the UI: the receipt is
+        // already saved and a leftover Pending voucher is picked up by the next
+        // receipt or a scheduled run.
+        drainTransferOrders(0);
+
         EDIT = false;
         loadMaterials();
-    }).catch(function (err) {
-        console.error('receiveMaterials error:', err);
-        alert('Failed to save. Check the browser console for details.');
+    }
+
+    function drainTransferOrders(callsSoFar) {
+        var MAX_TO_CALLS = 12; // 12 * maxOrders(10) = 120 vouchers, well past any real receipt
+        if (callsSoFar >= MAX_TO_CALLS) {
+            console.warn('drainTransferOrders: hit call cap, leaving the rest for the next run');
+            return;
+        }
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'postTransferOrders',
+            http_method: 'POST',
+            payload: { dryRun: 'false' }
+        }).then(function (resp) {
+            var parsed = null;
+            try {
+                var r = resp && resp.result !== undefined ? resp.result : resp;
+                parsed = typeof r === 'string' ? JSON.parse(r) : r;
+                if (parsed && parsed.data !== undefined) parsed = typeof parsed.data === 'string' ? JSON.parse(parsed.data) : parsed.data;
+            } catch (e) { parsed = null; }
+
+            if (!parsed || (parsed.errors && parsed.errors.length)) {
+                console.warn('postTransferOrders reported an error, stopping the drain:', parsed && parsed.errors);
+                return;
+            }
+            var pending = Number(parsed.stillPending) || 0;
+            var progressed = (Number(parsed.posted) || 0) + (Number(parsed.failed) || 0);
+            console.log('transfer orders:', 'posted', parsed.posted, 'failed', parsed.failed,
+                'stillPending', pending, 'needsHuman', parsed.needsHuman);
+
+            if (pending > 0 && progressed > 0) {
+                setTimeout(function () { drainTransferOrders(callsSoFar + 1); }, 400);
+            }
+            // pending>0 but progressed==0 -> the rest are Failed/needsHuman; stop.
+        }).catch(function (err) {
+            console.warn('postTransferOrders call failed, scheduled run will retry:', err);
+        });
+    }
+
+    // `stage` is which loop the retry timer should resume - 'chunk' or 'final'.
+    var retryStage = 'chunk';
+
+    function abortRun(err) {
+        console.error('receiveMaterials aborted', err);
+        var where = retryStage === 'final'
+            ? 'Settlements saved. Status update did not finish — press Confirm again to complete it.'
+            : 'Receipt saved up to batch ' + chunkIndex + ' of ' + chunks.length +
+              '. Batches before this went through. Press Confirm again to finish the rest.';
+        alert(where);
         btn.disabled = false;
         btn.textContent = EDIT ? 'Confirm' : 'All received as listed';
-    });
+    }
+
+    function scheduleRetry(err) {
+        if (retryCount >= RETRY_WAITS_MS.length) { abortRun(err); return; }
+        var waitMs = RETRY_WAITS_MS[retryCount];
+        retryCount++;
+        console.warn('receiveMaterials rate-limited; retry ' + retryCount + '/' +
+            RETRY_WAITS_MS.length + ' in ' + waitMs + 'ms');
+        btn.textContent = 'Rate limited — retrying in ' + Math.round(waitMs / 1000) + 's…';
+        setTimeout(retryStage === 'final' ? finalizeLoop : processNextChunk, waitMs);
+    }
+
+    function processNextChunk() {
+        retryStage = 'chunk';
+        if (chunkIndex >= chunks.length) { finalizeLoop(); return; }
+
+        var cp = chunks[chunkIndex];
+        btn.textContent = 'Saving… (' + (chunkIndex + 1) + '/' + chunks.length + ')';
+
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'receiveMaterials',
+            http_method: 'POST',
+            payload: {
+                supervisorId: supId,
+                receiptsJson: JSON.stringify(cp)
+            }
+        }).then(function (response) {
+            var parsed;
+            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+
+            if (parsed && parsed.errors && parsed.errors.length > 0) {
+                // A Deluge-side throttle surfaces here, not in .catch.
+                if (parsed.errors.some(function (e) { return isRateLimited({ message: e }); })) {
+                    scheduleRetry({ message: parsed.errors.join(' ') });
+                    return;
+                }
+                collectedErrors = collectedErrors.concat(parsed.errors);
+            }
+
+            chunkIndex++;
+            retryCount = 0;
+            setTimeout(processNextChunk, 400); // pace between chunks
+        }).catch(function (err) {
+            if (isRateLimited(err)) { scheduleRetry(err); return; }
+            abortRun(err);
+        });
+    }
+
+    // Readiness sweep + warehouse transfer, resumable. Each call sweeps a
+    // budgeted slice of sweepQueue and returns the rest in sweepRemaining; we
+    // keep calling until sweepDone. A receipt with no plansTouched still makes
+    // one pass so postTransferOrders runs.
+    function finalizeLoop() {
+        retryStage = 'final';
+        finalizePass++;
+        btn.textContent = 'Finishing… (' + finalizePass + ')';
+
+        var cp = {
+            materials: [], waste: [], printedPieces: [],
+            finalize: true,
+            plansTouched: sweepQueue
+        };
+
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'receiveMaterials',
+            http_method: 'POST',
+            payload: {
+                supervisorId: supId,
+                receiptsJson: JSON.stringify(cp)
+            }
+        }).then(function (response) {
+            var parsed;
+            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+
+            if (parsed && parsed.errors && parsed.errors.length > 0) {
+                if (parsed.errors.some(function (e) { return isRateLimited({ message: e }); })) {
+                    scheduleRetry({ message: parsed.errors.join(' ') });
+                    return;
+                }
+                collectedErrors = collectedErrors.concat(parsed.errors);
+            }
+
+            var remaining = (parsed && parsed.sweepRemaining) || [];
+            var done = !parsed || parsed.sweepDone === true || remaining.length === 0;
+
+            if (!done && remaining.length > 0 && remaining.length < sweepQueue.length) {
+                // Progress made - go again with what's left.
+                sweepQueue = remaining;
+                retryCount = 0;
+                setTimeout(finalizeLoop, 400);
+                return;
+            }
+            if (!done && remaining.length >= sweepQueue.length) {
+                // No progress - stop rather than loop forever.
+                console.error('finalize made no progress; remaining plans:', remaining);
+                collectedErrors.push('Status update did not finish for ' +
+                    remaining.length + ' order(s). Press Confirm again.');
+            }
+            finishOk();
+        }).catch(function (err) {
+            if (isRateLimited(err)) { scheduleRetry(err); return; }
+            abortRun(err);
+        });
+    }
+
+    processNextChunk();
 }
 
 // ---- Load ----
@@ -699,6 +963,61 @@ function fillSupervisors(list) {
     return false;
 }
 
+// getSupervisorMaterials is PAGED BY Issue_Line ROW. A supervisor with a huge
+// old chunked handover has 1800+ lines on one voucher, and one call cannot walk
+// them all without blowing Zoho's statement limit. So each call processes a
+// slice of his Issue_Lines and returns linesConsumed; we call again with
+// skipLines += linesConsumed until linesConsumed === 0, merging the slices.
+//
+// Merge rules mirror the payload contract:
+//   materials  - keyed by materialId; pending sums, orders concat, lots merge
+//                by lot label (qty sums). isFabric/isReissue OR together.
+//   waste      - per Waste_Movement row, no overlap between pages: concat.
+//   printedPieces - per issueLineId, no overlap: concat.
+//   planFed    - union of plan ids; plansAwaiting = plansAssigned - |union|.
+function mergeReceiptPages(target, page) {
+    if (target.materials === undefined) {
+        target.materials = [];
+        target.waste = [];
+        target.printedPieces = [];
+        target.supervisors = page.supervisors || [];
+        target.plansAssigned = Number(page.plansAssigned) || 0;
+        target._planFed = {};
+        target.errors = [];
+    }
+    (page.errors || []).forEach(function (e) { target.errors.push(e); });
+
+    (page.materials || []).forEach(function (bm) {
+        var em = null;
+        for (var i = 0; i < target.materials.length; i++) {
+            if (target.materials[i].materialId === bm.materialId) { em = target.materials[i]; break; }
+        }
+        if (!em) {
+            target.materials.push(JSON.parse(JSON.stringify(bm)));
+            return;
+        }
+        em.pending = (Number(em.pending) || 0) + (Number(bm.pending) || 0);
+        if (bm.isFabric) em.isFabric = true;
+        if (bm.isReissue) em.isReissue = true;
+        em.orders = (em.orders || []).concat(bm.orders || []);
+        // The per-Issue_Line detail receiveMaterials settles against. Pages never
+        // overlap on a line (the cursor steps each line exactly once), so concat.
+        em.lines = (em.lines || []).concat(bm.lines || []);
+        (bm.lots || []).forEach(function (bl) {
+            var el = null;
+            for (var j = 0; j < (em.lots || []).length; j++) {
+                if (em.lots[j].lot === bl.lot) { el = em.lots[j]; break; }
+            }
+            if (el) el.qty = (Number(el.qty) || 0) + (Number(bl.qty) || 0);
+            else { em.lots = em.lots || []; em.lots.push(JSON.parse(JSON.stringify(bl))); }
+        });
+    });
+
+    (page.waste || []).forEach(function (w) { target.waste.push(w); });
+    (page.printedPieces || []).forEach(function (p) { target.printedPieces.push(p); });
+    (page.planFed || []).forEach(function (pid) { target._planFed[String(pid)] = 1; });
+}
+
 function loadMaterials() {
     var content = document.getElementById('rcv-content');
     var emptyState = document.getElementById('rcv-empty');
@@ -712,26 +1031,53 @@ function loadMaterials() {
         '<div class="skeleton-line"></div><div class="skeleton-line"></div>' +
         '<div class="skeleton-line w-70"></div></div>';
 
-    ZOHO.CREATOR.DATA.invokeCustomApi({
-        api_name: 'getSupervisorMaterials',
-        http_method: 'POST',
-        payload: { supervisorId: supId || '' }
-    }).then(function (response) {
-        console.log('raw response:', response);
-        refreshBtn.disabled = false;
-        try {
-            var parsed = JSON.parse(response.result);
-            console.log('parsed:', parsed);
-            // This response was fetched with an empty supervisorId, so its
-            // materials are empty by construction. Fetch again for whoever was
-            // just defaulted in rather than rendering "nothing to receive".
-            if (fillSupervisors(parsed.supervisors)) {
-                loadMaterials();
-                return;
+    var merged = {};
+    var MAX_CALLS = 60; // safety cap - real stop is linesConsumed===0
+
+    function fetchPage(skipLines, callsSoFar) {
+        if (callsSoFar >= MAX_CALLS) {
+            console.error('loadMaterials: hit MAX_CALLS safety cap, stopping');
+            return Promise.resolve();
+        }
+        return ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'getSupervisorMaterials',
+            http_method: 'POST',
+            payload: {
+                supervisorId: supId || '',
+                skipLinesTxt: String(skipLines)
             }
-            render(parsed);
+        }).then(function (response) {
+            var parsed = JSON.parse(response.result);
+
+            // Empty supervisorId fetch: only the picker is populated. Default one
+            // in and restart.
+            if ((!supId || supId === '') && fillSupervisors(parsed.supervisors)) {
+                return null; // signal: restart
+            }
+
+            mergeReceiptPages(merged, parsed);
+            var consumed = Number(parsed.linesConsumed) || 0;
+            if (consumed > 0) {
+                return fetchPage(skipLines + consumed, callsSoFar + 1);
+            }
+        });
+    }
+
+    fetchPage(0, 0).then(function (restart) {
+        refreshBtn.disabled = false;
+        if (restart === null) { loadMaterials(); return; }
+
+        merged.plansAwaiting = Math.max(0,
+            (merged.plansAssigned || 0) - Object.keys(merged._planFed || {}).length);
+
+        console.log('merged receipt list:', merged);
+        if (merged.errors && merged.errors.length > 0) {
+            console.warn('getSupervisorMaterials page errors:', merged.errors);
+        }
+        try {
+            render(merged);
         } catch (e) {
-            console.error('JSON.parse failed:', e, response.result);
+            console.error('render failed:', e, merged);
             content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Could not read the list</h2><p>Check the browser console for details.</p></div>';
         }
     }).catch(function (err) {

@@ -65,9 +65,24 @@ string runPurchaseInflow()
 
 		info "runPurchaseInflow | " + syncRes;
 
+		// Close any open PO Shortage tickets the just-synced stock now covers.
+		// Its own try/catch: a resolve failure must not make a completed inflow
+		// look failed, and the sync's own result is what matters here.
+		poRes = "";
+		try
+		{
+			poRes = thisapp.resolvePurchaseShortages().toString();
+			info "runPurchaseInflow | shortages -> " + poRes;
+		}
+		catch (ePo)
+		{
+			poRes = "{\"errors\":[\"" + ePo.toString().replaceAll("\"","'") + "\"]}";
+			info "runPurchaseInflow | resolvePurchaseShortages threw: " + ePo.toString();
+		}
+
 		// The sync's reply is passed straight through rather than summarised, so
 		// the button and the webhook log see exactly what Execute would.
-		res = "{\"ran\":true,\"result\":" + syncRes + "}";
+		res = "{\"ran\":true,\"result\":" + syncRes + ",\"shortages\":" + poRes + "}";
 	}
 	catch (e)
 	{

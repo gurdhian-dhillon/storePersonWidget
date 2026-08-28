@@ -1036,6 +1036,30 @@ blow the statement limit at 111 plans even after the `matPlanIdx` fix, confirmed
   fetch-alls are fine, and the paged history functions are the shape to copy.
 - **`resolveStockDispute.dg`** is a legacy form workflow duplicating `resolveDispute`. It has
   none of the current logic. **Delete it in Creator.**
+- **`resolveDispute` does NOT wind back `Issue_Lines.Settled_Qty` or `Material_Issue.Issue_Status`,
+  and does not move Zoho Inventory on a `Store_Correction`.** Both are pre-existing — the receive
+  path settles the WHOLE owed amount into `Settled_Qty` and disputes the gap, so on a
+  `Store_Correction` / `Lost` resolution the requirement re-opens (`Issued_Qty` / `Received_Qty` /
+  `Pieces_From_*` rolled back correctly) but:
+  > 1. the handover's `Issue_Line` still reads `Settled_Qty == Qty` and its voucher still reads
+  >    `Issue_Status == "Received"` — the Material Issue Report shows the voucher as fully received
+  >    when part of it was corrected back.
+  > 2. `postTransferOrders` already moved the disputed metres to Production (they were in
+  >    `Settled_Qty − Transferred_Qty`), and `resolveDispute` only queues a `Write_Off` on `Lost`,
+  >    not on `Store_Correction` — so after a store-correction Inventory says Production while
+  >    Creator says the cloth is back on the shelf.
+  >
+  > The store/supervisor screen optimisations (allocation-applier issue, settlement-applier
+  > receive, per-voucher `Issue_Status`, chunked/resumable finalize) did NOT introduce this — the
+  > old fan also settled the full owed amount and the old `resolveDispute` also ignored
+  > `Issue_Lines`. The dispute raise/display/net/resolve-requirement paths were all traced and are
+  > correct after the optimisation.
+  >
+  > **To fix later:** `resolveDispute` needs to (a) wind back the oldest matching `Issue_Line`'s
+  > `Settled_Qty` by the resolved qty, (b) re-derive that voucher's `Issue_Status` from its lines,
+  > (c) queue an Inventory move for `Store_Correction` too. Needs a dispute→voucher link, which is
+  > not stored today — `receiveMaterials` would have to stamp the voucher/line id on the
+  > `Stock_Dispute` when it raises it.
 - **Old `Production_Planning` subforms** (`Item_Table`, `Production_Tracking`,
   `Raw_Material_Check`, `Waste_Issued`) are unused post-migration and can be deleted.
 

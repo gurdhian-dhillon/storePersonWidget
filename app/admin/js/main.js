@@ -1821,7 +1821,11 @@ function loadLive(done) {
             api_name: 'getStoreMaterialRequirements',
             http_method: 'POST',
             payload: {
-                skipCountTxt: String(skipCount)
+                skipCountTxt: String(skipCount),
+                // Creator Custom API args are all MANDATORY - "" = legacy
+                // chained mode (this audit walk stays sequential; it is a
+                // background load, not the store person waiting on a screen).
+                pagePlansTxt: ''
             }
         }).then(function (response) {
             var parsed = JSON.parse(response.result);

@@ -1,0 +1,231 @@
+string raiseBulkPurchaseOrder(string vendorId, string shortItemsJsonTxt)
+{
+	// Creates ONE draft Purchase Order in Zoho Inventory for a set of short
+	// materials, and - on success - raises a Shortage Material_Exception per
+	// material stamped with the PO number, so the store screen knows a PO is
+	// already out and stops offering "Raise PO" for that material until the
+	// ticket is resolved (i.e. until the goods land).
+	//
+	// REUSED by three screens with different rate sources:
+	//   Store "What is missing"  - no rate in the payload; falls back to
+	//                              Raw_Material.Rate.
+	//   Third-party job / Print  - rate comes from the operator on the UI and is
+	//                              sent per line; that rate wins.
+	//
+	// shortItemsJsonTxt: a JSON list of
+	//   { "materialId":"123", "quantity":40, "rate":12.5 }
+	// rate is OPTIONAL - omitted or <= 0 means "use the material's catalogue
+	// rate". planId / salesOrder / planItemId / supervisorId may also ride on a
+	// line and are passed straight through to the exception's line subform.
+
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		orgId = "60076905558";
+		baseUrl = "https://www.zohoapis.in/inventory/v1/";
+
+		vId = ifnull(vendorId,"").toString().trim();
+		if(vId == "")
+		{
+			return "{\"errors\":[\"vendorId is required.\"]}";
+		}
+
+		itemsList = shortItemsJsonTxt.toList();
+		if(itemsList.size() == 0)
+		{
+			return "{\"errors\":[\"No items provided for the PO.\"]}";
+		}
+
+		lineItems = List();
+		// Kept alongside lineItems, same order, so the exception pass after the
+		// PO posts has every figure it needs without re-reading Raw_Material.
+		exSpecs = List();
+
+		for each  itemStr in itemsList
+		{
+			itemMap = itemStr.toMap();
+			matId = ifnull(itemMap.get("materialId"),"").toString().trim();
+			qtyStr = ifnull(itemMap.get("quantity"),"0").toString().trim();
+			if(qtyStr == "")
+			{
+				qtyStr = "0";
+			}
+			qty = qtyStr.toDecimal();
+
+			// UI rate wins when it is present and positive; otherwise the
+			// catalogue rate. Normalised to string first - a Creator numeric
+			// that was never written is EMPTY, not null, and toDecimal() throws
+			// on empty.
+			uiRateStr = ifnull(itemMap.get("rate"),"").toString().trim();
+			uiRate = 0.0;
+			if(uiRateStr != "" && uiRateStr.isNumber() == true)
+			{
+				uiRate = uiRateStr.toDecimal();
+			}
+
+			if(matId != "" && qty > 0)
+			{
+				for each  rm in Raw_Material[ID == matId.toLong()]
+				{
+					invItemId = ifnull(rm.Inventory_Item_ID,"").toString().trim();
+					if(invItemId == "")
+					{
+						return "{\"errors\":[\"Material " + rm.SKU + " is not mapped to an Inventory Item.\"]}";
+					}
+
+					catRateStr = ifnull(rm.Rate,"0").toString().trim();
+					if(catRateStr == "")
+					{
+						catRateStr = "0";
+					}
+					rate = catRateStr.toDecimal();
+					if(uiRate > 0)
+					{
+						rate = uiRate;
+					}
+
+					lineItem = Map();
+					lineItem.put("item_id",invItemId);
+					lineItem.put("quantity",qty);
+					lineItem.put("rate",rate);
+					lineItems.add(lineItem);
+
+					// SKU|MaterialName|Unit for the exception. The name follows the
+					// same Display -> Name -> SKU fallback every other screen uses.
+					mName = ifnull(rm.Material_Display_Name,"").toString().trim();
+					if(mName == "")
+					{
+						mName = ifnull(rm.Name,"").toString().trim();
+					}
+					if(mName == "")
+					{
+						mName = ifnull(rm.SKU,"").toString().trim();
+					}
+					mUnit = ifnull(rm.Unit,"").toString().trim();
+
+					// Live stock for the ticket's Available_Qty. Fabric reads
+					// washed cloth (what the store screen's shortfall is against);
+					// everything else reads Quantity.
+					availQ = 0.0;
+					if(ifnull(rm.Is_Fabric,false) == true)
+					{
+						awStr = ifnull(rm.Wash_Quantity,"0").toString().trim();
+						if(awStr == "")
+						{
+							awStr = "0";
+						}
+						availQ = awStr.toDecimal();
+					}
+					else
+					{
+						aqStr = ifnull(rm.Quantity,"0").toString().trim();
+						if(aqStr == "")
+						{
+							aqStr = "0";
+						}
+						availQ = aqStr.toDecimal();
+					}
+
+					exMap = Map();
+					exMap.put("materialId",matId);
+					exMap.put("name",mName);
+					exMap.put("unit",mUnit);
+					exMap.put("qty",qty);
+					exMap.put("available",availQ);
+					exMap.put("lines",ifnull(itemMap.get("lines"),"[]").toString());
+					exSpecs.add(exMap);
+				}
+			}
+		}
+
+		if(lineItems.size() == 0)
+		{
+			return "{\"errors\":[\"Could not resolve any materials to Inventory Items.\"]}";
+		}
+
+		poPayload = Map();
+		poPayload.put("vendor_id",vId);
+		poPayload.put("status","draft");
+		poPayload.put("line_items",lineItems);
+
+		apiResp = invokeurl
+		[
+			url :baseUrl + "purchaseorders?organization_id=" + orgId
+			type :POST
+			parameters:poPayload.toString()
+			connection:"inventory_connection"
+		];
+
+		if(apiResp.get("code") != 0)
+		{
+			return "{\"errors\":[\"Inventory API Error: " + ifnull(apiResp.get("message"),"") + "\"]}";
+		}
+
+		poObj = apiResp.get("purchaseorder");
+		poNumber = ifnull(poObj.get("purchaseorder_number"),"Unknown").toString();
+
+		//------------------------------------------------------------------
+		// The PO is posted. Now record a Shortage exception per material,
+		// stamped with the PO number - this is the store screen's memory that
+		// an order is already out, so it stops showing the material in "What
+		// is missing" and hides its Raise PO button until the ticket resolves.
+		//
+		// Own try/catch: the PO exists in Inventory whatever happens here, and
+		// failing the whole call over a Creator write would leave a draft PO
+		// with nothing in Creator pointing at it. Each material also wrapped
+		// individually so one bad row does not lose the rest.
+		//------------------------------------------------------------------
+		exRaised = 0;
+		exFailed = 0;
+		try
+		{
+			for each  exMap2 in exSpecs
+			{
+				try
+				{
+					exPayload = Map();
+					exPayload.put("materialId",exMap2.get("materialId"));
+					exPayload.put("type","Shortage");
+					exPayload.put("unit",exMap2.get("unit"));
+					// Required is the shortfall being ordered - this ticket is
+					// "a PO is out for N", not a re-derivation of total demand.
+					exPayload.put("required",exMap2.get("qty"));
+					exPayload.put("available",exMap2.get("available"));
+					exPayload.put("unwashed",0);
+					exPayload.put("shortfall",exMap2.get("qty"));
+					exPayload.put("poNumber",poNumber);
+					exPayload.put("note","Draft PO " + poNumber + " raised for " + exMap2.get("qty") + " " + exMap2.get("unit"));
+					exPayload.put("lines",exMap2.get("lines").toString().toJSONList());
+
+					exRes = thisapp.raiseMaterialException(exPayload.toString());
+					exResMap = exRes.toMap();
+					if(ifnull(exResMap.get("success"),false) == true)
+					{
+						exRaised = exRaised + 1;
+					}
+					else
+					{
+						exFailed = exFailed + 1;
+						info "raiseBulkPurchaseOrder: exception for material " + exMap2.get("materialId") + " not raised: " + ifnull(exResMap.get("error"),"");
+					}
+				}
+				catch (exOne)
+				{
+					exFailed = exFailed + 1;
+					info "raiseBulkPurchaseOrder: exception for material " + exMap2.get("materialId") + " threw: " + exOne.toString();
+				}
+			}
+		}
+		catch (exAll)
+		{
+			info "raiseBulkPurchaseOrder: exception pass failed wholesale: " + exAll.toString();
+		}
+
+		res = "{\"errors\":[],\"purchaseorder_number\":\"" + poNumber + "\",\"exceptionsRaised\":" + exRaised + ",\"exceptionsFailed\":" + exFailed + "}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}
