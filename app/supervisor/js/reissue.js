@@ -89,7 +89,8 @@ function openDamageDialog(plan, item, opts) {
         item: item,
         materials: [],
         phaseName: o.phaseName || '',
-        stageLogId: o.stageLogId || ''
+        stageLogId: o.stageLogId || '',
+        maxPieces: fromStage ? Number(o.pieces) : -1
     };
 
     var el = damageModalEl();
@@ -125,8 +126,9 @@ function openDamageDialog(plan, item, opts) {
 
         '<div class="dmg-step">' +
         '<label for="dmg-pieces">How many pieces were spoiled?</label>' +
-        '<input type="number" id="dmg-pieces" min="0" step="1" value="' +
-        (fromStage ? o.pieces : 1) + '">' +
+        '<input type="number" id="dmg-pieces" min="0"' +
+        (fromStage ? ' max="' + o.pieces + '"' : '') +
+        ' step="1" value="' + (fromStage ? o.pieces : 1) + '">' +
         // A label torn while being attached ruins no garment. Saying so
         // here stops him typing 1 to get past the box and inventing a
         // piece loss that never happened.
@@ -168,6 +170,10 @@ function loadDamageProposal() {
     var pieces = elP ? Number(elP.value) : 0;
     if (isNaN(pieces) || pieces < 0) {
         alert('Pieces spoiled must be zero or more.');
+        return;
+    }
+    if (damageCtx.maxPieces >= 0 && pieces > damageCtx.maxPieces) {
+        alert('Pieces spoiled cannot exceed ' + damageCtx.maxPieces + '.');
         return;
     }
 
@@ -292,7 +298,9 @@ function renderDamageProposal() {
             (m.sku ? '<div class="mat-sku">' + escapeHtml(m.sku) + '</div>' : '') +
             '</td>' +
             '<td class="col-num">' +
-            '<input type="number" class="dmg-pcs" data-i="' + i + '" min="0" step="1" value="' + seed + '">' +
+            '<input type="number" class="dmg-pcs" data-i="' + i + '" min="0"' +
+            (damageCtx.maxPieces >= 0 ? ' max="' + damageCtx.maxPieces + '"' : '') +
+            ' step="1" value="' + seed + '">' +
             '</td>' +
             // Still editable. The spoiled count is the quick way to fill this
             // in, not a replacement for it — a part-used cone or a length he
@@ -328,7 +336,12 @@ function renderDamageProposal() {
     // be looking at a stale figure while deciding whether to correct it.
     document.querySelectorAll('#damage-modal .dmg-pcs').forEach(function (el) {
         el.addEventListener('input', function () {
-            syncDamageRow(Number(el.getAttribute('data-i')));
+            var i = Number(el.getAttribute('data-i'));
+            var val = Number(el.value);
+            if (damageCtx.maxPieces >= 0 && val > damageCtx.maxPieces) {
+                el.value = damageCtx.maxPieces;
+            }
+            syncDamageRow(i);
         });
     });
 
@@ -341,6 +354,10 @@ function renderDamageProposal() {
         headEl.addEventListener('input', function () {
             var n = Number(headEl.value);
             if (isNaN(n) || n < 0) return;
+            if (damageCtx.maxPieces >= 0 && n > damageCtx.maxPieces) {
+                headEl.value = damageCtx.maxPieces;
+                n = damageCtx.maxPieces;
+            }
             damageCtx.pieces = n;
             var v = n > 0 ? n : 1;
             document.querySelectorAll('#damage-modal .dmg-pcs').forEach(function (el) {
@@ -382,7 +399,14 @@ function wireDamageSave() {
 function saveDamage() {
     if (!damageCtx) return;
 
+    var pieces = damageCtx.pieces || 0;
+    if (damageCtx.maxPieces >= 0 && pieces > damageCtx.maxPieces) {
+        alert('Pieces spoiled cannot exceed ' + damageCtx.maxPieces + '.');
+        return;
+    }
+
     var lines = [];
+    var invalidRow = false;
     document.querySelectorAll('#damage-modal .dmg-qty').forEach(function (inp) {
         var i = Number(inp.getAttribute('data-i'));
         var m = damageCtx.materials[i];
@@ -392,6 +416,12 @@ function saveDamage() {
         var pcsEl = document.querySelector('#damage-modal .dmg-pcs[data-i="' + i + '"]');
         var pcs = pcsEl ? Number(pcsEl.value) || 0 : 0;
         var useEl = document.querySelector('#damage-modal .dmg-use[data-i="' + i + '"]');
+
+        if (damageCtx.maxPieces >= 0 && pcs > damageCtx.maxPieces) {
+            invalidRow = true;
+            alert('Pieces spoiled for ' + (m.name || 'material') + ' cannot exceed ' + damageCtx.maxPieces + '.');
+            return;
+        }
 
         // Pieces are only meaningful on fabric — that is what Required_Pieces
         // means on the requirement this becomes, and it is what the offcut
@@ -417,7 +447,8 @@ function saveDamage() {
         });
     });
 
-    var pieces = damageCtx.pieces || 0;
+    if (invalidRow) return;
+
     if (lines.length === 0 && pieces <= 0) {
         alert('Nothing to record \u2014 set a quantity, or say how many pieces were spoiled.');
         return;
