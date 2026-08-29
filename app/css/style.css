@@ -2469,3 +2469,51 @@ th.col-num {
     font-weight: 600;
     color: var(--text-main);
 }
+
+/* Mobile Compatibility */
+@media (max-width: 768px) {
+    .app-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+    .app-header-right {
+        width: 100%;
+        justify-content: space-between;
+    }
+    .item-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+    .item-header-right {
+        width: 100%;
+        justify-content: flex-end;
+    }
+    .tab-strip {
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 0.5rem;
+    }
+    .tab-btn {
+        padding: 0.5rem 0.75rem;
+        font-size: 0.8125rem;
+    }
+    .tables-container {
+        padding: 0.5rem;
+    }
+    .item-body {
+        padding: 1rem 0.5rem;
+    }
+}
+
+/* Prevent wrapping on History and Waste tables to match Raw Materials */
+#panel-history table th,
+#panel-history table td,
+#panel-history .material-name-cell,
+#panel-history .material-name-cell .mat-name,
+#panel-waste table th,
+#panel-waste table td,
+#panel-waste .material-name-cell,
+#panel-waste .material-name-cell .mat-name {
+    white-space: nowrap;
+}

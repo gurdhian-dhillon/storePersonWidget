@@ -3446,3 +3446,140 @@ th.col-num {
     .os-rate-in { grid-area: rate; }
     .os-rate-hist { grid-area: hist; }
 }
+
+/* Mobile Compatibility */
+@media (max-width: 768px) {
+    .app-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+    .app-header-right {
+        width: 100%;
+        justify-content: space-between;
+    }
+    .item-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+    .item-header-right {
+        width: 100%;
+        justify-content: flex-end;
+    }
+    .tab-strip {
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 0.5rem;
+    }
+    .tab-btn {
+        padding: 0.5rem 0.75rem;
+        font-size: 0.8125rem;
+    }
+    .tables-container {
+        padding: 0.5rem;
+    }
+    .item-body {
+        padding: 1rem 0.5rem;
+    }
+
+    /* Supervisor Production Tab Specifics */
+    .prod-toolbar {
+        display: flex !important;
+        width: 100% !important;
+    }
+    .prod-toolbar .sup-select {
+        flex: 1 1 auto !important;
+        width: 100% !important;
+        margin-right: 0 !important;
+    }
+    .app-header-right .sup-select {
+        flex: 1 1 auto !important;
+        width: 100% !important;
+        margin-right: 0.75rem !important;
+    }
+    .plan-header-top {
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        gap: 0.75rem !important;
+    }
+    .plan-header-controls {
+        width: 100% !important;
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 0.5rem !important;
+    }
+    .plan-header-controls .sup-select {
+        min-width: 0 !important;
+        width: 100% !important;
+        margin-right: 0 !important;
+    }
+    .stage-card-head {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.5rem;
+    }
+    .share-table {
+        table-layout: auto !important;
+    }
+    .share-table th, .share-table td {
+        white-space: nowrap !important;
+    }
+    .table-wrapper {
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        width: 100% !important;
+    }
+    .share-assign {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 0.75rem !important;
+    }
+    .share-assign-qty {
+        justify-content: space-between !important;
+        width: 100% !important;
+    }
+    .share-assign select {
+        flex: none !important; 
+        width: 100% !important;
+        max-width: none !important;
+    }
+    .share-assign input[type="number"] {
+        flex: 1 1 auto !important;
+    }
+    .share-assign .btn-share-add {
+        max-width: none !important;
+        width: 100% !important;
+        margin-left: 0 !important;
+    }
+    .stage-end-row {
+        grid-template-columns: 1fr !important;
+    }
+    .stage-end-action {
+        min-width: 0 !important;
+        width: 100% !important;
+    }
+    .stage-time-row {
+        flex-direction: column !important;
+        align-items: stretch !important;
+    }
+    .stage-time-row .btn-stage {
+        width: 100% !important;
+        margin-top: 5px !important;
+        margin-left: 0 !important;
+    }
+    .waste-panel table th, .waste-panel table td {
+        white-space: nowrap !important;
+    }
+}
+
+/* Prevent wrapping on History and Waste tables */
+#panel-history table th,
+#panel-history table td,
+#panel-history .material-name-cell,
+#panel-history .material-name-cell .mat-name,
+#panel-waste table th,
+#panel-waste table td,
+#panel-waste .material-name-cell,
+#panel-waste .material-name-cell .mat-name {
+    white-space: nowrap;
+}
