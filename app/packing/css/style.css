@@ -729,11 +729,60 @@
 .inc-item {
     display: inline-flex;
     align-items: center;
+    gap: 0.5rem;
     font-size: 0.875rem;
     color: #475569;
     background: #f1f5f9;
+    border: 1px solid #e2e8f0;
     border-radius: 9999px;
-    padding: 0.3rem 0.85rem;
+    padding: 0.35rem 0.85rem;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s ease;
+}
+
+.inc-item:hover {
+    background: #e2e8f0;
+    color: #1e293b;
+}
+
+.inc-item.is-checked,
+.inc-item:has(.inc-checkbox:checked) {
+    background: #eff6ff;
+    color: #1d4ed8;
+    border-color: #bfdbfe;
+    font-weight: 500;
+}
+
+.inc-checkbox {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 1.1rem;
+    height: 1.1rem;
+    border: 1.5px solid #94a3b8;
+    border-radius: 4px;
+    outline: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #ffffff;
+    margin: 0;
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+}
+
+.inc-checkbox:checked {
+    background-color: var(--primary, #2563eb);
+    border-color: var(--primary, #2563eb);
+}
+
+.inc-checkbox:checked::after {
+    content: '✓';
+    color: #ffffff;
+    font-size: 0.75rem;
+    font-weight: bold;
+    line-height: 1;
 }
 
 /* ----------------------------------------------------------------------------

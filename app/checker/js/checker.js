@@ -723,6 +723,21 @@ function saveCheck(item, produced) {
         return;
     }
 
+    if (rejected > 0) {
+        var rejRemarks = el('chk-remarks-rejected') ? el('chk-remarks-rejected').value.trim() : '';
+        if (!rejRemarks) {
+            showDialogError('Please provide Rejection Remarks.');
+            return;
+        }
+    }
+    if (alteration > 0) {
+        var altRemarks = el('chk-remarks-alteration') ? el('chk-remarks-alteration').value.trim() : '';
+        if (!altRemarks) {
+            showDialogError('Please provide Alteration Remarks.');
+            return;
+        }
+    }
+
     var lines = [];
     if (alteration > 0) {
         m.querySelectorAll('.alt-qty').forEach(function (inp) {

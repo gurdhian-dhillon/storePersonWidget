@@ -894,8 +894,12 @@ var PackingScreen = (function () {
     function inclusionsSection() {
         if (!INCLUSIONS.length) return '';
 
-        var items = INCLUSIONS.map(function (inc) {
-            return '<span class="inc-item">' + esc(inc.name) + '</span>';
+        var items = INCLUSIONS.map(function (inc, idx) {
+            var incId = 'pack-inc-' + idx;
+            return '<label class="inc-item" for="' + incId + '">' +
+                '<input type="checkbox" id="' + incId + '" class="inc-checkbox" onchange="PackingScreen.updateInclusion(this)">' +
+                '<span>' + esc(inc.name) + '</span>' +
+                '</label>';
         }).join('');
 
         return '<section class="pack-sec">' +
@@ -1054,6 +1058,20 @@ var PackingScreen = (function () {
         });
 
         if (!SELECTED_STAFF) out.push('Choose who packed it');
+
+        if (INCLUSIONS.length) {
+            var allTicked = true;
+            for (var idx = 0; idx < INCLUSIONS.length; idx++) {
+                var chk = document.getElementById('pack-inc-' + idx);
+                if (chk && !chk.checked) {
+                    allTicked = false;
+                    break;
+                }
+            }
+            if (!allTicked) {
+                out.push('Inclusions (care card, thank you card, etc.) are not fully packed');
+            }
+        }
 
         return out;
     }
@@ -1400,6 +1418,10 @@ var PackingScreen = (function () {
         setItemLine: setItemLine,
         setItemQty: setItemQty,
         save: save,
+        updateInclusion: function (checkbox) {
+            checkbox.parentElement.classList.toggle('is-checked', checkbox.checked);
+            renderValidation();
+        },
         // for the stub-DOM tests only
         _setHistory: function (h) { HISTORY = h; HISTORY_LOADED = true; renderHistory(); },
         _visibleHistory: visibleHistory,

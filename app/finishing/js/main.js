@@ -23,8 +23,8 @@
 // the end of the job, so a tablet with a wrong clock wrote wrong times and two
 // devices on one job wrote two disagreeing sets.
 
-var STAGE_NAMES = ['folding', 'pressing', 'branding'];
-var STAGE_LABELS = ['Folding', 'Pressing', 'Branding'];
+var STAGE_NAMES = ['pressing', 'folding', 'branding'];
+var STAGE_LABELS = ['Pressing', 'Folding', 'Branding'];
 
 var SUPERVISORS = [];
 var SELECTED_SUP = '';
@@ -786,8 +786,8 @@ function renderHistory() {
             '<td class="col-num">' + n(run.qty) + '</td>' +
             '<td>' + escapeHtml(run.salesOrder || '—') + '</td>' +
             '<td>' + escapeHtml(run.staff || '—') + '</td>' +
-            '<td class="col-num">' + fmtDuration(st.folding ? st.folding.duration : null) + '</td>' +
             '<td class="col-num">' + fmtDuration(st.pressing ? st.pressing.duration : null) + '</td>' +
+            '<td class="col-num">' + fmtDuration(st.folding ? st.folding.duration : null) + '</td>' +
             '<td class="col-num">' + fmtDuration(st.branding ? st.branding.duration : null) + '</td>' +
             '<td>' + escapeHtml(run.completedOn || '—') + '</td>' +
             '</tr>';
@@ -795,7 +795,7 @@ function renderHistory() {
 
     container.innerHTML = '<div class="fin-scroll"><table class="fin-tbl">' +
         '<thead><tr><th>Item</th><th class="col-num">Pcs</th><th>Order</th><th>Finished by</th>' +
-        '<th class="col-num">Folding</th><th class="col-num">Pressing</th><th class="col-num">Branding</th>' +
+        '<th class="col-num">Pressing</th><th class="col-num">Folding</th><th class="col-num">Branding</th>' +
         '<th>Completed</th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table></div>';
 }
