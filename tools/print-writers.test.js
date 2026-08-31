@@ -262,6 +262,8 @@ function sendToPrint(W, payload) {
     }
 
     if (errTxt === '' && printedId === 0) {
+      errTxt = 'Creating new printed SKUs is disabled - choose an existing one';
+      /*
       // THE CODE: next free RM- number, zero-padded to the width already in use;
       // a code that does not match the prefix pattern is SKIPPED, never guessed at.
       let maxSeq = 0, padLen = 5;
@@ -308,6 +310,7 @@ function sendToPrint(W, payload) {
         // The lookup is set AFTER the insert.
         for (const rmNew of byId(W.Raw_Material, printedId)) rmNew.Print_Base = plainMatId;
       }
+      */
     }
 
     if (errTxt === '' && printedId === 0) errTxt = 'Could not resolve a printed material to print into';

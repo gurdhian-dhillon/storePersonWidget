@@ -1,0 +1,129 @@
+
+// 1. Map of SKUs to their Cut Size Length and Width
+cutSizeMap = {"SKU-00011":{"l":36.0,"w":56.0}, "SKU-00012":{"l":55.0,"w":105.0}, "SKU-00013":{"l":253.0,"w":143.0}, "SKU-00014":{"l":307.0,"w":159.0}, "SKU-00015":{"l":244.0,"w":264.0}, "SKU-00016":{"l":66.0,"w":66.0}, "SKU-00017":{"l":45.0,"w":205.0}, "SKU-00018":{"l":36.8,"w":36.8}, "SKU-00019":{"l":236.0,"w":267.0}, "SKU-00020":{"l":277.0,"w":143.0}, "SKU-00021":{"l":182.0,"w":234.0}, "SKU-00022":{"l":174.0,"w":227.0}, "SKU-00023":{"l":0.0,"w":0.0}, "SKU-00024":{"l":105.0,"w":105.0}, "SKU-00025":{"l":255.0,"w":45.0}, "SKU-00026":{"l":170.0,"w":140.0}, "SKU-00027":{"l":140.0,"w":181.0}, "SKU-00028":{"l":239.0,"w":244.0}, "SKU-00029":{"l":50.0,"w":75.0}, "SKU-00030":{"l":47.0,"w":47.0}, "SKU-00031":{"l":236.0,"w":267.0}, "SKU-00032":{"l":246.0,"w":272.0}, "SKU-00033":{"l":367.0,"w":147.0}, "SKU-00034":{"l":231.0,"w":237.0}, "SKU-00035":{"l":147.0,"w":147.0}, "SKU-00036":{"l":40.0,"w":50.0}, "SKU-00037":{"l":157.0,"w":262.0}, "SKU-00038":{"l":38.0,"w":58.0}, "SKU-00039":{"l":45.0,"w":255.0}, "SKU-00040":{"l":147.0,"w":281.0}, "SKU-00041":{"l":159.0,"w":281.0}, "SKU-00042":{"l":36.8,"w":36.8}, "SKU-00043":{"l":231.0,"w":237.0}, "SKU-00044":{"l":226.0,"w":244.0}, "SKU-00045":{"l":47.0,"w":47.0}, "SKU-00046":{"l":180.0,"w":249.0}, "SKU-00047":{"l":302.0,"w":251.0}, "SKU-00048":{"l":231.0,"w":237.0}, "SKU-00049":{"l":236.0,"w":267.0}, "SKU-00050":{"l":52.0,"w":52.0}, "SKU-00051":{"l":48.0,"w":68.0}, "SKU-00052":{"l":38.0,"w":58.0}, "SKU-00053":{"l":236.0,"w":267.0}, "SKU-00054":{"l":143.0,"w":203.0}, "SKU-00055":{"l":68.0,"w":68.0}, "SKU-00056":{"l":56.0,"w":76.0}, "SKU-00057":{"l":215.0,"w":150.0}, "SKU-00058":{"l":52.0,"w":52.0}, "SKU-00059":{"l":103.0,"w":143.0}, "SKU-00060":{"l":231.0,"w":237.0}, "SKU-00061":{"l":238.0,"w":147.0}, "SKU-00062":{"l":45.0,"w":170.0}, "SKU-00063":{"l":246.0,"w":272.0}, "SKU-00064":{"l":45.0,"w":255.0}, "SKU-00065":{"l":235.0,"w":255.0}, "SKU-00066":{"l":36.8,"w":36.8}, "SKU-00067":{"l":145.0,"w":145.0}, "SKU-00068":{"l":174.0,"w":227.0}, "SKU-00069":{"l":246.0,"w":272.0}, "SKU-00070":{"l":45.0,"w":45.0}, "SKU-00071":{"l":203.0,"w":143.0}, "SKU-00072":{"l":235.0,"w":255.0}, "SKU-00073":{"l":0.0,"w":0.0}, "SKU-00074":{"l":155.0,"w":277.0}, "SKU-00075":{"l":41.9,"w":204.5}, "SKU-00076":{"l":246.0,"w":272.0}, "SKU-00077":{"l":110.0,"w":270.0}, "SKU-00078":{"l":328.0,"w":143.0}, "SKU-00079":{"l":56.0,"w":76.0}, "SKU-00080":{"l":246.0,"w":272.0}, "SKU-00081":{"l":45.0,"w":170.0}, "SKU-00082":{"l":255.0,"w":45.0}, "SKU-00083":{"l":244.0,"w":264.0}, "SKU-00084":{"l":244.0,"w":274.0}, "SKU-00085":{"l":235.0,"w":255.0}, "SKU-00086":{"l":45.0,"w":90.0}, "SKU-00087":{"l":103.0,"w":103.0}, "SKU-00088":{"l":140.0,"w":208.0}, "SKU-00089":{"l":211.0,"w":262.0}, "SKU-00090":{"l":153.7,"w":41.9}, "SKU-00091":{"l":41.9,"w":153.7}, "SKU-00092":{"l":145.0,"w":145.0}, "SKU-00093":{"l":36.8,"w":36.8}, "SKU-00094":{"l":26.7,"w":26.7}, "SKU-00095":{"l":159.0,"w":281.0}, "SKU-00096":{"l":147.0,"w":281.0}, "SKU-00097":{"l":41.9,"w":204.5}, "SKU-00098":{"l":170.0,"w":236.0}, "SKU-00099":{"l":45.0,"w":65.0}, "SKU-00100":{"l":147.0,"w":257.0}, "SKU-00101":{"l":231.0,"w":237.0}, "SKU-00102":{"l":236.0,"w":267.0}, "SKU-00103":{"l":26.7,"w":26.7}, "SKU-00104":{"l":0.0,"w":0.0}, "SKU-00105":{"l":58.0,"w":58.0}, "SKU-00106":{"l":143.0,"w":234.0}, "SKU-00107":{"l":226.0,"w":205.0}, "SKU-00108":{"l":140.0,"w":251.0}, "SKU-00109":{"l":157.0,"w":279.0}, "SKU-00110":{"l":254.0,"w":279.0}};
+
+// 2. Fetch the Raw Materials
+rm_02 = Raw_Material[SKU == "RM-00002"];
+rm_12 = Raw_Material[SKU == "RM-00012"];
+rm_16 = Raw_Material[SKU == "RM-00016"];
+
+// 3. Loop over the 100 items we imported
+for each itemRec in Item_Master [SKU.contains("SKU-00")]
+{
+    // Skip the first 10 dummy records (or any others) that are not in our 100-item map
+    if (cutSizeMap.get(itemRec.SKU) == null)
+    {
+        continue;
+    }
+    
+    matList = Collection();
+    total_cost = 0.0;
+    
+    // --- Material 1: RM-00002 (Fabric) ---
+    if (rm_02.ID != null)
+    {
+        mat1 = BOM.Material_Required();
+        mat1.Item = rm_02.ID;
+        mat1.SKU = rm_02.ID;
+        mat1.Color = rm_02.Color;
+        mat1.Fabric_Gsm = rm_02.Fabric_Gsm;
+        mat1.Is_Fabric = rm_02.Is_Fabric;
+        mat1.Type_field = rm_02.Type_field;
+        mat1.Pattern = rm_02.Pattern;
+        mat1.Unit = rm_02.Unit;
+        
+        mat1.Required_Quantity = 1;
+        
+        sizeData = cutSizeMap.get(itemRec.SKU);
+        if (sizeData != null)
+        {
+            mat1.Cut_Size_Length = sizeData.get("l");
+            mat1.Cut_Size_Width = sizeData.get("w");
+        }
+        
+        rate1 = ifnull(rm_02.Item_Price, 0.0) * mat1.Required_Quantity;
+        mat1.Rate = rate1;
+        total_cost = total_cost + rate1;
+        
+        matList.insert(mat1);
+    }
+    
+    // --- Material 2: RM-00012 ---
+    if (rm_12.ID != null)
+    {
+        mat2 = BOM.Material_Required();
+        mat2.Item = rm_12.ID;
+        mat2.SKU = rm_12.ID;
+        mat2.Color = rm_12.Color;
+        mat2.Fabric_Gsm = rm_12.Fabric_Gsm;
+        mat2.Is_Fabric = rm_12.Is_Fabric;
+        mat2.Type_field = rm_12.Type_field;
+        mat2.Pattern = rm_12.Pattern;
+        mat2.Unit = rm_12.Unit;
+        
+        mat2.Required_Quantity = 2; // Fixed quantity for testing
+        
+        rate2 = ifnull(rm_12.Item_Price, 0.0) * mat2.Required_Quantity;
+        mat2.Rate = rate2;
+        total_cost = total_cost + rate2;
+        
+        matList.insert(mat2);
+    }
+    
+    // --- Material 3: RM-00016 ---
+    if (rm_16.ID != null)
+    {
+        mat3 = BOM.Material_Required();
+        mat3.Item = rm_16.ID;
+        mat3.SKU = rm_16.ID;
+        mat3.Color = rm_16.Color;
+        mat3.Fabric_Gsm = rm_16.Fabric_Gsm;
+        mat3.Is_Fabric = rm_16.Is_Fabric;
+        mat3.Type_field = rm_16.Type_field;
+        mat3.Pattern = rm_16.Pattern;
+        mat3.Unit = rm_16.Unit;
+        
+        mat3.Required_Quantity = 3; // Fixed quantity for testing
+        
+        rate3 = ifnull(rm_16.Item_Price, 0.0) * mat3.Required_Quantity;
+        mat3.Rate = rate3;
+        total_cost = total_cost + rate3;
+        
+        matList.insert(mat3);
+    }
+    
+    // --- Production Stages ---
+    stageList = Collection();
+    
+    s1 = BOM.Production_Stages();
+    s1.Sequence_No = 1;
+    s1.Operation = "Cutting";
+    stageList.insert(s1);
+    
+    s2 = BOM.Production_Stages();
+    s2.Sequence_No = 2;
+    s2.Operation = "Machine Embroidery";
+    stageList.insert(s2);
+    
+    s3 = BOM.Production_Stages();
+    s3.Sequence_No = 3;
+    s3.Operation = "Stitching (+ Accessories)";
+    stageList.insert(s3);
+    
+    // --- Insert BOM ---
+    insert into BOM
+    [
+        BOM_No = itemRec.SKU.replaceAll("SKU", "BOM")
+        BOM_Version = "1"
+        Effective_Date = zoho.currentdate
+        Status = "Active"
+        Item = itemRec.ID
+        SKU = itemRec.ID
+        Category = itemRec.Category
+        Color = itemRec.Color
+        Size = itemRec.Size
+        Material_Required = matList
+        Production_Stages = stageList
+        Total_Cost = total_cost
+    ];
+}
