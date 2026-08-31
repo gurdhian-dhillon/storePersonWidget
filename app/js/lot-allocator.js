@@ -1227,7 +1227,138 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
         m.printBaseName = String(m0.printBaseName || '');
         m.printBaseLots = m0.printBaseLots || [];
         m.shortReason = shortReasonFor(m, r, lots);
+        // The auto figure, kept so the store screen can show "auto: X" beside a
+        // box he has hand-edited and applyFabricOverride can be undone back to it.
+        // Set here, once, from the allocation — never touched again.
+        m.autoMetres = round2((m.lotLines || []).reduce(function (t, ln) {
+            return t + (Number(ln.qty) || 0);
+        }, 0));
+        m.autoLotLines = JSON.parse(JSON.stringify(m.lotLines || []));
+        m.autoRemaining = round2(Number(m.remaining) || 0);
+        m.metresEdited = false;
     });
+}
+
+// ---- Hand-edited fabric metres ----
+//
+// The store person is allowed to cut MORE or LESS than the allocator worked out
+// (a ruined marker row, an order he knows changed, cloth he wants to send spare).
+// The box on the screen is the running total of `m.lotLines[].qty`, and the
+// submit path reads ONLY `m.lotLines` — never the box — so an edit has to be
+// pushed back onto `lotLines` here or it does nothing.
+//
+// THE LOT SPLIT IS FIXED. He is changing how much, not which roll — the tone
+// decision is the allocator's and the pin's, and a metres edit must never move
+// an order onto another lot. So the edited total is spread across the SAME lot
+// lines the allocator chose, in proportion to what each already carried.
+//
+// FULFILMENT IS STILL COUNTED IN WHOLE CUT ROWS, and this is the load-bearing
+// part. `giveRaw` / `Pieces_From_Raw` is what receiveMaterials and the store
+// screen read to decide a fabric row is done — NOT the metres. So per line:
+//
+//   rows      = floor(lineMetres / cutLength)      -- a part-cut row is 0, it is
+//                                                     the damaged one
+//   fromRaw   = min(rows * perRow, owed - fromWaste)
+//
+// A short edit therefore leaves the requirement OPEN for the rows he did not
+// cut — next Issue re-covers them off the same lot, exactly as a fresh handover
+// would. It is never `required - issued` metres.
+//
+// OVER-ISSUE rides the handover. Surplus metres above the recommendation are
+// added to the largest line's `qty` (so lotMoves charges the lot for the cloth
+// that physically leaves) but `fromRaw` is still capped at `owed` — the extra
+// comes back as an offcut the supervisor declares through the normal waste flow,
+// not something issueMaterials records.
+//
+// Metres he types that are not a whole number of rows are sent AS TYPED (the lot
+// is charged the real figure) and the stray part-row counts 0 pieces, same as
+// the over-issue tail.
+//
+// PURE, like the rest of this file: mutates `m` and returns nothing. Called only
+// from the store screen's oninput — the admin audit never runs it, so its replay
+// stays the clean allocator output.
+function applyFabricOverride(m, editedMetres) {
+    if (!m || !m.isFabric) return;
+    var base = m.autoLotLines || [];
+    // A Pieces lot line carries a per-piece cut list the server needs to
+    // decrement Fabric_Piece. A hand-sized metres figure cannot be mapped onto
+    // discrete pieces, so an override is refused outright when any line is one —
+    // the box is rendered read-only for the same reason.
+    if (base.some(function (ln) { return ln.pieces && ln.pieces.length; })) return;
+    var auto = Number(m.autoMetres) || 0;
+    var want = Math.max(0, Number(editedMetres) || 0);
+
+    // Back to exactly what the allocator decided.
+    if (base.length === 0 || Math.abs(want - auto) < 0.005) {
+        m.lotLines = JSON.parse(JSON.stringify(base));
+        m.metresEdited = false;
+        m.remaining = m.freshMeters = m.autoRemaining !== undefined
+            ? m.autoRemaining : round2(auto);
+        return;
+    }
+
+    var cutL = Number(m.cutLength) || 0;
+    var perRow = perRowFor({ fabricWidthCm: m.fabricWidthCm }, m.cutWidth);
+
+    // planItemId -> pieces the row still owes and how many its offcuts already
+    // cover — the ceiling on fromRaw, straight off the server's per-row lines.
+    var owedBy = {}, wasteBy = {};
+    (m.lines || []).forEach(function (ln) {
+        var it = String(ln.planItemId || '');
+        if (it && owedBy[it] === undefined) {
+            owedBy[it] = Math.max(0, (Number(ln.reqPieces) || 0) - (Number(ln.issPieces) || 0));
+        }
+    });
+    (base || []).forEach(function (ln) {
+        var it = String(ln.planItemId || '');
+        wasteBy[it] = (wasteBy[it] || 0) + (Number(ln.fromWaste) || 0);
+    });
+
+    // Spread the edited total across the same lines, weighted by their auto qty.
+    var lines = JSON.parse(JSON.stringify(base));
+    var autoSum = lines.reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0);
+    if (autoSum <= 0) { autoSum = lines.length; lines.forEach(function (ln) { ln.qty = 1; }); }
+
+    var biggest = 0;
+    lines.forEach(function (ln, i) {
+        ln.qty = round2(want * ((Number(ln.qty) || 0) / autoSum));
+        if ((Number(lines[i].qty) || 0) > (Number(lines[biggest].qty) || 0)) biggest = i;
+    });
+    // Rounding slack from the proportional split lands on the largest line, so
+    // the lines still sum to exactly what he typed.
+    var spread = lines.reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0);
+    lines[biggest].qty = round2((Number(lines[biggest].qty) || 0) + (want - spread));
+    if ((Number(lines[biggest].qty) || 0) < 0) lines[biggest].qty = 0;
+
+    // Re-derive the piece credit per line: whole rows only, capped at what the
+    // item still owes after its offcuts.
+    var rawTaken = {};
+    lines.forEach(function (ln) {
+        var it = String(ln.planItemId || '');
+        var metresCm = (Number(ln.qty) || 0) * 100;
+        var rows = (cutL > 0) ? Math.floor((metresCm + 0.5) / cutL) : 0;
+        var gross = rows * perRow;
+        var owed = owedBy[it] === undefined ? gross : owedBy[it];
+        var wasteCredit = wasteBy[it] || 0;
+        var already = rawTaken[it] || 0;
+        var room = Math.max(0, owed - wasteCredit - already);
+        var give = Math.min(gross, room);
+        rawTaken[it] = already + give;
+        ln.fromRaw = give;
+        // fromWaste is the physical-pick credit and is not a function of metres —
+        // leave it exactly as the allocator set it. Roll lines carry no `pieces`,
+        // and Pieces lines never reach here (guarded at the top).
+    });
+
+    m.lotLines = lines;
+    m.metresEdited = true;
+    // `remaining` STAYS the true outstanding need — it caps the box's max, feeds
+    // maxIssuable and drives the shortfall summary. A SHORT edit must not shrink
+    // it: the rows he did not cut are still owed and the row must not read as
+    // covered. An over-edit does not raise it either — the surplus is spare
+    // cloth, not a bigger requirement. So it is simply left at the auto figure.
+    m.remaining = m.freshMeters = m.autoRemaining !== undefined
+        ? m.autoRemaining : round2(auto);
 }
 
 // ONE ROW, ONE PROBLEM, ONE LINE.

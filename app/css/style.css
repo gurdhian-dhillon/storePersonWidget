@@ -621,6 +621,16 @@ th.col-num {
     box-sizing: border-box;
 }
 
+/* "auto: 22.00 Mtr" under a fabric box the store person has hand-edited, so an
+   override reads as an override. */
+.issue-edited-note {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-top: 0.2rem;
+    padding-left: 1.55rem;
+}
+
 .issue-checkbox {
     width: 1.05rem;
     height: 1.05rem;

@@ -405,11 +405,51 @@ function onIssueInputChange(supIdx, matIdx) {
     var checkbox = document.getElementById(rowCheckboxId(supIdx, matIdx));
     var val = parseFloat(input.value);
     var material = window.__reqData[supIdx].materials[matIdx];
+
+    // FABRIC: push the typed metres back onto m.lotLines so the submit path —
+    // which reads only lotLines, never this box — actually issues his figure.
+    // applyFabricOverride keeps the lot split fixed and re-derives the cut-piece
+    // credit as whole rows. Then repaint the lot strip and hidden lot-inputs so
+    // what he sees matches what will be sent.
+    if (material.isFabric && !isFullyIssued(material) && fabricMetresEditable(material)) {
+        applyFabricOverride(material, isNaN(val) ? 0 : val);
+        refreshFabricRowLots(supIdx, matIdx);
+    }
+
     // Typing 0 metres does not clear the row when waste pieces still go with it.
     checkbox.checked = !(isNaN(val) || val <= 0) || wastePicks(material).length > 0;
     validateRow(supIdx, matIdx, material);
     markRowSelected(supIdx, matIdx);
     refreshCardState(supIdx);
+}
+
+// Repaint just the lot column of one fabric row after an override — the "from
+// L2 · 20.9 Mtr" lines, the hidden lot-inputs the submit path reads, and the
+// "auto: X" note. A full card re-render would throw away every other in-progress
+// edit on the card, so this touches only the one cell and the one note.
+function refreshFabricRowLots(supIdx, matIdx) {
+    var row = document.getElementById(rowId(supIdx, matIdx));
+    if (!row) return;
+    var material = window.__reqData[supIdx].materials[matIdx];
+
+    var lotCell = row.querySelector('.col-lot-issue');
+    if (lotCell) {
+        var picks = wastePicks(material);
+        lotCell.innerHTML =
+            lotLinesHtml(material, supIdx, matIdx) +
+            lotShortHtml(material, supIdx, matIdx) +
+            picks.map(function (p) { return wasteWhereHtml(p); }).join('');
+    }
+
+    var note = row.querySelector('.issue-edited-note');
+    var noteHtml = editedMetresNote(material);
+    if (note) {
+        if (noteHtml) { note.outerHTML = noteHtml; } else { note.remove(); }
+    } else if (noteHtml) {
+        var group = row.querySelector('.issue-input-group');
+        var cell = group && group.closest('.issue-cell');
+        if (cell) cell.insertAdjacentHTML('afterend', noteHtml);
+    }
 }
 
 function onIssueCheckboxChange(supIdx, matIdx) {
@@ -1461,6 +1501,38 @@ function recommendedTotal(m, supIdx, matIdx) {
     return round2(t);
 }
 
+// WHAT TO PUT IN THE FABRIC BOX ON RENDER. The running total of m.lotLines —
+// which is the allocator's recommendation until he hand-edits it, and his own
+// figure after. Same number recommendedTotal returns; named for what it now is,
+// because the box is no longer read-only and "recommended" stopped being the
+// whole story.
+function currentIssueMetres(m, supIdx, matIdx) {
+    return recommendedTotal(m, supIdx, matIdx);
+}
+
+// CAN THE FABRIC METRES BE HAND-EDITED? Only for continuous ROLL cloth. A
+// Pieces lot holds discrete printed pieces — "cut 20.9 m" is not a thing he can
+// do with a stack of them, he takes whole pieces — and the allocator's per-piece
+// cut list on the lot line is what the server needs to decrement Fabric_Piece.
+// A free metres figure would strand that, so the box stays read-only whenever
+// any line on the row comes off a Pieces lot. Also read-only when the auto
+// allocation produced no lot line at all (nothing to spread an edit across).
+function fabricMetresEditable(m) {
+    var lines = m.autoLotLines || m.lotLines || [];
+    if (lines.length === 0) return false;
+    return !lines.some(function (ln) { return ln.pieces && ln.pieces.length; });
+}
+
+// Shown under a fabric box he has changed: what the allocator would have issued,
+// so an override is visible as an override and he can see what he moved away
+// from. Nothing when the box still holds the auto figure.
+function editedMetresNote(m) {
+    if (!m || !m.metresEdited) return '';
+    var auto = round2(Number(m.autoMetres) || 0);
+    return '<div class="issue-edited-note">auto: ' + fmt(auto) + ' ' +
+        escapeHtml(m.unit) + '</div>';
+}
+
 // WHICH LOT THE CLOTH COMES OFF, said on the row itself.
 //
 // Almost always ONE lot — that is what the allocator is for — and then this is a
@@ -1656,7 +1728,7 @@ function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
     // this one — which is exactly how the lot strip came to be missing from the
     // issue screen the first time.
     var byLot = m.isFabric && !done;
-    var defaultIssue = byLot ? 0 : suggestedIssue(m);
+    var defaultIssue = byLot ? currentIssueMetres(m, supIdx, matIdx) : suggestedIssue(m);
     var disabled = maxIssuable(m) > 0 ? '' : 'disabled';
     if (byLot && lots.length === 0) disabled = 'disabled';
 
@@ -1678,11 +1750,12 @@ function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
             '<span class="issue-input-group">' +
             '<input type="number" step="0.01" min="0" max="' + issueCeiling(m) + '" ' +
             'class="issue-input" id="' + rowInputId(supIdx, matIdx) + '" ' + disabled + ' ' +
-            (byLot ? 'readonly ' : '') +
+            (byLot && !fabricMetresEditable(m) ? 'readonly ' : '') +
             'value="' + defaultIssue + '" oninput="onIssueInputChange(' + supIdx + ',' + matIdx + ')" />' +
             '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
             '</span>' +
-            '</div>';
+            '</div>' +
+            (byLot ? editedMetresNote(m) : '');
     }
 
     var stockCells;
@@ -1788,7 +1861,7 @@ function renderFabricRows(m, supIdx, matIdx) {
         if (wantsFresh) {
             // Pre-filled from the recommendation, so the common case is one
             // glance and one press. He can still change any of it.
-            var startQty = byLot ? recommendedTotal(m, supIdx, matIdx) : suggestedIssue(m);
+            var startQty = byLot ? currentIssueMetres(m, supIdx, matIdx) : suggestedIssue(m);
 
             issueCell +=
                 '<div class="issue-cell">' +
@@ -1797,18 +1870,22 @@ function renderFabricRows(m, supIdx, matIdx) {
                 'aria-label="Issue ' + escapeHtml(m.material) + '" ' +
                 'onchange="onIssueCheckboxChange(' + supIdx + ',' + matIdx + ')" />' +
                 '<span class="issue-input-group">' +
-                // Read-only when it comes off lots: this box is the
-                // running total of what he typed against each lot, not
-                // somewhere to type. Keeping it means the checkbox,
-                // validation and card footer all work unchanged.
+                // EDITABLE for fabric off a ROLL. The box is still the running
+                // total of m.lotLines[].qty and the submit path still reads only
+                // lotLines, but onIssueInputChange now pushes a typed value back
+                // onto them via applyFabricOverride — keeping the lot split fixed
+                // and re-deriving the cut-piece credit as whole rows. Still
+                // read-only for a Pieces lot, where a free metres figure has no
+                // physical meaning (see fabricMetresEditable).
                 '<input type="number" step="0.01" min="0" max="' + issueCeiling(m) + '" ' +
                 'class="issue-input" id="' + rowInputId(supIdx, matIdx) + '" ' + disabled + ' ' +
-                (byLot ? 'readonly ' : '') +
+                (byLot && !fabricMetresEditable(m) ? 'readonly ' : '') +
                 'value="' + startQty + '" ' +
                 'oninput="onIssueInputChange(' + supIdx + ',' + matIdx + ')" />' +
                 '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
                 '</span>' +
-                '</div>';
+                '</div>' +
+                editedMetresNote(m);
         }
 
         // Each piece size keeps its own checkbox — a remnant can be declined
