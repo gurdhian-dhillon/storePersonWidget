@@ -221,16 +221,24 @@ function extractFn(name) {
 
 const uiCtx = runInSandbox(
   allocSrc + '\n' +
-  ['escapeHtml', 'fmt', 'recommendLots', 'lotInputId', 'lotLinesHtml'].map(extractFn).join('\n') +
+  ['escapeHtml', 'fmt', 'qty', 'wastePicks', 'lotLineInputId', 'lotLineCheckId',
+   'lotLineMetres', 'lotLineAutoMetres', 'lotWashedStock', 'fabricLotLineList',
+   'lotLinesHtml']
+    .map(extractFn).join('\n') +
   '\nthis.lotLinesHtml = lotLinesHtml;');
 
+// Render the lot column read-only (editable=false), so the assertions target the
+// "Cut X m from Y m piece" fetch text without the per-lot input markup.
+// lotLinesHtml now returns { lot, stock, issue }; PART B only checks the LOT col.
 function renderLotStrip(lotLinePieces, qty) {
   const m = {
-    materialId: 'M1', unit: 'Mtr', isFabric: true,
+    materialId: 'M1', unit: 'Mtr', isFabric: true, material: 'Fab',
     lotLines: [{ lotId: 'L1', lotNumber: 'L1', qty: qty, pieces: lotLinePieces }],
-    lots: [{ lotId: 'L1', lotNumber: 'L1' }]
+    autoLotLines: [{ lotId: 'L1', lotNumber: 'L1', qty: qty, pieces: lotLinePieces }],
+    lots: [{ lotId: 'L1', lotNumber: 'L1', wash: 0 }],
+    wastePicks: []
   };
-  return String(uiCtx.lotLinesHtml(m, 0, 0));
+  return String(uiCtx.lotLinesHtml(m, 0, 0, false).lot);
 }
 
 test('B1 "Cut 18 m from 20 m piece" renders for a partial cut', () => {

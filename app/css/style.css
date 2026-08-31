@@ -621,15 +621,6 @@ th.col-num {
     box-sizing: border-box;
 }
 
-/* "auto: 22.00 Mtr" under a fabric box the store person has hand-edited, so an
-   override reads as an override. */
-.issue-edited-note {
-    font-size: 0.7rem;
-    font-weight: 500;
-    color: var(--text-muted);
-    margin-top: 0.2rem;
-    padding-left: 1.55rem;
-}
 
 .issue-checkbox {
     width: 1.05rem;
@@ -751,7 +742,93 @@ th.col-num {
     color: var(--text-muted);
 }
 
-/* Loading skeleton — replaces the bare "Loading…" text. */
+/* ---- Load progress card ----
+   Shown while getStoreMaterialRequirements is paged. The bar tracks REAL call
+   completion: one segment per page in parallel mode, an indeterminate crawl in
+   the sequential fallback (page total is not known there). */
+.load-progress {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.75rem 1.75rem 1.5rem;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+    max-width: 520px;
+    margin: 1.5rem auto;
+}
+
+.load-progress .lp-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.9rem;
+}
+
+.load-progress .lp-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-main);
+}
+
+.load-progress .lp-count {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.load-progress .lp-track {
+    height: 8px;
+    border-radius: 999px;
+    background: #eef2f7;
+    overflow: hidden;
+    position: relative;
+}
+
+.load-progress .lp-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--primary), var(--primary-hover));
+    width: 0%;
+    transition: width 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Indeterminate mode (sequential fallback): a sliding highlight, no fixed width */
+.load-progress.is-indeterminate .lp-fill {
+    width: 35% !important;
+    transition: none;
+    animation: lp-slide 1.15s ease-in-out infinite;
+}
+
+@keyframes lp-slide {
+    0%   { transform: translateX(-120%); }
+    100% { transform: translateX(340%); }
+}
+
+.load-progress .lp-sub {
+    margin-top: 0.75rem;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+/* Same bar, shown in a modal while a handover is being issued. The
+   .load-progress card IS the panel here — strip the wrapper so it does not
+   read as a card inside a card. */
+.exc-panel.progress-panel {
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+    max-width: 460px;
+}
+
+.exc-panel.progress-panel .load-progress {
+    margin: 0;
+    max-width: none;
+    box-shadow: 0 20px 45px rgba(15, 23, 42, 0.25);
+}
+
+/* Loading skeleton — kept for other spots that still use it. */
 .skeleton-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -1349,11 +1426,24 @@ th.col-num {
    lines and took the row to 400px tall, pushing the next fabric row off screen.
    The material column beside it is the greedy one and can spare this. */
 .col-lot-issue {
-    width: 16rem;
-    min-width: 13rem;
+    width: 14rem;
+    min-width: 11rem;
     vertical-align: top;
     padding-top: 0.75rem;
     white-space: normal;
+}
+
+/* TOTAL STOCK column — that lot's washed metres, one figure per sub-line,
+   stacked to line up with the LOT and ISSUE NOW sub-lines beside it. */
+.col-lot-stock {
+    width: 7rem;
+    min-width: 6rem;
+    vertical-align: top;
+    padding-top: 0.75rem;
+    text-align: right;
+}
+.col-issue {
+    vertical-align: top;
 }
 
 .carton-input {
@@ -2193,6 +2283,54 @@ th.col-num {
     font-weight: 700;
 }
 
+/* THREE STACKED COLUMNS on a fabric SKU row — LOT, TOTAL STOCK, ISSUE NOW — one
+   sub-line per lot (and per waste pick). The sub-lines must line up across the
+   three <td>s, so every sub-line cell is the same fixed height in all three. */
+.lot-line-row,
+.lot-line-cell,
+.col-lot-issue .waste-where,
+.col-lot-issue .lot-pieces {
+    min-height: 2.4rem;
+    box-sizing: border-box;
+}
+.lot-line-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    white-space: nowrap;
+    padding: 0.3rem 0.5rem;
+    background: #f1f5f9;
+    border-left: 2px solid var(--primary);
+    border-radius: 0 4px 4px 0;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+.lot-line-name b {
+    color: var(--text-main);
+    font-weight: 700;
+}
+.lot-line-rec {
+    color: var(--text-main);
+    font-weight: 600;
+}
+.lot-line-cell {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5rem;
+}
+.col-lot-stock .lot-line-cell {
+    font-size: 0.8rem;
+    color: var(--text-main);
+}
+.lot-line-box .issue-input {
+    width: 4.5rem;
+}
+.lot-line-static {
+    font-weight: 700;
+    color: var(--text-main);
+}
+
 /* The lot on a HISTORY line. Quiet: the history table is read to find out what
    went out, and the lot is the qualifier on that — it must not compete with the
    material name or the quantity either side of it. Same accent as .lot-from so
@@ -2454,30 +2592,6 @@ th.col-num {
 }
 .mat-chevron.expanded {
     transform: rotate(90deg);
-}
-
-/* Issue Progress Modal */
-.progress-container {
-    width: 100%;
-    background-color: #e2e8f0;
-    border-radius: 9999px;
-    height: 14px;
-    overflow: hidden;
-    margin: 1.5rem 0 1rem;
-}
-
-.progress-bar {
-    height: 100%;
-    background-color: var(--primary);
-    width: 0%;
-    transition: width 0.3s ease;
-}
-
-.progress-text {
-    text-align: center;
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text-main);
 }
 
 /* Mobile Compatibility */

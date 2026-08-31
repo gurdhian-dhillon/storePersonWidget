@@ -251,6 +251,28 @@ string issueMaterials(string supervisorId, string issuesJson, string voucherIn)
 					{
 						plStr = "0";
 					}
+					// PER-PICK CUT SIZE. A SKU issue line no longer carries one
+					// cut - it spans several - so the Waste_Movement's Cut_Size_*
+					// comes from the pick's own target item. Falls back to the
+					// wrapper cutW/cutL for an older widget that did not send it.
+					pkCwStr = ifnull(pk.get("cutW"),"").toString().trim();
+					if(pkCwStr == "")
+					{
+						pkCutW = cutW;
+					}
+					else
+					{
+						pkCutW = pkCwStr.toDecimal();
+					}
+					pkClStr = ifnull(pk.get("cutL"),"").toString().trim();
+					if(pkClStr == "")
+					{
+						pkCutL = cutL;
+					}
+					else
+					{
+						pkCutL = pkClStr.toDecimal();
+					}
 					pkPlanStr = ifnull(pk.get("planId"),"").toString().trim();
 					pkItemStr = ifnull(pk.get("planItemId"),"").toString().trim();
 					wRecs = Waste_Master[ID == wId.toLong()];
@@ -308,8 +330,8 @@ string issueMaterials(string supervisorId, string issuesJson, string voucherIn)
 							Piece_Width=pwStr.toDecimal()
 							Piece_Length=plStr.toDecimal()
 							Piece_Count=takePcs
-							Cut_Size_Width=cutW
-							Cut_Size_Length=cutL
+							Cut_Size_Width=pkCutW
+							Cut_Size_Length=pkCutL
 							Pieces_Yielded=takePcs * yieldPer
 							Moved_On=zoho.currentdate
 							Added_User=zoho.loginuser

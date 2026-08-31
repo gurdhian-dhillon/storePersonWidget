@@ -1,0 +1,247 @@
+string verifyStoreGap(string materialSku, string supervisorId)
+{
+	// DIAGNOSTIC. Proves that the gap between the store screen's
+	// "TO BE ISSUED" column and its "LOT / ISSUE NOW" column, for ONE fabric
+	// SKU on ONE supervisor, is exactly the per-Plan_Item whole-marker-row
+	// rounding loss - and nothing else.
+	//
+	// It re-computes both numbers from the SAME raw data the widget uses:
+	//
+	//   HEADLINE  ("TO BE ISSUED")  = per CUT SIZE:  ceil(freshPcs / perRow) * cutL
+	//                                 -> rounds the whole cut ONCE
+	//   LOTLINES  ("LOT / ISSUE NOW")= per PLAN_ITEM: ceil(itemPcs / perRow) * cutL
+	//                                 -> rounds ONCE PER ITEM
+	//
+	// gap = LOTLINES - HEADLINE  should equal  sum over items of the
+	// part-row each item wastes at the end of its own marker lay.
+	//
+	// It also lists everything that could ADD to the gap and shows each is
+	// absent for this row:
+	//   - lot split      (lotCount)          -> screen shows one lot only if 1
+	//   - offcut cover   (piecesFromWaste)   -> would make LOTLINES < HEADLINE
+	//   - hand edit      (not visible here)  -> compare to what the box shows
+	//   - >1 cut size    (cutCount)          -> headline already sums per cut
+	//
+	// Args: materialSku e.g. "RM-00002"; supervisorId the Employee id as text.
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		skuTxt = ifnull(materialSku,"").toString().trim();
+		supTxt = ifnull(supervisorId,"").toString().trim();
+		if(skuTxt == "" || supTxt == "" || supTxt.isNumber() == false)
+		{
+			return "{\"errors\":[\"pass materialSku (e.g. RM-00002) and supervisorId (Employee id)\"]}";
+		}
+		supId = supTxt.toLong();
+
+		// --- the material + its fabric width, exactly as the widget resolves it
+		matId = 0;
+		fabWidthCm = 0.0;
+		isFabTxt = "false";
+		for each  rm in Raw_Material[SKU == skuTxt]
+		{
+			matId = rm.ID;
+			bwIn = ifnull(rm.Fabric_Width_Inches,"").toString().trim();
+			if(bwIn == "")
+			{
+				bwIn = "0";
+			}
+			fabWidthCm = bwIn.toDecimal() * 2.54;
+			isFabTxt = ifnull(rm.Is_Fabric,false).toString();
+		}
+		if(matId == 0)
+		{
+			return "{\"errors\":[\"no Raw_Material with SKU " + skuTxt + "\"]}";
+		}
+
+		// --- every open Material_Requirement for this material on plans of
+		//     this supervisor, Plan source only (reissue is its own screen row)
+		//     Status set: same as getStoreMaterialRequirements.
+		perItem = "";
+		itemCount = 0;
+
+		// cut size -> summed fresh pieces (for the HEADLINE calc)
+		cutFreshMap = Map();
+		cutLenMap = Map();
+		cutWidMap = Map();
+		cutKeys = List();
+
+		headlineM = 0.0;
+		lotlinesM = 0.0;
+
+		totWastePieces = 0;
+		lotIdSeen = List();
+
+		livePlans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Partially Received" || Order_Status == "In Progress")];
+
+		for each  pl in livePlans
+		{
+			for each  mr in Material_Requirement[Plan == pl.ID && Material == matId]
+			{
+				srcTxt = ifnull(mr.Source,"").toString().trim();
+				if(srcTxt == "")
+				{
+					srcTxt = "Plan";
+				}
+				if(srcTxt == "Reissue")
+				{
+					continue;
+				}
+
+				cw = ifnull(mr.Cut_Size_Width,0);
+				cl = ifnull(mr.Cut_Size_Length,0);
+				reqP = ifnull(mr.Required_Pieces,0);
+				fromRaw = ifnull(mr.Pieces_From_Raw,0);
+				fromWaste = ifnull(mr.Pieces_From_Waste,0);
+				issP = fromRaw + fromWaste;
+
+				owed = reqP - issP;
+				if(owed < 0)
+				{
+					owed = 0;
+				}
+
+				// PLAN'S FRESH PIECES for this item = owed minus what its own
+				// offcuts already cover. The widget's allocator does the offcut
+				// step first; here we just note fromWaste and treat the rest as
+				// fresh, which is the no-offcut case this row is in.
+				freshP = owed;
+
+				totWastePieces = totWastePieces + fromWaste;
+
+				lotId = ifnull(mr.Issued_Lot,"").toString().trim();
+				if(lotId != "" && lotIdSeen.contains(lotId) == false)
+				{
+					lotIdSeen.add(lotId);
+				}
+
+				if(reqP > 0 && cw > 0 && cl > 0 && fabWidthCm > 0)
+				{
+					perRow = (fabWidthCm / cw).floor();
+					if(perRow > 0)
+					{
+						// ---- LOT / ISSUE NOW contribution: per ITEM ----
+						itemRows = 0;
+						itemM = 0.0;
+						if(freshP > 0)
+						{
+							itemRows = ((freshP * 1.0) / perRow).ceil();
+							itemM = (itemRows * cl) / 100;
+						}
+						lotlinesM = lotlinesM + itemM;
+
+						// ---- HEADLINE contribution: accumulate per CUT SIZE ----
+						ck = cw + "x" + cl;
+						cur = cutFreshMap.get(ck);
+						if(cur == null)
+						{
+							cur = 0;
+							cutKeys.add(ck);
+							cutLenMap.put(ck,cl);
+							cutWidMap.put(ck,cw);
+						}
+						cutFreshMap.put(ck,cur + freshP);
+
+						if(perItem != "")
+						{
+							perItem = perItem + ",";
+						}
+						partRowWaste = (itemRows * perRow) - freshP;
+						perItem = perItem + "{\"planItem\":\"" + mr.Plan_Item + "\",\"cut\":\"" + ck + "\",\"perRow\":" + perRow + ",\"freshPcs\":" + freshP + ",\"rows\":" + itemRows + ",\"metres\":" + itemM + ",\"partRowWastePcs\":" + partRowWaste + "}";
+						itemCount = itemCount + 1;
+					}
+				}
+			}
+		}
+
+		// ---- HEADLINE total: one ceil() per cut size ----
+		headlineDetail = "";
+		for each  ck in cutKeys
+		{
+			cfresh = cutFreshMap.get(ck);
+			ccl = cutLenMap.get(ck);
+			cwNum = cutWidMap.get(ck);
+			cperRow = (fabWidthCm / cwNum).floor();
+			crows = 0;
+			cm = 0.0;
+			if(cfresh > 0 && cperRow > 0)
+			{
+				crows = ((cfresh * 1.0) / cperRow).ceil();
+				cm = (crows * ccl) / 100;
+			}
+			headlineM = headlineM + cm;
+			if(headlineDetail != "")
+			{
+				headlineDetail = headlineDetail + ",";
+			}
+			headlineDetail = headlineDetail + "{\"cut\":\"" + ck + "\",\"totalFreshPcs\":" + cfresh + ",\"perRow\":" + cperRow + ",\"rows\":" + crows + ",\"metres\":" + cm + "}";
+		}
+
+		gap = lotlinesM - headlineM;
+
+		// ---- sum of per-item part-row waste, expressed in metres, for the
+		//      cut sizes that have >1 item. This should EQUAL the gap. ----
+		// gap in metres = sum_items(rows_i*cutL) - sum_cuts(ceil(sumFresh/perRow)*cutL)
+		// and (rows_i*perRow - freshP_i) is the part-row pieces per item.
+		// Converting: gap = sum_items(rows_i*cutL/100) - headline.  So the
+		// direct subtraction below IS the proof; we also report the piece-level
+		// leftover so it is human-checkable.
+
+		perCutLeftover = "";
+		for each  ck2 in cutKeys
+		{
+			ccl2 = cutLenMap.get(ck2);
+			cwNum2 = cutWidMap.get(ck2);
+			cperRow2 = (fabWidthCm / cwNum2).floor();
+			sumRows = 0;
+			sumFresh = cutFreshMap.get(ck2);
+			// re-walk items of this cut to sum their individual rows
+			for each  pl2 in livePlans
+			{
+				for each  mr2 in Material_Requirement[Plan == pl2.ID && Material == matId]
+				{
+					s2 = ifnull(mr2.Source,"").toString().trim();
+					if(s2 == "Reissue")
+					{
+						continue;
+					}
+					cw2 = ifnull(mr2.Cut_Size_Width,0);
+					cl2 = ifnull(mr2.Cut_Size_Length,0);
+					if((cw2 + "x" + cl2) != ck2)
+					{
+						continue;
+					}
+					reqP2 = ifnull(mr2.Required_Pieces,0);
+					issP2 = ifnull(mr2.Pieces_From_Raw,0) + ifnull(mr2.Pieces_From_Waste,0);
+					owed2 = reqP2 - issP2;
+					if(owed2 < 0)
+					{
+						owed2 = 0;
+					}
+					if(reqP2 > 0 && cw2 > 0 && cl2 > 0 && cperRow2 > 0 && owed2 > 0)
+					{
+						sumRows = sumRows + ((owed2 * 1.0) / cperRow2).ceil();
+					}
+				}
+			}
+			combinedRows = 0;
+			if(sumFresh > 0 && cperRow2 > 0)
+			{
+				combinedRows = ((sumFresh * 1.0) / cperRow2).ceil();
+			}
+			extraRows = sumRows - combinedRows;
+			if(perCutLeftover != "")
+			{
+				perCutLeftover = perCutLeftover + ",";
+			}
+			perCutLeftover = perCutLeftover + "{\"cut\":\"" + ck2 + "\",\"sumPerItemRows\":" + sumRows + ",\"combinedRows\":" + combinedRows + ",\"extraRows\":" + extraRows + ",\"extraMetres\":" + ((extraRows * ccl2) / 100) + "}";
+		}
+
+		res = "{\"errors\":[]," + "\"material\":\"" + skuTxt + "\",\"materialId\":\"" + matId + "\",\"isFabric\":" + isFabTxt + ",\"fabricWidthCm\":" + fabWidthCm + ",\"supervisorId\":\"" + supId + "\",\"itemCount\":" + itemCount + ",\"lotCount\":" + lotIdSeen.size() + ",\"totalPiecesFromWaste\":" + totWastePieces + ",\"headline_toBeIssued\":" + headlineM + ",\"lotlines_issueNow\":" + lotlinesM + ",\"gap\":" + gap + ",\"headlineByCut\":[" + headlineDetail + "],\"perCutRoundingLeftover\":[" + perCutLeftover + "],\"perItem\":[" + perItem + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}
