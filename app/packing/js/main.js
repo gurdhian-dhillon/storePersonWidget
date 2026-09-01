@@ -101,6 +101,15 @@ var PackingScreen = (function () {
     var HISTORY_ERROR = '';
     var OPEN_PACKING_ID = null;
 
+    // packingId -> { state: 'loading'|'ok'|'error', urls: [...] }. Box_Images is a
+    // multi-image field on the parent Packing record; getPackingHistory only
+    // sends imageCount, and the URLs are fetched lazily with getRecords when a
+    // history card is opened.
+    var PHOTO_CACHE = {};
+    var CREATOR_ORIGIN = (function () {
+        try { return new URL(document.referrer).origin; } catch (e) { return ''; }
+    })();
+
     // ----------------------------------------------------
     // HELPERS
     // ----------------------------------------------------
@@ -494,7 +503,11 @@ var PackingScreen = (function () {
         }
         if (!target) return;
 
-        var box = { grossWeight: '', grossWeightEdited: false, items: [{ lineNo: target.lineNo, qty: Math.max(remainingFor(target.lineNo), 1) }] };
+        var box = {
+            grossWeight: '', grossWeightEdited: false,
+            imageFiles: [], imagePreviewUrls: [],
+            items: [{ lineNo: target.lineNo, qty: Math.max(remainingFor(target.lineNo), 1) }]
+        };
         applyCartonTo(box, ACTIVE_ORDER.cartons[0]);
         ACTIVE_ORDER.boxes.push(box);
 
@@ -502,7 +515,13 @@ var PackingScreen = (function () {
     }
 
     function removeBox(i) {
-        if (ACTIVE_ORDER) { ACTIVE_ORDER.boxes.splice(i, 1); renderBody(); }
+        if (!ACTIVE_ORDER) return;
+        var box = ACTIVE_ORDER.boxes[i];
+        if (box && box.imagePreviewUrls) {
+            box.imagePreviewUrls.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) {} });
+        }
+        ACTIVE_ORDER.boxes.splice(i, 1);
+        renderBody();
     }
 
     // Changing the carton re-seeds all six dimensions, the two carton weights,
@@ -652,6 +671,32 @@ var PackingScreen = (function () {
             box.grossWeight = kg(estimatedFor(box));
         }
         renderLive();
+    }
+
+    // Box photos are held as File objects on the box until the record is saved,
+    // then every box's photos are uploaded to the parent Packing.Box_Images
+    // multi-image field. Previews are object URLs, revoked as they go.
+    function addBoxImages(i, fileList) {
+        if (!ACTIVE_ORDER) return;
+        var box = ACTIVE_ORDER.boxes[i];
+        if (!box.imageFiles) { box.imageFiles = []; box.imagePreviewUrls = []; }
+        Array.prototype.slice.call(fileList || []).forEach(function (f) {
+            if (!f) return;
+            if (f.type && f.type.indexOf('image/') !== 0) return;
+            box.imageFiles.push(f);
+            box.imagePreviewUrls.push(URL.createObjectURL(f));
+        });
+        renderBody();
+    }
+
+    function removeBoxImage(i, k) {
+        if (!ACTIVE_ORDER) return;
+        var box = ACTIVE_ORDER.boxes[i];
+        if (!box || !box.imageFiles || k < 0 || k >= box.imageFiles.length) return;
+        try { URL.revokeObjectURL(box.imagePreviewUrls[k]); } catch (e) {}
+        box.imageFiles.splice(k, 1);
+        box.imagePreviewUrls.splice(k, 1);
+        renderBody();
     }
 
     // ----------------------------------------------------
@@ -822,6 +867,7 @@ var PackingScreen = (function () {
         var allLinesUsed = box.items.length >= ACTIVE_ORDER.items.length;
 
         var carton = cartonById(box.boxTypeId);
+        var nImgs = (box.imagePreviewUrls || []).length;
 
         return '<div class="box-card" id="pack-box-' + i + '">' +
             '<div class="box-topline">' +
@@ -845,13 +891,33 @@ var PackingScreen = (function () {
                     dimRow(i, 'Outer', 'outer', false) +
                 '</div>' +
             '</div>' +
-            '<div class="box-contents">' +
-                '<div class="box-sub-head"><span>In this box</span>' +
-                    (allLinesUsed ? '' : '<button type="button" class="mini-btn" onclick="PackingScreen.addItem(' + i + ')">+ item</button>') +
+            '<div class="box-right-col">' +
+                '<div class="box-contents">' +
+                    '<div class="box-sub-head"><span>In this box</span>' +
+                        (allLinesUsed ? '' : '<button type="button" class="mini-btn" onclick="PackingScreen.addItem(' + i + ')">+ item</button>') +
+                    '</div>' +
+                    '<table class="pack-tbl box-items-tbl">' +
+                    '<thead><tr><th class="col-item">Item</th><th class="col-num">Pieces</th><th class="col-act"></th></tr></thead>' +
+                    '<tbody>' + itemRows + '</tbody></table>' +
                 '</div>' +
-                '<table class="pack-tbl box-items-tbl">' +
-                '<thead><tr><th class="col-item">Item</th><th class="col-num">Pieces</th><th class="col-act"></th></tr></thead>' +
-                '<tbody>' + itemRows + '</tbody></table>' +
+                '<div class="box-photo-col">' +
+                    '<div class="box-sub-head"><span>Box photos</span>' +
+                        (nImgs ? '<span class="photo-count">' + nImgs + '</span>' : '') +
+                    '</div>' +
+                    '<div class="photo-strip">' +
+                        (box.imagePreviewUrls || []).map(function (url, k) {
+                            return '<div class="photo-thumb">' +
+                                '<img src="' + esc(url) + '" alt="Box photo" title="View full size" onclick="window.open(this.src, \'_blank\')">' +
+                                '<button type="button" class="photo-thumb-x" title="Remove photo" onclick="PackingScreen.removeBoxImage(' + i + ', ' + k + ')">✕</button>' +
+                            '</div>';
+                        }).join('') +
+                        '<label class="photo-add" for="pack-image-' + i + '">' +
+                            '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>' +
+                            '<span>' + (nImgs ? 'Add more' : 'Add photos') + '</span>' +
+                        '</label>' +
+                        '<input type="file" class="file-input-hidden" accept="image/*" multiple id="pack-image-' + i + '" onchange="PackingScreen.addBoxImages(' + i + ', this.files); this.value=\'\';">' +
+                    '</div>' +
+                '</div>' +
             '</div>' +
             '<div class="box-foot">' +
                 '<span class="box-stat">Estimated <b id="pack-est-' + i + '">—</b> kg</span>' +
@@ -1133,11 +1199,65 @@ var PackingScreen = (function () {
 
         callApi('savePackingRecord', payload).then(function (parsed) {
             if (!parsed.success) throw new Error(parsed.error || 'Unknown server error.');
-            // The same figures the history card shows, and in the same order, so
-            // the confirmation and the record he opens afterwards agree. The
-            // server still returns chargeableWeight; it is simply not quoted.
-            alert(parsed.message + '\n\nActual ' + parsed.grossWeight + ' kg, volumetric ' +
-                parsed.volumetricWeight + ' kg.');
+
+            var packId = parsed.packingId;
+
+            // Photos upload AFTER the record exists. Box_Images is a MULTI-IMAGE
+            // field on the PARENT Packing form (a subform file field is neither
+            // reportable nor cleanly readable from the widget SDK), so every
+            // box's photos go to that one field against packId - each uploadFile
+            // call appends one more. Failures never block the close; a count is
+            // surfaced in the confirmation instead.
+            var uploadPromises = [];
+            if (isRunningInCreator() && packId) {
+                // v2 SDK exposes ZOHO.CREATOR.FILE.uploadFile; older builds put it
+                // on ZOHO.CREATOR.API. Same config shape either way.
+                var fileNs = (ZOHO && ZOHO.CREATOR && ZOHO.CREATOR.FILE && ZOHO.CREATOR.FILE.uploadFile) ? ZOHO.CREATOR.FILE
+                    : (ZOHO && ZOHO.CREATOR && ZOHO.CREATOR.API && ZOHO.CREATOR.API.uploadFile) ? ZOHO.CREATOR.API
+                    : null;
+                if (fileNs) {
+                    var allPhotos = [];
+                    ACTIVE_ORDER.boxes.forEach(function (b, i) {
+                        (b.imageFiles || []).forEach(function (f) { allPhotos.push({ box: i + 1, file: f }); });
+                    });
+                    allPhotos.forEach(function (p) {
+                        uploadPromises.push(
+                            fileNs.uploadFile({
+                                reportName: 'Packing_Report',
+                                id: packId,
+                                fieldName: 'Box_Images',
+                                file: p.file
+                            }).then(function () { return { ok: true }; })
+                              .catch(function (err) {
+                                  console.error('Photo upload failed (box ' + p.box + ')', err);
+                                  return { ok: false };
+                              })
+                        );
+                    });
+                } else {
+                    console.warn('No file-upload API on this SDK build - box photos not uploaded.');
+                }
+            }
+
+            if (uploadPromises.length > 0) {
+                var btn2 = el('save-btn');
+                if (btn2) { btn2.innerText = 'Uploading photos…'; }
+                return Promise.all(uploadPromises).then(function (results) {
+                    parsed._photoTotal = results.length;
+                    parsed._photoFailed = results.filter(function (r) { return !r.ok; }).length;
+                    return parsed;
+                });
+            }
+            return parsed;
+
+        }).then(function (parsed) {
+            var msg = parsed.message + '\n\nActual ' + parsed.grossWeight + ' kg, volumetric ' +
+                parsed.volumetricWeight + ' kg.';
+            if (parsed._photoTotal) {
+                msg += '\n\n' + (parsed._photoTotal - parsed._photoFailed) + ' of ' + parsed._photoTotal +
+                    ' photo' + (parsed._photoTotal === 1 ? '' : 's') + ' uploaded.';
+            }
+            alert(msg);
             done();
             closeAndRefresh();
         }).catch(function (err) {
@@ -1243,6 +1363,86 @@ var PackingScreen = (function () {
     function toggleHistory(id) {
         OPEN_PACKING_ID = (String(OPEN_PACKING_ID) === String(id)) ? null : String(id);
         renderHistory();
+        if (OPEN_PACKING_ID) {
+            var p = HISTORY.filter(function (x) { return String(x.id) === OPEN_PACKING_ID; })[0];
+            if (p && n(p.imageCount) > 0 && !PHOTO_CACHE[OPEN_PACKING_ID]) {
+                loadPackingPhotos(OPEN_PACKING_ID);
+            }
+        }
+    }
+
+    // Pull Box_Images off the Packing record and turn whatever getRecords returns
+    // for a multi-image field into a list of usable <img> URLs.
+    function photoUrlsFromRecord(rec) {
+        if (!rec) return [];
+        var raw = rec.Box_Images;
+        if (raw === undefined || raw === null || raw === '') return [];
+        var parts = [];
+        if (Array.isArray(raw)) {
+            raw.forEach(function (v) {
+                if (!v) return;
+                if (typeof v === 'string') parts.push(v);
+                else if (v.url) parts.push(v.url);
+                else if (v.download_Url) parts.push(v.download_Url);
+                else if (v.filepath) parts.push(v.filepath);
+            });
+        } else if (typeof raw === 'object') {
+            if (raw.url) parts.push(raw.url);
+        } else {
+            String(raw).split(/[\n,]/).forEach(function (s) { if (s.trim()) parts.push(s.trim()); });
+        }
+        return parts.map(function (s) {
+            // getRecords may hand back an <a href="…"> wrapper, a bare /api/v2
+            // path, or a full URL. Normalise to something an <img> can load.
+            var m = String(s).match(/(?:href=")?((?:https?:)?\/\/[^"\s]+|\/[^"\s]+)/);
+            var u = m ? m[1] : s;
+            if (/^https?:\/\//.test(u)) return u;
+            if (/^\/\//.test(u)) return 'https:' + u;
+            if (u.charAt(0) === '/') return (CREATOR_ORIGIN || '') + u;
+            return u;
+        }).filter(Boolean);
+    }
+
+    function loadPackingPhotos(packId) {
+        PHOTO_CACHE[packId] = { state: 'loading', urls: [] };
+        paintPackingPhotos(packId);
+
+        if (!isRunningInCreator() || !(ZOHO && ZOHO.CREATOR && ZOHO.CREATOR.DATA && ZOHO.CREATOR.DATA.getRecords)) {
+            PHOTO_CACHE[packId] = { state: 'error', urls: [] };
+            paintPackingPhotos(packId);
+            return;
+        }
+        ZOHO.CREATOR.DATA.getRecords({
+            reportName: 'Packing_Report',
+            criteria: '(ID == ' + packId + ')',
+            fieldConfig: 'quick_view'
+        }).then(function (resp) {
+            var recs = (resp && (resp.data || resp.records)) || [];
+            var rec = Array.isArray(recs) ? recs[0] : recs;
+            PHOTO_CACHE[packId] = { state: 'ok', urls: photoUrlsFromRecord(rec) };
+            paintPackingPhotos(packId);
+        }).catch(function (err) {
+            console.error('getRecords for packing photos failed:', err);
+            PHOTO_CACHE[packId] = { state: 'error', urls: [] };
+            paintPackingPhotos(packId);
+        });
+    }
+
+    function paintPackingPhotos(packId) {
+        var box = el('hist-photos-' + packId);
+        if (!box) return;
+        box.innerHTML = photoGalleryHtml(packId);
+    }
+
+    function photoGalleryHtml(packId) {
+        var hit = PHOTO_CACHE[packId];
+        if (!hit || hit.state === 'loading') return '<span class="hist-photos-note">Loading photos…</span>';
+        if (hit.state === 'error') return '<span class="hist-photos-note">Could not load photos.</span>';
+        if (!hit.urls.length) return '<span class="hist-photos-note">No photos on this record.</span>';
+        return hit.urls.map(function (u) {
+            return '<a class="hist-photo" href="' + esc(u) + '" target="_blank" rel="noopener">' +
+                '<img src="' + esc(u) + '" alt="Box photo" loading="lazy"></a>';
+        }).join('');
     }
 
     // A PACKED BOX IS ANSWERED FOR MONTHS LATER, so an opened history card shows
@@ -1250,7 +1450,7 @@ var PackingScreen = (function () {
     // an inner went in, all three weights, and every item inside with the unit
     // weight the estimate was built from. Summarising it would mean going to
     // Creator to answer the question this tab exists to answer.
-    function historyBox(b) {
+    function historyBox(p, b) {
         var itemRows = (b.items || []).map(function (it) {
             return '<tr>' +
                 '<td class="material-name-cell">' +
@@ -1367,7 +1567,12 @@ var PackingScreen = (function () {
                 '<span>Inner cartons <b>' + n(p.innerBoxCount) + ' of ' + n(p.boxCount) + '</b></span>' +
                 (p.source ? '<span>Source <b>' + esc(p.source) + '</b></span>' : '') +
                 '</div>' +
-                (p.boxes || []).map(historyBox).join('') +
+                (n(p.imageCount) > 0
+                    ? '<div class="hist-photos-wrap"><div class="hist-photos-head">Photos</div>' +
+                      '<div class="hist-photos" id="hist-photos-' + esc(p.id) + '">' +
+                      (open ? photoGalleryHtml(p.id) : '') + '</div></div>'
+                    : '') +
+                (p.boxes || []).map(function (b) { return historyBox(p, b); }).join('') +
                 '</div>' +
                 '</div>';
         }).join('');
@@ -1380,12 +1585,17 @@ var PackingScreen = (function () {
         if (HISTORY_LOADED) loadHistory();
     }
 
+    function viewPhoto(url) {
+        if (url) window.open(url, '_blank');
+    }
+
     // Only what the generated markup's onclick handlers and the host page need.
     return {
         init: init,
         refresh: refreshAll,
         showTab: showTab,
         toggleHistory: toggleHistory,
+        viewPhoto: viewPhoto,
         selectOrder: selectOrder,
         setStaff: setStaff,
         addBox: addBox,
@@ -1395,6 +1605,8 @@ var PackingScreen = (function () {
         setBoxDim: setBoxDim,
         setBoxWeight: setBoxWeight,
         setBoxCartonWeight: setBoxCartonWeight,
+        addBoxImages: addBoxImages,
+        removeBoxImage: removeBoxImage,
         addItem: addItem,
         removeItem: removeItem,
         setItemLine: setItemLine,

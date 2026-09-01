@@ -3683,3 +3683,87 @@ th.col-num {
 #panel-waste .material-name-cell .mat-name {
     white-space: nowrap;
 }
+
+/* ---- Load / receive progress bar ----
+   Same bar the store Issue screen uses. On the Receive tab it shows while
+   getSupervisorMaterials is paged (indeterminate + "Page N"), and again in a
+   modal while receiveMaterials runs its sweep + finalize batches. */
+.load-progress {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.75rem 1.75rem 1.5rem;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+    max-width: 520px;
+    margin: 1.5rem auto;
+}
+
+.load-progress .lp-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.9rem;
+}
+
+.load-progress .lp-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-main);
+}
+
+.load-progress .lp-count {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.load-progress .lp-track {
+    height: 8px;
+    border-radius: 999px;
+    background: #eef2f7;
+    overflow: hidden;
+    position: relative;
+}
+
+.load-progress .lp-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--primary), var(--primary-hover));
+    width: 0%;
+    transition: width 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.load-progress.is-indeterminate .lp-fill {
+    width: 35% !important;
+    transition: none;
+    animation: lp-slide 1.15s ease-in-out infinite;
+}
+
+@keyframes lp-slide {
+    0%   { transform: translateX(-120%); }
+    100% { transform: translateX(340%); }
+}
+
+.load-progress .lp-sub {
+    margin-top: 0.75rem;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+/* The bar shown in a modal while a receipt is being confirmed - the
+   .load-progress card IS the panel, so strip the wrapper. */
+.exc-panel.progress-panel {
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+    max-width: 460px;
+}
+
+.exc-panel.progress-panel .load-progress {
+    margin: 0;
+    max-width: none;
+    box-shadow: 0 20px 45px rgba(15, 23, 42, 0.25);
+}

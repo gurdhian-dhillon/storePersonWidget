@@ -286,7 +286,7 @@
 .x-btn {
     font-family: inherit;
     font-size: 0.9rem;
-    color: #cbd5e1;
+    color: #64748b;
     background: transparent;
     border: none;
     cursor: pointer;
@@ -336,7 +336,7 @@
    fixed width; the card can be as wide as it likes. */
 .box-card {
     display: grid;
-    grid-template-columns: minmax(22rem, 24rem) minmax(0, 34rem);
+    grid-template-columns: minmax(22rem, 24rem) minmax(0, 44rem);
     justify-content: start;
     align-items: start;
     gap: 0.35rem 2.5rem;
@@ -856,4 +856,153 @@
     color: var(--text-main);
     font-weight: 700;
     font-variant-numeric: tabular-nums;
+}
+
+/* ---------- box photos (multiple, held until save then uploaded) ---------- */
+.box-right-col {
+    display: flex;
+    gap: 1.5rem;
+    align-items: flex-start;
+    min-width: 0;
+}
+
+.box-contents {
+    flex: 1;
+    min-width: 0;
+}
+
+.box-photo-col {
+    width: 168px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.photo-count {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    background: #f1f5f9;
+    border-radius: 9999px;
+    padding: 0.05rem 0.45rem;
+}
+
+.photo-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    align-content: flex-start;
+    padding-top: 0.15rem;
+}
+
+.photo-thumb {
+    position: relative;
+    width: 46px;
+    height: 46px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: #f8fafc;
+}
+
+.photo-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    cursor: pointer;
+}
+
+.photo-thumb-x {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 16px;
+    height: 16px;
+    line-height: 14px;
+    padding: 0;
+    text-align: center;
+    font-size: 0.6rem;
+    border: none;
+    border-radius: 50%;
+    background: var(--text-main);
+    color: #fff;
+    cursor: pointer;
+}
+
+.photo-thumb-x:hover {
+    background: var(--status-danger);
+}
+
+.photo-add {
+    width: 46px;
+    height: 46px;
+    border-radius: 6px;
+    border: 1px dashed var(--border);
+    background: #f8fafc;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    color: #94a3b8;
+    cursor: pointer;
+    transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.photo-add:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+.photo-add span {
+    font-size: 0.55rem;
+    font-weight: 600;
+    line-height: 1.1;
+    text-align: center;
+}
+
+.file-input-hidden {
+    display: none;
+}
+
+/* ---------- history: box photos (parent Box_Images, lazy) ---------- */
+.hist-photos-wrap {
+    margin: 0.25rem 0 1rem;
+}
+
+.hist-photos-head {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin-bottom: 0.4rem;
+}
+
+.hist-photos {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.hist-photo {
+    display: block;
+    width: 92px;
+    height: 92px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: #f8fafc;
+}
+
+.hist-photo img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.hist-photos-note {
+    font-size: 0.8rem;
+    color: var(--text-muted);
 }

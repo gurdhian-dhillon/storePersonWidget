@@ -1034,6 +1034,19 @@ blow the statement limit at 111 plans even after the `matPlanIdx` fix, confirmed
   today. That doc also records what is already *correct* and must not be "fixed": nothing ever
   scans `Material_Requirement`, the hot path is bounded by WIP rather than history, master-data
   fetch-alls are fine, and the paged history functions are the shape to copy.
+- **Item lists on the supervisor / checker / finishing screens WILL be paginated — decided,
+  not yet built.** Tested at real volume: one Faire order = one plan with **110 `Plan_Item`
+  rows**, and the Production tab rendered all 110 without hitting the statement limit
+  (`getProductionWidgetData` is already scoped to one supervisor + one plan; a fresh item costs
+  ~15 statement visits, so ~1,700 for the plan — well under). **So this is a UX fix, not a
+  statement-limit fix:** 110 cards is an unusable scroll, and the same list gets 3–4× heavier
+  per item once production starts (each `Stage_Log` / `Stage_Assignment` / `Waste_Movement`
+  query stops being empty), plus `getCheckingQueue` walks `Plan_Item[Item_Status ==
+  "Awaiting_Check"]` **factory-wide** before filtering to the supervisor. Plan: page the heavy
+  item array (`getProductionWidgetData` items, `getCheckingQueue`, `getFinishingItems` in
+  `deluge/finishingScripts/`) ~15–20 rows/page, keeping the light plan/dropdown rows in the
+  first call — same shape as the supervisor-receive sweep. Widget adds a pager under each list.
+  Being done in a separate session.
 - **`resolveStockDispute.dg`** is a legacy form workflow duplicating `resolveDispute`. It has
   none of the current logic. **Delete it in Creator.**
 - **`resolveDispute` does NOT wind back `Issue_Lines.Settled_Qty` or `Material_Issue.Issue_Status`,

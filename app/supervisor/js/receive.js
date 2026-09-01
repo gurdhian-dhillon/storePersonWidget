@@ -36,6 +36,85 @@ function ordChevId(i, j) { return 'ord-chev-' + i + '-' + j; }
 // planId|materialId -> { state: 'loading'|'ok'|'error', items: [...] }
 var BD_CACHE = {};
 
+// ---- Progress bar (shared look with the store Issue screen) ----
+//
+// getSupervisorMaterials is paged by Issue_Line row - a big backlog is a
+// handful of sequential calls, total unknown until linesConsumed hits 0. So the
+// load bar runs INDETERMINATE with a live "Page N". The receipt bar is the same
+// bar in a modal, one tick per sweep slice / finalize phase.
+var LoadProgress = {
+    el: null,
+
+    start: function (contentEl, title, sub) {
+        contentEl.innerHTML =
+            '<div class="load-progress is-indeterminate" id="rcv-load-progress">' +
+            '<div class="lp-head">' +
+            '<span class="lp-title" id="rcv-lp-title"></span>' +
+            '<span class="lp-count" id="rcv-lp-count"></span>' +
+            '</div>' +
+            '<div class="lp-track"><div class="lp-fill"></div></div>' +
+            '<div class="lp-sub" id="rcv-lp-sub"></div>' +
+            '</div>';
+        this.el = document.getElementById('rcv-load-progress');
+        this.setTitle(title || 'Loading your deliveries…');
+        this.setSub(sub || 'This can take a moment on a large order backlog.');
+    },
+    setTitle: function (t) { var n = document.getElementById('rcv-lp-title'); if (n) n.textContent = t; },
+    setSub: function (t) { var n = document.getElementById('rcv-lp-sub'); if (n) n.textContent = t || ''; },
+    setPage: function (n) { var c = document.getElementById('rcv-lp-count'); if (c) c.textContent = 'Page ' + n; },
+    finish: function () { this.el = null; }
+};
+
+// The receipt-time bar, in a modal so it sits over the card while the sweep +
+// finalize batches run. `percentage` numeric => a filled bar; omit it for the
+// indeterminate crawl (the batch count is not known ahead of time).
+function rcvProgressModalEl() {
+    var el = document.getElementById('rcv-progress-modal');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'rcv-progress-modal';
+        el.className = 'exc-modal hidden';
+        el.innerHTML = '<div class="exc-panel progress-panel">' +
+            '<div class="load-progress" id="rcv-pm-card">' +
+            '<div class="lp-head">' +
+            '<span class="lp-title" id="rcv-pm-title">Receiving materials</span>' +
+            '<span class="lp-count" id="rcv-pm-count"></span>' +
+            '</div>' +
+            '<div class="lp-track"><div class="lp-fill" id="rcv-pm-fill"></div></div>' +
+            '<div class="lp-sub" id="rcv-pm-sub"></div>' +
+            '</div>' +
+            '</div>';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+function showRcvProgress(title, sub, percentage) {
+    var el = rcvProgressModalEl();
+    document.getElementById('rcv-pm-title').textContent = title || 'Receiving materials';
+    document.getElementById('rcv-pm-sub').textContent = sub || '';
+    var card = document.getElementById('rcv-pm-card');
+    var fill = document.getElementById('rcv-pm-fill');
+    var count = document.getElementById('rcv-pm-count');
+    var hasPct = typeof percentage === 'number' && isFinite(percentage);
+    if (hasPct) {
+        var pct = Math.max(0, Math.min(100, Math.round(percentage)));
+        card.classList.remove('is-indeterminate');
+        fill.style.width = pct + '%';
+        count.textContent = pct + '%';
+    } else {
+        card.classList.add('is-indeterminate');
+        fill.style.width = '';
+        count.textContent = '';
+    }
+    el.classList.remove('hidden');
+}
+
+function closeRcvProgress() {
+    var el = document.getElementById('rcv-progress-modal');
+    if (el) el.classList.add('hidden');
+}
+
 // ---- Mode ----
 //
 // Two modes, and the whole screen is built around the difference. Confirming a
@@ -749,6 +828,7 @@ function submitReceipt() {
     var btn = document.getElementById('confirm-btn');
     btn.disabled = true;
     btn.textContent = 'Saving…';
+    showRcvProgress('Receiving materials', 'Confirming your handover…');
 
     var RETRY_WAITS_MS = [3000, 8000, 20000, 45000, 60000];
     var retryCount = 0;
@@ -757,8 +837,18 @@ function submitReceipt() {
 
     var sweepCursor = {};
     var firstSweep = true;
+    var sweepN = 0;
+    var finalizeN = 0;
     var finalizeCursor = {};
     var stage = 'sweep';
+
+    var FINALIZE_PHASE_LABEL = {
+        '': 'Updating handover status…',
+        vouchers: 'Updating handover status…',
+        items: 'Updating your orders…',
+        transfer: 'Moving stock to production…',
+        notify: 'Wrapping up…'
+    };
 
     function isRateLimited(err) {
         var msg = ((err && (err.message || err.error || err.toString())) || '')
@@ -802,12 +892,15 @@ function submitReceipt() {
         retryCount++;
         console.warn('receiveMaterials rate-limited; retry ' + retryCount + '/' +
             RETRY_WAITS_MS.length + ' in ' + waitMs + 'ms');
-        btn.textContent = 'Rate limited — retrying in ' + Math.round(waitMs / 1000) + 's…';
+        btn.textContent = 'Rate limited — retrying…';
+        showRcvProgress(stage === 'sweep' ? 'Receiving materials' : 'Finishing',
+            'Store is busy — retrying in ' + Math.round(waitMs / 1000) + 's…');
         setTimeout(stage === 'sweep' ? sweepStep : finalizeStep, waitMs);
     }
 
     function abortRun(err) {
         console.error('receiveMaterials aborted', err);
+        closeRcvProgress();
         alert(stage === 'finalize'
             ? 'Receipt recorded. The status update did not finish — press Confirm again to complete it.'
             : 'Receipt saved so far. Press Confirm again to finish — it picks up where it stopped.');
@@ -817,7 +910,10 @@ function submitReceipt() {
 
     function sweepStep() {
         stage = 'sweep';
-        btn.textContent = firstSweep ? 'Saving…' : 'Saving… (more)';
+        sweepN++;
+        btn.textContent = 'Saving…';
+        showRcvProgress('Receiving materials',
+            sweepN === 1 ? 'Confirming your handover…' : 'Batch ' + sweepN + '…');
         var payload = {
             vouchers: vouchers,
             shortMaterials: shortMaterials,
@@ -841,7 +937,10 @@ function submitReceipt() {
 
     function finalizeStep() {
         stage = 'finalize';
+        finalizeN++;
         btn.textContent = 'Finishing…';
+        var ph = (finalizeCursor && finalizeCursor.ph) || '';
+        showRcvProgress('Finishing', FINALIZE_PHASE_LABEL[ph] || 'Finishing up…');
         var payload = {
             vouchers: vouchers,
             plansTouched: plansTouchedArr,
@@ -860,6 +959,8 @@ function submitReceipt() {
     }
 
     function finishOk() {
+        showRcvProgress('Done', 'Receipt recorded', 100);
+        setTimeout(closeRcvProgress, 400);
         if (collectedErrors.length > 0) {
             alert('Recorded, with discrepancies:\n' + collectedErrors.join('\n'));
         }
@@ -1044,10 +1145,8 @@ function loadMaterials() {
 
     emptyState.classList.add('hidden');
     refreshBtn.disabled = true;
-    content.innerHTML =
-        '<div class="skeleton-card"><div class="skeleton-line w-40"></div>' +
-        '<div class="skeleton-line"></div><div class="skeleton-line"></div>' +
-        '<div class="skeleton-line w-70"></div></div>';
+    LoadProgress.start(content, 'Loading your deliveries…',
+        'Reading the handovers the store has made to you.');
 
     var merged = {};
     var MAX_CALLS = 60; // safety cap - real stop is linesConsumed===0
@@ -1057,6 +1156,7 @@ function loadMaterials() {
             console.error('loadMaterials: hit MAX_CALLS safety cap, stopping');
             return Promise.resolve();
         }
+        LoadProgress.setPage(callsSoFar + 1);
         return ZOHO.CREATOR.DATA.invokeCustomApi({
             api_name: 'getSupervisorMaterials',
             http_method: 'POST',
@@ -1076,6 +1176,8 @@ function loadMaterials() {
             mergeReceiptPages(merged, parsed);
             var consumed = Number(parsed.linesConsumed) || 0;
             if (consumed > 0) {
+                LoadProgress.setSub('Loaded ' + (merged.materials || []).length +
+                    ' material' + ((merged.materials || []).length === 1 ? '' : 's') + ' so far…');
                 return fetchPage(skipLines + consumed, callsSoFar + 1);
             }
         });
@@ -1083,6 +1185,7 @@ function loadMaterials() {
 
     fetchPage(0, 0).then(function (restart) {
         refreshBtn.disabled = false;
+        LoadProgress.finish();
         if (restart === null) { loadMaterials(); return; }
 
         merged.plansAwaiting = Math.max(0,
@@ -1101,6 +1204,7 @@ function loadMaterials() {
     }).catch(function (err) {
         console.error('invokeCustomApi error:', err);
         refreshBtn.disabled = false;
+        LoadProgress.finish();
         content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Failed to load</h2><p>Check the browser console for details.</p></div>';
     });
 }
