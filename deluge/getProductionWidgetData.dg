@@ -1,6 +1,6 @@
-string getProductionWidgetData(string supervisorId, string planId)
+string getProductionWidgetData(string supervisorId, string planId, string itemPageJson)
 {
-	// SCOPED TO ONE SUPERVISOR. Custom API, POST, one argument.
+	// SCOPED TO ONE SUPERVISOR. Custom API, POST, three arguments.
 	//
 	// This used to take no argument and return every live plan in the factory,
 	// with the widget throwing away everything but the one supervisor it was
@@ -29,11 +29,68 @@ string getProductionWidgetData(string supervisorId, string planId)
 	// So every plan comes back as a light row, and exactly one comes back with
 	// items. Empty planId gives the detail to the FIRST plan, which is the one
 	// the widget auto-selects - so a first load still needs only one call.
+	//
+	// itemPageJson NARROWS THE DETAILED PLAN TO ONE PAGE OF ITEMS.
+	//
+	// A Faire wholesale order is one plan with ~100-110 Plan_Item rows. Drawing
+	// every card at once is an unusable scroll, and every item costs a handful
+	// of queries - its requirements, stage logs, waste movements and their
+	// children, BOM, master record - so a hundred of them in one execution is
+	// also the direction the uncatchable statement limit lies in.
+	//
+	// A SINGLE JSON STRING so future paging tweaks never need another Creator
+	// Custom API config change:
+	//   {"skip":0,"limit":10,"focusItemId":"","search":""}
+	//   skip / limit  - the window into the filtered item list. limit defaults
+	//                   to 10 and is capped at 50.
+	//   focusItemId   - "make the page holding this item the one returned",
+	//                   for openItemId after a save that moved focus off-page.
+	//   search        - substring match on item name AND sku, case-insensitive.
+	//                   Narrows the list BEFORE paging, so the pager counts what
+	//                   is actually drawn.
+	//
+	// The filter that hides finished originals once a plan carries QC remake
+	// work (the widget used to do this) moves here too, so itemTotal and the
+	// page agree with each other.
+	//
+	// itemTotal / itemSkip / itemLimit come back on the response for the pager.
+	// The focused plan's light row also carries itemStats - id count and four
+	// integers computed over the WHOLE Plan_Item list, no child queries - so
+	// renderPlanHeader keeps describing the whole plan while the cards show one
+	// page.
 	errJson = "";
 	plansJson = "";
 	empsJson = "";
 	supsJson = "";
 	partyJson = "";
+
+	// Paging inputs, parsed once. A Custom API argument is always a string and
+	// may arrive "" - toMap() on an empty string throws, so it is guarded.
+	pgSkip = 0;
+	pgLimit = 10;
+	pgFocus = "";
+	pgSearch = "";
+	pgRaw = ifnull(itemPageJson,"").toString().trim();
+	if(pgRaw != "" && pgRaw != "{}")
+	{
+		pgMap = pgRaw.toMap();
+		if(pgMap != null)
+		{
+			pgSkipS = ifnull(pgMap.get("skip"),"0").toString().trim();
+			if(pgSkipS == "" || pgSkipS.isNumber() == false) { pgSkipS = "0"; }
+			pgSkip = pgSkipS.toDecimal().toLong();
+			if(pgSkip < 0) { pgSkip = 0; }
+
+			pgLimS = ifnull(pgMap.get("limit"),"10").toString().trim();
+			if(pgLimS == "" || pgLimS.isNumber() == false) { pgLimS = "10"; }
+			pgLimit = pgLimS.toDecimal().toLong();
+			if(pgLimit <= 0) { pgLimit = 10; }
+			if(pgLimit > 50) { pgLimit = 50; }
+
+			pgFocus = ifnull(pgMap.get("focusItemId"),"").toString().trim();
+			pgSearch = ifnull(pgMap.get("search"),"").toString().trim().toLowerCase();
+		}
+	}
 
 	try
 	{
@@ -257,30 +314,170 @@ string getProductionWidgetData(string supervisorId, string planId)
 			}
 
 			planItems = Plan_Item[ID == 0];
+
+			// itemStats travels on the FOCUSED plan's light row and nowhere
+			// else. renderPlanHeader used to sum the items it received - "to
+			// produce", "produced", "N of M complete" - which a one-page slice
+			// breaks. These four integers are computed over the whole Plan_Item
+			// list with NO child queries (just the item's own fields), so the
+			// header keeps describing the whole plan for the cost of one cheap
+			// scan.
+			statCount = 0;
+			statToProduce = 0;
+			statProduced = 0;
+			statDone = 0;
+			statRemake = 0;
+
+			// itemTotal / the page window, for the pager.
+			itemTotal = 0;
+			itemSkipOut = pgSkip;
+
+			// Which item ids are on this page. Built before the expensive loop so
+			// the detail build can skip everything outside the window.
+			pgInclude = Map();
+
 			if(plan.ID == wantPlan)
 			{
 				// Plan_Item is its own form now, not a subform - so this is a
 				// query against the plan rather than a walk of nested rows.
 				planItems = Plan_Item[Plan == plan.ID] sort by Line_No;
+
+				//----------------------------------------------------------
+				// PASS A - the light scan. Stats over the whole plan, plus the
+				// FILTERED, ORDERED id list the pager pages through.
+				//
+				// The filter that hides finished originals once a plan carries
+				// QC remake work moved here from the widget: an item is on the
+				// list unless the plan has any remake AND this item is a
+				// finished (Complete) original. Search narrows it further, on
+				// name and sku.
+				//
+				// SKU is a lookup, so a search on it needs the master record -
+				// resolved here ONLY when a search term is present and only for
+				// non-remake items, so an unsearched load pays nothing for it.
+				//----------------------------------------------------------
+				planHasRemake = false;
+				for each  rmScan in planItems
+				{
+					if(ifnull(rmScan.Is_Remake,false) == true)
+					{
+						planHasRemake = true;
+					}
+				}
+
+				pgOrder = List();
+				pgIdx = 0;
+
+				for each  itmA in planItems
+				{
+					aIsRemake = ifnull(itmA.Is_Remake,false);
+					aStatus = ifnull(itmA.Item_Status,"").toString().trim();
+					aQty = ifnull(itmA.Qty_Ordered,0);
+					aProd = ifnull(itmA.Qty_Produced,0);
+
+					// Stats first - always the whole plan, never the filtered
+					// or paged view. Originals only for the order totals; the
+					// remake pieces get their own figure.
+					if(aIsRemake == false)
+					{
+						statCount = statCount + 1;
+						statToProduce = statToProduce + aQty;
+						if(aStatus == "Complete")
+						{
+							statDone = statDone + 1;
+						}
+					}
+					else
+					{
+						if(aStatus != "Complete")
+						{
+							statRemake = statRemake + aQty;
+						}
+					}
+					statProduced = statProduced + aProd;
+
+					// The visibility filter - same rule the widget applied.
+					aVisible = true;
+					if(planHasRemake == true && aIsRemake == false && aStatus == "Complete")
+					{
+						aVisible = false;
+					}
+
+					if(aVisible == true && pgSearch != "")
+					{
+						aName = ifnull(itmA.Item_Name,"").toString().toLowerCase();
+						aHit = aName.contains(pgSearch);
+						if(aHit == false)
+						{
+							aSkuTxt = "";
+							for each  imS in Item_Master[ID == itmA.Item_Sku]
+							{
+								aSkuTxt = ifnull(imS.SKU,"").toString().toLowerCase();
+							}
+							if(aSkuTxt.contains(pgSearch))
+							{
+								aHit = true;
+							}
+						}
+						if(aHit == false)
+						{
+							aVisible = false;
+						}
+					}
+
+					if(aVisible == true)
+					{
+						pgOrder.add(itmA.ID.toString());
+						if(pgFocus != "" && itmA.ID.toString() == pgFocus)
+						{
+							// Land the window on the page holding the focused
+							// item. Integer division floors before the multiply.
+							pgSkip = (pgIdx / pgLimit).floor() * pgLimit;
+						}
+						pgIdx = pgIdx + 1;
+					}
+				}
+
+				itemTotal = pgOrder.size();
+				if(pgSkip >= itemTotal && itemTotal > 0)
+				{
+					// A stale skip - the list shrank under it. Fall back to the
+					// last page rather than returning nothing.
+					pgSkip = ((itemTotal - 1) / pgLimit).floor() * pgLimit;
+				}
+				itemSkipOut = pgSkip;
+
+				pgEnd = pgSkip + pgLimit;
+				pgN = 0;
+				for each  incId in pgOrder
+				{
+					if(pgN >= pgSkip && pgN < pgEnd)
+					{
+						pgInclude.put(incId,"1");
+					}
+					pgN = pgN + 1;
+				}
 			}
 
-			// EVERY item is sent, including ones already finished, and the widget
-			// decides which to draw.
-			//
-			// Filtering here was tried and reverted. renderPlanHeader derives its
-			// totals from the items it receives - "to produce", "produced", "N of
-			// M complete" - so dropping the finished ones server-side made a
-			// re-opened 100-piece order report "1 item, to produce 10 pcs". The
-			// header was not wrong to work that way; the server was wrong to send
-			// it a filtered list and let it believe that was the plan.
-			//
 			// isRemake goes with each item so the widget can hide the finished
 			// originals from the stage list while the header still counts the
 			// whole plan - and so a supervisor handed cloth for something he
 			// already finished is told it is a QC remake rather than left to
 			// wonder.
+			//
+			// PASS B - the expensive build, PAGE-WINDOW ONLY. An item not in
+			// pgInclude contributes nothing: its requirements, stage logs, waste
+			// movements, BOM and master record are never touched.
 			for each itm in planItems
 			{
+				// OUTSIDE THE PAGE WINDOW - skip the whole expensive build. The
+				// only stage not started has no Stage_Log row, so "no row" is a
+				// real state and there is nothing cheaper to do here than
+				// nothing. Guarded with an if rather than a break: Deluge has no
+				// reliable break in a for-each.
+				pgOn = ifnull(pgInclude.get(itm.ID.toString()),"").toString();
+				if(pgOn == "1")
+				{
 				// Item_Sku is a LOOKUP to Item_Master, so the field itself holds a
 				// record id. This shipped the id as "sku" on every item, which
 				// nobody noticed only because nothing rendered it. The code the
@@ -713,6 +910,177 @@ string getProductionWidgetData(string supervisorId, string planId)
 					logsJson = logsJson + "{\"id\":\"" + trk.ID + "\",\"phase\":\"" + trk.Phase_Name + "\",\"operator\":\"" + opId + "\",\"assigns\":[" + asgJson + "],\"outsourced\":" + ifnull(trk.Is_Outsourced,false) + ",\"party\":\"" + trkParty + "\",\"sentOn\":\"" + trkSent + "\",\"outsourceRef\":\"" + ifnull(trk.Outsource_Ref,"").toString().replaceAll("\"","'") + "\",\"returnedOn\":\"" + trkBack + "\",\"start\":\"" + ifnull(trk.Start_Time,"") + "\",\"end\":\"" + ifnull(trk.End_Time,"") + "\",\"qtyIn\":" + ifnull(trk.Qty_In,0) + ",\"qtyOut\":" + ifnull(trk.Qty_Out,0) + ",\"status\":\"" + ifnull(trk.Stage_Status,"") + "\",\"remarks\":\"" + trkRemTxt + "\"}";
 				}
 
+				//------------------------------------------------------------
+				// EXPECTED WASTE, THE ARITHMETIC ONLY.
+				//
+				// production.js used to fire getExpectedWaste once per visible
+				// item on render - ~110 POSTs on a Faire order, most of them
+				// bounced 429 by Creator's per-minute cap. Folded in here so a
+				// page of 10 items costs zero extra calls.
+				//
+				// THIS IS NOT THE WHOLE OF getExpectedWaste. That function also
+				// resolves which LOT each remnant goes back to, which means
+				// walking Material_Issue and its Issue_Lines subform and
+				// Raw_Material_Lot - the heavy part, and the reason it could not
+				// simply be looped. The inline "Expected waste" cell renders
+				// only count / length x width (production.js), so NONE of the
+				// lot machinery is needed here. The cutting-waste DIALOG still
+				// calls the standalone getExpectedWaste, which still does all of
+				// it - fresh cloth is treated as one continuous block for the
+				// prediction cell, and the exact per-lot split stays in the
+				// dialog.
+				//
+				// Grain is fixed: cut width across the piece width, cut length
+				// along its length, never rotated. Same two passes as
+				// getExpectedWaste - the received waste pieces first, then fresh
+				// fabric for whatever they did not cover.
+				expWasteJson = "";
+				expPcsCut = ifnull(itm.Qty_Ordered,0);
+
+				for each  ewK in mOrder
+				{
+					ewM = mAgg.get(ewK);
+					if(ewM.get("isFabric") == true && expPcsCut > 0)
+					{
+						ewMatId = ewM.get("materialId");
+						ewCutW = ewM.get("cutWidth");
+						ewCutL = ewM.get("cutLength");
+
+						ewFabWcm = 0.0;
+						for each  ewRm in Raw_Material[ID == ewMatId.toLong()]
+						{
+							// Stored as TEXT, in inches.
+							ewWv = ewRm.Fabric_Width_Inches;
+							if(ewWv != null && ewWv.trim() != "")
+							{
+								ewFabWcm = ewWv.trim().toDecimal() * 2.54;
+							}
+						}
+
+						if(ewCutW > 0 && ewCutL > 0 && ewFabWcm > 0)
+						{
+							ewGen = "";
+							ewRemain = expPcsCut;
+
+							//--------------------------------------------------
+							// Pass 1 - the waste pieces he actually received.
+							// itemIssued was already fetched above for wasteJson.
+							//--------------------------------------------------
+							for each  ewWi in itemIssued
+							{
+								ewAvail = 0;
+								for each  ewRv in Waste_Movement[Parent_Movement == ewWi.ID && Movement_Type == "Received"]
+								{
+									ewAvail = ewAvail + ifnull(ewRv.Piece_Count,0);
+								}
+
+								ewWMat = "";
+								for each  ewWmRec in Waste_Master[ID == ewWi.Waste_Piece]
+								{
+									ewWMat = ifnull(ewWmRec.SKU,"").toString();
+								}
+
+								ewPieceW = ifnull(ewWi.Piece_Width,0);
+								ewPieceL = ifnull(ewWi.Piece_Length,0);
+
+								if(ewRemain > 0 && ewAvail > 0 && ewWMat == ewMatId.toString() && ewPieceW >= ewCutW && ewPieceL >= ewCutL)
+								{
+									ewPerRow = (ewPieceW / ewCutW).floor();
+									ewMaxRows = (ewPieceL / ewCutL).floor();
+									ewCap = ewPerRow * ewMaxRows;
+									ewSideW = ewPieceW - (ewPerRow * ewCutW);
+
+									ewFull = (ewRemain / ewCap).floor();
+									if(ewFull > ewAvail) { ewFull = ewAvail; }
+									if(ewFull > 0)
+									{
+										ewUsedLen = ewMaxRows * ewCutL;
+										if(ewSideW > 0)
+										{
+											if(ewGen != "") { ewGen = ewGen + ","; }
+											ewGen = ewGen + "{\"count\":" + ewFull + ",\"length\":" + ewUsedLen + ",\"width\":" + ewSideW + "}";
+										}
+										ewFullTail = ewPieceL - ewUsedLen;
+										if(ewFullTail > 0)
+										{
+											if(ewGen != "") { ewGen = ewGen + ","; }
+											ewGen = ewGen + "{\"count\":" + ewFull + ",\"length\":" + ewFullTail + ",\"width\":" + ewPieceW + "}";
+										}
+										ewRemain = ewRemain - (ewFull * ewCap);
+										ewAvail = ewAvail - ewFull;
+									}
+
+									if(ewRemain > 0 && ewAvail > 0)
+									{
+										ewTake = ewRemain;
+										ewPartRows = (ewTake / ewPerRow).floor();
+										ewLastRow = ewTake - (ewPartRows * ewPerRow);
+										ewRows = ewPartRows;
+										if(ewLastRow > 0) { ewRows = ewRows + 1; }
+										ewLenUsed = ewRows * ewCutL;
+
+										if(ewPartRows > 0 && ewSideW > 0)
+										{
+											if(ewGen != "") { ewGen = ewGen + ","; }
+											ewGen = ewGen + "{\"count\":1,\"length\":" + (ewPartRows * ewCutL) + ",\"width\":" + ewSideW + "}";
+										}
+										if(ewLastRow > 0)
+										{
+											ewPartW = ewPieceW - (ewLastRow * ewCutW);
+											if(ewPartW > 0)
+											{
+												if(ewGen != "") { ewGen = ewGen + ","; }
+												ewGen = ewGen + "{\"count\":1,\"length\":" + ewCutL + ",\"width\":" + ewPartW + "}";
+											}
+										}
+										ewTailL = ewPieceL - ewLenUsed;
+										if(ewTailL > 0)
+										{
+											if(ewGen != "") { ewGen = ewGen + ","; }
+											ewGen = ewGen + "{\"count\":1,\"length\":" + ewTailL + ",\"width\":" + ewPieceW + "}";
+										}
+										ewRemain = 0;
+									}
+								}
+							}
+
+							//--------------------------------------------------
+							// Pass 2 - fresh fabric for whatever is left, as one
+							// continuous block (the per-lot split is dialog-only).
+							//--------------------------------------------------
+							if(ewRemain > 0)
+							{
+								ewPerRowR = (ewFabWcm / ewCutW).floor();
+								if(ewPerRowR > 0)
+								{
+									ewSideWR = ewFabWcm - (ewPerRowR * ewCutW);
+									ewFullRowsR = (ewRemain / ewPerRowR).floor();
+									ewLastRowR = ewRemain - (ewFullRowsR * ewPerRowR);
+
+									if(ewFullRowsR > 0 && ewSideWR > 0)
+									{
+										if(ewGen != "") { ewGen = ewGen + ","; }
+										ewGen = ewGen + "{\"count\":1,\"length\":" + (ewFullRowsR * ewCutL) + ",\"width\":" + ewSideWR + "}";
+									}
+									if(ewLastRowR > 0)
+									{
+										ewPartWR = ewFabWcm - (ewLastRowR * ewCutW);
+										if(ewPartWR > 0)
+										{
+											if(ewGen != "") { ewGen = ewGen + ","; }
+											ewGen = ewGen + "{\"count\":1,\"length\":" + ewCutL + ",\"width\":" + ewPartWR + "}";
+										}
+									}
+									ewRemain = 0;
+								}
+							}
+
+							if(expWasteJson != "") { expWasteJson = expWasteJson + ","; }
+							expWasteJson = expWasteJson + "{\"materialId\":\"" + ewMatId + "\",\"waste\":[" + ewGen + "]}";
+						}
+					}
+				}
+
 				if(itemsJson != "") { itemsJson = itemsJson + ","; }
 				// isRemake carried so the card can say so. A supervisor handed
 				// cloth for something he already finished deserves to be told it
@@ -741,7 +1109,8 @@ string getProductionWidgetData(string supervisorId, string planId)
 					}
 				}
 
-				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"name\":\"" + itm.Item_Name + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"isAlteration\":" + isAltTxt + ",\"canCloseAlteration\":" + canCloseTxt + ",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "]}";
+				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"name\":\"" + itm.Item_Name + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"isAlteration\":" + isAltTxt + ",\"canCloseAlteration\":" + canCloseTxt + ",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "],\"expectedWaste\":{\"fabrics\":[" + expWasteJson + "]}}";
+				}
 			}
 
 			// Formatted here rather than in the widget - a raw Creator date
@@ -752,8 +1121,14 @@ string getProductionWidgetData(string supervisorId, string planId)
 				planDateTxt = plan.Plan_Start_Date.toString("dd-MMM-yyyy");
 			}
 
+			// itemStats and the paging figures are only meaningful on the
+			// focused plan - every other row's stat scan never ran, so they are
+			// zero and the widget must not read them. hasDetail already tells it
+			// which row is the real one.
+			statsJson = "{\"count\":" + statCount + ",\"toProduce\":" + statToProduce + ",\"produced\":" + statProduced + ",\"doneCount\":" + statDone + ",\"remakeQty\":" + statRemake + "}";
+
 			if(plansJson != "") { plansJson = plansJson + ","; }
-			plansJson = plansJson + "{\"id\":\"" + plan.ID + "\",\"planNo\":\"" + plan.Plan_No + "\",\"salesOrder\":\"" + soNo + "\",\"planDate\":\"" + planDateTxt + "\",\"orderStatus\":\"" + ifnull(plan.Order_Status,"") + "\",\"assignedTo\":\"" + ifnull(plan.Assigned_To,"") + "\",\"hasDetail\":" + hasDetail + ",\"items\":[" + itemsJson + "]}";
+			plansJson = plansJson + "{\"id\":\"" + plan.ID + "\",\"planNo\":\"" + plan.Plan_No + "\",\"salesOrder\":\"" + soNo + "\",\"planDate\":\"" + planDateTxt + "\",\"orderStatus\":\"" + ifnull(plan.Order_Status,"") + "\",\"assignedTo\":\"" + ifnull(plan.Assigned_To,"") + "\",\"hasDetail\":" + hasDetail + ",\"itemStats\":" + statsJson + ",\"itemTotal\":" + itemTotal + ",\"itemSkip\":" + itemSkipOut + ",\"itemLimit\":" + pgLimit + ",\"items\":[" + itemsJson + "]}";
 		}
 	}
 	catch (e)

@@ -2252,6 +2252,122 @@ th.col-num {
     background: #fff;
 }
 
+/* ---- Item search + pager ----
+   A Faire order is ~110 Plan_Item rows. The list is paged 10 at a time on the
+   server; the search box narrows it and the pager walks it. */
+
+.item-search-group {
+    display: flex;
+    align-items: stretch;
+    gap: 0.25rem;
+}
+
+.item-search {
+    font-family: inherit;
+    font-size: 0.8125rem;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #fff;
+    color: var(--text);
+    width: 13rem;
+    max-width: 13rem;
+}
+
+.item-search::placeholder {
+    color: var(--text-muted);
+}
+
+.item-search:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+/* Commits the term — the box also commits on blur and Enter, so this is the
+   explicit affordance rather than the only way in. */
+.item-search-go {
+    font-family: inherit;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    padding: 0.35rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #fff;
+    color: var(--text);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.item-search-go:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+/* Its own footer strip under the last item card — not inside a card, where it
+   would read as part of that item. Mirrors the store widget's .pager. */
+.item-pager {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    padding: 0.75rem 0.25rem 0.25rem;
+    margin-top: 0.5rem;
+}
+
+.item-pager .pg-count {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    margin-right: auto;
+}
+
+.item-pager .pg-btn {
+    font-family: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+    min-width: 2.25rem;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--text);
+    cursor: pointer;
+}
+
+.item-pager .pg-btn:hover:not(:disabled) {
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+/* The page he is on. Disabled because pressing it refetches what is already on
+   screen, but it must not look switched off — it is the label. */
+.item-pager .pg-btn.is-current,
+.item-pager .pg-btn.is-current:disabled {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #fff;
+    opacity: 1;
+    cursor: default;
+}
+
+.item-pager .pg-btn:disabled {
+    background: #f8fafc;
+    color: #94a3b8;
+    opacity: 1;
+    cursor: default;
+}
+
+.item-pager .pg-arrow {
+    font-size: 1.125rem;
+    line-height: 1;
+    padding: 0.4rem 0.6rem;
+}
+
+.item-pager .pg-gap {
+    padding: 0 0.15rem;
+    color: var(--text-muted);
+}
+
 /* ---- Dialogs (dispute resolution) ---- */
 
 .exc-modal {
@@ -3734,6 +3850,23 @@ th.col-num {
         min-width: 0 !important;
         width: 100% !important;
         margin-right: 0 !important;
+        height: 40px !important;
+        border-radius: 8px !important;
+    }
+
+    .plan-header-controls .item-search-group {
+        width: 100% !important;
+    }
+
+    .plan-header-controls .item-search {
+        flex: 1 1 auto !important;
+        width: auto !important;
+        max-width: none !important;
+        height: 40px !important;
+        border-radius: 8px !important;
+    }
+
+    .plan-header-controls .item-search-go {
         height: 40px !important;
         border-radius: 8px !important;
     }

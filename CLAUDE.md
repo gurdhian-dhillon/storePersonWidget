@@ -1034,19 +1034,38 @@ blow the statement limit at 111 plans even after the `matPlanIdx` fix, confirmed
   today. That doc also records what is already *correct* and must not be "fixed": nothing ever
   scans `Material_Requirement`, the hot path is bounded by WIP rather than history, master-data
   fetch-alls are fine, and the paged history functions are the shape to copy.
-- **Item lists on the supervisor / checker / finishing screens WILL be paginated — decided,
-  not yet built.** Tested at real volume: one Faire order = one plan with **110 `Plan_Item`
-  rows**, and the Production tab rendered all 110 without hitting the statement limit
-  (`getProductionWidgetData` is already scoped to one supervisor + one plan; a fresh item costs
-  ~15 statement visits, so ~1,700 for the plan — well under). **So this is a UX fix, not a
-  statement-limit fix:** 110 cards is an unusable scroll, and the same list gets 3–4× heavier
-  per item once production starts (each `Stage_Log` / `Stage_Assignment` / `Waste_Movement`
-  query stops being empty), plus `getCheckingQueue` walks `Plan_Item[Item_Status ==
-  "Awaiting_Check"]` **factory-wide** before filtering to the supervisor. Plan: page the heavy
-  item array (`getProductionWidgetData` items, `getCheckingQueue`, `getFinishingItems` in
-  `deluge/finishingScripts/`) ~15–20 rows/page, keeping the light plan/dropdown rows in the
-  first call — same shape as the supervisor-receive sweep. Widget adds a pager under each list.
-  Being done in a separate session.
+- **Item pagination — PRODUCTION TAB DONE; checker + finishing still to do.** One Faire order =
+  one plan with ~110 `Plan_Item` rows. This was never a statement-limit fix on Production
+  (`getProductionWidgetData` is scoped to one supervisor + one plan, ~15 visits/item), it was a
+  UX + API-call-count fix: 110 cards is an unusable scroll, and `production.js` fired
+  `getExpectedWaste` once per visible item on render — ~110 POSTs → 429 storm (`code 2955`).
+  - **`getProductionWidgetData` now takes a 3rd arg `itemPageJson`** — a single JSON string
+    `{"skip":0,"limit":10,"focusItemId":"","search":""}` (JSON blob, not positional, so future
+    tweaks need no Creator config change). **Page size 10, hardcoded.** It returns one page of
+    the focused plan's items plus `itemTotal`/`itemSkip`/`itemLimit`, and the focused plan's
+    light row carries `itemStats` (`count`/`toProduce`/`produced`/`doneCount`/`remakeQty`,
+    computed over the whole `Plan_Item` list with **no child queries**) so `renderPlanHeader`
+    still describes the whole order. The "hide finished originals once a plan has a QC remake"
+    filter moved server-side so pager counts match the cards. Search is a case-insensitive
+    substring on item name AND sku (sku hop only when a term is present).
+  - **`getExpectedWaste` fold-in: ARITHMETIC ONLY.** `getProductionWidgetData` now attaches
+    `item.expectedWaste` (`{fabrics:[{materialId,waste:[{count,length,width}]}]}`) computed in
+    its existing per-item loop — Pass 1 over received waste pieces, Pass 2 fresh cloth **as one
+    continuous block**. The lot-resolution machinery (`Material_Issue`/`Issue_Lines` walk,
+    `Raw_Material_Lot` lookups, per-lot fresh-cloth split) is the heavy part and is **NOT**
+    ported — the inline "Expected waste" cell only renders `count / L×W`. `getExpectedWaste.dg`
+    is unchanged and still called by the cutting-waste dialog, which needs lots.
+    Cross-checked against `getExpectedWaste.dg`'s no-lot path in
+    `tools/`-style node script (8 cases, exact match).
+  - `production.js` reads `item.expectedWaste` directly (zero calls); falls back to the per-item
+    `getExpectedWaste` call only when the field is absent (deploy gap). Pager ported from the
+    store widget's `pagerHtml`/`pageListFor`. Search box lives in `.plan-header-controls`.
+  - **MANUAL: add `itemPageJson` to `getProductionWidgetData`'s Custom API argument list** in
+    the same pass as the `.dg` paste — a call with an arg count the deployed function lacks
+    fails "Number of params/datatype mismatch".
+  - **Still to do (separate session):** `getCheckingQueue` (also a statement-limit risk — walks
+    `Plan_Item[Item_Status == "Awaiting_Check"]` factory-wide) and `getFinishingItems`. Full
+    plan: `docs/production-pagination-plan.md`.
 - **`resolveStockDispute.dg`** is a legacy form workflow duplicating `resolveDispute`. It has
   none of the current logic. **Delete it in Creator.**
 - **`resolveDispute` does NOT wind back `Issue_Lines.Settled_Qty` or `Material_Issue.Issue_Status`,
