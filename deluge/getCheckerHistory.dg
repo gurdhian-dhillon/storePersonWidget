@@ -86,50 +86,47 @@ string getCheckerHistory(string supervisorId, string dateTxt)
 	planNoCache = Map();
 	soNoCache = Map();
 
-	// Newest first. Check_Date is the same for every row on a one-day view, so
-	// it can order nothing here - Added_Time is stamped at insert and gives the
-	// real sequence of the shift.
-	checks = Item_Check[Check_Date == dDay] sort by Added_Time desc;
-	info "checks on day: " + checks.count();
-
-	for each  icRow in checks
+	if(wantSup != "")
 	{
-		inspKey = ifnull(icRow.Inspector,"").toString();
+		checks = Item_Check[Check_Date == dDay] sort by Added_Time desc;
+		info "checks on day: " + checks.count();
 
-		//--------------------------------------------------------------
-		// WHOSE BATCH WAS THIS? Resolved from the check's own Plan lookup and
-		// cached, because a day's checks cluster on a handful of plans.
-		//
-		// The supervisor is read here rather than filtered in the query because
-		// Item_Check has no supervisor of its own - it belongs to an item, which
-		// belongs to a plan, which is assigned to a man. One hop, cached.
-		//--------------------------------------------------------------
-		planKey = ifnull(icRow.Plan,"").toString();
-		planSupTxt = ifnull(planSupCache.get(planKey),"").toString();
-
-		if(planSupTxt == "" && planKey != "" && planKey.isNumber())
+		for each  icRow in checks
 		{
-			for each  icSup in Production_Planning[ID == planKey.toLong()]
-			{
-				planSupTxt = ifnull(icSup.Assigned_To,"").toString().trim();
-			}
-			// "-" is the remembered miss, never a real id - without it a plan
-			// with no supervisor is re-queried on every check hanging off it.
-			if(planSupTxt == "")
-			{
-				planSupTxt = "-";
-			}
-			planSupCache.put(planKey,planSupTxt);
-		}
+			inspKey = ifnull(icRow.Inspector,"").toString();
 
-		takeIt = true;
-		if(wantSup != "" && planSupTxt != wantSup)
-		{
+			//--------------------------------------------------------------
+			// WHOSE BATCH WAS THIS? Resolved from the check's own Plan lookup and
+			// cached, because a day's checks cluster on a handful of plans.
+			//
+			// The supervisor is read here rather than filtered in the query because
+			// Item_Check has no supervisor of its own - it belongs to an item, which
+			// belongs to a plan, which is assigned to a man. One hop, cached.
+			//--------------------------------------------------------------
+			planKey = ifnull(icRow.Plan,"").toString();
+			planSupTxt = ifnull(planSupCache.get(planKey),"").toString();
+
+			if(planSupTxt == "" && planKey != "" && planKey.isNumber())
+			{
+				for each  icSup in Production_Planning[ID == planKey.toLong()]
+				{
+					planSupTxt = ifnull(icSup.Assigned_To,"").toString().trim();
+				}
+				if(planSupTxt == "")
+				{
+					planSupTxt = "-";
+				}
+				planSupCache.put(planKey,planSupTxt);
+			}
+
 			takeIt = false;
-		}
+			if(planSupTxt == wantSup)
+			{
+				takeIt = true;
+			}
 
-		if(takeIt == true)
-		{
+			if(takeIt == true)
+			{
 			//----------------------------------------------------------
 			// The inspector's NAME. A lookup holds a record id, so
 			// toString() gives the id rather than the label - the exact
@@ -279,6 +276,7 @@ string getCheckerHistory(string supervisorId, string dateTxt)
 			// IDs forced to string - 18-digit ids break JSON.parse otherwise.
 			rowsJson = rowsJson + "{\"id\":\"" + icRow.ID + "\",\"itemId\":\"" + itemKey + "\",\"item\":\"" + itemNm + "\",\"sku\":\"" + itemSku + "\",\"batch\":\"" + itemKind + "\",\"salesOrder\":\"" + soNoTxt + "\",\"planNo\":\"" + planNoTxt + "\",\"inspector\":\"" + inspName + "\",\"checkedOn\":\"" + chkDateTxt + "\",\"round\":" + rndS.toDecimal().toLong() + ",\"inspected\":" + insN + ",\"approved\":" + appN + ",\"rejected\":" + rejN + ",\"alteration\":" + altN + ",\"remarks\":\"" + ifnull(icRow.Remarks,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\",\"lines\":[" + lineJson + "],\"alterationLines\":[" + altJson + "]}";
 		}
+	}
 	}
 	}
 	catch (e)

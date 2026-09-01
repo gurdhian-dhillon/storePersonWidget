@@ -23,8 +23,8 @@
 // the end of the job, so a tablet with a wrong clock wrote wrong times and two
 // devices on one job wrote two disagreeing sets.
 
-var STAGE_NAMES = ['folding', 'pressing', 'branding'];
-var STAGE_LABELS = ['Folding', 'Pressing', 'Branding'];
+var STAGE_NAMES = ['pressing', 'folding', 'branding'];
+var STAGE_LABELS = ['Pressing', 'Folding', 'Branding'];
 
 var SUPERVISORS = [];
 var SELECTED_SUP = '';
@@ -169,9 +169,83 @@ function callApi(apiName, payload) {
     });
 }
 
-function activeJob() {
+function activeJobGroup() {
     var hit = JOBS_QUEUE.filter(function (j) { return String(j.id) === String(ACTIVE_JOB_ID); });
-    return hit.length ? hit[0] : null;
+    if (!hit.length) return [];
+    var refJob = hit[0];
+    return JOBS_QUEUE.filter(function (j) {
+        return j.salesOrder === refJob.salesOrder && 
+               (refJob.sku ? j.sku === refJob.sku : j.itemName === refJob.itemName);
+    });
+}
+
+function getCombinedActiveJob() {
+    var group = activeJobGroup();
+    if (!group.length) return null;
+    
+    var ref = group[0];
+    var totalQty = group.reduce(function (sum, j) { return sum + n(j.qty); }, 0);
+    
+    var combinedStages = hydrateStages(null);
+    STAGE_NAMES.forEach(function (name) {
+        var start = null;
+        var end = null;
+        for (var i = 0; i < group.length; i++) {
+            if (group[i].stages[name].start !== null) {
+                start = group[i].stages[name].start;
+                break;
+            }
+        }
+        var allEnded = true;
+        for (var i = 0; i < group.length; i++) {
+            if (group[i].stages[name].end === null) {
+                allEnded = false;
+                break;
+            }
+        }
+        if (allEnded && start !== null) {
+            end = group[0].stages[name].end; // use first one's end clock
+        }
+        combinedStages[name] = {
+            start: start,
+            end: end,
+            duration: (start && end) ? getDurationFromTimes(start, end) : null
+        };
+    });
+    
+    var status = 'Pending';
+    for (var i = 0; i < group.length; i++) {
+        if (group[i].status === 'In_Progress') {
+            status = 'In_Progress';
+            break;
+        }
+    }
+    
+    var selectedOperator = '';
+    for (var i = 0; i < group.length; i++) {
+        if (group[i].selectedOperator) {
+            selectedOperator = group[i].selectedOperator;
+            break;
+        }
+    }
+    
+    return {
+        id: ref.id,
+        finishingId: ref.finishingId,
+        salesOrder: ref.salesOrder,
+        planNo: ref.planNo,
+        itemName: ref.itemName,
+        sku: ref.sku,
+        qty: totalQty,
+        status: status,
+        stages: combinedStages,
+        selectedOperator: selectedOperator,
+        jobs: group
+    };
+}
+
+function activeJob() {
+    return getCombinedActiveJob();
 }
 
 // ----------------------------------------------------
@@ -417,23 +491,45 @@ function renderQueue() {
         if (isOpen) {
             cardHtml += '<div class="so-items-container">';
 
-            groupJobs.forEach(function (job, subIdx) {
-                var subIsOpen = (String(job.id) === String(ACTIVE_JOB_ID));
-                var started = job.status === 'In_Progress';
+            var subGroupsMap = {};
+            var subGroupsList = [];
+
+            groupJobs.forEach(function (job) {
+                var key = job.sku ? job.sku : job.itemName;
+                if (!subGroupsMap[key]) {
+                    subGroupsMap[key] = [];
+                    subGroupsList.push(key);
+                }
+                subGroupsMap[key].push(job);
+            });
+
+            subGroupsList.forEach(function (key, subIdx) {
+                var subGroup = subGroupsMap[key];
+                var ref = subGroup[0];
+                var totalSubQty = subGroup.reduce(function (sum, j) { return sum + n(j.qty); }, 0);
+                
+                var groupJobIds = subGroup.map(function (j) { return String(j.id); });
+                var subIsOpen = (ACTIVE_JOB_ID !== null && groupJobIds.indexOf(String(ACTIVE_JOB_ID)) !== -1);
+                
+                var started = subGroup.some(function (j) { return j.status === 'In_Progress'; });
                 var colour = started ? '#2563eb' : '#64748b';
                 var badge = started ? 'In progress' : 'Not started';
 
+                var plans = subGroup.map(function (j) { return j.planNo; }).filter(function (v, i, self) {
+                    return v && self.indexOf(v) === i;
+                }).join(', ');
+
                 cardHtml += '<div class="sub-item-row' + (subIsOpen ? ' open' : '') + '">' +
-                    '<div class="sub-item-header" onclick="selectJob(\'' + escapeHtml(job.id) + '\'); event.stopPropagation();">' +
+                    '<div class="sub-item-header" onclick="selectJob(\'' + escapeHtml(ref.id) + '\'); event.stopPropagation();">' +
                         '<div class="item-title-row" style="display: flex; gap: 1rem; align-items: center;">' +
                             '<div class="item-serial sub-serial">' + (subIdx + 1) + '</div>' +
                             '<div class="item-header-info">' +
-                                '<h3 style="margin: 0 0 0.25rem 0; font-size: 1rem; color: var(--text-dark); font-weight: 600;">' + escapeHtml(job.itemName) + '</h3>' +
+                                '<h3 style="margin: 0 0 0.25rem 0; font-size: 1rem; color: var(--text-dark); font-weight: 600;">' + escapeHtml(ref.itemName) + '</h3>' +
                                 '<div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">' +
-                                    (job.sku ? '<span class="fin-sku">' + escapeHtml(job.sku) + '</span>' : '') +
-                                    '<span class="item-qty">' + plural(job.qty, 'pc') + '</span>' +
+                                    (ref.sku ? '<span class="fin-sku">' + escapeHtml(ref.sku) + '</span>' : '') +
+                                    '<span class="item-qty">' + plural(totalSubQty, 'pc') + '</span>' +
                                     '<span class="item-status-badge" style="color:' + colour + '; font-weight:600; font-size:0.8rem; background:' + colour + '15; padding:0.1rem 0.5rem; border-radius:1rem;">' + badge + '</span>' +
-                                    (job.planNo ? '<span class="fin-order">' + escapeHtml(job.planNo) + '</span>' : '') +
+                                    (plans ? '<span class="fin-order">' + escapeHtml(plans) + '</span>' : '') +
                                 '</div>' +
                             '</div>' +
                         '</div>' +
@@ -441,7 +537,7 @@ function renderQueue() {
                             '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>' +
                         '</span></div>' +
                     '</div>' +
-                    (subIsOpen ? '<div class="item-body">' + jobBody(job) + '</div>' : '') +
+                    (subIsOpen ? '<div class="item-body">' + jobBody(getCombinedActiveJob()) + '</div>' : '') +
                     '</div>';
             });
 
@@ -537,17 +633,13 @@ function jobBody(job) {
 // does not re-stamp a branding end that already exists, so this only closes the
 // row, writes Qty_Finished and asks the order the question it never got asked.
 function closeJob() {
-    var job = activeJob();
-    if (!job || STAGE_BUSY) return;
+    var combined = activeJob();
+    if (!combined || STAGE_BUSY) return;
 
-    if (!job.finishingId) {
-        alert('This job was never opened on the server. Refresh and start it again.');
-        loadQueue();
-        return;
-    }
-
+    var group = combined.jobs;
     if (!isRunningInCreator()) {
-        JOBS_QUEUE = JOBS_QUEUE.filter(function (j) { return j.id !== job.id; });
+        var ids = group.map(function (j) { return j.id; });
+        JOBS_QUEUE = JOBS_QUEUE.filter(function (j) { return ids.indexOf(j.id) === -1; });
         ACTIVE_JOB_ID = null;
         renderQueue();
         return;
@@ -555,8 +647,13 @@ function closeJob() {
 
     setStageBusy(true);
 
-    callApi('completeFinishingJob', { finishingId: job.finishingId }).then(function (res) {
-        alert(res.message ? res.message : ('Closed ' + job.itemName + '.'));
+    var promises = group.map(function (job) {
+        if (!job.finishingId) return Promise.resolve(null);
+        return callApi('completeFinishingJob', { finishingId: job.finishingId });
+    });
+
+    Promise.all(promises).then(function (results) {
+        alert('Finished ' + combined.itemName + ' (' + combined.qty + ' pcs total).');
         ACTIVE_JOB_ID = null;
         ACTIVE_STAGE = 0;
         setStageBusy(false);
@@ -605,8 +702,8 @@ function stageRow(job, stageName, index) {
 
 function onOperatorChanged(name) {
     SELECTED_OPERATOR = name;
-    var job = activeJob();
-    if (job) job.selectedOperator = name;
+    var group = activeJobGroup();
+    group.forEach(function (j) { j.selectedOperator = name; });
 }
 
 function setStageBusy(busy) {
@@ -623,44 +720,50 @@ function setStageBusy(busy) {
 // ----------------------------------------------------
 
 function startStage(stageName) {
-    var job = activeJob();
-    if (!job || STAGE_BUSY) return;
+    var combined = activeJob();
+    if (!combined || STAGE_BUSY) return;
 
-    var stage = job.stages[stageName];
-    if (!stage || stage.start !== null) return;
+    var group = combined.jobs;
 
     if (!isRunningInCreator()) {
-        stage.start = '10:00:00';
+        group.forEach(function (j) {
+            j.stages[stageName].start = '10:00:00';
+        });
         renderQueue();
         return;
     }
 
     setStageBusy(true);
 
-    // THE ROW IS OPENED ON THE FIRST PRESS. startFinishingJob is idempotent, so a
-    // resumed job skips straight to the stamp and a double press cannot fork it
-    // into two rows.
-    var opened;
-    if (job.finishingId) {
-        opened = Promise.resolve(null);
-    } else {
-        opened = callApi('startFinishingJob', {
-            itemCheckId: job.id,
-            staffName: job.selectedOperator || SELECTED_OPERATOR
-        }).then(function (res) {
-            job.finishingId = res.finishingId;
-            job.status = 'In_Progress';
-        });
-    }
+    var promises = group.map(function (job) {
+        var stage = job.stages[stageName];
+        if (!stage || stage.start !== null) return Promise.resolve(null);
 
-    opened.then(function () {
-        return callApi('saveFinishingStage', {
-            finishingId: job.finishingId,
-            stage: stageName,
-            event: 'start'
+        var openedPromise;
+        if (job.finishingId) {
+            openedPromise = Promise.resolve(null);
+        } else {
+            openedPromise = callApi('startFinishingJob', {
+                itemCheckId: job.id,
+                staffName: job.selectedOperator || SELECTED_OPERATOR
+            }).then(function (res) {
+                job.finishingId = res.finishingId;
+                job.status = 'In_Progress';
+            });
+        }
+
+        return openedPromise.then(function () {
+            return callApi('saveFinishingStage', {
+                finishingId: job.finishingId,
+                stage: stageName,
+                event: 'start'
+            }).then(function (res) {
+                stage.start = res.time;
+            });
         });
-    }).then(function (res) {
-        stage.start = res.time;
+    });
+
+    Promise.all(promises).then(function () {
         setStageBusy(false);
         renderQueue();
     }).catch(function (err) {
@@ -671,20 +774,22 @@ function startStage(stageName) {
 }
 
 function completeStage(stageName) {
-    var job = activeJob();
-    if (!job || STAGE_BUSY) return;
+    var combined = activeJob();
+    if (!combined || STAGE_BUSY) return;
 
-    var stage = job.stages[stageName];
-    if (!stage || stage.start === null || stage.end !== null) return;
-
+    var group = combined.jobs;
     var index = STAGE_NAMES.indexOf(stageName);
     var isLast = (index === STAGE_NAMES.length - 1);
 
     if (!isRunningInCreator()) {
-        stage.end = '10:20:00';
-        stage.duration = getDurationFromTimes(stage.start, stage.end);
+        group.forEach(function (j) {
+            var stg = j.stages[stageName];
+            stg.end = '10:20:00';
+            stg.duration = getDurationFromTimes(stg.start, stg.end);
+        });
         if (isLast) {
-            JOBS_QUEUE = JOBS_QUEUE.filter(function (j) { return j.id !== job.id; });
+            var ids = group.map(function (j) { return j.id; });
+            JOBS_QUEUE = JOBS_QUEUE.filter(function (j) { return ids.indexOf(j.id) === -1; });
             ACTIVE_JOB_ID = null;
         } else {
             ACTIVE_STAGE = index + 1;
@@ -693,22 +798,32 @@ function completeStage(stageName) {
         return;
     }
 
-    if (!job.finishingId) {
-        alert('This job was never opened on the server. Refresh and start it again.');
-        loadQueue();
-        return;
+    for (var i = 0; i < group.length; i++) {
+        if (!group[i].finishingId) {
+            alert('One or more jobs were never opened on the server. Refresh and start again.');
+            loadQueue();
+            return;
+        }
     }
 
     setStageBusy(true);
 
     if (!isLast) {
-        callApi('saveFinishingStage', {
-            finishingId: job.finishingId,
-            stage: stageName,
-            event: 'end'
-        }).then(function (res) {
-            stage.end = res.time;
-            stage.duration = getDurationFromTimes(stage.start, stage.end);
+        var promises = group.map(function (job) {
+            var stage = job.stages[stageName];
+            if (!stage || stage.start === null || stage.end !== null) return Promise.resolve(null);
+            
+            return callApi('saveFinishingStage', {
+                finishingId: job.finishingId,
+                stage: stageName,
+                event: 'end'
+            }).then(function (res) {
+                stage.end = res.time;
+                stage.duration = getDurationFromTimes(stage.start, stage.end);
+            });
+        });
+
+        Promise.all(promises).then(function () {
             ACTIVE_STAGE = index + 1;
             setStageBusy(false);
             renderQueue();
@@ -720,12 +835,12 @@ function completeStage(stageName) {
         return;
     }
 
-    // THE LAST PRESS IS ONE CALL. completeFinishingJob stamps the branding end,
-    // closes the row, writes Qty_Finished from the inspection and asks the order
-    // whether that was the last batch it was waiting for - so there is no window
-    // in which the work is recorded but the job is still open.
-    callApi('completeFinishingJob', { finishingId: job.finishingId }).then(function (res) {
-        alert(res.message ? res.message : ('Finished ' + job.itemName + '.'));
+    var promises = group.map(function (job) {
+        return callApi('completeFinishingJob', { finishingId: job.finishingId });
+    });
+
+    Promise.all(promises).then(function () {
+        alert(combined.itemName + ' (' + combined.qty + ' pcs total) finished.');
         ACTIVE_JOB_ID = null;
         ACTIVE_STAGE = 0;
         setStageBusy(false);
@@ -786,8 +901,8 @@ function renderHistory() {
             '<td class="col-num">' + n(run.qty) + '</td>' +
             '<td>' + escapeHtml(run.salesOrder || '—') + '</td>' +
             '<td>' + escapeHtml(run.staff || '—') + '</td>' +
-            '<td class="col-num">' + fmtDuration(st.folding ? st.folding.duration : null) + '</td>' +
             '<td class="col-num">' + fmtDuration(st.pressing ? st.pressing.duration : null) + '</td>' +
+            '<td class="col-num">' + fmtDuration(st.folding ? st.folding.duration : null) + '</td>' +
             '<td class="col-num">' + fmtDuration(st.branding ? st.branding.duration : null) + '</td>' +
             '<td>' + escapeHtml(run.completedOn || '—') + '</td>' +
             '</tr>';
@@ -795,7 +910,7 @@ function renderHistory() {
 
     container.innerHTML = '<div class="fin-scroll"><table class="fin-tbl">' +
         '<thead><tr><th>Item</th><th class="col-num">Pcs</th><th>Order</th><th>Finished by</th>' +
-        '<th class="col-num">Folding</th><th class="col-num">Pressing</th><th class="col-num">Branding</th>' +
+        '<th class="col-num">Pressing</th><th class="col-num">Folding</th><th class="col-num">Branding</th>' +
         '<th>Completed</th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table></div>';
 }

@@ -136,138 +136,82 @@ string getCheckingQueue(string supervisorId)
 		//------------------------------------------------------------------
 		// 2. THE QUEUE ITSELF.
 		//
-		// "sort by" on its own assignment, never inline in the for-each header -
-		// inline it does not reliably parse, and a function that will not save
-		// looks exactly like one that saved and did nothing.
-		//
-		// Added_Time rather than Line_No: items of one plan are created together
-		// and in line order, so this reads plan by plan, line by line, with
-		// later batches after the originals they replace. Line_No sorted across
-		// plans would interleave them.
+		// Only queried if a supervisor has been selected (wantSup != "").
+		// If wantSup is empty, itemsJson stays empty and no Plan_Items are read.
 		//------------------------------------------------------------------
-		awaiting = Plan_Item[Item_Status == "Awaiting_Check"] sort by Added_Time;
-
-		// Caches. Every one is keyed by id AS STRING - a Map keyed on a raw id
-		// and read back with a string finds nothing, silently.
-		planNoById = Map();
-		planSoById = Map();
-		planSupById = Map();
-
-		rootOrdById = Map();
-		rootAccById = Map();
-		rootBomById = Map();
-		rootRoundById = Map();
-
-		bomStagesById = Map();
-		skuById = Map();
-
-		// One JSON blob per supervisor, plus the order they were first seen in.
-		// A Map alone has no order worth relying on.
-		supSeen = Map();
-		supOrder = List();
 		itemsJson = "";
 
-		for each  itm in awaiting
+		if(wantSup != "")
 		{
-			//----------------------------------------------------------
-			// THE PLAN, AND THROUGH IT THE ORDER AND THE SUPERVISOR.
-			//
-			// Filled on first sight of each plan. The sales order is fetched
-			// inside this block on purpose: one order produces exactly one
-			// plan in this app, so per-plan already means per-order, and a
-			// second cache would be two maps to keep in step for nothing.
-			//----------------------------------------------------------
-			planKey = ifnull(itm.Plan,"").toString().trim();
+			awaiting = Plan_Item[Item_Status == "Awaiting_Check"] sort by Added_Time;
 
-			if(planKey != "" && planNoById.get(planKey) == null)
+			// Caches. Every one is keyed by id AS STRING - a Map keyed on a raw id
+			// and read back with a string finds nothing, silently.
+			planNoById = Map();
+			planSoById = Map();
+			planSupById = Map();
+
+			rootOrdById = Map();
+			rootAccById = Map();
+			rootBomById = Map();
+			rootRoundById = Map();
+
+			bomStagesById = Map();
+			skuById = Map();
+
+			for each  itm in awaiting
 			{
-				pNoTxt = "";
-				pSoTxt = "";
-				pSupTxt = "";
+				//----------------------------------------------------------
+				// THE PLAN, AND THROUGH IT THE ORDER AND THE SUPERVISOR.
+				//----------------------------------------------------------
+				planKey = ifnull(itm.Plan,"").toString().trim();
 
-				if(planKey.isNumber())
+				if(planKey != "" && planNoById.get(planKey) == null)
 				{
-					planId = planKey.toLong();
+					pNoTxt = "";
+					pSoTxt = "";
+					pSupTxt = "";
 
-					for each  planRec in Production_Planning[ID == planId]
+					if(planKey.isNumber())
 					{
-						pNoTxt = ifnull(planRec.Plan_No,"").toString().replaceAll("\"","'");
+						planId = planKey.toLong();
 
-						// Assigned_To is a LOOKUP, so it holds a record id, not
-						// a name. The name comes off the directory above.
-						pSupTxt = ifnull(planRec.Assigned_To,"").toString().trim();
-
-						soKey = ifnull(planRec.Sales_Order,"").toString().trim();
-						if(soKey != "" && soKey.isNumber())
+						for each  planRec in Production_Planning[ID == planId]
 						{
-							soId = soKey.toLong();
-							for each  soRec in Sales_Order[ID == soId]
+							pNoTxt = ifnull(planRec.Plan_No,"").toString().replaceAll("\"","'");
+							pSupTxt = ifnull(planRec.Assigned_To,"").toString().trim();
+
+							soKey = ifnull(planRec.Sales_Order,"").toString().trim();
+							if(soKey != "" && soKey.isNumber())
 							{
-								pSoTxt = ifnull(soRec.Sales_Order,"").toString().replaceAll("\"","'");
+								soId = soKey.toLong();
+								for each  soRec in Sales_Order[ID == soId]
+								{
+									pSoTxt = ifnull(soRec.Sales_Order,"").toString().replaceAll("\"","'");
+								}
 							}
 						}
 					}
+
+					planNoById.put(planKey,pNoTxt);
+					planSoById.put(planKey,pSoTxt);
+					planSupById.put(planKey,pSupTxt);
 				}
 
-				// Written even when nothing was found, so a missing plan is
-				// looked up once rather than on every item hanging off it.
-				planNoById.put(planKey,pNoTxt);
-				planSoById.put(planKey,pSoTxt);
-				planSupById.put(planKey,pSupTxt);
-			}
+				planNoOut = ifnull(planNoById.get(planKey),"").toString();
+				soNoOut = ifnull(planSoById.get(planKey),"").toString();
+				supIdTxt = ifnull(planSupById.get(planKey),"").toString();
 
-			planNoOut = ifnull(planNoById.get(planKey),"").toString();
-			soNoOut = ifnull(planSoById.get(planKey),"").toString();
-			supIdTxt = ifnull(planSupById.get(planKey),"").toString();
-
-			//----------------------------------------------------------
-			// THE SUPERVISOR ROSTER, AND THE GATE.
-			//
-			// Every item awaiting a check contributes its supervisor to the
-			// dropdown and to that supervisor's count. Only the SELECTED
-			// supervisor's items go on to be described in full.
-			//
-			// This is the shape getProductionWidgetData already uses for plans:
-			// every one comes back as a light row, exactly one comes back with
-			// detail. It matters more here than there, because everything below
-			// this line - the root line, its acceptances, the BOM stage list,
-			// the round count - is several queries per item, and the queue spans
-			// the whole factory. Describing every supervisor's work to draw one
-			// man's screen is how this function would reach the statement limit,
-			// and that limit is not catchable: it kills the script and the
-			// widget gets a bare 500 with no error card.
-			//
-			// An item on a plan with no supervisor still counts, under the empty
-			// key. It is real work that somebody has to inspect, and dropping it
-			// because a lookup was never filled would hide it completely.
-			//----------------------------------------------------------
-			if(supSeen.get(supIdTxt) == null)
-			{
-				supSeen.put(supIdTxt,"0");
-				supOrder.add(supIdTxt);
-
-				// The default, decided by the OLDEST waiting item because the
-				// query is sorted that way. Whoever has been waiting longest is
-				// the right screen to open on, and it is the one the widget
-				// auto-selects - so the two cannot disagree about what is being
-				// shown.
-				if(wantSup == "")
+				// STRICT GUARD: Match supervisor ID as text.
+				// Only process items for the requested supervisor.
+				mineTxt = false;
+				if(supIdTxt == wantSup)
 				{
-					wantSup = supIdTxt;
+					mineTxt = true;
 				}
-			}
-			supSeen.put(supIdTxt,(ifnull(supSeen.get(supIdTxt),"0").toString().toLong() + 1).toString());
 
-			// Ids compared as text on both sides - a mixed-type comparison
-			// throws rather than returning false.
-			mineTxt = false;
-			if(supIdTxt == wantSup)
-			{
-				mineTxt = true;
-			}
-
-			if(mineTxt == true)
-			{
+				if(mineTxt == true)
+				{
 
 			//----------------------------------------------------------
 			// THE ROOT LINE.
@@ -548,41 +492,27 @@ string getCheckingQueue(string supervisorId)
 				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"name\":\"" + ifnull(itm.Item_Name,"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + skuOut + "\",\"planId\":\"" + planKey + "\",\"planNo\":\"" + planNoOut + "\",\"salesOrder\":\"" + soNoOut + "\",\"produced\":" + producedOut + ",\"round\":" + roundOut + ",\"batch\":\"" + batchTxt + "\",\"lineOrdered\":" + ordOut + ",\"lineAccepted\":" + accOut + ",\"lineOutstanding\":" + outOut + ",\"stages\":[" + stagesOut + "]}";
 			}
 		}
+	}
 
 		//------------------------------------------------------------------
 		// 3. THE SUPERVISOR DROPDOWN.
 		//
-		// Only supervisors who actually have something waiting, each with its
-		// count. Listing every supervisor means picking a name and landing on an
-		// empty screen with nothing to say why - the same reason
-		// getProductionWidgetData builds its filter from the plans it found
-		// rather than from the Employee table.
+		// Return all active Supervisors from the Employee table.
 		//------------------------------------------------------------------
-		for each  supKey in supOrder
+		supEmps = Employee[Designation == "Supervisor" && Status == "Active"] sort by Employee_Name;
+		if(supEmps.count() == 0)
 		{
-			supName = "Unassigned";
+			info "getCheckingQueue: no Active employee has Designation 'Supervisor' - falling back to all employees.";
+			supEmps = Employee[ID != 0] sort by Employee_Name;
+		}
 
-			if(supKey != "")
-			{
-				nameTxt = ifnull(empNameById.get(supKey),"").toString();
-				if(nameTxt != "")
-				{
-					supName = nameTxt;
-				}
-				else
-				{
-					// Named by id rather than left blank. A supervisor whose
-					// Employee record has gone still has garments on the rack,
-					// and a heading reading nothing is unattributable.
-					supName = "Employee " + supKey;
-				}
-			}
-
+		for each  seRec in supEmps
+		{
 			if(supsJson != "")
 			{
 				supsJson = supsJson + ",";
 			}
-			supsJson = supsJson + "{\"id\":\"" + supKey + "\",\"name\":\"" + supName + "\",\"count\":" + ifnull(supSeen.get(supKey),"0").toString().toLong() + "}";
+			supsJson = supsJson + "{\"id\":\"" + seRec.ID + "\",\"name\":\"" + ifnull(seRec.Employee_Name,"").toString().replaceAll("\"","'") + "\",\"count\":0}";
 		}
 	}
 	catch (e)
