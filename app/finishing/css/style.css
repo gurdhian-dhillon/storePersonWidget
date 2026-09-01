@@ -1,14 +1,235 @@
 /* Finishing screen.
-   The accordion itself - item-card, item-header, item-serial, item-title-row,
-   item-meta-line, chevron, item-body - and the tab strip come from
-   ../css/style.css, the same classes the supervisor, store, checker and packing
-   screens use. That is the point: five screens, one list. This file only adds
-   what is finishing-specific, which is the three stage rows inside an open card
-   and the history table.
+   This file contains both the shared accordion/card styles and the finishing-specific
+   styles (the three stage rows inside an open card and the history table). */
 
-   The old stylesheet went with the old screen: a plan dropdown, a summary strip,
-   full-width queue cards with an inline stepper, and per-card operator pickers.
-   None of that markup exists any more. */
+:root {
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --bg-color: #e9eef4;
+    --surface: #ffffff;
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+    --border: #e2e8f0;
+
+    --status-success: #10b981;
+    --status-success-bg: #d1fae5;
+    --status-warning: #f59e0b;
+    --status-warning-bg: #fef3c7;
+    --status-danger: #ef4444;
+    --status-danger-bg: #fee2e2;
+
+    --alt: #0d9488;
+    --alt-bg: #ccfbf1;
+
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    --radius: 8px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-main);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+.app-container { max-width: 100%; margin: 0 auto; padding: 1rem; }
+.hidden { display: none !important; }
+
+/* Header */
+.app-header {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem;
+}
+.app-header h1 { font-size: 1.4rem; font-weight: 700; }
+.app-date { font-size: 0.85rem; color: var(--text-muted); }
+.app-header-right { display: flex; gap: 0.6rem; align-items: center; }
+
+.sup-select {
+    font-family: inherit; font-size: 0.875rem; font-weight: 500;
+    padding: 0.55rem 2.2rem 0.55rem 0.75rem;
+    border: 1px solid #cbd5e1; border-radius: var(--radius);
+    background-color: var(--surface);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23475569' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    background-size: 1rem;
+    appearance: none; -webkit-appearance: none; -moz-appearance: none;
+    color: var(--text-main); min-width: 190px;
+    text-overflow: ellipsis; white-space: nowrap;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.sup-select:focus {
+    outline: none; border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.primary-btn {
+    font-family: inherit; font-size: 0.9rem; font-weight: 600;
+    padding: 0.5rem 1rem; border: 0; border-radius: var(--radius);
+    background: var(--primary); color: #fff; cursor: pointer;
+}
+.primary-btn:hover { background: var(--primary-hover); }
+.primary-btn:disabled { opacity: 0.55; cursor: default; }
+
+.ghost-btn {
+    font-family: inherit; font-size: 0.9rem; font-weight: 600;
+    padding: 0.5rem 1rem; border: 1px solid var(--border);
+    border-radius: var(--radius); background: var(--surface);
+    color: var(--text-muted); cursor: pointer;
+}
+.ghost-btn:hover { color: var(--text-main); }
+
+.empty-note { color: var(--text-muted); padding: 2rem 0; text-align: center; }
+.error-note { color: var(--status-danger); }
+
+/* Accordion */
+.sup-block {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); margin-bottom: 0.75rem; overflow: hidden;
+    box-shadow: var(--shadow-sm);
+}
+.sup-head {
+    width: 100%; display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.9rem 1rem; background: none; border: 0; cursor: pointer;
+    font-family: inherit; text-align: left;
+}
+.sup-head:hover { background: #f8fafc; }
+.sup-caret { color: var(--text-muted); font-size: 0.9rem; width: 0.9rem; }
+.sup-name { font-weight: 600; font-size: 1rem; flex: 1; }
+.sup-count {
+    font-size: 0.8rem; font-weight: 600; color: var(--primary);
+    background: #eff6ff; padding: 0.15rem 0.6rem; border-radius: 1rem;
+}
+.sup-body { padding: 0 1rem 1rem; }
+
+/* Item card */
+.item-card {
+    background: var(--surface);
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+    overflow: hidden;
+    margin-bottom: 0.75rem;
+    scroll-margin-top: 5rem;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.item-header {
+    display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background-color: #f8fafc;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.15s ease;
+}
+.item-header:hover {
+    background-color: #f1f5f9;
+}
+.item-header-info { flex: 1; min-width: 0; }
+.item-header h2 { font-size: 1rem; font-weight: 700; display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+
+.item-title-row {
+    display: flex; align-items: center; gap: 0.75rem;
+    flex: 1 1 auto; min-width: 0;
+}
+.item-serial {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.85rem; height: 1.85rem; flex: 0 0 auto;
+    border-radius: 50%;
+    background: #eff6ff; color: var(--primary);
+    border: 1px solid #bfdbfe;
+    font-size: 0.85rem; font-weight: 700;
+}
+
+.item-status-badge { white-space: nowrap; line-height: 1.5; }
+
+.chk-secondary {
+    display: inline-flex; align-items: baseline; gap: 0.5rem;
+    flex-wrap: wrap; min-width: 0;
+}
+
+.mat-name { font-weight: 600; }
+.mat-sku { font-size: 0.78rem; color: var(--text-muted); font-weight: 500; }
+
+.item-meta-line {
+    display: flex; align-items: center; gap: 0.7rem;
+    flex-wrap: wrap; margin-top: 0.3rem;
+}
+.item-qty { font-size: 0.85rem; color: var(--text-muted); }
+.so-ref { font-size: 0.8rem; color: var(--text-muted); }
+
+.batch-tag {
+    font-size: 0.72rem; font-weight: 600; padding: 0.1rem 0.5rem;
+    border-radius: 1rem;
+}
+.batch-tag.is-alt { color: var(--alt); background: var(--alt-bg); }
+.batch-tag.is-remake { color: var(--status-warning); background: var(--status-warning-bg); }
+.batch-tag.is-replace { color: var(--text-muted); background: #f1f5f9; }
+
+.round-tag { font-size: 0.72rem; font-weight: 600; color: var(--text-muted); }
+.line-pos { font-size: 0.8rem; color: var(--text-muted); }
+.line-pos b { color: var(--status-warning); }
+.line-pos.is-done { color: var(--status-success); }
+
+/* Tab Strip */
+.tab-strip { display: flex; gap: 0.25rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border); }
+.tab-btn {
+    font-family: inherit; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+    padding: 0.55rem 0.9rem; border: 0; background: none; color: var(--text-muted);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tab-btn:hover { color: var(--text-main); }
+.tab-btn.is-active { color: var(--primary); border-bottom-color: var(--primary); }
+.tab-count {
+    display: inline-block; margin-left: 0.4rem; min-width: 1.2rem; padding: 0 0.35rem;
+    font-size: 0.72rem; line-height: 1.2rem; text-align: center; border-radius: 1rem;
+    background: var(--status-danger); color: #fff;
+}
+.tab-panel { display: none; }
+.tab-panel.is-active { display: block; }
+
+.item-card.is-open { border-color: var(--primary); }
+.item-card.is-open .item-header { border-bottom: 1px solid var(--border); }
+
+.item-body { padding: 0.875rem; cursor: default; }
+.section-title {
+    font-size: 0.82rem; font-weight: 600; color: var(--text-main);
+    margin-top: 1rem; margin-bottom: 0.15rem;
+}
+
+/* Chevron */
+.item-header-right { display: flex; align-items: center; gap: 0.6rem; flex: 0 0 auto; }
+.chevron {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.75rem; height: 1.75rem; flex: 0 0 auto;
+    border-radius: 50%; color: var(--primary);
+    background: rgba(255, 255, 255, 0.75);
+    box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.25);
+    transition: transform 0.2s ease, background-color 0.15s ease;
+}
+.item-header:hover .chevron, .sub-item-header:hover .chevron { background: #ffffff; box-shadow: inset 0 0 0 1px var(--primary); }
+.chevron svg { width: 0.95rem; height: 0.95rem; display: block; }
+.item-card.is-open > .item-header .chevron,
+.sub-item-row.is-open > .sub-item-header .chevron { transform: rotate(90deg); }
+
+/* Responsive */
+@media (max-width: 640px) {
+    .app-container { padding: 0.75rem; }
+    .app-header { flex-direction: column; align-items: stretch; gap: 0.75rem; }
+    .app-header-right { width: 100%; display: flex; gap: 0.5rem; }
+    .sup-select { flex: 1 1 auto; min-width: 0; width: 100%; height: 40px; }
+    .item-header { flex-direction: row !important; align-items: center !important; justify-content: space-between !important; padding: 0.75rem !important; }
+    .item-title-row { flex: 1 1 auto !important; min-width: 0 !important; }
+    .item-header-right { width: auto !important; flex-shrink: 0 !important; }
+}
+
+
+/* ========================================================================= */
+/* FINISHING-SPECIFIC STYLES                                                 */
+/* ========================================================================= */
 
 /* ---------- header ---------- */
 
@@ -29,26 +250,6 @@
     color: var(--text-muted);
 }
 
-/* Copied verbatim from app/supervisor/css/style.css so the pickers on the
-   supervisor, packing and finishing screens are the same control, not three that
-   merely look similar. If that one changes, these change with it. */
-.sup-select {
-    font-family: inherit;
-    font-size: 0.875rem;
-    font-weight: 500;
-    padding: 0.55rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: 0.5rem;
-    background: #fff;
-    color: var(--text-main);
-    margin-right: 0.5rem;
-    min-width: 12rem;
-}
-
-/* ---------- queue ---------- */
-
-/* The SHARED .item-body is padding: 1.5rem 1.5rem 0 - no bottom at all, so the
-   stage list sat flush against the bottom edge of an open card. */
 .finishing-app .item-body {
     padding-bottom: 1.5rem;
 }
@@ -74,8 +275,6 @@
     border-radius: 4px;
 }
 
-/* The order and plan, quiet - they answer "which job is this" without competing
-   with the item name for attention. */
 .fin-order {
     font-size: 0.7rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -120,11 +319,6 @@
 }
 
 /* ---------- the three stages ---------- */
-/*
-   One row per stage, in order, with the state on the left as a dot. Three rows
-   is the whole job, so they are a list and not a stepper widget - a stepper spent
-   most of its height drawing a line between three things that fit on three lines.
-*/
 
 .fin-stages {
     display: flex;
@@ -348,8 +542,6 @@
     }
 }
 
-/* The recovery row for a job whose stages are all stamped but whose status never
-   closed - see jobBody(). Amber, because it is a repair and not the normal path. */
 .fin-close-row {
     display: flex;
     align-items: center;

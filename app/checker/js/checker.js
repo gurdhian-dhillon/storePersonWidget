@@ -949,6 +949,12 @@ function todayIso() {
 }
 
 function loadHistory() {
+    if (!currentSupervisorId()) {
+        el('hist-totals').textContent = '';
+        el('history-root').innerHTML = '<p class="empty-note">Choose a supervisor to see history.</p>';
+        return;
+    }
+
     var dateInput = el('hist-date');
     if (!dateInput.value) dateInput.value = todayIso();
 
@@ -1091,8 +1097,17 @@ function renderHistory(data) {
                 '<span class="hist-row-body hist-clean">Every check clean</span></div>';
         }
 
+        var cardClass = 'hist-card';
+        if (num(c.rejected) > 0) {
+            cardClass += ' has-rej';
+        } else if (num(c.alteration) > 0) {
+            cardClass += ' has-alt';
+        } else {
+            cardClass += ' is-clean';
+        }
+
         return '' +
-            '<div class="hist-card">' +
+            '<div class="' + cardClass + '">' +
             '<div class="hist-head">' +
             '<div class="hist-title">' +
             '<h3>' + escapeHtml(c.item) +
