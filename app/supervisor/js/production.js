@@ -112,6 +112,32 @@ const revealedItems = new Set();
 // collapsed, which must survive the re-render rather than springing back open.
 let openItemId;
 
+// ---- Item pagination + search ----
+//
+// A Faire wholesale order is one plan with ~110 Plan_Item rows. The server now
+// sends ONE PAGE of them (getProductionWidgetData's itemPageJson arg); this is
+// the widget's half of it.
+//
+// ITEM_PAGE_SIZE is fixed at 10 by decision — one screen of cards. The server
+// caps it at 50 regardless, so this is the only place it is set.
+const ITEM_PAGE_SIZE = 10;
+
+// Zero-based page index and the current search term. Reset to 0 / "" whenever
+// the plan changes — a stale page or filter carried onto a different order is
+// never what he wants.
+let itemPage = 0;
+let itemSearch = "";
+// Rows in the filtered list, off the server's reply. Drives the pager.
+let itemTotal = 0;
+// Set for exactly one fetch when a save moves focus to an item that is not on
+// the page on screen — tells the server "return the page holding this one".
+// Cleared as soon as that fetch is issued so it cannot pin the view.
+let pendingFocusItemId = "";
+
+// Which page fetch we have already re-asked for with a focus hint, so the
+// off-page recovery below fires once and never loops.
+let focusRetryFor = null;
+
 function nowHHMM() {
 	const d = new Date();
 	return (
@@ -436,8 +462,11 @@ function renderPlanDropdown() {
 		const workable = filteredPlans.find((p) => p.orderStatus !== "Pending");
 		selectedPlanId = (workable || filteredPlans[0]).id;
 		// New order on screen, so open its first item rather than carrying over
-		// whichever index was expanded on a previous one.
+		// whichever index was expanded on a previous one — and start at page 1
+		// with no filter, since both belong to the order we just left.
 		openItemId = undefined;
+		itemPage = 0;
+		itemSearch = "";
 	}
 
 	if (selectedPlanId) {
@@ -457,6 +486,14 @@ function fetchAllData(afterRender) {
 	// stops the factory's entire day being fetched to draw one man's screen.
 	const forSup = elSupSelect ? elSupSelect.value || "" : "";
 
+	// The page holding the item we want in view. pendingFocusItemId wins for one
+	// fetch (a save moved focus off-page); otherwise the plain page index.
+	const focusForThis = pendingFocusItemId;
+	pendingFocusItemId = "";
+	// This fetch is NOT a focus-recovery retry, so clear the guard — the next
+	// render is free to try recovering again if the open item is off-page.
+	if (!focusForThis) focusRetryFor = null;
+
 	ZOHO.CREATOR.DATA.invokeCustomApi({
 		api_name: API.getProductionData,
 		http_method: "POST",
@@ -465,6 +502,14 @@ function fetchAllData(afterRender) {
 			// Only this plan comes back with items. Everything else is a
 			// dropdown row, and nothing the dropdown shows comes from an item.
 			planId: String(selectedPlanId || ""),
+			// ONE PAGE of that plan's items. A single JSON string so a later
+			// paging tweak never needs another Creator Custom API config change.
+			itemPageJson: JSON.stringify({
+				skip: itemPage * ITEM_PAGE_SIZE,
+				limit: ITEM_PAGE_SIZE,
+				focusItemId: focusForThis,
+				search: itemSearch,
+			}),
 		},
 	})
 		.then((response) => {
@@ -529,6 +574,22 @@ function fetchAllData(afterRender) {
 				}
 				detailRetryFor = null;
 
+				// The pager reads these off the DETAILED plan's light row — the
+				// server clamps skip to the real list length, so trusting the
+				// reply rather than what we asked for keeps the pager in step
+				// with the rows actually on screen.
+				const detailedPlan = plans.find(
+					(p) => String(p.id) === String(selectedPlanId),
+				);
+				if (detailedPlan && detailedPlan.hasDetail === true) {
+					itemTotal = Number(detailedPlan.itemTotal) || 0;
+					const srvLimit =
+						Number(detailedPlan.itemLimit) || ITEM_PAGE_SIZE;
+					itemPage = Math.floor(
+						(Number(detailedPlan.itemSkip) || 0) / srvLimit,
+					);
+				}
+
 				renderSelectedPlan();
 
 				if (typeof afterRender === "function") {
@@ -588,132 +649,308 @@ function renderSelectedPlan() {
 		return;
 	}
 
+	// Nothing on screen — three different reasons, three different messages, all
+	// with the header and search box still shown so he can act.
+	//   - a search that matched nothing
+	//   - every original done and only (also-done) remakes left: the moment
+	//     between QC rejecting and the store issuing
+	//   - the plan genuinely has no items
+	// The header reads plan.itemStats regardless, so it keeps describing the
+	// whole order.
 	if (!plan.items || plan.items.length === 0) {
-		elDynamicContent.innerHTML = `
-            <div class="prod-empty">
+		const s = plan.itemStats || {};
+		const allDone =
+			!itemSearch &&
+			Number(s.count) > 0 &&
+			Number(s.doneCount) === Number(s.count);
+
+		let body;
+		if (itemSearch) {
+			body = `<div class="prod-empty">
                 <div class="icon">🔍</div>
-                <h2>No Items Found</h2>
-                <p>This plan does not have any finished items attached.</p>
-            </div>
-        `;
-		parkPlanSelect();
-		return;
-	}
-
-	// Once a plan carries QC remake work, the finished originals drop off THIS
-	// list — a dozen completed cards around one live remake reads as "did I not
-	// already finish this?", and the work in hand is the only thing he can act
-	// on. They are still on his History tab in full.
-	//
-	// Filtered here and not on the server on purpose: renderPlanHeader counts
-	// what it is given, so the header keeps describing the whole plan while the
-	// cards show only what is left to do.
-	const hasRemake = plan.items.some((i) => i.isRemake);
-	const visibleItems = hasRemake
-		? plan.items.filter((i) => i.status !== "Complete")
-		: plan.items;
-
-	// Everything finished and only remakes outstanding is a real state, not an
-	// empty one — it is what the moment between QC rejecting and the store
-	// issuing looks like.
-	if (visibleItems.length === 0) {
-		elDynamicContent.innerHTML =
-			renderPlanHeader(plan) +
-			`<div class="prod-empty">
+                <h2>No items match “${escapeHtml(itemSearch)}”</h2>
+                <p>Clear the search above to see the whole order.</p>
+            </div>`;
+		} else if (allDone) {
+			body = `<div class="prod-empty">
                 <div class="icon">✅</div>
                 <h2>Nothing to work on</h2>
                 <p>Every item on this plan is complete.</p>
             </div>`;
+		} else {
+			body = `<div class="prod-empty">
+                <div class="icon">🔍</div>
+                <h2>No Items Found</h2>
+                <p>This plan does not have any finished items attached.</p>
+            </div>`;
+		}
+
+		elDynamicContent.innerHTML = renderPlanHeader(plan) + body;
 		dockPlanSelect();
+		wireItemSearch();
 		return;
 	}
 
-	// Default to the first item, and recover if the open one has gone away
-	// (plan switched, item removed, or hidden as a finished original).
-	if (openItemId !== null && !visibleItems.find((i) => i.id === openItemId)) {
+	// The server now applies the "hide finished originals once a plan carries a
+	// QC remake" filter AND the search AND the paging, so this list is exactly
+	// what to draw. renderPlanHeader reads plan.itemStats, not this list, so the
+	// header still describes the whole order.
+	const visibleItems = plan.items;
+
+	// The open item is not on this page — a save moved focus off it. Ask the
+	// server once for the page that holds it rather than snapping to the first
+	// card of whatever page we are on. Guarded so it cannot loop.
+	if (
+		openItemId !== null &&
+		openItemId !== undefined &&
+		!visibleItems.find((i) => i.id === openItemId) &&
+		focusRetryFor !== String(openItemId)
+	) {
+		focusRetryFor = String(openItemId);
+		pendingFocusItemId = String(openItemId);
+		showLoading();
+		fetchAllData();
+		return;
+	}
+	focusRetryFor = null;
+
+	// Default to the first item on the page when nothing is open (fresh plan,
+	// or the open one really has gone away and the focus fetch above already
+	// ran).
+	if (
+		openItemId !== null &&
+		!visibleItems.find((i) => i.id === openItemId)
+	) {
 		openItemId = visibleItems[0].id;
 	}
 
 	elDynamicContent.innerHTML = renderPlanHeader(plan);
 	dockPlanSelect();
+	wireItemSearch();
+
+	// index is the position ON THE PAGE; the serial the card prints has to be
+	// the position in the WHOLE list, so it is offset by where the page starts.
+	const pageBase = itemPage * ITEM_PAGE_SIZE;
 	visibleItems.forEach((item, index) => {
-		const card = renderItemCard(plan, item, index);
+		const card = renderItemCard(plan, item, pageBase + index);
 		elDynamicContent.appendChild(card);
 
 		const hasFabric = (item.materials || []).some(
 			(m) => m.isFabric && !m.isWaste,
 		);
-		if (hasFabric) {
-			ZOHO.CREATOR.DATA.invokeCustomApi({
-				api_name: API.expectedWaste,
-				http_method: "POST",
-				payload: {
-					planId: plan.id,
-					planItemId: item.id,
-					qtyOut: String(item.qty || 0),
-				},
-			}).then((response) => {
-				try {
-					const data = JSON.parse(response.result);
-					(data.fabrics || []).forEach((f) => {
-						const el = document.getElementById(
-							`exp-waste-${item.id}-${f.materialId}`,
-						);
-						if (el) {
-							if (f.waste && f.waste.length > 0) {
-								el.innerHTML = f.waste
-									.map(
-										(w) =>
-											`<div style="padding: 2px 0;"><b>${w.count}</b> <span class="unit">pc${w.count > 1 ? "s" : ""}</span> of ${w.length}&times;${w.width}<span class="unit">cm</span></div>`,
-									)
-									.join("");
-								el.style.opacity = "1";
-								el.classList.remove("is-muted");
-							} else {
-								el.innerHTML = "No waste";
-							}
-						}
-					});
-				} catch (e) {
-					console.error("Waste parse error", e);
-				}
-			});
+		if (!hasFabric) return;
+
+		// The server folds the expected-waste prediction into the item now
+		// (item.expectedWaste). Fill the cells from it directly — zero extra
+		// calls. Only fall back to the per-item getExpectedWaste call when the
+		// field is absent, which means the .dg has not been redeployed yet.
+		if (item.expectedWaste && Array.isArray(item.expectedWaste.fabrics)) {
+			fillExpectedWaste(item.id, item.expectedWaste.fabrics);
+			return;
+		}
+
+		ZOHO.CREATOR.DATA.invokeCustomApi({
+			api_name: API.expectedWaste,
+			http_method: "POST",
+			payload: {
+				planId: plan.id,
+				planItemId: item.id,
+				qtyOut: String(item.qty || 0),
+			},
+		}).then((response) => {
+			try {
+				const data = JSON.parse(response.result);
+				fillExpectedWaste(item.id, data.fabrics || []);
+			} catch (e) {
+				console.error("Waste parse error", e);
+			}
+		});
+	});
+
+	renderItemPager(plan);
+}
+
+// Paint the "Expected waste" cells for one item from a fabrics[] array — the
+// same shape whether it came folded into the item or from a standalone
+// getExpectedWaste call.
+function fillExpectedWaste(itemId, fabrics) {
+	fabrics.forEach((f) => {
+		const el = document.getElementById(`exp-waste-${itemId}-${f.materialId}`);
+		if (!el) return;
+		if (f.waste && f.waste.length > 0) {
+			el.innerHTML = f.waste
+				.map(
+					(w) =>
+						`<div style="padding: 2px 0;"><b>${w.count}</b> <span class="unit">pc${w.count > 1 ? "s" : ""}</span> of ${w.length}&times;${w.width}<span class="unit">cm</span></div>`,
+				)
+				.join("");
+			el.style.opacity = "1";
+			el.classList.remove("is-muted");
+		} else {
+			el.innerHTML = "No waste";
 		}
 	});
+}
+
+// ---- The item search box, in the plan header ----
+//
+// Re-wired after every render because the whole panel is rebuilt on each fetch.
+// The caret is restored so typing does not lose its place when the debounced
+// fetch re-renders underneath him.
+let itemSearchTimer = null;
+function wireItemSearch() {
+	const box = document.getElementById("item-search");
+	if (!box) return;
+
+	box.addEventListener("input", () => {
+		const v = box.value;
+		if (itemSearchTimer) clearTimeout(itemSearchTimer);
+		itemSearchTimer = setTimeout(() => {
+			const next = v.trim();
+			if (next === itemSearch) return;
+			itemSearch = next;
+			// A new filter starts at its first page — page 6 of a search that
+			// only has two is not where he means to be.
+			itemPage = 0;
+			openItemId = undefined;
+			showLoading();
+			fetchAllData(restoreSearchFocus);
+		}, 300);
+	});
+}
+
+// After the re-render, put the cursor back in the search box where it was.
+function restoreSearchFocus() {
+	requestAnimationFrame(() => {
+		const box = document.getElementById("item-search");
+		if (!box) return;
+		box.focus();
+		const end = box.value.length;
+		try {
+			box.setSelectionRange(end, end);
+		} catch (e) {
+			// Some input types reject setSelectionRange — focus alone is fine.
+		}
+	});
+}
+
+// ---- Item pager ----
+//
+// The same control the store widget uses on its history tabs (pageListFor /
+// pagerHtml there). Ported here rather than shared because the two widgets are
+// separate bundles. Server-paged: each button re-fetches one page.
+
+function itemPageListFor(cur, last) {
+	const want = {};
+	want[1] = true;
+	want[last] = true;
+	for (let p = cur - 1; p <= cur + 1; p++) {
+		if (p >= 1 && p <= last) want[p] = true;
+	}
+	const nums = Object.keys(want)
+		.map(Number)
+		.sort((a, b) => a - b);
+	const out = [];
+	let prev = 0;
+	nums.forEach((n) => {
+		if (prev > 0 && n - prev > 1) out.push(null);
+		out.push(n);
+		prev = n;
+	});
+	return out;
+}
+
+function renderItemPager(plan) {
+	const total = itemTotal || 0;
+	const shown = (plan.items || []).length;
+	const last = Math.max(1, Math.ceil(total / ITEM_PAGE_SIZE));
+	const cur = itemPage + 1;
+	const from = total === 0 ? 0 : itemPage * ITEM_PAGE_SIZE + 1;
+	const to = itemPage * ITEM_PAGE_SIZE + shown;
+
+	// A single page of an unsearched order needs no control at all — the header
+	// already says how many items there are.
+	if (last <= 1 && !itemSearch) return;
+
+	const btn = (page, label, extra, off) =>
+		`<button type="button" class="pg-btn${extra || ""}"${
+			off ? " disabled" : ""
+		} data-page="${page}">${label}</button>`;
+
+	let controls = "";
+	if (last > 1) {
+		controls =
+			btn(cur - 1, "&lsaquo;", " pg-arrow", cur === 1) +
+			itemPageListFor(cur, last)
+				.map((p) =>
+					p === null
+						? `<span class="pg-gap">&hellip;</span>`
+						: btn(p, p, p === cur ? " is-current" : "", p === cur),
+				)
+				.join("") +
+			btn(cur + 1, "&rsaquo;", " pg-arrow", cur === last);
+	}
+
+	const wrap = document.createElement("div");
+	wrap.className = "item-pager";
+	wrap.innerHTML =
+		`<span class="pg-count">Showing ${from}&ndash;${to} of ${total}` +
+		`${itemSearch ? " matching" : ""} item${total === 1 ? "" : "s"}</span>` +
+		controls;
+
+	wrap.querySelectorAll(".pg-btn").forEach((b) => {
+		if (b.disabled) return;
+		b.addEventListener("click", () => {
+			const n = Number(b.getAttribute("data-page"));
+			if (!n || n === cur) return;
+			itemPage = n - 1;
+			// New page, so let it open its own first card rather than hunting
+			// for whichever item was expanded on the last one.
+			openItemId = undefined;
+			showLoading();
+			fetchAllData();
+		});
+	});
+
+	elDynamicContent.appendChild(wrap);
 }
 
 // What the supervisor is looking at, stated once at the top. Without it the
 // screen opens straight into item cards and the only clue which order is on
 // screen is a dropdown he set several clicks ago.
 function renderPlanHeader(plan) {
-	const items = plan.items || [];
-
-	// Totals come from the items already on screen rather than a separate server
-	// figure — two numbers for the same thing drift, and the one nobody is
-	// looking at is always the stale one.
-	// "To produce" and "Items" describe THE ORDER, so QC remakes are left out of
-	// both — a 100-piece order that had 10 rejected and remade must not start
-	// reading as 110. "Produced" counts everything, because 110 really were made;
-	// the gap between the two is the scrap, and it should be visible.
-	const orderItems = items.filter((i) => !i.isRemake);
-	const remakeItems = items.filter((i) => i.isRemake);
-
-	const totalQty = orderItems.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
-	const producedQty = items.reduce(
-		(sum, i) => sum + (Number(i.produced) || 0),
-		0,
-	);
-	const doneCount = orderItems.filter((i) => i.status === "Complete").length;
-
-	const remakeQty = remakeItems
-		.filter((i) => i.status !== "Complete")
-		.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
+	// The header describes the WHOLE ORDER, and the page on screen is one slice
+	// of it, so these come from plan.itemStats — computed server-side over every
+	// Plan_Item with no child queries. Deriving them from plan.items here would
+	// make a 10-item page report a 10-item order.
+	//
+	// itemStats is only filled on the detailed plan's row. A plan that has not
+	// been detailed yet (should not reach here) falls back to counting what it
+	// was given, which is the old behaviour.
+	const s = plan.itemStats || {};
+	const totalItems =
+		s.count != null ? Number(s.count) || 0 : (plan.items || []).length;
+	const totalQty =
+		s.toProduce != null
+			? Number(s.toProduce) || 0
+			: (plan.items || [])
+					.filter((i) => !i.isRemake)
+					.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
+	const producedQty =
+		s.produced != null
+			? Number(s.produced) || 0
+			: (plan.items || []).reduce(
+					(sum, i) => sum + (Number(i.produced) || 0),
+					0,
+				);
+	const doneCount = s.doneCount != null ? Number(s.doneCount) || 0 : 0;
+	const remakeQty = s.remakeQty != null ? Number(s.remakeQty) || 0 : 0;
 
 	const stats = [
 		["Sales order", plan.salesOrder || "—"],
 		["Plan", plan.planNo || "—"],
 		["Plan date", plan.planDate || "—"],
-		["Items", String(orderItems.length)],
+		["Items", String(totalItems)],
 		["To produce", `${totalQty} pcs`],
 		["Produced", `${producedQty} pcs`],
 	];
@@ -729,13 +966,17 @@ function renderPlanHeader(plan) {
             <div class="plan-header-top">
                 <div>
                     <div class="plan-header-title">${plan.salesOrder || plan.planNo || "Plan"}</div>
-                    <div class="plan-header-sub">${doneCount} of ${orderItems.length} items complete${
+                    <div class="plan-header-sub">${doneCount} of ${totalItems} items complete${
 											remakeQty > 0
 												? ` &middot; remaking ${remakeQty} pcs after QC`
 												: ""
 										}</div>
                 </div>
                 <div class="plan-header-controls">
+                    <input type="search" id="item-search" class="item-search"
+                        placeholder="Find an item in this order…"
+                        value="${escapeHtml(itemSearch)}"
+                        autocomplete="off">
                     <div id="plan-slot"></div>
                     <span class="plan-status-pill">${plan.orderStatus || "—"}</span>
                 </div>
@@ -2995,9 +3236,11 @@ function confirmWaste() {
 
 elPlanSelect.addEventListener("change", (e) => {
 	selectedPlanId = e.target.value;
-	// New order, start at its first item rather than carrying over whatever
-	// was open on the previous one.
+	// New order, start at its first item / first page with no filter rather
+	// than carrying over whatever was open on the previous one.
 	openItemId = undefined;
+	itemPage = 0;
+	itemSearch = "";
 
 	// REFETCH, not just re-render. Only the plan that was on screen came back
 	// with items — the rest are dropdown rows — so switching order means asking
