@@ -63,6 +63,7 @@ string getEmployeeReport(string dateTxt)
 	inProgressCount = 0;
 	completedCount = 0;
 	qcCount = 0;
+	finishingCount = 0;
 	packedCount = 0;
 	dispatchedCount = 0;
 
@@ -75,6 +76,7 @@ string getEmployeeReport(string dateTxt)
 		inProgressCount = Sales_Order[Order_Status == "In Progress"].count();
 		completedCount = Sales_Order[Order_Status == "Production Complete"].count();
 		qcCount = Sales_Order[Order_Status == "Checking Passed"].count();
+		finishingCount = Sales_Order[Order_Status == "Finishing Complete"].count();
 		packedCount = Sales_Order[Order_Status == "Packed"].count();
 		dispatchedCount = Sales_Order[Order_Status == "Dispatched"].count();
 	}
@@ -536,5 +538,5 @@ string getEmployeeReport(string dateTxt)
 	// Built by hand. Map.toString() stops emitting valid JSON the moment the
 	// structure nests Map -> List -> Map, which is exactly the stages array, and
 	// List.toString() does not wrap in []. That is what the old function did.
-	return "{\"errors\":[" + errJson + "],\"date\":\"" + dayTxt + "\",\"worked\":[" + workedJson + "],\"noLogs\":[" + idleJson + "],\"totals\":{\"people\":" + totPeople + ",\"stagesDone\":" + totStagesDone + ",\"stagesOpen\":" + totStagesOpen + ",\"piecesIn\":" + totIn + ",\"piecesInHand\":" + totOpen + ",\"piecesOut\":" + totOut + "},\"pipeline\":{\"pending\":" + pendingCount + ",\"inProgress\":" + inProgressCount + ",\"completed\":" + completedCount + ",\"qcPassed\":" + qcCount + ",\"packed\":" + packedCount + ",\"dispatched\":" + dispatchedCount + "}}";
+	return "{\"errors\":[" + errJson + "],\"date\":\"" + dayTxt + "\",\"worked\":[" + workedJson + "],\"noLogs\":[" + idleJson + "],\"totals\":{\"people\":" + totPeople + ",\"stagesDone\":" + totStagesDone + ",\"stagesOpen\":" + totStagesOpen + ",\"piecesIn\":" + totIn + ",\"piecesInHand\":" + totOpen + ",\"piecesOut\":" + totOut + "},\"pipeline\":{\"pending\":" + pendingCount + ",\"inProgress\":" + inProgressCount + ",\"completed\":" + completedCount + ",\"qcPassed\":" + qcCount + ",\"finishingComplete\":" + finishingCount + ",\"packed\":" + packedCount + ",\"dispatched\":" + dispatchedCount + "}}";
 }

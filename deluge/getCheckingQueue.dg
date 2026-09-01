@@ -113,6 +113,27 @@ string getCheckingQueue(string supervisorId)
 		{
 			wantSup = "";
 		}
+
+		if(wantSup == "")
+		{
+			for each surajRec in Employee[Designation == "Supervisor" && Employee_Name.contains("Suraj") && Status == "Active"]
+			{
+				if(wantSup == "")
+				{
+					wantSup = surajRec.ID.toString();
+				}
+			}
+			if(wantSup == "")
+			{
+				for each defSupRec in Employee[Designation == "Supervisor" && Status == "Active"]
+				{
+					if(wantSup == "")
+					{
+						wantSup = defSupRec.ID.toString();
+					}
+				}
+			}
+		}
 		info "getCheckingQueue: supervisor '" + wantSup + "'";
 
 		//------------------------------------------------------------------

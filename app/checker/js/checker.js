@@ -158,6 +158,13 @@ function fillSupervisors(serverChoice) {
         sel.value = keep;
     } else if (have(serverChoice)) {
         sel.value = String(serverChoice);
+    } else if (QUEUE.supervisors.length > 0) {
+        var defaultSup = QUEUE.supervisors.find(function (s) {
+            return String(s.name || '').toLowerCase().indexOf('suraj') > -1;
+        }) || QUEUE.supervisors[0];
+        if (defaultSup) {
+            sel.value = String(defaultSup.id);
+        }
     }
 }
 
@@ -291,12 +298,9 @@ function renderSalesOrderCard(so, groupItems, index) {
     card.className = 'item-card' + (isOpen ? ' is-open' : '');
     card.setAttribute('data-so-id', so);
 
-    // List unique item names
-    var itemNames = groupItems.map(function (it) { return it.name; }).filter(function (v, i, self) {
-        return self.indexOf(v) === i;
-    }).join(', ');
-
     var totalPcs = groupItems.reduce(function (sum, it) { return sum + num(it.produced); }, 0);
+    var itemCount = groupItems.length;
+    var itemCountText = itemCount + (itemCount === 1 ? ' item' : ' items');
 
     var header =
         '<div class="item-header">' +
@@ -304,9 +308,9 @@ function renderSalesOrderCard(so, groupItems, index) {
         '<div class="item-serial">' + (num(index) + 1) + '</div>' +
         '<div class="item-header-info">' +
         '<h2><span class="mat-name">' + escapeHtml(so) + '</span></h2>' +
-        '<div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.25rem;">' +
-        '<span class="item-qty" style="font-weight: 500; color: var(--text-dark);">' + escapeHtml(itemNames) + '</span>' +
-        '<span class="round-tag" style="background-color: #f1f5f9; color: #475569;">' + totalPcs + ' pcs total</span>' +
+        '<div class="item-meta-line" style="display: flex; align-items: center; gap: 0.6rem; margin-top: 0.25rem;">' +
+        '<span class="round-tag" style="background-color: #f1f5f9; color: #334155; padding: 0.2rem 0.65rem; border-radius: 1rem; font-weight: 600; font-size: 0.85rem;">' + totalPcs + ' pcs total</span>' +
+        '<span class="so-ref" style="font-size: 0.83rem; color: var(--text-muted); font-weight: 500;">' + itemCountText + '</span>' +
         '</div>' +
         '</div>' +
         '</div>' +

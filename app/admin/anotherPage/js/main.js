@@ -485,6 +485,9 @@ function loadPendingOrders() {
             if (data && data.data !== undefined) data = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
             if (!data || !Array.isArray(data.orders)) throw new Error('Response did not contain a pending order list');
             PENDING_ORDERS = data.orders;
+            DATA = DATA || {};
+            DATA.pipeline = DATA.pipeline || {};
+            DATA.pipeline.pending = data.orders.length;
             if (data.errors && data.errors.length) {
                 console.warn('getPendingSalesOrders returned errors:', data.errors);
             }
@@ -703,6 +706,15 @@ function loadSalesOrderProgress(statusFilter) {
             if (!data || !Array.isArray(data.orders)) throw new Error('Response did not contain order progress');
             DATA = DATA || {};
             DATA.progressOrders = data.orders;
+            DATA.pipeline = DATA.pipeline || {};
+            var count = data.orders.length;
+            if (targetStatus === 'Pending') DATA.pipeline.pending = count;
+            else if (targetStatus === 'In Progress') DATA.pipeline.inProgress = count;
+            else if (targetStatus === 'Production Complete' || targetStatus === 'Prod Complete') DATA.pipeline.completed = count;
+            else if (targetStatus === 'Checking Passed') DATA.pipeline.qcPassed = count;
+            else if (targetStatus === 'Finishing Complete') DATA.pipeline.finishingComplete = count;
+            else if (targetStatus === 'Packed') DATA.pipeline.packed = count;
+            else if (targetStatus === 'Dispatched') DATA.pipeline.dispatched = count;
             renderPipeline();
         } catch (e) {
             console.error('getSalesOrderProgress parse failed:', e, response);

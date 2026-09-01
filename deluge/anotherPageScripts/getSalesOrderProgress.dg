@@ -8,7 +8,11 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId, string statusFilter)
 	ordersOut = List();
 
 	targetStatus = ifnull(statusFilter,"").toString().trim();
-	if(targetStatus == "")
+	if(targetStatus == "Prod Complete" || targetStatus == "Production Complete")
+	{
+		targetStatus = "Production Complete";
+	}
+	else if(targetStatus == "")
 	{
 		targetStatus = "In Progress";
 	}
