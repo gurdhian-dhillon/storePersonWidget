@@ -1,0 +1,2519 @@
+/* Base Variables */
+:root {
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --bg-color: #e9eef4;
+    --surface: #ffffff;
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+    --border: #e2e8f0;
+
+    /* Status Colors */
+    --status-success: #10b981;
+    --status-success-bg: #d1fae5;
+    --status-warning: #f59e0b;
+    --status-warning-bg: #fef3c7;
+    --status-danger: #ef4444;
+    --status-danger-bg: #fee2e2;
+
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    --radius: 8px;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-main);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+.app-container {
+    max-width: 100%;
+    margin: 0 auto;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+/* Header */
+.app-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 0;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.app-header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+}
+
+.app-header p {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    margin-top: 0.25rem;
+}
+
+/* Sticky page header so Refresh + the running totals stay reachable
+   while scrolling a long list of supervisors. */
+.app-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--bg-color);
+    padding-top: 0.25rem;
+}
+
+.so-selector-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+/* Empty State */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 4rem 2rem;
+    background: var(--surface);
+    border-radius: var(--radius);
+    border: 1px dashed var(--border);
+    text-align: center;
+}
+
+.empty-state.hidden {
+    display: none;
+}
+
+.empty-state .icon {
+    font-size: 3rem;
+    margin-bottom: 1rem;
+    opacity: 0.5;
+}
+
+.empty-state h2 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+.empty-state p {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    max-width: 400px;
+}
+
+.plan-container {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+#dynamic-content {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+/* Item Card (reused for each supervisor) */
+.item-card {
+    background: #ffffff;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    overflow: hidden;
+    margin-bottom: 1rem;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.item-header {
+    padding: 0.625rem 0.875rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #f8fafc;
+    cursor: pointer;
+    user-select: none;
+}
+
+
+
+.item-card:not(.open) .item-header {
+    border-bottom: none;
+}
+
+.item-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.item-serial {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #ffffff;
+    flex: 0 0 auto;
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.item-header-info h2 {
+    font-size: 1.125rem;
+    font-weight: 600;
+}
+
+.item-meta-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    font-family: monospace;
+    margin-top: 0.25rem;
+    font-weight: 500;
+}
+
+.item-qty {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--primary);
+    background: rgba(37, 99, 235, 0.1);
+    padding: 0.35rem 0.85rem;
+    border-radius: 9999px;
+    white-space: nowrap;
+}
+
+.item-qty-ok {
+    color: #047857;
+    background: var(--status-success-bg);
+}
+
+.item-qty-danger {
+    color: var(--status-danger);
+    background: var(--status-danger-bg);
+}
+
+.item-header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+/* Expand/collapse affordance — sized to read as a real button next to
+   the status pill, not a stray glyph. */
+.chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    color: var(--primary);
+    background: rgba(255, 255, 255, 0.75);
+    box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.25);
+    transition: transform 0.2s ease, background-color 0.15s ease;
+}
+
+.item-header:hover .chevron {
+    background: #ffffff;
+    box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.chevron svg {
+    width: 0.95rem;
+    height: 0.95rem;
+    display: block;
+}
+
+.item-card.open .chevron {
+    transform: rotate(90deg);
+}
+
+.item-body {
+    display: none;
+    padding: 1.5rem 1.5rem 0;
+}
+
+.item-card.open .item-body {
+    display: block;
+}
+
+/* Tables Section */
+.tables-container {
+    padding: 1rem 1.25rem;
+}
+
+.table-wrapper {
+    overflow: auto;
+    /* Long material lists scroll inside the card instead of pushing the
+       Issue button off-screen. */
+    max-height: 60vh;
+    border-radius: var(--radius);
+    border: 1px solid #dbe3ec;
+    background: var(--surface);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}
+
+table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    text-align: left;
+    white-space: nowrap;
+}
+
+th,
+td {
+    padding: 0.625rem 1rem;
+    font-size: 0.875rem;
+    border-bottom: 1px solid var(--border);
+}
+
+th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background-color: #f1f5f9;
+    font-weight: 600;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #475569;
+    border-bottom: 2px solid #cbd5e1;
+    padding: 0.7rem 1rem;
+}
+
+tr:last-child td {
+    border-bottom: none;
+}
+
+tbody tr {
+    transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+tbody tr:hover {
+    background-color: #f8fafc;
+}
+
+/* Rows queued for issuing get a clear left rail + tint so a long list
+   reads at a glance. */
+tbody tr.row-selected {
+    background-color: #eff6ff;
+}
+
+tbody tr.row-selected:hover {
+    background-color: #e0ecfe;
+}
+
+tbody tr.row-selected td:first-child {
+    box-shadow: inset 3px 0 0 var(--primary);
+}
+
+tbody tr.row-selected td {
+    border-bottom-color: #d6e0f0;
+}
+
+.material-name-cell .mat-name {
+    font-weight: 600;
+    display: block;
+    white-space: normal;
+    word-break: break-word;
+}
+
+.material-name-cell .mat-sku {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.02em;
+    margin-top: 0.15rem;
+    opacity: 0.8;
+}
+
+/* Units sit next to the number but stay visually secondary so the
+   figures themselves line up and stay scannable. */
+.unit {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+    margin-left: 0.25rem;
+}
+
+.is-zero {
+    color: #94a3b8;
+}
+
+.is-zero .unit {
+    color: #cbd5e1;
+}
+
+.col-strong {
+    font-weight: 700;
+}
+
+/* Sub-line under Required on partially issued rows, so the reduced
+   max on the input has a visible explanation. */
+.qty-sub {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-top: 0.1rem;
+    white-space: nowrap;
+}
+
+/* Stock held back for a higher-priority supervisor. */
+.qty-sub.held {
+    color: #b45309;
+    cursor: help;
+}
+
+/* The quantity to hand over is the whole point of the row, so it carries the
+   weight. Everything else on the line is identification. */
+.qty-big {
+    font-size: 1.05rem;
+    font-weight: 700;
+}
+
+.waste-badge {
+    display: inline-block;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    padding: 0.1rem 0.5rem;
+    border-radius: 9999px;
+    background: rgba(4, 120, 87, 0.1);
+    color: #047857;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+/* Two sections per card: fabric and everything else. */
+.mat-section+.mat-section {
+    margin-top: 1.5rem;
+}
+
+.section-title {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #475569;
+    margin-bottom: 0.6rem;
+    padding-bottom: 0.35rem;
+    border-bottom: 1px solid #e8ecf1;
+}
+
+.section-note {
+    font-size: 0.7rem;
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+    color: #047857;
+}
+
+/* The bulk "Raise all…" / "Raise PO for…" button in a section header — pushed
+   to the right edge, away from the section label. */
+.section-title .section-action {
+    margin-left: auto;
+    align-self: center;
+}
+
+/* Cut pieces coming out of the waste store instead of fresh fabric. Green
+   because it is the good outcome - reuse rather than cutting new cloth. */
+.qty-sub.from-waste {
+    color: #047857;
+    font-weight: 600;
+    cursor: help;
+    white-space: normal;
+}
+
+.meta-warn {
+    color: #b45309;
+    font-weight: 700;
+}
+
+.item-serial {
+    position: relative;
+}
+
+/* Completed rows: receipt, not a dead input. */
+tbody tr.row-issued {
+    background-color: #f6fdf9;
+}
+
+tbody tr.row-issued:hover {
+    background-color: #eefaf3;
+}
+
+tbody tr.row-issued td:first-child {
+    box-shadow: inset 3px 0 0 var(--status-success);
+}
+
+tbody tr.row-issued .mat-name,
+tbody tr.row-issued .col-strong {
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.issued-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    color: #047857;
+    background: var(--status-success-bg);
+    padding: 0.3rem 0.75rem;
+    border-radius: 9999px;
+    font-variant-numeric: tabular-nums;
+}
+
+.issued-tag .unit {
+    color: #047857;
+    opacity: 0.7;
+}
+
+.fabric-badge {
+    display: inline-block;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    padding: 0.1rem 0.5rem;
+    border-radius: 9999px;
+    background: rgba(37, 99, 235, 0.1);
+    color: var(--primary);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+/* Status Pills */
+.status-pill {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.status-sufficient {
+    background-color: var(--status-success-bg);
+    color: var(--status-success);
+}
+
+.status-washing {
+    background-color: var(--status-warning-bg);
+    color: var(--status-warning);
+}
+
+.status-done {
+    background-color: var(--status-success-bg);
+    color: #047857;
+}
+
+.status-partial {
+    background-color: var(--status-warning-bg);
+    color: #b45309;
+}
+
+.status-shortfall {
+    background-color: var(--status-danger-bg);
+    color: var(--status-danger);
+}
+
+/* Number columns alignment */
+.col-num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    width: 10rem;
+}
+
+th.col-num {
+    text-align: right;
+}
+
+/* Keep a value on one line — cut sizes like "2,055 × 127.96 cm" and dates
+   wrap badly in a narrow column otherwise. */
+.col-nowrap {
+    white-space: nowrap;
+}
+
+.is-muted {
+    color: var(--text-muted);
+}
+
+.primary-btn {
+    background-color: var(--primary);
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: var(--radius);
+    font-weight: 600;
+    font-size: 0.875rem;
+    cursor: pointer;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.2s ease;
+}
+
+.primary-btn:hover {
+    background-color: var(--primary-hover);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+
+.primary-btn:active {
+    transform: translateY(0);
+}
+
+.primary-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: var(--shadow-sm);
+}
+
+/* Issue controls */
+.issue-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.col-issue {
+    width: 10rem;
+    min-width: 9rem;
+}
+
+.issue-cell-waste {
+    height: 3rem;
+    box-sizing: border-box;
+}
+
+.issue-checkbox {
+    width: 1.05rem;
+    height: 1.05rem;
+    accent-color: var(--primary);
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+
+/* Master checkbox lives in the "Issue now" header cell. */
+.select-all-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    user-select: none;
+}
+
+.select-all-label .issue-checkbox:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+/* Unit lives inside the input so the number and its unit read as one control. */
+.issue-input-group {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: var(--surface);
+    overflow: hidden;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.issue-input {
+    width: 4.75rem;
+    padding: 0.35rem 0.4rem;
+    border: none;
+    font-family: inherit;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-align: right;
+    outline: none;
+    background: transparent;
+    color: var(--text-main);
+}
+
+.issue-unit {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 0 0.5rem 0 0.25rem;
+    background: transparent;
+}
+
+.issue-input-group:focus-within {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.issue-input-group:has(.issue-input.invalid) {
+    border-color: var(--status-danger);
+    background: var(--status-danger-bg);
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.12);
+}
+
+/* Fallback for browsers without :has() — colour the field itself. */
+.issue-input.invalid {
+    color: var(--status-danger);
+    background: var(--status-danger-bg);
+}
+
+.issue-input-group:has(.issue-input:disabled) {
+    background: #f1f5f9;
+    border-color: var(--border);
+}
+
+.issue-input:disabled,
+.issue-checkbox:disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    opacity: 0.7;
+}
+
+/* Spinners eat horizontal space and are useless for decimal meterage. */
+.issue-input::-webkit-outer-spin-button,
+.issue-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.issue-input {
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+.card-footer {
+    padding: 0.875rem 1.25rem 1.25rem;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.card-footer .hint,
+.card-footer .sel-count {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    margin-right: auto;
+}
+
+.card-footer .sel-count {
+    font-weight: 600;
+    color: var(--primary);
+}
+
+.card-footer .sel-count.is-empty {
+    font-weight: 400;
+    color: var(--text-muted);
+}
+
+/* Loading skeleton — replaces the bare "Loading…" text. */
+.skeleton-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+
+.skeleton-line {
+    height: 0.85rem;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #eef2f7 25%, #e2e8f0 37%, #eef2f7 63%);
+    background-size: 400% 100%;
+    animation: shimmer 1.4s ease infinite;
+}
+
+.skeleton-line.w-40 {
+    width: 40%;
+    height: 1.15rem;
+}
+
+.skeleton-line.w-70 {
+    width: 70%;
+}
+
+@keyframes shimmer {
+    0% {
+        background-position: 100% 50%;
+    }
+
+    100% {
+        background-position: 0 50%;
+    }
+}
+
+.issued-locked-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--status-success);
+    background: var(--status-success-bg);
+    padding: 0.5rem 1rem;
+    border-radius: 9999px;
+}
+
+/* ---- Report a blocked material ---- */
+
+/* Sits under the SKU so it only appears on rows that are actually short —
+   an always-visible button on every row would be noise. */
+.report-link {
+    font-family: inherit;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #b45309;
+    background: none;
+    border: none;
+    padding: 0;
+    margin-left: 0.6rem;
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+.report-link:hover {
+    color: #92400e;
+}
+
+.exc-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 4rem 1rem;
+    overflow-y: auto;
+    z-index: 100;
+}
+
+.exc-modal.hidden {
+    display: none;
+}
+
+.exc-panel {
+    background: #fff;
+    border-radius: 12px;
+    padding: 1.5rem;
+    width: 100%;
+    max-width: 460px;
+    box-shadow: 0 20px 45px rgba(15, 23, 42, 0.25);
+}
+
+.exc-panel h3 {
+    margin: 0 0 0.2rem;
+    font-size: 1.05rem;
+}
+
+.exc-sub {
+    margin: 0 0 1rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+/* The numbers that make the report worth reading — whoever picks this up
+   should not have to go and look them up. */
+.exc-facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.25rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    background: #f8fafc;
+    border-radius: 6px;
+    padding: 0.6rem 0.8rem;
+    margin-bottom: 1rem;
+}
+
+.exc-facts b {
+    color: var(--text);
+}
+
+.exc-unwashed {
+    color: #047857;
+}
+
+/* Shown when this answer is the one that writes stock off the books. Amber, not
+   red: nothing has gone wrong yet, but the next click is not reversible. */
+.exc-warn {
+    margin: 0 0 0.75rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid #fcd34d;
+    border-left: 3px solid var(--status-warning);
+    border-radius: 4px;
+    background: #fffbeb;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: #78350f;
+}
+
+.exc-warn b {
+    display: block;
+    margin-bottom: 0.2rem;
+}
+
+/* The supervisor's own words. Where he already looked is the most useful thing
+   on the screen for deciding whether to search again or accept the loss. */
+.exc-warn-quote {
+    margin: 0.35rem 0;
+    padding-left: 0.6rem;
+    border-left: 2px solid #fcd34d;
+    font-style: italic;
+    color: #92400e;
+}
+
+.primary-btn.is-danger {
+    background: var(--status-danger);
+}
+
+.primary-btn.is-danger:hover {
+    background: #dc2626;
+}
+
+.exc-label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 0.3rem;
+}
+
+/* What the PO is about to order, shown in the vendor modal before it commits. */
+.po-preview-wrap {
+    margin-bottom: 1.1rem;
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.po-preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+}
+
+.po-preview-table thead th {
+    position: sticky;
+    top: 0;
+    background: #f8fafc;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+.po-preview-table thead th.col-num { text-align: right; }
+
+.po-preview-table td {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid #eef2f6;
+    vertical-align: middle;
+}
+
+.po-preview-table tbody tr:last-child td,
+.po-preview-table tr:last-child td { border-bottom: 0; }
+
+.po-preview-table td.col-num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.exc-panel select,
+.exc-panel textarea {
+    width: 100%;
+    font-family: inherit;
+    font-size: 0.875rem;
+    padding: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    background: #fff;
+}
+
+.exc-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+}
+
+.ghost-btn {
+    font-family: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+    padding: 0.55rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: #fff;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+/* There was no disabled rule at all, so a greyed-out button still looked and
+   behaved like a live one. Kept mild — opacity low enough to read as "off" was
+   low enough to read as "not there". */
+.ghost-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+/* ---- Waste receipt: the two blocks ---- */
+
+/* Replaces a full-panel placeholder. "Nothing to check in" is a small fact and
+   must not push the history below the fold to say it. */
+.waste-none {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.875rem 1.25rem;
+    margin-bottom: 1rem;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+/* The pager count is a statement of position, not a selection to act on, so it
+   drops the primary blue .sel-count normally carries. */
+.pager .sel-count {
+    font-weight: 400;
+    color: var(--text-muted);
+}
+
+.pager {
+    gap: 0.3rem;
+}
+
+/* Its own class rather than .ghost-btn. That one is styled for a secondary
+   ACTION — muted text on white — which reads as half-disabled the moment it is
+   the only control in the footer. A page number has to look pressable. */
+.pager .pg-btn {
+    font-family: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+    min-width: 2.25rem;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--surface);
+    color: var(--text-main);
+    cursor: pointer;
+}
+
+.pager .pg-btn:hover:not(:disabled) {
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+/* The page he is on. Disabled because pressing it would refetch what is already
+   on screen, but it must not look switched off — it is the label. */
+.pager .pg-btn.is-current,
+.pager .pg-btn.is-current:disabled {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #fff;
+    opacity: 1;
+    cursor: default;
+}
+
+/* Off, but still legible. Fading to near-nothing is what made the old pager
+   look like it had one button. */
+.pager .pg-btn:disabled {
+    background: #f8fafc;
+    color: #94a3b8;
+    opacity: 1;
+    cursor: default;
+}
+
+.pager .pg-arrow {
+    font-size: 1.125rem;
+    line-height: 1;
+    padding: 0.4rem 0.6rem;
+}
+
+.pager .pg-gap {
+    padding: 0 0.15rem;
+    color: var(--text-muted);
+}
+
+.contested-warn {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: #b45309;
+    margin-top: 0.25rem;
+}
+
+/* ---- End-of-page shortfall summary ---- */
+
+/* Overrides the odd/even blue-amber alternation. This card is not another
+   supervisor and must not read as one — it is the leftover work after every
+   supervisor has been dealt with. */
+/* Sits on a grey ground while the supervisor cards stay white. The two are
+   different kinds of thing — one is a queue of work to do now, the other is a
+   standing summary of what is missing — and a shade change separates them
+   without spending a colour on it. The tables inside stay white, so they lift
+   off the grey and stay the most readable thing on the panel. */
+.item-card.summary-card {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+    margin-top: 1.25rem;
+}
+
+.item-card.summary-card .item-header {
+    background-color: #e8edf3;
+    border-bottom-color: #cbd5e1;
+    /* Always open — there is nothing to toggle, so the pointer would lie. */
+    cursor: default;
+}
+
+.summary-card .item-header-info h2 {
+    font-size: 1.05rem;
+}
+
+/* No serial circle on this card, so the title needs the indent the circle
+   would otherwise have provided. */
+.summary-card .item-title-row {
+    padding-left: 0.25rem;
+}
+
+/* ---- Combined-request dialog (raised from the summary) ---- */
+
+/* Wider than the row-level dialog because it carries the contributing orders —
+   that table is the justification for the request, not decoration. */
+.exc-panel-wide {
+    max-width: 640px;
+}
+
+.exc-lines {
+    max-height: 220px;
+    overflow-y: auto;
+    margin-bottom: 0.75rem;
+}
+
+.exc-lines table {
+    font-size: 0.85rem;
+}
+
+.exc-strong b {
+    color: var(--status-danger);
+}
+
+/* ---- Summary row action ---- */
+
+.col-action {
+    width: 1%;
+    white-space: nowrap;
+    text-align: right;
+}
+
+.raise-btn {
+    padding: 0.4rem 0.85rem;
+    border: 1px solid var(--primary, #2563eb);
+    border-radius: 6px;
+    background: var(--primary, #2563eb);
+    color: #fff;
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.raise-btn:hover:not(:disabled) {
+    background: var(--primary-hover, #1d4ed8);
+    border-color: var(--primary-hover, #1d4ed8);
+}
+
+/* A ticket exists but does not cover every order now waiting. Outlined rather
+   than solid: it is the same action, on something already half-done. */
+.raise-btn.is-stale {
+    background: #fff;
+    color: var(--primary, #2563eb);
+}
+
+.raise-btn.is-stale:hover:not(:disabled) {
+    background: #eff6ff;
+    color: var(--primary-hover, #1d4ed8);
+}
+
+/* The other side has already denied, so the next denial writes stock off. The
+   button carries that weight before it is pressed, not only in the dialog. */
+.raise-btn.is-danger {
+    background: var(--status-danger);
+    border-color: var(--status-danger);
+}
+
+.raise-btn.is-danger:hover:not(:disabled) {
+    background: #dc2626;
+    border-color: #dc2626;
+}
+
+/* What the supervisor said, quoted on the row. A dispute is a conversation, and
+   the store cannot answer a question it cannot see. */
+.answer-tag {
+    margin-bottom: 0.3rem;
+    font-size: 0.7rem;
+    font-style: italic;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+/* Whose turn it is. One denial resolves nothing, so without this the store sees
+   an unchanged Outstanding and assumes the supervisor's answer went nowhere. */
+.turn-tag {
+    margin-top: 0.3rem;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--status-danger);
+    white-space: nowrap;
+}
+
+/* Disabled means the request is already open, not that the button is broken —
+   so it reads as a state ("Requested"), not as something greyed out by mistake. */
+.raise-btn:disabled {
+    background: #f8fafc;
+    color: var(--text-muted);
+    border-style: dashed;
+    cursor: default;
+}
+
+/* ---- Combined fabric row: fresh metres + waste in one line ---- */
+
+/* One control per supply source, stacked in the Issue Now cell. Each keeps its
+   own checkbox so a remnant can be declined without giving up the fresh length
+   that goes with it. */
+.issue-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    align-items: flex-end;
+}
+
+/* "incl. waste" on the name, rather than a badge per supply row — the row is
+   the material now, not one of its sources. */
+.waste-badge {
+    display: inline-block;
+    vertical-align: middle;
+    margin-left: 0.5rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: #ecfdf5;
+    color: #047857;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+}
+
+/* Which way the material was going. Deliberately quieter than waste-badge: the
+   direction changes which answers the dialog offers, but the material is still
+   what the eye should land on first. Green is the offcut colour throughout, so
+   the inbound one borrows it and the outbound one stays neutral. */
+.dir-badge {
+    display: inline-block;
+    vertical-align: middle;
+    margin-left: 0.4rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.dir-badge.dir-out {
+    background: #eef2f7;
+    color: #475569;
+}
+
+.dir-badge.dir-in {
+    background: #ecfdf5;
+    color: #047857;
+}
+
+/* Waste receipt uses the same shape as the supervisor's receive screen, so the
+   next four rules are the same ones — kept identical on purpose. A store person
+   and a supervisor doing the mirror image of one job should not have to learn
+   two layouts. */
+.col-note {
+    width: 14rem;
+}
+
+.material-name-cell,
+.col-num,
+.col-issue,
+.col-note {
+    vertical-align: top;
+    padding-top: 0.75rem;
+    white-space: normal;
+}
+
+/* Sits under the input, so it must not push the row taller as it appears and
+   disappears - hence the reserved line box. */
+.short-hint {
+    min-height: 1rem;
+    margin-top: 0.2rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--status-danger);
+    text-align: right;
+}
+
+.note-input {
+    font-family: inherit;
+    font-size: 0.8rem;
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    width: 100%;
+}
+
+/* ---- Carton: where an offcut physically lives ----
+   Captured at waste receipt, quoted back on the issue screen. Narrow, because a
+   carton number is short and the column should not steal width from the piece
+   it describes. */
+.col-carton {
+    width: 8rem;
+    vertical-align: middle;
+}
+
+.col-lot {
+    width: 6rem;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.col-lot .w-lot-none {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+/* THE ISSUE SCREEN'S LOT COLUMN IS NOT THE RECEIPT SCREEN'S.
+   The receipt column above holds a lot number and nothing else, so 6rem is
+   right there. This one holds the number in the ordinary case and a sentence in
+   the awkward ones — why the row cannot be issued, which lot it was pinned to,
+   what is left on the rack. At 6rem a 120-character sentence wrapped to fifteen
+   lines and took the row to 400px tall, pushing the next fabric row off screen.
+   The material column beside it is the greedy one and can spare this. */
+.col-lot-issue {
+    width: 16rem;
+    min-width: 13rem;
+    vertical-align: top;
+    padding-top: 0.75rem;
+    white-space: normal;
+}
+
+.carton-input {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    width: 100%;
+    text-transform: uppercase;
+}
+
+.carton-input:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+/* The fetch instruction under a suggested offcut. Carton first — it is the box
+   he walks to; the lot is what tells two same-sized remnants apart. */
+.waste-where {
+    color: var(--text-muted);
+}
+
+.waste-where b {
+    color: var(--text-main);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-weight: 600;
+}
+
+/* Booked in before cartons existed. Said out loud, because a blank space here
+   reads as a rendering fault rather than as missing information. */
+.waste-nocarton {
+    color: #b45309;
+}
+
+/* When waste-where lines appear in the LOT column, give them a clean card-like
+   appearance so they visually belong to the lot info beside the fresh-fabric
+   lot lines. */
+.col-lot-issue .waste-where {
+    margin-top: 0.35rem;
+    padding: 0.3rem 0.5rem;
+    background: #f8fafb;
+    border-left: 2px solid #047857;
+    border-radius: 0 4px 4px 0;
+    font-size: 0.72rem;
+    line-height: 1.3;
+    white-space: normal;
+    height: 3rem;
+    box-sizing: border-box;
+    display: flex;
+    gap: 0.25rem;
+    align-items: center;
+}
+
+/* Closed until the line is actually short - the server only keeps a remark
+   against a shortfall, so there is nothing to say here otherwise. */
+.note-input:disabled {
+    background: #f8fafc;
+    border-style: dashed;
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
+/* Restates in the footer how many disputes the button is about to raise. */
+.sel-count.is-short {
+    color: var(--status-danger);
+    font-weight: 600;
+}
+
+/* What the raiser said when they opened the dispute. The person answering has
+   to be able to read the question. */
+.exc-quote {
+    margin: 0.5rem 0 0;
+    padding-left: 0.6rem;
+    border-left: 2px solid var(--border);
+    font-style: italic;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+/* The waste sub-lines under the headline metres. Muted so the number the store
+   person cuts stays the thing the eye lands on. */
+.qty-sub {
+    margin-top: 0.15rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    white-space: normal;
+    word-break: break-word;
+}
+
+/* ---- Waste, picked out within the combined fabric row ---- */
+
+/* Waste is the part a store person can miss — it is a physical offcut off a
+   rack, not a length off the roll, and it was reading as a footnote. Green ties
+   it to the "incl. waste" tag on the name so the two register as one thing. */
+/* Its own line UNDER the metres, not beside them: the two are separate things
+   to fetch, and inline they read as one sentence. block + fit-content keeps the
+   pill hugging its text while staying right-aligned in the numeric column. */
+.qty-sub-waste {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-end;
+    text-align: right;
+    width: fit-content;
+    max-width: 100%;
+    margin-top: 0.35rem;
+    margin-left: auto;
+    padding: 0.2rem 0.55rem;
+    border-radius: 6px;
+    background: #ecfdf5;
+    color: #047857;
+    font-weight: 600;
+    font-size: 0.72rem;
+    white-space: normal;
+    word-break: break-word;
+    height: 3rem;
+    box-sizing: border-box;
+}
+
+.qty-sub-waste .waste-dim {
+    font-size: 0.65rem;
+    font-weight: 500;
+    opacity: 0.9;
+    margin-top: 0.1rem;
+}
+
+/* ============================================================
+   ERP shell — header bar, tab strip, panels
+   Dense and plain on purpose. This screen is used all day by
+   someone standing at a counter: readability and a predictable
+   layout beat visual interest every time.
+   ============================================================ */
+
+.app-container {
+    max-width: 1600px;
+    padding: 0.75rem 1rem 2rem;
+}
+
+.app-header-left {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+}
+
+.app-header h1 {
+    font-size: 1.125rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.app-date {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+}
+
+.app-header-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.header-sub {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+}
+
+/* Buttons sized for a toolbar, not a landing page. */
+.app-header .primary-btn {
+    padding: 0.4rem 0.9rem;
+    font-size: 0.8125rem;
+    border-radius: 4px;
+    box-shadow: none;
+}
+
+.app-header .primary-btn:hover {
+    transform: none;
+    box-shadow: none;
+}
+
+/* ---- Tab strip ---- */
+
+.tab-strip {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1rem;
+    overflow-x: auto;
+}
+
+.tab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 1rem;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: none;
+    font-family: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.tab-btn:hover {
+    color: var(--text);
+    background: #f8fafc;
+}
+
+/* The active tab is marked by an underline, not a filled block — a filled tab
+   competes with the content below it for attention. */
+.tab-btn.is-active {
+    color: var(--text);
+    border-bottom-color: var(--primary);
+}
+
+.tab-count {
+    min-width: 1.15rem;
+    padding: 0 0.35rem;
+    border-radius: 999px;
+    background: #e2e8f0;
+    color: #334155;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-align: center;
+}
+
+.tab-btn.is-active .tab-count {
+    background: var(--primary);
+    color: #fff;
+}
+
+.tab-count.hidden {
+    display: none;
+}
+
+/* ---- Panels ---- */
+
+.tab-panel {
+    display: none;
+}
+
+.tab-panel.is-active {
+    display: block;
+}
+
+/* The list tabs write their cards straight into the panel, so the panel itself
+   has to carry the spacing. Without it two cards meet border to border and read
+   as one table split by a rule, rather than two separate handovers.
+   panel-issue is left alone - it has its own container. */
+#panel-history.is-active,
+#panel-waste.is-active,
+#panel-disputes.is-active,
+#panel-requests.is-active,
+#panel-consumption.is-active {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+/* Disputes Table Layout and Alignment */
+#panel-disputes td {
+    vertical-align: top;
+    padding-top: 0.75rem;
+}
+
+#panel-disputes .col-num {
+    width: 7rem;
+}
+
+#panel-disputes .col-supervisor {
+    width: 8.5rem;
+    white-space: normal;
+    word-break: break-word;
+}
+
+#panel-disputes .col-raised {
+    width: 7.5rem;
+}
+
+#panel-disputes .col-action {
+    vertical-align: top;
+    padding-top: 0.75rem;
+}
+
+/* ---- Material used ---- */
+
+.cons-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    padding: 0.75rem 1rem;
+    background: var(--surface);
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+}
+
+.cons-bar select {
+    font-family: inherit;
+    font-size: 0.875rem;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #fff;
+    min-width: 16rem;
+}
+
+/* Variance is the whole point of the screen, so it is the only figure that
+   carries colour. Over plan is amber rather than red - a cutting allowance is
+   expected, not a fault. Under plan is green: offcut reuse paid off. */
+.var-over {
+    color: #b45309;
+    font-weight: 700;
+}
+
+.var-under {
+    color: #047857;
+    font-weight: 700;
+}
+
+.var-none {
+    color: var(--text-muted);
+}
+
+/* One row per reason, folded under the material it explains. */
+.reason-row td {
+    background: #f8fafc;
+    padding-top: 0.4rem;
+    padding-bottom: 0.4rem;
+}
+
+.reason-line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.reason-tag {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 0.1rem 0.45rem;
+    border-radius: 9999px;
+}
+
+.reason-tag.is-lost {
+    background: var(--status-danger-bg);
+    color: #b91c1c;
+}
+
+.reason-tag.is-cutting {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.reason-tag.is-reuse {
+    background: #d1fae5;
+    color: #047857;
+}
+
+/* The two notes from the people who looked for it. This is the audit trail for
+   a write-off, so it is quoted rather than summarised. */
+.reason-looked {
+    font-style: italic;
+    color: var(--text-muted);
+}
+
+#dynamic-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.panel-placeholder {
+    padding: 3rem 1.5rem;
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.panel-placeholder h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 0.35rem;
+}
+
+.panel-placeholder p {
+    font-size: 0.875rem;
+}
+
+/* Supervisor cards keep the white ground and a slightly tinted head, so the
+   header band reads as a label strip rather than part of the rows below it. */
+.item-card:not(.summary-card) .item-header {
+    background-color: #f8fafc;
+}
+
+.item-card:not(.summary-card) {
+    background: #ffffff;
+}
+
+/* Section titles inside the summary sit on grey, so they need a touch more
+   contrast than the ones on white do. */
+.summary-card .section-title {
+    color: #475569;
+}
+
+/* ---- Depth order on the Issue tab ----
+   Three levels, darkest to lightest:
+     page ground  #e9eef4  — nothing lives here
+     summary card #f8fafc  — reference, read when you have a moment
+     supervisor   #ffffff  — the work in front of you, brightest
+   Brightness is the ranking. The thing you act on now is the thing that
+   catches the eye first, without spending a colour to say so. */
+
+.item-card:not(.summary-card) {
+    border-color: #cbd5e1;
+}
+
+/* One hairline of lift. Not a drop shadow — just enough that the card edge
+   reads as an edge rather than a drawn line. */
+.item-card {
+    box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
+}
+
+/* The header band sat almost on top of the card white. Against a grey page it
+   needs to be a shade stronger to still read as a band. */
+.item-card:not(.summary-card) .item-header {
+    background-color: #f1f5f9;
+    border-bottom-color: #dbe3ec;
+}
+
+/* ---- Waste receipt tab ---- */
+
+/* This card has nothing to collapse, so the header must not look clickable. */
+.item-header.static-header {
+    cursor: default;
+}
+
+.item-body.is-open {
+    display: block;
+}
+
+.col-check {
+    width: 1%;
+    white-space: nowrap;
+    padding-right: 0;
+}
+
+.panel-loading {
+    padding: 2rem;
+    text-align: center;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+/* The resolve dialog reuses the exception panel. Its number and select need the
+   same treatment the textarea already gets. */
+.exc-panel input[type="number"],
+.exc-panel select {
+    width: 100%;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.875rem;
+    background: #fff;
+    color: var(--text-main);
+    margin-bottom: 0.5rem;
+}
+
+/* ---- History day bar ---- */
+
+.day-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.6rem 0.875rem;
+    margin-bottom: 0.75rem;
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+}
+
+.day-bar input[type="date"] {
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.8125rem;
+    color: var(--text-main);
+}
+
+.day-bar-sub {
+    margin-left: auto;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+}
+
+/* The supervisor is who the store person acts on; the item is only there to
+   tell two otherwise-identical lines apart (a QC remake repeats its original's
+   material AND its supervisor). Sizing them the other way round — which is what
+   an unscoped .mat-sku gave — made the item read as the subject of the row. */
+.exc-lines .exc-who {
+    font-weight: 600;
+}
+
+.exc-lines .exc-item {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    margin-top: 0.1rem;
+}
+
+/* A line already fully issued. Dimmed, not hidden — it is the context that
+   makes the outstanding figure mean something ("this order already had 28.35"),
+   but it is not what the ticket is about. */
+.exc-lines tr.is-settled td {
+    color: var(--text-muted);
+}
+
+/* An offcut is green throughout this app because reuse is the good outcome; a
+   remake is amber for the same reason in reverse — not an error, but not
+   something to read past either. */
+.exc-remake {
+    display: inline-block;
+    margin-left: 0.35rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 1rem;
+    background: #fef3c7;
+    color: #b45309;
+    font-size: 0.7rem;
+    font-weight: 600;
+    vertical-align: middle;
+}
+
+/* Shown only when the server capped the range. Amber rather than red: nothing
+   has gone wrong and nothing needs fixing — it is telling him where the list
+   stops so he does not read a partial range as the whole one. */
+.hist-capped {
+    padding: 0.55rem 0.875rem;
+    margin-bottom: 0.75rem;
+    background: #fffbeb;
+    border: 1px solid #fcd34d;
+    border-radius: 4px;
+    font-size: 0.8125rem;
+    color: #92400e;
+}
+
+/* Next is disabled rather than hidden on today — a button that disappears makes
+   people wonder what they did wrong. */
+.raise-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+    background: #fff;
+    color: var(--text-muted);
+    border-color: var(--border);
+}
+
+/* The page header is sticky, so scrolling a card to "top" would tuck its title
+   underneath it. This reserves that height for scrollIntoView. */
+.item-card {
+    scroll-margin-top: 5.5rem;
+}
+
+/* ---- History range bar ---- */
+
+.range-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.day-bar {
+    flex-wrap: wrap;
+}
+
+/* Why the store is being asked for a material a second time. One line per damage
+   report, never merged, so each describes exactly one incident.
+
+   Amber rather than red, and on the row rather than only in the section heading:
+   nothing has gone wrong from the store's side, and a heading can only say
+   "these are reissues" — the row has to say which one this is. */
+.reissue-why {
+    margin-top: 0.3rem;
+    padding: 0.2rem 0.45rem;
+    border-left: 2px solid #f59e0b;
+    background: #fffbeb;
+    border-radius: 0 3px 3px 0;
+    font-size: 0.7rem;
+    line-height: 1.45;
+    color: #92400e;
+}
+
+/* The pager for the issue history sits in a card of its own — inside the last
+   handover it would read as part of that handover's contents. No header, so it
+   must not look like an empty one. */
+.pager-card .card-footer {
+    padding: 0.75rem 1.25rem;
+}
+
+/* Priority position on a supervisor card. The cards are already ordered by it —
+   the server sorts plans by Priority_Key and the card order follows — so this
+   only names what the order already means. Highest is the one that gets read
+   first and gets contested offcuts first, so it is the only one coloured. */
+.prio-tag {
+    color: var(--text-muted);
+}
+
+.prio-tag.is-top {
+    color: var(--primary);
+    font-weight: 700;
+}
+
+/* ---- Stock in tab ----
+   The search box sits outside #stockin-list so filtering redraws the list
+   alone. Rebuilding the input on every keystroke would take the focused
+   element with it and drop the caret after one character. */
+.stockin-search {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+    padding: 0 0 0.75rem 0;
+}
+
+.stockin-search .note-input {
+    flex: 1 1 16rem;
+    max-width: 26rem;
+}
+
+/* The outcome of "Check for arrivals" sits beside the button rather than in an
+   alert. It is information, not a decision, and an alert would have to be
+   dismissed before the list underneath could be read — which is the thing he
+   pressed the button to see. */
+.stockin-check-msg {
+    font-size: 0.8125rem;
+    color: var(--text-muted, #64748b);
+}
+
+.stockin-check-msg.is-good {
+    color: #15803d;
+    font-weight: 600;
+}
+
+.stockin-check-msg.is-bad {
+    color: #b91c1c;
+    font-weight: 600;
+}
+
+/* One row of fields, wrapping on a narrow screen rather than scrolling — the
+   store person is often on a tablet at the counter. */
+.stockin-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    padding: 1rem 1.25rem 0.25rem;
+    align-items: flex-end;
+}
+
+.si-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.si-field .note-input,
+.si-field .issue-input {
+    min-width: 10rem;
+    text-transform: none;
+    letter-spacing: normal;
+}
+
+.si-field .issue-input {
+    min-width: 7rem;
+}
+
+/* ---- Print ----
+   Same field row as Stock in, reusing .si-field. Kept as its own class because
+   the print form carries five fields to Stock in's three and needs to wrap
+   earlier — the store person is on a tablet at the counter. */
+.print-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    padding: 1rem 1.25rem 0.25rem;
+    align-items: flex-end;
+}
+
+/* The send and receive line tables sit inside an open card, so they need the
+   same inset the form above them has rather than running to the card edge. */
+.print-form+.table-wrapper,
+.item-body .table-wrapper+.raise-btn {
+    margin: 0.5rem 1.25rem;
+}
+
+/* A piece length input is a small number and does not want the wide default. */
+.item-body table .issue-input,
+.item-body table .note-input {
+    min-width: 5.5rem;
+    width: 100%;
+}
+
+/* .issue-input IS DELIBERATELY BORDERLESS. It normally sits inside
+   .issue-input-group, which draws the border around the input and its unit
+   suffix together. Used bare — as the print form, the print line tables and
+   Stock In's quantity box all do — it renders as plain text on the card and
+   there is nothing to say a number can be typed there. The store person reads
+   it as a display value and never touches it.
+   Give those the border the group would have given them. */
+.si-field .issue-input,
+.print-form .issue-input,
+.item-body table .issue-input {
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    background: var(--surface);
+    padding: 0.4rem 0.55rem;
+}
+
+.si-field .issue-input:focus,
+.print-form .issue-input:focus,
+.item-body table .issue-input:focus,
+.item-body table .note-input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+    outline: none;
+}
+
+/* The grey ground for a disabled field normally comes from .issue-input-group,
+   which these bare inputs do not have — so without this the width cell looks
+   exactly like the two beside it that DO take a value. */
+.item-body table .issue-input:disabled {
+    background: #f1f5f9;
+    border-color: var(--border);
+}
+
+/* Pieces that did not come back. Loud, because it is a write-off against the
+   plain SKU that cannot be undone once the receipt is saved. */
+.recv-short {
+    color: var(--status-danger);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Metres is a read-only consequence of the length and the count beside it, so it
+   is set apart from the two that are inputs — otherwise the row reads as three
+   boxes of which one mysteriously refuses to accept anything. */
+.print-derived {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---- Lots ----
+   The picker and the table it grew into are both gone. The allocation is
+   computed, so a fabric issue row names its lot in one line instead — see
+   .lot-from below. What survives here is the lot id as it appears on the
+   shortfall summary and in the wash dialog. */
+.lot-id {
+    font-weight: 600;
+    min-width: 6rem;
+}
+
+/* A lot that cannot be issued today: greige, waiting on the wash. Shown so a
+   short-looking stock figure explains itself, muted so it is clearly not a
+   choice — it carries no input and no Fill button. */
+.lot-note {
+    font-size: 0.78rem;
+    color: #b45309;
+}
+
+/* Why the wash dialog suggested this lot. One line, under the picker. */
+.exc-lot-why {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    padding-top: 0.35rem;
+}
+
+.exc-nolot {
+    font-size: 0.85rem;
+    color: #b45309;
+    padding-top: 0.5rem;
+}
+
+/* Which lot the wash comes off, on the shortfall summary. */
+.sum-lot {
+    white-space: nowrap;
+}
+
+.sum-lot .lot-id {
+    font-weight: 600;
+}
+
+.sum-lot-note {
+    font-size: 0.72rem;
+    color: #b45309;
+}
+
+/* Already at the wash house, on the shortfall summary. The reason a shortfall
+   can look unfixable when it is simply already being fixed. */
+.sum-inwash {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+
+/* WHICH LOT, on the row itself. Almost always one line — "from L3" — sitting
+   under the metres box that it explains. The table this replaced carried a
+   single row of data in four columns and read as clutter. */
+.lot-from {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-align: left;
+    padding: 0.25rem 0.5rem;
+    margin-top: 0.2rem;
+    white-space: nowrap;
+    background: #f1f5f9;
+    border-left: 2px solid var(--primary);
+    border-radius: 0 4px 4px 0;
+}
+
+.lot-from b {
+    color: var(--text-main);
+    font-weight: 700;
+}
+
+/* The lot on a HISTORY line. Quiet: the history table is read to find out what
+   went out, and the lot is the qualifier on that — it must not compete with the
+   material name or the quantity either side of it. Same accent as .lot-from so
+   a lot reads as a lot on every screen, without the block treatment that suits a
+   line the store person is about to act on. */
+.hist-lot {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--text-main);
+    background: #f1f5f9;
+    border-left: 2px solid var(--primary);
+    padding: 0.1rem 0.4rem;
+    border-radius: 0 3px 3px 0;
+    white-space: nowrap;
+}
+
+/* Which physical pieces to fetch, under the lot line that names them. Only ever
+   on a Pieces lot — printed cloth is a stack, not a roll he can measure off, so
+   "9 Mtr off P1" is not an instruction anyone can follow. Indented under its lot
+   because it belongs to that line and not to the row. */
+.lot-pieces {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-align: left;
+    padding: 0.1rem 0.5rem 0.25rem 1.1rem;
+    white-space: nowrap;
+    background: #f1f5f9;
+    border-left: 2px solid var(--primary);
+}
+
+/* Only when a split was forced, so it is worth a colour. */
+.lot-split {
+    font-size: 0.72rem;
+    color: #b45309;
+    text-align: left;
+    padding-top: 0.25rem;
+}
+
+/* Why the row is short of what it asked for. Shown only when it IS short —
+   unconditionally it was noise on every fabric row. */
+.lot-short {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-align: left;
+    padding-top: 0.25rem;
+    white-space: normal;
+}
+
+/* Why the wash figure is larger than the shortfall. Without it the number reads
+   as an arithmetic fault — he is looking at a "short by" figure and being asked
+   to wash more than it. */
+.exc-why-more {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    background: #f8fafc;
+    border-left: 3px solid var(--primary);
+    padding: 0.5rem 0.7rem;
+    border-radius: 0 4px 4px 0;
+    margin-top: 0.6rem;
+    white-space: normal;
+}
+
+/* The chosen lot cannot give what the ticket asks for. Washing less than needed
+   is the one direction that cannot be recovered from, so it is said loudly. */
+.exc-lot-short:not(:empty) {
+    font-size: 0.8rem;
+    color: #b45309;
+    padding-top: 0.4rem;
+    white-space: normal;
+}
+
+/* Pinned to a lot that has run out. The row cannot be issued at all, so this
+   replaces an empty Lot column that otherwise reads as a rendering fault. */
+.lot-dry {
+    font-size: 0.72rem;
+    color: #b45309;
+    text-align: left;
+    white-space: normal;
+}
+
+/* Offered only on a row whose pinned lot has run dry. Deliberately plain and
+   secondary — accepting a visible mismatch should not look like the easy path. */
+.lot-override-btn {
+    margin-top: 0.4rem;
+    padding: 0.25rem 0.6rem;
+    font-family: inherit;
+    font-size: 0.72rem;
+    color: var(--text-main);
+    background: #ffffff;
+    border: 1px solid var(--border);
+    border-radius: 0.35rem;
+    cursor: pointer;
+}
+
+.lot-override-btn:hover {
+    border-color: #b45309;
+    color: #b45309;
+}
+
+.unalloc-badge {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #e0e7ff;
+    border: 1px solid #c7d2fe;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+}
+
+.unalloc-val {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #3730a3;
+}
+
+.unalloc-lbl {
+    font-size: 0.65rem;
+    color: #4338ca;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+}
+
+/* Professional styling for allocation form */
+.alloc-form {
+    background: #f8fafc;
+    padding: 1.25rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    margin-top: 1rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.alloc-title {
+    margin: 0 0 0.75rem 0;
+    color: var(--text-main);
+    font-size: 0.95rem;
+    font-weight: 600;
+    width: 100%;
+}
+
+.alloc-form .note-input,
+.alloc-form .issue-input {
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+    color: var(--text-main);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.alloc-form .note-input:focus,
+.alloc-form .issue-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.alloc-form .issue-input[readonly] {
+    background: #f1f5f9;
+    color: #64748b;
+    cursor: not-allowed;
+    border-color: #cbd5e1;
+}
+
+.alloc-form .si-field {
+    color: var(--text-main);
+    font-weight: 500;
+}
+
+/* Professional Search Bar Styling */
+.search-bar-container {
+    padding: 0 0 1.25rem 0;
+}
+
+.search-input-wrapper {
+    position: relative;
+    width: 100%;
+    max-width: 100%;
+    display: flex;
+    align-items: center;
+}
+
+.search-icon {
+    position: absolute;
+    left: 1rem;
+    color: #6b7280;
+    pointer-events: none;
+}
+
+.professional-search {
+    width: 100%;
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 9999px;
+    padding: 0.75rem 1rem 0.75rem 2.75rem;
+    font-family: inherit;
+    font-size: 0.95rem;
+    color: var(--text-main);
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    transition: all 0.2s ease;
+}
+
+.professional-search:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+.professional-search::placeholder {
+    color: #9ca3af;
+}
+
+/* Print Jobs accordion UI */
+#print-jobs .item-card {
+    margin-bottom: 1rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+    background: #ffffff;
+}
+
+#print-jobs .item-body {
+    background-color: #f8fafc;
+    border-top: 1px solid #f1f5f9;
+    padding-bottom: 0.5rem;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+}
+
+/* Clickable row styling */
+.mat-row-clickable {
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+.mat-row-clickable:hover {
+    background-color: #f1f5f9 !important;
+}
+.mat-row-clickable.is-expanded {
+    background-color: #f8fafc !important;
+}
+
+/* Detailed breakdown row */
+.lots-detail-row {
+    background-color: #f8fafc;
+}
+.lots-detail-row td {
+    border-bottom: 1px solid var(--border) !important;
+}
+
+/* Chevron animation */
+.mat-chevron {
+    display: inline-flex;
+    transition: transform 0.2s ease;
+}
+.mat-chevron.expanded {
+    transform: rotate(90deg);
+}
+
+/* Issue Progress Modal */
+.progress-container {
+    width: 100%;
+    background-color: #e2e8f0;
+    border-radius: 9999px;
+    height: 14px;
+    overflow: hidden;
+    margin: 1.5rem 0 1rem;
+}
+
+.progress-bar {
+    height: 100%;
+    background-color: var(--primary);
+    width: 0%;
+    transition: width 0.3s ease;
+}
+
+.progress-text {
+    text-align: center;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-main);
+}
+
+/* Mobile Compatibility */
+@media (max-width: 768px) {
+    .app-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+    .app-header-right {
+        width: 100%;
+        justify-content: space-between;
+    }
+    .item-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+    .item-header-right {
+        width: 100%;
+        justify-content: flex-end;
+    }
+    .tab-strip {
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 0.5rem;
+    }
+    .tab-btn {
+        padding: 0.5rem 0.75rem;
+        font-size: 0.8125rem;
+    }
+    .tables-container {
+        padding: 0.5rem;
+    }
+    .item-body {
+        padding: 1rem 0.5rem;
+    }
+}
+
+/* Prevent wrapping on History and Waste tables to match Raw Materials */
+#panel-history table th,
+#panel-history table td,
+#panel-history .material-name-cell,
+#panel-history .material-name-cell .mat-name,
+#panel-waste table th,
+#panel-waste table td,
+#panel-waste .material-name-cell,
+#panel-waste .material-name-cell .mat-name {
+    white-space: nowrap;
+}
