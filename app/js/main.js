@@ -1,3 +1,106 @@
+// ---------------------------------------------------------------------------
+// API CALL TRACER — temporary instrumentation.
+//
+// Wraps ZOHO.CREATOR.DATA.invokeCustomApi so every Custom API call this widget
+// makes is logged: a running number, the api_name, ms since the first call, and
+// a rolling 60-second count (the per-user, per-minute limit is ~50 — code 2955).
+// `window.__apiStats()` in the console prints a summary: total, calls per
+// api_name, and the peak calls-in-any-60s window.
+//
+// Remove this block once the call count is understood.
+// ---------------------------------------------------------------------------
+(function () {
+    try {
+        if (!(window.ZOHO && ZOHO.CREATOR && ZOHO.CREATOR.DATA &&
+              typeof ZOHO.CREATOR.DATA.invokeCustomApi === 'function')) {
+            console.warn('[api-trace] invokeCustomApi not available — tracer not installed');
+            return;
+        }
+        if (ZOHO.CREATOR.DATA.invokeCustomApi.__traced) return;
+
+        var orig = ZOHO.CREATOR.DATA.invokeCustomApi;
+        var seq = 0;
+        var t0 = 0;
+        var times = [];          // epoch ms of every call, for the rolling window
+        var byName = {};         // api_name -> count
+        var inflight = 0;
+        var peakWindow = 0;
+
+        function windowCount(now) {
+            var cut = now - 60000;
+            var c = 0;
+            for (var i = times.length - 1; i >= 0; i--) {
+                if (times[i] >= cut) c++; else break;
+            }
+            return c;
+        }
+
+        function trace(cfg) {
+            var now = Date.now();
+            if (!t0) t0 = now;
+            seq++;
+            times.push(now);
+            var name = (cfg && cfg.api_name) || '(unknown)';
+            byName[name] = (byName[name] || 0) + 1;
+            inflight++;
+            var win = windowCount(now);
+            if (win > peakWindow) peakWindow = win;
+
+            var mine = seq;
+            console.log(
+                '[api #' + mine + '] ' + name +
+                '  +' + (now - t0) + 'ms' +
+                '  · last60s=' + win +
+                (win >= 45 ? '  ⚠️ NEAR LIMIT' : '') +
+                '  · inflight=' + inflight
+            );
+
+            var started = now;
+            var p;
+            try {
+                p = orig.call(this, cfg);
+            } catch (e) {
+                inflight--;
+                console.error('[api #' + mine + '] ' + name + ' threw synchronously', e);
+                throw e;
+            }
+            if (p && typeof p.then === 'function') {
+                return p.then(function (r) {
+                    inflight--;
+                    console.log('[api #' + mine + '] ' + name + ' ✓ ' + (Date.now() - started) + 'ms');
+                    return r;
+                }, function (err) {
+                    inflight--;
+                    var msg = '';
+                    try { msg = JSON.stringify(err); } catch (e) { msg = String(err); }
+                    var throttled = /2955|too many request|rate.?limit|limit exceeded/i.test(msg);
+                    console.error('[api #' + mine + '] ' + name + ' ✗ ' + (Date.now() - started) + 'ms' +
+                        (throttled ? '  ← RATE LIMITED (2955)' : ''), err);
+                    throw err;
+                });
+            }
+            inflight--;
+            return p;
+        }
+        trace.__traced = true;
+        ZOHO.CREATOR.DATA.invokeCustomApi = trace;
+
+        window.__apiStats = function () {
+            var names = Object.keys(byName).sort(function (a, b) { return byName[b] - byName[a]; });
+            console.log('===== API CALL SUMMARY =====');
+            console.log('total calls: ' + seq + '  · span: ' + (times.length ? (times[times.length - 1] - t0) : 0) + 'ms' +
+                '  · peak in any 60s window: ' + peakWindow + (peakWindow >= 50 ? '  ⚠️ OVER LIMIT' : ''));
+            names.forEach(function (n) { console.log('  ' + byName[n] + '  ' + n); });
+            console.log('============================');
+            return { total: seq, peakWindow: peakWindow, byName: byName };
+        };
+
+        console.log('[api-trace] installed — call window.__apiStats() for a summary');
+    } catch (e) {
+        console.warn('[api-trace] failed to install', e);
+    }
+})();
+
 function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, function (c) {
         return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
