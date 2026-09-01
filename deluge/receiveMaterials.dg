@@ -2,91 +2,84 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 {
 	// Supervisor confirms what he physically received.
 	//
-	// APPLIER, NOT RECONSTRUCTOR. This function used to rebuild the whole receipt
-	// server-side: walk every Material_Issue of the supervisor, every Issue_Lines
-	// row on each (THREE separate passes), fan the confirmed quantity across
-	// Material_Requirement[Plan==] for every open plan, then sweep every plan item
-	// and its requirements to roll statuses. On a supervisor holding a large old
-	// chunked handover - 1800+ lines on one voucher - each of those passes was
-	// 1800+ statement visits, and the statement-execution limit is NOT catchable:
-	// it kills the script and the widget gets a bare HTTP 500 with no error card.
+	// SWEEP APPLIER. The widget no longer sends per-line settlements. At
+	// 100 items/order a common trim ("care label") fanned across every open
+	// item is 10,000 Issue_Lines on one handover; a per-line payload was ~84
+	// sequential calls, and each call re-scanned a voucher's whole subform to
+	// FIND each line - O(lines squared) per chunk, past the uncatchable
+	// statement-execution limit.
 	//
-	// The widget already rendered exactly what he is confirming, line by line,
-	// from the PAGED getSupervisorMaterials - which resolves, per still-owed
-	// Issue_Line: the line id, its voucher, the lot, the requirement, the plan,
-	// and how much it still owes (already net of open disputes). So the widget now
-	// sends explicit per-line SETTLEMENTS and this function applies them with
-	// point lookups by record id. Cost is O(lines in THIS receipt), independent of
-	// how many vouchers or plans the supervisor has. Same shape issueMaterials and
-	// the accessory allocations array already use.
+	// Instead the widget names the vouchers it is confirming ("vouchers") and,
+	// only for a material he marked short, how much of it actually arrived
+	// ("shortMaterials"). This function walks each voucher's Issue_Lines ONCE,
+	// settling every still-owed line as it goes, in budgeted resumable slices.
 	//
 	// receiptsJson:
 	// {
-	//   "materials":[
-	//     { "materialId":"123", "received":9.5, "remark":"half metre short",
-	//       "settlements":[
-	//         { "issueLineId":"555", "voucherId":"77", "lot":"901",
-	//           "requirementId":"888", "planId":"50",
-	//           "settle":5.5,      // metres to take off In_Transit for this line
-	//           "confirmed":5.5 }  // of that, how much arrived (rest = shortfall)
-	//       ] } ],
-	//   "waste":[ {"rowId":"456","received":1,"remark":""} ],
-	//   "printedPieces":[ {"issueLineId":"555","voucherId":"77","received":3,"remark":""} ],
-	//   "plansTouched":["50","51"], // distinct plan ids to run the readiness sweep on
-	//   "finalize":true             // see below
+	//   "vouchers": ["77","78", ...],      // the sweep scope, oldest-first
+	//   "sweepCursor": {},                  // {} to start; server returns resume point
+	//                                       // {"v":<vIdx>,"l":"<lastLineId>",
+	//                                       //  "sd":{matId:leftToCredit},
+	//                                       //  "nd":{"planId|matId":openDisputeQtyLeft}}
+	//   "shortMaterials": [
+	//     { "materialId":"123", "owed":10.0, "received":9.5, "remark":"..." }
+	//   ],
+	//   "waste":         [ {"rowId":"456","received":1,"remark":""} ],
+	//   "printedPieces": [ {"issueLineId":"555","voucherId":"77","received":3,"remark":""} ],
+	//   "plansTouched":  ["50","51"],       // for the readiness sweep
+	//   "disputeIds":    ["111","222"],     // finalize/notify: disputes this receipt raised
+	//   "finalize":      false,
+	//   "finalizeCursor": {}                // {} to start; {"ph":"vouchers"|"items"|
+	//                                       //  "transfer"|"notify"|"done", ...}
 	// }
 	//
-	// CHUNKED, LIKE issueMaterials. A big receipt has hundreds of settlements -
-	// too large for one invokeCustomApi payload, and too long for one execution.
-	// The widget splits the settlements / waste / printed rows into chunks and
-	// calls this once per chunk, sequentially, with rate-limit backoff.
+	// SWEEP SLICE (finalize:false): walk "vouchers" from the cursor up to
+	// LINE_BUDGET still-owed lines. Per line: Settled_Qty = Qty (the whole owed
+	// amount leaves In_Transit), Requirement.Received_Qty += the part that
+	// arrived, the rest is a shortfall. Open disputes are netted per plan+material
+	// exactly as getSupervisorMaterials shows him, drawn down in the cursor so a
+	// later slice does not re-net the same dispute. Stock (parent + lot
+	// In_Transit -> Disputed) is drained once per material / lot at the end of the
+	// slice. One Stock_Dispute per (plan, material) with a gap is UPSERTED - a
+	// shortfall split across slices is one dispute, not one per slice.
 	//
-	// Every settlement this function applies is ADDITIVE per line
-	// (Settled_Qty += settle, Received_Qty += confirmed, In_Transit -= settle), so
-	// splitting them across N calls needs no threading and no shared record - each
-	// chunk just writes its own rows. Disputes are raised per chunk as the
-	// shortfalls land; each is independent.
+	// WASTE + PRINTED: still explicit, one row per physical piece (bounded), and
+	// unchanged. The widget sends them on the first sweep call only.
 	//
-	// "finalize" is the ONLY thing that cannot run per chunk: the readiness sweep
-	// (Item_Status / Order_Status), the Issue_Status flip, and postTransferOrders.
-	// Run per chunk they would sweep on half-applied data and fire N transfer
-	// orders. The widget sends finalize:false on every chunk but the last, and
-	// finalize:true (with the FULL plansTouched list) on the last one - which does
-	// only the sweep + transfer, its settlements arrays already empty or small.
-	// A single unchunked receipt sends finalize:true and behaves exactly as
-	// before.
-	//
-	// TRUST THE WIDGET. The only guards kept are the two that stop a genuinely
-	// broken write: an unknown record id (point lookup finds nothing -> readable
-	// error, skip), and a stock field that would go negative (clamped to 0,
-	// reported, the settlement still recorded on the line).
-	//
-	// A short receipt is RECORDED, never auto-corrected. Stock was already
-	// decremented at issue time; quietly adjusting it here would mean the ledger
-	// changed under the store person without anyone deciding to. The confirmed
-	// part of each settlement comes off In_Transit_Qty into production; the
-	// shortfall moves to Disputed_Qty and raises one Stock_Dispute per plan.
+	// FINALIZE (finalize:true), one phase per call, driven by finalizeCursor.ph:
+	//   "vouchers"  - recheck Issue_Status for "vouchers", VOUCHER_BUDGET per call.
+	//                 Moved here from every chunk; nothing reads it mid-receipt.
+	//   "items"     - readiness sweep over "plansTouched", BUDGETED BY Plan_Item
+	//                 COUNT (ITEM_BUDGET), not by plan count - 15 plans x 100
+	//                 items was the limit-killer. Item already past
+	//                 Awaiting_Material skips the req/waste walk. Plan Order_Status
+	//                 rolled from a count query, not a re-walk.
+	//   "transfer"  - postTransferOrders("auto"), its own try/catch.
+	//   "notify"    - build the dispute digest from "disputeIds" and send the two
+	//                 mails, once, for the whole receipt.
 	//
 	// WRITE-CONTRACT KEPT for getStoreIssueHistory / postTransferOrders /
 	// getOrderConsumption / resolveDispute:
-	//  - Issue_Lines.Settled_Qty advanced by "settle" (drives postTransferOrders'
-	//    Settled_Qty - Transferred_Qty).
-	//  - Material_Requirement.Received_Qty advanced by "confirmed" (drives the
-	//    readiness test row by row).
+	//  - Issue_Lines.Settled_Qty advanced to Qty on every line the sweep touches.
+	//  - Material_Requirement.Received_Qty advanced by the arrived part.
 	//  - Raw_Material / Raw_Material_Lot: In_Transit_Qty down by the settled part,
 	//    Disputed_Qty up by the shortfall.
-	//  - Stock_Dispute: one per plan carrying a gap, Direction="Outbound",
-	//    Material / Supervisor / Plan / Plan_Item / Lot stamped.
-	//  - Material_Issue.Issue_Status -> Received / Partially_Received per plan.
+	//  - Stock_Dispute: one per plan carrying a gap, Direction="Outbound".
+	//  - Material_Issue.Issue_Status -> Received / Partially_Received (finalize).
 
 	errJson = "";
 	okJson = "";
-
-	// Disputes raised by THIS receipt, gathered for one pair of notification
-	// mails at the end. Not one mail per dispute: a receipt three materials short
-	// raises three disputes, and six mails describing one trip to the counter is
-	// how people learn to ignore them.
+	// Filled ONLY by the finalize "notify" phase now, so the mail block at the
+	// end fires exactly once per receipt rather than once per sweep slice.
 	dispRows = List();
+	// Dispute ids raised by THIS sweep slice - the widget unions them across
+	// slices and hands the full set to the finalize "notify" phase.
+	newDispIdsJson = "";
+
+	sweepCursorJson = "null";
+	sweepDone = true;
+	finalizeCursorJson = "{\"ph\":\"done\"}";
+	finalizeDone = true;
 
 	// DEBUG WRAPPER: Creator reports every runtime failure as a generic
 	// "code 9430 - There is an error while executing Custom API." Catching it
@@ -95,39 +88,45 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	{
 	supId = supervisorId.trim().toLong();
 	inp = receiptsJson.toMap();
-	mats = ifnull(inp.get("materials"),"[]").toString().toJSONList();
+
+	vouchersIn = ifnull(inp.get("vouchers"),"[]").toString().toJSONList();
+	shortMatsIn = ifnull(inp.get("shortMaterials"),"[]").toString().toJSONList();
 	wastes = ifnull(inp.get("waste"),"[]").toString().toJSONList();
 	printed = ifnull(inp.get("printedPieces"),"[]").toString().toJSONList();
 	plansTouchedIn = ifnull(inp.get("plansTouched"),"[]").toString().toJSONList();
-	// Absent -> true, so an unchunked receipt (no flag) finalizes as it always
-	// did. Only an explicit "false" from a non-last chunk suppresses the sweep.
-	doFinalize = (ifnull(inp.get("finalize"),"true").toString().trim() != "false");
-	// FINALIZE IS ITSELF RESUMABLE. A common trim received against ~100 open
-	// plans has ~100 plan ids in plansTouched, and the readiness sweep walks
-	// Plan_Item -> Material_Requirement -> Waste_Movement per plan - thousands of
-	// statement visits in one call, past the uncatchable limit. So a finalize
-	// call sweeps at most SWEEP_BUDGET plans, returns which are still to do, and
-	// the widget calls finalize again with just those until none are left. The
-	// warehouse transfer runs only on the finalize call that clears the list.
-	SWEEP_BUDGET = 15;
-	info "supId=" + supId + " matLines=" + mats.size() + " wasteLines=" + wastes.size() + " printedLines=" + printed.size() + " finalize=" + doFinalize + " plansTouched=" + plansTouchedIn.size();
+	disputeIdsIn = ifnull(inp.get("disputeIds"),"[]").toString().toJSONList();
+	doFinalize = (ifnull(inp.get("finalize"),"false").toString().trim() == "true");
+	// toMap() on "{}" / "" is not worth trusting - build empty and only parse a
+	// cursor that actually carries something.
+	swCur = Map();
+	swRawTxt = ifnull(inp.get("sweepCursor"),"").toString().trim();
+	if(swRawTxt != "" && swRawTxt != "{}")
+	{
+		swCur = swRawTxt.toMap();
+	}
+	fnCur = Map();
+	fnRawTxt = ifnull(inp.get("finalizeCursor"),"").toString().trim();
+	if(fnRawTxt != "" && fnRawTxt != "{}")
+	{
+		fnCur = fnRawTxt.toMap();
+	}
+
+	LINE_BUDGET = 250;
+	VOUCHER_BUDGET = 60;
+	ITEM_BUDGET = 250;
+
+	info "receiveMaterials supId=" + supId + " vouchers=" + vouchersIn.size() + " short=" + shortMatsIn.size() + " waste=" + wastes.size() + " printed=" + printed.size() + " finalize=" + doFinalize;
 
 	//------------------------------------------------------------------------
-	// THE PLANS THIS RECEIPT TOUCHES, resolved to order numbers ONCE.
-	//
-	// The widget names them (plansTouched) from the line detail it rendered, so
-	// there is no plan walk. A dispute names an order; the readiness sweep at
-	// the bottom only runs on these. Empty list -> nothing to sweep, which is
-	// correct for a receipt of only loose (no-requirement) lines.
+	// SO number per plan - used by dispute messages and the notify digest.
+	// Bounded by plansTouched (a receipt touches a handful).
 	//------------------------------------------------------------------------
-	touchedPlanIds = List();
 	soNoByPlan = Map();
 	for each  ptRaw in plansTouchedIn
 	{
 		ptTxt = ifnull(ptRaw,"").toString().trim();
-		if(ptTxt != "" && touchedPlanIds.contains(ptTxt) == false)
+		if(ptTxt != "" && ptTxt.isNumber() == true && soNoByPlan.get(ptTxt) == null)
 		{
-			touchedPlanIds.add(ptTxt);
 			soTxtP = "";
 			for each  ppRec in Production_Planning[ID == ptTxt.toLong()]
 			{
@@ -144,1103 +143,1384 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 		}
 	}
 
-	// Vouchers this receipt settled a line on - materials AND printed pieces.
-	// After the settlement passes, each of these is re-checked: a voucher whose
-	// every Issue_Line now has Settled_Qty >= Qty is flipped to "Received", and
-	// one with some still owed to "Partially_Received". This does NOT depend on
-	// Material_Issue.Plan, on plansTouched, or on the finalize call - the old
-	// flip lived only inside the readiness sweep and missed a voucher whose
-	// plan was not in plansTouched or whose Plan field was empty / pointed at a
-	// different plan of a multi-plan handover.
-	touchedVoucherIds = List();
-
-	//------------------------------------------------------------------------
-	// MATERIALS - apply each line settlement the widget computed.
-	//
-	// The widget has already distributed his confirmed quantity across the
-	// still-owed lines oldest-first and worked out, per line, how much to settle
-	// and how much of that actually arrived. This loop only writes it.
-	//------------------------------------------------------------------------
-	for each  mRaw in mats
+	if(doFinalize == false)
 	{
-		// toJSONList() yields JSON objects, NOT Deluge Maps - .get() silently
-		// returns null on those. .toMap() converts to a real Map first.
-		mm = mRaw.toMap();
-		matId = ifnull(mm.get("materialId"),"").toString().trim();
-
-		// Creator fields that were never written are EMPTY, not null, and
-		// toDecimal() throws on empty - normalise to string first.
-		rStr = ifnull(mm.get("received"),"0").toString().trim();
-		if(rStr == "")
+		//================================================================
+		// SWEEP SLICE.
+		//================================================================
+		startV = 0;
+		svS = ifnull(swCur.get("v"),"").toString().trim();
+		if(svS != "" && svS.isNumber() == true)
 		{
-			rStr = "0";
+			startV = svS.toLong();
 		}
-		gotQty = rStr.toDecimal();
-		remark = ifnull(mm.get("remark"),"").toString();
-		setts = ifnull(mm.get("settlements"),"[]").toString().toJSONList();
+		afterLine = ifnull(swCur.get("l"),"").toString().trim();
 
-		if(matId == "" || gotQty < 0)
+		// shortLeft: matId -> qty still to credit as "arrived". Seeded from the
+		// cursor on a resume so it survives across slices, else from the payload.
+		shortLeft = Map();
+		shortRemarkByMat = Map();
+		shortSeedRaw = ifnull(swCur.get("sd"),"").toString().trim();
+		if(shortSeedRaw != "" && shortSeedRaw != "{}")
 		{
-			if(errJson != "")
+			sdMap = shortSeedRaw.toMap();
+			for each  sdK in sdMap.keys()
 			{
-				errJson = errJson + ",";
+				sdVS = ifnull(sdMap.get(sdK),"0").toString().trim();
+				if(sdVS == "")
+				{
+					sdVS = "0";
+				}
+				shortLeft.put(sdK,sdVS.toDecimal());
 			}
-			errJson = errJson + "\"Material " + matId + ": invalid received quantity\"";
 		}
 		else
 		{
-			matName = "";
-			matUnit = "";
-			settledTot = 0.0;
-			confirmedTot = 0.0;
-			shortTot = 0.0;
-
-			// Shortfall gathered PER PLAN - that is where downstream reads look
-			// for it. getSupervisorMaterials discounts open disputes per
-			// plan+material; resolveDispute re-opens Material_Requirement[Plan ==
-			// dsp.Plan]. Four parallel maps, not a Map of Maps - the latter does
-			// not survive being read back reliably in Deluge.
-			shortKeys = List();
-			shortQty = Map();
-			shortPend = Map();
-			shortGot = Map();
-			shortItem = Map();
-
-			// Which lot carries the largest shortfall share - the one the
-			// dispute record names (resolveDispute restores to it; the lots
-			// themselves each carry their own share already).
-			dispLotId = "";
-			dispLotShare = 0.0;
-
-			for each  stRaw in setts
+			for each  smRaw in shortMatsIn
 			{
-				st = stRaw.toMap();
-				liTxt = ifnull(st.get("issueLineId"),"").toString().trim();
-				vTxt = ifnull(st.get("voucherId"),"").toString().trim();
-				reqTxt = ifnull(st.get("requirementId"),"").toString().trim();
-				planTxt = ifnull(st.get("planId"),"").toString().trim();
-				lotTxt = ifnull(st.get("lot"),"").toString().trim();
-
-				seStr = ifnull(st.get("settle"),"0").toString().trim();
-				if(seStr == "")
+				sm = smRaw.toMap();
+				smId = ifnull(sm.get("materialId"),"").toString().trim();
+				if(smId != "")
 				{
-					seStr = "0";
-				}
-				coStr = ifnull(st.get("confirmed"),"0").toString().trim();
-				if(coStr == "")
-				{
-					coStr = "0";
-				}
-				settleQ = seStr.toDecimal();
-				confirmQ = coStr.toDecimal();
-				if(confirmQ > settleQ)
-				{
-					confirmQ = settleQ;
-				}
-				shortQ = settleQ - confirmQ;
-
-				if(settleQ <= 0)
-				{
-					continue;
-				}
-
-				// --- 1. Settle the Issue_Line, via its voucher (point lookup) ---
-				lineFound = false;
-				if(vTxt != "" && liTxt != "")
-				{
-					if(touchedVoucherIds.contains(vTxt) == false)
+					smRcvS = ifnull(sm.get("received"),"0").toString().trim();
+					if(smRcvS == "")
 					{
-						touchedVoucherIds.add(vTxt);
+						smRcvS = "0";
 					}
-					for each  miRec in Material_Issue[ID == vTxt.toLong()]
+					shortLeft.put(smId,smRcvS.toDecimal());
+					shortRemarkByMat.put(smId,ifnull(sm.get("remark"),"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," "));
+				}
+			}
+		}
+
+		// dispNet: "planId|matId" -> still-open disputed qty, netted off the
+		// lines the sweep settles (same rule getSupervisorMaterials shows him).
+		// Rebuilt from his open disputes on the first slice, then drawn down and
+		// carried in the cursor so a later slice cannot re-net the same dispute.
+		dispNet = Map();
+		dnSeedRaw = ifnull(swCur.get("nd"),"").toString().trim();
+		if(dnSeedRaw != "" && dnSeedRaw != "{}")
+		{
+			dnMap = dnSeedRaw.toMap();
+			for each  dnK in dnMap.keys()
+			{
+				dnVS = ifnull(dnMap.get(dnK),"0").toString().trim();
+				if(dnVS == "")
+				{
+					dnVS = "0";
+				}
+				dispNet.put(dnK,dnVS.toDecimal());
+			}
+		}
+		else
+		{
+			for each  odsp in Stock_Dispute[Supervisor == supId && Status == "Open" && Is_Waste == false]
+			{
+				odDir = ifnull(odsp.Direction,"Outbound").toString().trim();
+				if(odDir == "")
+				{
+					odDir = "Outbound";
+				}
+				if(odDir == "Outbound" && odsp.Plan != null && odsp.Material != null)
+				{
+					odqS = ifnull(odsp.Disputed_Qty,"0").toString().trim();
+					if(odqS == "")
 					{
-						for each  miLn in miRec.Issue_Lines
+						odqS = "0";
+					}
+					odRes = 0.0;
+					for each  odrl in odsp.Resolution_Lines
+					{
+						odrS = ifnull(odrl.Resolved_Qty,"0").toString().trim();
+						if(odrS == "")
 						{
-							if(miLn.ID == liTxt.toLong())
+							odrS = "0";
+						}
+						odRes = odRes + odrS.toDecimal();
+					}
+					odLeft = odqS.toDecimal() - odRes;
+					if(odLeft > 0)
+					{
+						odKey = odsp.Plan + "|" + odsp.Material;
+						dispNet.put(odKey,ifnull(dispNet.get(odKey),0.0) + odLeft);
+					}
+				}
+			}
+		}
+
+		// per-slice accumulators
+		settledByMat = Map();
+		shortByMat = Map();
+		confByMat = Map();
+		settledByLot = Map();
+		shortByLot = Map();
+		matNameById = Map();
+		matUnitById = Map();
+		dispLotByMat = Map();
+		dispLotShareByMat = Map();
+		pmKeys = List();
+		shortByPM = Map();
+		shortPendPM = Map();
+		shortGotPM = Map();
+		shortItemPM = Map();
+
+		linesDone = 0;
+		budgetHit = false;
+		vIdx = 0;
+
+		for each  vRaw in vouchersIn
+		{
+			vTxt = ifnull(vRaw,"").toString().trim();
+			if(budgetHit == false && vIdx >= startV && vTxt != "" && vTxt.isNumber() == true)
+			{
+				// On a resume INTO this exact voucher, step over lines up to and
+				// including afterLine; otherwise start fresh.
+				reachedResume = true;
+				if(vIdx == startV && afterLine != "")
+				{
+					reachedResume = false;
+				}
+
+				for each  vRec in Material_Issue[ID == vTxt.toLong()]
+				{
+					for each  miLn in vRec.Issue_Lines
+					{
+						if(budgetHit == false)
+						{
+							lnIdTxt = miLn.ID + "";
+							if(reachedResume == false)
 							{
-								lineFound = true;
-								lnSetS = ifnull(miLn.Settled_Qty,"0").toString().trim();
-								if(lnSetS == "")
+								if(lnIdTxt == afterLine)
 								{
-									lnSetS = "0";
+									reachedResume = true;
 								}
-								lnQtyS = ifnull(miLn.Qty,"0").toString().trim();
-								if(lnQtyS == "")
+							}
+							else
+							{
+								qS = ifnull(miLn.Qty,"0").toString().trim();
+								if(qS == "")
 								{
-									lnQtyS = "0";
+									qS = "0";
 								}
-								room = lnQtyS.toDecimal() - lnSetS.toDecimal();
-								applyS = settleQ;
-								if(applyS > room)
+								setS = ifnull(miLn.Settled_Qty,"0").toString().trim();
+								if(setS == "")
 								{
-									// Line already settled past this point by an
-									// earlier receipt - never drive Settled_Qty
-									// past Qty.
-									applyS = room;
-									if(applyS < 0)
+									setS = "0";
+								}
+								lnQ = qS.toDecimal();
+								owed = lnQ - setS.toDecimal();
+
+								matTxt = ifnull(miLn.Material,"").toString().trim();
+								reqTxt = ifnull(miLn.Requirement,"").toString().trim();
+								lotTxt = ifnull(miLn.Lot,"").toString().trim();
+								rPlan = "";
+								rItem = "";
+
+								if(owed > 0 && reqTxt != "")
+								{
+									for each  rq0 in Material_Requirement[ID == reqTxt.toLong()]
 									{
-										applyS = 0.0;
+										rPlan = ifnull(rq0.Plan,"").toString().trim();
+										rItem = ifnull(rq0.Plan_Item,"").toString().trim();
+										if(matNameById.get(matTxt) == null)
+										{
+											matNameById.put(matTxt,ifnull(rq0.Material_Name,"").toString());
+										}
+										if(matUnitById.get(matTxt) == null)
+										{
+											matUnitById.put(matTxt,ifnull(rq0.Unit,"").toString());
+										}
 									}
 								}
-								miLn.Settled_Qty = lnSetS.toDecimal() + applyS;
-								if(ifnull(miLn.Material_Name,"").toString().trim() != "")
+
+								// NET off an open dispute for this plan+material.
+								if(owed > 0 && rPlan != "" && matTxt != "")
 								{
-									matName = ifnull(miLn.Material_Name,"").toString();
+									dnKey = rPlan + "|" + matTxt;
+									dnLeft = dispNet.get(dnKey);
+									if(dnLeft != null && dnLeft > 0)
+									{
+										dnTake = dnLeft;
+										if(dnTake > owed)
+										{
+											dnTake = owed;
+										}
+										owed = owed - dnTake;
+										dispNet.put(dnKey,dnLeft - dnTake);
+									}
 								}
-								if(ifnull(miLn.Unit,"").toString().trim() != "")
+
+								if(owed > 0)
 								{
-									matUnit = ifnull(miLn.Unit,"").toString();
+									if(matNameById.get(matTxt) == null && ifnull(miLn.Material_Name,"").toString().trim() != "")
+									{
+										matNameById.put(matTxt,ifnull(miLn.Material_Name,"").toString());
+									}
+									if(matUnitById.get(matTxt) == null && ifnull(miLn.Unit,"").toString().trim() != "")
+									{
+										matUnitById.put(matTxt,ifnull(miLn.Unit,"").toString());
+									}
+
+									conf = owed;
+									shortQ = 0.0;
+									slLeft = shortLeft.get(matTxt);
+									if(slLeft != null)
+									{
+										if(slLeft >= owed)
+										{
+											conf = owed;
+											shortLeft.put(matTxt,slLeft - owed);
+										}
+										else
+										{
+											conf = slLeft;
+											if(conf < 0)
+											{
+												conf = 0.0;
+											}
+											shortLeft.put(matTxt,0.0);
+										}
+										shortQ = owed - conf;
+									}
+
+									// Settle the line in full - the whole owed
+									// amount leaves In_Transit this receipt.
+									miLn.Settled_Qty = lnQ;
+
+									if(reqTxt != "")
+									{
+										for each  rq1 in Material_Requirement[ID == reqTxt.toLong()]
+										{
+											rcvS = ifnull(rq1.Received_Qty,"0").toString().trim();
+											if(rcvS == "")
+											{
+												rcvS = "0";
+											}
+											rq1.Received_Qty = rcvS.toDecimal() + conf;
+										}
+									}
+
+									settledByMat.put(matTxt,ifnull(settledByMat.get(matTxt),0.0) + owed);
+									confByMat.put(matTxt,ifnull(confByMat.get(matTxt),0.0) + conf);
+									if(shortQ > 0)
+									{
+										shortByMat.put(matTxt,ifnull(shortByMat.get(matTxt),0.0) + shortQ);
+									}
+									if(lotTxt != "")
+									{
+										settledByLot.put(lotTxt,ifnull(settledByLot.get(lotTxt),0.0) + owed);
+										if(shortQ > 0)
+										{
+											shortByLot.put(lotTxt,ifnull(shortByLot.get(lotTxt),0.0) + shortQ);
+											if(shortQ > ifnull(dispLotShareByMat.get(matTxt),0.0))
+											{
+												dispLotShareByMat.put(matTxt,shortQ);
+												dispLotByMat.put(matTxt,lotTxt);
+											}
+										}
+									}
+
+									if(shortQ > 0 && rPlan != "")
+									{
+										pmk = rPlan + "|" + matTxt;
+										if(shortByPM.get(pmk) == null)
+										{
+											pmKeys.add(pmk);
+											shortByPM.put(pmk,0.0);
+											shortPendPM.put(pmk,0.0);
+											shortGotPM.put(pmk,0.0);
+											shortItemPM.put(pmk,"");
+										}
+										shortByPM.put(pmk,shortByPM.get(pmk) + shortQ);
+										shortPendPM.put(pmk,shortPendPM.get(pmk) + owed);
+										shortGotPM.put(pmk,shortGotPM.get(pmk) + conf);
+										if(ifnull(shortItemPM.get(pmk),"").toString() == "" && rItem != "")
+										{
+											shortItemPM.put(pmk,rItem);
+										}
+									}
+
+								}
+
+								// Advance the resume point past this line whether
+								// or not it owed anything - a resume must not
+								// revisit it - and count EVERY visited line toward
+								// the budget so a long run of already-settled lines
+								// cannot blow the limit either.
+								afterLine = lnIdTxt;
+								startV = vIdx;
+								linesDone = linesDone + 1;
+								if(linesDone >= LINE_BUDGET)
+								{
+									budgetHit = true;
 								}
 							}
 						}
 					}
 				}
-				if(lineFound == false)
-				{
-					if(errJson != "")
-					{
-						errJson = errJson + ",";
-					}
-					errJson = errJson + "\"Material " + matId + ": issue line " + liTxt + " not found\"";
-					continue;
-				}
 
-				settledTot = settledTot + settleQ;
-				confirmedTot = confirmedTot + confirmQ;
-				shortTot = shortTot + shortQ;
-
-				// --- 2. Credit the requirement's Received_Qty (point lookup) ---
-				if(reqTxt != "")
+				if(budgetHit == false)
 				{
-					for each  reqRec in Material_Requirement[ID == reqTxt.toLong()]
-					{
-						rqRcvS = ifnull(reqRec.Received_Qty,"0").toString().trim();
-						if(rqRcvS == "")
-						{
-							rqRcvS = "0";
-						}
-						reqRec.Received_Qty = rqRcvS.toDecimal() + confirmQ;
-						if(matName == "")
-						{
-							matName = ifnull(reqRec.Material_Name,"").toString();
-						}
-						if(matUnit == "")
-						{
-							matUnit = ifnull(reqRec.Unit,"").toString();
-						}
-					}
-				}
-
-				// --- 3. Move the lot's In_Transit -> (production / disputed) ---
-				if(lotTxt != "")
-				{
-					for each  lotSet in Raw_Material_Lot[ID == lotTxt.toLong()]
-					{
-						ltiS = ifnull(lotSet.In_Transit_Qty,"0").toString().trim();
-						if(ltiS == "")
-						{
-							ltiS = "0";
-						}
-						ltdS = ifnull(lotSet.Disputed_Qty,"0").toString().trim();
-						if(ltdS == "")
-						{
-							ltdS = "0";
-						}
-						ltIn = ltiS.toDecimal();
-						offIt = settleQ;
-						if(offIt > ltIn)
-						{
-							// Never drive a lot's in-transit negative - a re-run
-							// or a race would otherwise take it past zero.
-							offIt = ltIn;
-						}
-						lotSet.In_Transit_Qty = ltIn - offIt;
-						if(shortQ > 0)
-						{
-							lotSet.Disputed_Qty = ltdS.toDecimal() + shortQ;
-						}
-					}
-					if(shortQ > dispLotShare)
-					{
-						dispLotShare = shortQ;
-						dispLotId = lotTxt;
-					}
-				}
-
-				// --- 4. Gather the shortfall against its plan ---
-				if(shortQ > 0 && planTxt != "")
-				{
-					if(shortQty.get(planTxt) == null)
-					{
-						shortKeys.add(planTxt);
-						shortQty.put(planTxt,0.0);
-						shortPend.put(planTxt,0.0);
-						shortGot.put(planTxt,0.0);
-						shortItem.put(planTxt,"");
-					}
-					shortQty.put(planTxt,shortQty.get(planTxt) + shortQ);
-					shortPend.put(planTxt,shortPend.get(planTxt) + settleQ);
-					shortGot.put(planTxt,shortGot.get(planTxt) + confirmQ);
-					if(ifnull(shortItem.get(planTxt),"").toString() == "" && reqTxt != "")
-					{
-						for each  reqPi in Material_Requirement[ID == reqTxt.toLong()]
-						{
-							shortItem.put(planTxt,ifnull(reqPi.Plan_Item,"").toString());
-						}
-					}
-				}
-				else if(shortQ > 0)
-				{
-					// A settlement with a shortfall but no plan - a loose line.
-					// Still has to come off In_Transit on the parent below; it
-					// just cannot raise a per-plan dispute.
-					shortPend.put("_loose",ifnull(shortPend.get("_loose"),0.0) + settleQ);
+					// Whole voucher consumed - the next slice starts fresh at
+					// the next voucher.
+					startV = vIdx + 1;
+					afterLine = "";
 				}
 			}
+			vIdx = vIdx + 1;
+		}
 
-			// --- 5. Move the parent Raw_Material stock, once per material ---
-			if(settledTot > 0)
+		//------------------------------------------------------------------
+		// Drain In_Transit -> (production / Disputed), once per material and
+		// once per lot the slice touched. Never below zero.
+		//
+		// INVENTORY ADJUSTMENT DISABLED FOR NOW. The old materials loop enqueued
+		// a Consumption row (settled - short) into Inventory_Post_Queue via
+		// thisapp.queueInventoryPost("Consumption", ...). We are not creating Zoho
+		// Inventory adjustments at the moment, so receiving material updates
+		// Creator only. The warehouse transfer in the finalize "transfer" phase
+		// is a separate thing and stays.
+		//------------------------------------------------------------------
+		for each  mk in settledByMat.keys()
+		{
+			drainM = settledByMat.get(mk);
+			shM = ifnull(shortByMat.get(mk),0.0);
+			for each  rmS in Raw_Material[ID == mk.toLong()]
 			{
-				for each  rmStock in Raw_Material[ID == matId.toLong()]
+				itS = ifnull(rmS.In_Transit_Qty,"0").toString().trim();
+				if(itS == "")
 				{
-					itStr = ifnull(rmStock.In_Transit_Qty,"0").toString().trim();
-					if(itStr == "")
-					{
-						itStr = "0";
-					}
-					dispStr = ifnull(rmStock.Disputed_Qty,"0").toString().trim();
-					if(dispStr == "")
-					{
-						dispStr = "0";
-					}
-					itQty = itStr.toDecimal();
-					dispQty = dispStr.toDecimal();
+					itS = "0";
+				}
+				dpS = ifnull(rmS.Disputed_Qty,"0").toString().trim();
+				if(dpS == "")
+				{
+					dpS = "0";
+				}
+				itV = itS.toDecimal();
+				offM = drainM;
+				if(offM > itV)
+				{
+					offM = itV;
+				}
+				rmS.In_Transit_Qty = itV - offM;
+				if(shM > 0)
+				{
+					rmS.Disputed_Qty = dpS.toDecimal() + shM;
+				}
+			}
+		}
+		for each  lk in settledByLot.keys()
+		{
+			drainL = settledByLot.get(lk);
+			shL = ifnull(shortByLot.get(lk),0.0);
+			for each  ltS in Raw_Material_Lot[ID == lk.toLong()]
+			{
+				litS = ifnull(ltS.In_Transit_Qty,"0").toString().trim();
+				if(litS == "")
+				{
+					litS = "0";
+				}
+				ldpS = ifnull(ltS.Disputed_Qty,"0").toString().trim();
+				if(ldpS == "")
+				{
+					ldpS = "0";
+				}
+				litV = litS.toDecimal();
+				offL = drainL;
+				if(offL > litV)
+				{
+					offL = litV;
+				}
+				ltS.In_Transit_Qty = litV - offL;
+				if(shL > 0)
+				{
+					ltS.Disputed_Qty = ldpS.toDecimal() + shL;
+				}
+			}
+		}
 
-					offParent = settledTot;
-					if(offParent > itQty)
+		//------------------------------------------------------------------
+		// UPSERT one Stock_Dispute per (plan, material) with a gap. A shortfall
+		// split across sweep slices lands on ONE dispute, not one per slice.
+		//------------------------------------------------------------------
+		for each  pmk in pmKeys
+		{
+			pmShort = shortByPM.get(pmk);
+			if(pmShort != null && pmShort > 0)
+			{
+				pmParts = pmk.toList("|");
+				pmPlan = pmParts.get(0).toString();
+				pmMat = pmParts.get(1).toString();
+				pmName = ifnull(matNameById.get(pmMat),"").toString();
+				if(pmName == "")
+				{
+					pmName = "Material " + pmMat;
+				}
+				pmUnit = ifnull(matUnitById.get(pmMat),"").toString();
+				pmSo = ifnull(soNoByPlan.get(pmPlan),"").toString();
+				pmRemark = ifnull(shortRemarkByMat.get(pmMat),"").toString();
+
+				existDsp = "";
+				for each  exd in Stock_Dispute[Supervisor == supId && Plan == pmPlan.toLong() && Material == pmMat.toLong() && Status == "Open"]
+				{
+					exDir = ifnull(exd.Direction,"Outbound").toString().trim();
+					if(exDir == "")
 					{
-						// Cannot settle more than is actually in transit -
-						// otherwise a re-run drives it negative, and a negative
-						// In_Transit reads as stock the company does not have on
-						// every screen that sums it.
-						offParent = itQty;
+						exDir = "Outbound";
 					}
-					rmStock.In_Transit_Qty = itQty - offParent;
-					if(shortTot > 0)
+					if(existDsp == "" && exDir == "Outbound" && ifnull(exd.Is_Waste,false) == false)
 					{
-						rmStock.Disputed_Qty = dispQty + shortTot;
+						existDsp = exd.ID + "";
+						exIq = ifnull(exd.Issued_Qty,"0").toString().trim();
+						if(exIq == "")
+						{
+							exIq = "0";
+						}
+						exRq = ifnull(exd.Received_Qty,"0").toString().trim();
+						if(exRq == "")
+						{
+							exRq = "0";
+						}
+						exDq = ifnull(exd.Disputed_Qty,"0").toString().trim();
+						if(exDq == "")
+						{
+							exDq = "0";
+						}
+						exd.Issued_Qty = exIq.toDecimal() + shortPendPM.get(pmk);
+						exd.Received_Qty = exRq.toDecimal() + shortGotPM.get(pmk);
+						exd.Disputed_Qty = exDq.toDecimal() + pmShort;
 					}
 				}
 
-				// INVENTORY ADJUSTMENT DISABLED FOR NOW. This used to enqueue a
-				// Consumption row (settleQty - shortBy) into Inventory_Post_Queue
-				// via thisapp.queueInventoryPost("Consumption", ...). We are not
-				// creating Zoho Inventory adjustments at the moment, so receiving
-				// material updates Creator only and leaves the external adjustment
-				// queue untouched. The warehouse transfer at the end of this
-				// function is a separate thing and stays.
-			}
-
-			if(matName == "")
-			{
-				matName = "Material " + matId;
-			}
-
-			// --- 6. Raise one Stock_Dispute per plan that carries a gap ---
-			if(shortTot > 0 && shortKeys.size() > 0)
-			{
-				noteTxt = "";
-				if(remark != "")
+				if(existDsp == "")
 				{
-					noteTxt = " - " + remark.replaceAll("\"","'");
+					try
+					{
+						newDId = insert into Stock_Dispute
+						[
+							Material_Name=pmName
+							Unit=pmUnit
+							Is_Waste=false
+							Direction="Outbound"
+							Issued_Qty=shortPendPM.get(pmk)
+							Received_Qty=shortGotPM.get(pmk)
+							Disputed_Qty=pmShort
+							Status="Open"
+							Raised_On=zoho.currentdate
+							Raised_Note=pmRemark
+							Added_User=zoho.loginuser
+						];
+						for each  nd0 in Stock_Dispute[ID == newDId.toLong()]
+						{
+							nd0.Material = pmMat.toLong();
+							nd0.Supervisor = supId;
+							dlot = ifnull(dispLotByMat.get(pmMat),"").toString();
+							if(dlot != "")
+							{
+								nd0.Lot = dlot.toLong();
+							}
+							nd0.Plan = pmPlan.toLong();
+							ditem = ifnull(shortItemPM.get(pmk),"").toString();
+							if(ditem != "")
+							{
+								nd0.Plan_Item = ditem.toLong();
+							}
+						}
+						existDsp = newDId + "";
+					}
+					catch (edsp)
+					{
+						info "Stock_Dispute not raised for " + pmName + " plan " + pmPlan + ": " + edsp.toString();
+					}
 				}
 
-				for each  pKey2 in shortKeys
+				if(existDsp != "")
 				{
-					planShort = shortQty.get(pKey2);
-					if(planShort > 0)
+					if(newDispIdsJson != "")
 					{
-						planSoNo = ifnull(soNoByPlan.get(pKey2),"").toString();
+						newDispIdsJson = newDispIdsJson + ",";
+					}
+					newDispIdsJson = newDispIdsJson + "\"" + existDsp + "\"";
+				}
 
+				if(errJson != "")
+				{
+					errJson = errJson + ",";
+				}
+				errJson = errJson + "\"" + pmName + " (" + pmSo + "): " + pmShort + " short of " + shortPendPM.get(pmk) + " issued - dispute raised\"";
+			}
+		}
+
+		for each  ck in confByMat.keys()
+		{
+			if(okJson != "")
+			{
+				okJson = okJson + ",";
+			}
+			okJson = okJson + "{\"materialId\":\"" + ck + "\",\"received\":" + confByMat.get(ck) + ",\"short\":" + ifnull(shortByMat.get(ck),0.0) + "}";
+		}
+
+		//------------------------------------------------------------------
+		// The sweep cursor.
+		//------------------------------------------------------------------
+		sweepDone = (budgetHit == false);
+		if(budgetHit == true)
+		{
+			sdJson = "{";
+			sdFirst = true;
+			for each  sk in shortLeft.keys()
+			{
+				if(sdFirst == false)
+				{
+					sdJson = sdJson + ",";
+				}
+				sdJson = sdJson + "\"" + sk + "\":" + shortLeft.get(sk);
+				sdFirst = false;
+			}
+			sdJson = sdJson + "}";
+
+			ndJson = "{";
+			ndFirst = true;
+			for each  nk in dispNet.keys()
+			{
+				if(ndFirst == false)
+				{
+					ndJson = ndJson + ",";
+				}
+				ndJson = ndJson + "\"" + nk + "\":" + dispNet.get(nk);
+				ndFirst = false;
+			}
+			ndJson = ndJson + "}";
+
+			sweepCursorJson = "{\"v\":" + startV + ",\"l\":\"" + afterLine + "\",\"sd\":" + sdJson + ",\"nd\":" + ndJson + "}";
+		}
+
+		//------------------------------------------------------------------------
+		// Waste pieces - rowId is a Waste_Movement id, a top-level record, so this
+		// is already a true point lookup. Sent on the first sweep call only.
+		//------------------------------------------------------------------------
+		for each  wRaw in wastes
+		{
+			wm = wRaw.toMap();
+			rowId = ifnull(wm.get("rowId"),"").toString().trim();
+			wrStr = ifnull(wm.get("received"),"0").toString().trim();
+			if(wrStr == "")
+			{
+				wrStr = "0";
+			}
+			gotPcs = wrStr.toDecimal().toLong();
+			wRemark = ifnull(wm.get("remark"),"").toString();
+
+			if(rowId != "" && rowId.isNumber() == true)
+			{
+				for each  wi in Waste_Movement[ID == rowId.toLong() && Movement_Type == "Issued"]
+				{
+					issuedW = ifnull(wi.Piece_Count,0);
+
+					alreadyW = 0;
+					for each  rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
+					{
+						alreadyW = alreadyW + ifnull(rv.Piece_Count,0);
+					}
+
+					takePcs = gotPcs;
+					if(alreadyW + takePcs > issuedW)
+					{
+						takePcs = issuedW - alreadyW;
+					}
+					if(takePcs < 0)
+					{
+						takePcs = 0;
+					}
+
+					if(takePcs > 0)
+					{
+						newRvId = insert into Waste_Movement
+						[
+							Movement_Type="Received"
+							Piece_Width=ifnull(wi.Piece_Width,0)
+							Piece_Length=ifnull(wi.Piece_Length,0)
+							Piece_Count=takePcs
+							Cut_Size_Width=ifnull(wi.Cut_Size_Width,0)
+							Cut_Size_Length=ifnull(wi.Cut_Size_Length,0)
+							Moved_On=zoho.currentdate
+							Added_User=zoho.loginuser
+						];
+
+						for each  rvNew in Waste_Movement[ID == newRvId.toLong()]
+						{
+							rvNew.Parent_Movement = wi.ID;
+							rvNew.Waste_Piece = wi.Waste_Piece;
+							rvNew.Plan = wi.Plan;
+							rvNew.Plan_Item = wi.Plan_Item;
+							rvNew.Moved_By = supId;
+						}
+					}
+
+					stillOut = issuedW - (alreadyW + takePcs);
+					if(stillOut < 0)
+					{
+						stillOut = 0;
+					}
+
+					for each  wmStock in Waste_Master[ID == wi.Waste_Piece]
+					{
+						witStr = ifnull(wmStock.In_Transit_Count,"0").toString().trim();
+						if(witStr == "")
+						{
+							witStr = "0";
+						}
+						wdispStr = ifnull(wmStock.Disputed_Count,"0").toString().trim();
+						if(wdispStr == "")
+						{
+							wdispStr = "0";
+						}
+						witCount = witStr.toDecimal().toLong();
+						wdispCount = wdispStr.toDecimal().toLong();
+
+						settlePcs = takePcs + stillOut;
+						if(settlePcs > witCount)
+						{
+							settlePcs = witCount;
+						}
+
+						wmStock.In_Transit_Count = witCount - settlePcs;
+						if(stillOut > 0)
+						{
+							wmStock.Disputed_Count = wdispCount + stillOut;
+						}
+
+						restStr = ifnull(wmStock.Piece_Count,"0").toString().trim();
+						if(restStr == "")
+						{
+							restStr = "0";
+						}
+						if(restStr.toDecimal().toLong() <= 0 && (witCount - settlePcs) <= 0 && (wdispCount + stillOut) <= 0)
+						{
+							wmStock.Status = "Consumed";
+						}
+					}
+
+					if(stillOut > 0)
+					{
 						try
 						{
-							newDispId = insert into Stock_Dispute
+							wNoteTxt = "";
+							if(wRemark != "")
+							{
+								wNoteTxt = " - " + wRemark.replaceAll("\"","'");
+							}
+
+							wDispMat = null;
+							for each  wmRec2 in Waste_Master[ID == wi.Waste_Piece]
+							{
+								wDispMat = wmRec2.SKU;
+							}
+							wDispName = "Waste";
+							for each  rmw2 in Raw_Material[ID == wDispMat]
+							{
+								wDispName = ifnull(rmw2.Material_Display_Name,"").toString().trim();
+								if(wDispName == "")
+								{
+									wDispName = ifnull(rmw2.Name,"").toString().trim();
+								}
+								wDispName = wDispName.replaceAll("\"","'");
+							}
+
+							newWDispId = insert into Stock_Dispute
 							[
-								Material_Name=matName
-								Unit=matUnit
-								Is_Waste=false
+								Material_Name=wDispName
+								Unit="pcs"
+								Is_Waste=true
 								Direction="Outbound"
-								Issued_Qty=shortPend.get(pKey2)
-								Received_Qty=shortGot.get(pKey2)
-								Disputed_Qty=planShort
+								Issued_Qty=issuedW
+								Received_Qty=alreadyW + takePcs
+								Disputed_Qty=stillOut
 								Status="Open"
 								Raised_On=zoho.currentdate
-								Raised_Note=remark.replaceAll("\"","'")
+								Raised_Note=wRemark.replaceAll("\"","'")
 								Added_User=zoho.loginuser
 							];
 
-							for each  dsp in Stock_Dispute[ID == newDispId.toLong()]
+							for each  wdsp in Stock_Dispute[ID == newWDispId.toLong()]
 							{
-								dsp.Material = matId.toLong();
-								dsp.Supervisor = supId;
-								if(dispLotId != "")
+								wdsp.Waste_Piece = wi.Waste_Piece;
+								wdsp.Supervisor = supId;
+								if(wDispMat != null)
 								{
-									dsp.Lot = dispLotId.toLong();
+									wdsp.Material = wDispMat;
 								}
-								dsp.Plan = pKey2.toLong();
-								itemTxt = ifnull(shortItem.get(pKey2),"").toString();
-								if(itemTxt != "")
+								if(wi.Plan != null)
 								{
-									dsp.Plan_Item = itemTxt.toLong();
+									wdsp.Plan = wi.Plan;
+								}
+								if(wi.Plan_Item != null)
+								{
+									wdsp.Plan_Item = wi.Plan_Item;
 								}
 							}
-							dispRows.add(matName + "|" + planSoNo + "|" + matUnit + "|" + shortPend.get(pKey2) + "|" + shortGot.get(pKey2) + "|" + planShort);
+							if(newDispIdsJson != "")
+							{
+								newDispIdsJson = newDispIdsJson + ",";
+							}
+							newDispIdsJson = newDispIdsJson + "\"" + newWDispId + "\"";
 						}
-						catch (e2)
+						catch (e3)
 						{
-							info "Stock_Dispute not raised for " + matName + " on plan " + pKey2 + ": " + e2.toString();
+							info "Stock_Dispute not raised for waste piece " + wi.Waste_Piece + ": " + e3.toString();
 						}
 
 						if(errJson != "")
 						{
 							errJson = errJson + ",";
 						}
-						errJson = errJson + "\"" + matName + " (" + planSoNo + "): " + planShort + " short of the " + shortPend.get(pKey2) + " issued" + noteTxt + " - dispute raised\"";
+						errJson = errJson + "\"Waste piece " + ifnull(wi.Piece_Width,0) + "x" + ifnull(wi.Piece_Length,0) + ": " + stillOut + " of " + issuedW + " not received" + wNoteTxt + " - dispute raised\"";
 					}
-				}
-			}
-
-			if(okJson != "")
-			{
-				okJson = okJson + ",";
-			}
-			okJson = okJson + "{\"materialId\":\"" + matId + "\",\"received\":" + confirmedTot + ",\"short\":" + shortTot + "}";
-		}
-	}
-
-	//------------------------------------------------------------------------
-	// Waste pieces - rowId is a Waste_Movement id, a top-level record, so this
-	// is already a true point lookup. Unchanged in shape.
-	//------------------------------------------------------------------------
-	for each  wRaw in wastes
-	{
-		wm = wRaw.toMap();
-		rowId = ifnull(wm.get("rowId"),"").toString().trim();
-		wrStr = ifnull(wm.get("received"),"0").toString().trim();
-		if(wrStr == "")
-		{
-			wrStr = "0";
-		}
-		gotPcs = wrStr.toDecimal().toLong();
-		wRemark = ifnull(wm.get("remark"),"").toString();
-
-		if(rowId != "" && rowId.isNumber() == true)
-		{
-			for each  wi in Waste_Movement[ID == rowId.toLong() && Movement_Type == "Issued"]
-			{
-				issuedW = ifnull(wi.Piece_Count,0);
-
-				alreadyW = 0;
-				for each  rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
-				{
-					alreadyW = alreadyW + ifnull(rv.Piece_Count,0);
-				}
-
-				takePcs = gotPcs;
-				if(alreadyW + takePcs > issuedW)
-				{
-					takePcs = issuedW - alreadyW;
-				}
-				if(takePcs < 0)
-				{
-					takePcs = 0;
-				}
-
-				if(takePcs > 0)
-				{
-					newRvId = insert into Waste_Movement
-					[
-						Movement_Type="Received"
-						Piece_Width=ifnull(wi.Piece_Width,0)
-						Piece_Length=ifnull(wi.Piece_Length,0)
-						Piece_Count=takePcs
-						Cut_Size_Width=ifnull(wi.Cut_Size_Width,0)
-						Cut_Size_Length=ifnull(wi.Cut_Size_Length,0)
-						Moved_On=zoho.currentdate
-						Added_User=zoho.loginuser
-					];
-
-					for each  rvNew in Waste_Movement[ID == newRvId.toLong()]
-					{
-						rvNew.Parent_Movement = wi.ID;
-						rvNew.Waste_Piece = wi.Waste_Piece;
-						rvNew.Plan = wi.Plan;
-						rvNew.Plan_Item = wi.Plan_Item;
-						rvNew.Moved_By = supId;
-					}
-				}
-
-				stillOut = issuedW - (alreadyW + takePcs);
-				if(stillOut < 0)
-				{
-					stillOut = 0;
-				}
-
-				for each  wmStock in Waste_Master[ID == wi.Waste_Piece]
-				{
-					witStr = ifnull(wmStock.In_Transit_Count,"0").toString().trim();
-					if(witStr == "")
-					{
-						witStr = "0";
-					}
-					wdispStr = ifnull(wmStock.Disputed_Count,"0").toString().trim();
-					if(wdispStr == "")
-					{
-						wdispStr = "0";
-					}
-					witCount = witStr.toDecimal().toLong();
-					wdispCount = wdispStr.toDecimal().toLong();
-
-					settlePcs = takePcs + stillOut;
-					if(settlePcs > witCount)
-					{
-						settlePcs = witCount;
-					}
-
-					wmStock.In_Transit_Count = witCount - settlePcs;
-					if(stillOut > 0)
-					{
-						wmStock.Disputed_Count = wdispCount + stillOut;
-					}
-
-					restStr = ifnull(wmStock.Piece_Count,"0").toString().trim();
-					if(restStr == "")
-					{
-						restStr = "0";
-					}
-					if(restStr.toDecimal().toLong() <= 0 && (witCount - settlePcs) <= 0 && (wdispCount + stillOut) <= 0)
-					{
-						wmStock.Status = "Consumed";
-					}
-				}
-
-				if(stillOut > 0)
-				{
-					try
-					{
-						wNoteTxt = "";
-						if(wRemark != "")
-						{
-							wNoteTxt = " - " + wRemark.replaceAll("\"","'");
-						}
-
-						wDispMat = null;
-						for each  wmRec2 in Waste_Master[ID == wi.Waste_Piece]
-						{
-							wDispMat = wmRec2.SKU;
-						}
-						wDispName = "Waste";
-						for each  rmw2 in Raw_Material[ID == wDispMat]
-						{
-							wDispName = ifnull(rmw2.Material_Display_Name,"").toString().trim();
-							if(wDispName == "")
-							{
-								wDispName = ifnull(rmw2.Name,"").toString().trim();
-							}
-							wDispName = wDispName.replaceAll("\"","'");
-						}
-
-						newWDispId = insert into Stock_Dispute
-						[
-							Material_Name=wDispName
-							Unit="pcs"
-							Is_Waste=true
-							Direction="Outbound"
-							Issued_Qty=issuedW
-							Received_Qty=alreadyW + takePcs
-							Disputed_Qty=stillOut
-							Status="Open"
-							Raised_On=zoho.currentdate
-							Raised_Note=wRemark.replaceAll("\"","'")
-							Added_User=zoho.loginuser
-						];
-
-						for each  wdsp in Stock_Dispute[ID == newWDispId.toLong()]
-						{
-							wdsp.Waste_Piece = wi.Waste_Piece;
-							wdsp.Supervisor = supId;
-							if(wDispMat != null)
-							{
-								wdsp.Material = wDispMat;
-							}
-							if(wi.Plan != null)
-							{
-								wdsp.Plan = wi.Plan;
-							}
-							if(wi.Plan_Item != null)
-							{
-								wdsp.Plan_Item = wi.Plan_Item;
-							}
-						}
-						wSoNo = "";
-						if(wi.Plan != null)
-						{
-							wSoNo = ifnull(soNoByPlan.get(wi.Plan + ""),"").toString();
-						}
-						dispRows.add(wDispName + " (offcuts)|" + wSoNo + "|pcs|" + issuedW + "|" + (alreadyW + takePcs) + "|" + stillOut);
-					}
-					catch (e3)
-					{
-						info "Stock_Dispute not raised for waste piece " + wi.Waste_Piece + ": " + e3.toString();
-					}
-
-					if(errJson != "")
-					{
-						errJson = errJson + ",";
-					}
-					errJson = errJson + "\"Waste piece " + ifnull(wi.Piece_Width,0) + "x" + ifnull(wi.Piece_Length,0) + ": " + stillOut + " of " + issuedW + " not received" + wNoteTxt + " - dispute raised\"";
 				}
 			}
 		}
-	}
 
-	//------------------------------------------------------------------------
-	// PRINTED FABRIC PIECES: received per piece. issueLineId + voucherId now,
-	// so the parent voucher is a point lookup instead of a scan of every
-	// handover.
-	//------------------------------------------------------------------------
-	for each  pRaw in printed
-	{
-		pm = pRaw.toMap();
-		pIdTxt = ifnull(pm.get("issueLineId"),"").toString().trim();
-		pVTxt = ifnull(pm.get("voucherId"),"").toString().trim();
-		pGotStr = ifnull(pm.get("received"),"0").toString().trim();
-		if(pGotStr == "")
+		//------------------------------------------------------------------------
+		// PRINTED FABRIC PIECES: received per piece, one Issue_Line each. Sent on
+		// the first sweep call only.
+		//------------------------------------------------------------------------
+		for each  pRaw in printed
 		{
-			pGotStr = "0";
-		}
-		pGot = pGotStr.toDecimal();
-		pNoteTxt = ifnull(pm.get("remark"),"").toString();
-
-		if(pIdTxt == "" || pVTxt == "" || pGot < 0)
-		{
-			if(errJson != "")
+			pm = pRaw.toMap();
+			pIdTxt = ifnull(pm.get("issueLineId"),"").toString().trim();
+			pVTxt = ifnull(pm.get("voucherId"),"").toString().trim();
+			pGotStr = ifnull(pm.get("received"),"0").toString().trim();
+			if(pGotStr == "")
 			{
-				errJson = errJson + ",";
+				pGotStr = "0";
 			}
-			errJson = errJson + "\"Printed piece: invalid received quantity\"";
-		}
-		else
-		{
-			if(touchedVoucherIds.contains(pVTxt) == false)
-			{
-				touchedVoucherIds.add(pVTxt);
-			}
-			foundLn = false;
-			for each  miRec in Material_Issue[ID == pVTxt.toLong()]
-			{
-				for each  miLn in miRec.Issue_Lines
-				{
-					if(miLn.ID == pIdTxt.toLong())
-					{
-						foundLn = true;
-						lnQtyS = ifnull(miLn.Qty,"0").toString().trim();
-						if(lnQtyS == "")
-						{
-							lnQtyS = "0";
-						}
-						lnSetS = ifnull(miLn.Settled_Qty,"0").toString().trim();
-						if(lnSetS == "")
-						{
-							lnSetS = "0";
-						}
-						lnRemain = lnQtyS.toDecimal() - lnSetS.toDecimal();
+			pGot = pGotStr.toDecimal();
+			pNoteTxt = ifnull(pm.get("remark"),"").toString();
 
-						takeP = pGot;
-						if(takeP > lnRemain)
-						{
-							takeP = lnRemain;
-						}
-
-						miLn.Settled_Qty = lnSetS.toDecimal() + takeP;
-						stillOutP = lnRemain - takeP;
-
-						ppSpill = takeP;
-						if(miLn.Requirement != null)
-						{
-							ppItemId = null;
-							ppMatId = "";
-
-							for each  req in Material_Requirement[ID == miLn.Requirement]
-							{
-								ppItemId = req.Plan_Item;
-								ppMatId = ifnull(req.Material,"").toString().trim();
-
-								reqIssS = ifnull(req.Issued_Qty,"0").toString().trim();
-								if(reqIssS == "")
-								{
-									reqIssS = "0";
-								}
-								reqRcvS = ifnull(req.Received_Qty,"0").toString().trim();
-								if(reqRcvS == "")
-								{
-									reqRcvS = "0";
-								}
-
-								ppRoom = reqIssS.toDecimal() - reqRcvS.toDecimal();
-								if(ppRoom > ppSpill)
-								{
-									ppRoom = ppSpill;
-								}
-								if(ppRoom < 0)
-								{
-									ppRoom = 0.0;
-								}
-								req.Received_Qty = reqRcvS.toDecimal() + ppRoom;
-								ppSpill = ppSpill - ppRoom;
-							}
-
-							if(ppSpill > 0 && ppItemId != null && ppMatId != "")
-							{
-								for each  reqSib in Material_Requirement[Plan_Item == ppItemId]
-								{
-									if(ppSpill > 0 && (reqSib.ID + "") != (miLn.Requirement + "") && ifnull(reqSib.Material,"").toString().trim() == ppMatId)
-									{
-										sibIssS = ifnull(reqSib.Issued_Qty,"0").toString().trim();
-										if(sibIssS == "")
-										{
-											sibIssS = "0";
-										}
-										sibRcvS = ifnull(reqSib.Received_Qty,"0").toString().trim();
-										if(sibRcvS == "")
-										{
-											sibRcvS = "0";
-										}
-
-										sibRoom = sibIssS.toDecimal() - sibRcvS.toDecimal();
-										if(sibRoom > ppSpill)
-										{
-											sibRoom = ppSpill;
-										}
-										if(sibRoom > 0)
-										{
-											reqSib.Received_Qty = sibRcvS.toDecimal() + sibRoom;
-											ppSpill = ppSpill - sibRoom;
-										}
-									}
-								}
-							}
-						}
-
-						if(miLn.Material != null)
-						{
-							for each  rm in Raw_Material[ID == miLn.Material]
-							{
-								ptiS = ifnull(rm.In_Transit_Qty,"0").toString().trim();
-								if(ptiS == "")
-								{
-									ptiS = "0";
-								}
-								ptdS = ifnull(rm.Disputed_Qty,"0").toString().trim();
-								if(ptdS == "")
-								{
-									ptdS = "0";
-								}
-								ptiQty = ptiS.toDecimal();
-								ptDrain = lnRemain;
-								if(ptDrain > ptiQty)
-								{
-									ptDrain = ptiQty;
-								}
-								if(ptDrain < 0)
-								{
-									ptDrain = 0.0;
-								}
-								rm.In_Transit_Qty = ptiQty - ptDrain;
-								if(stillOutP > 0)
-								{
-									rm.Disputed_Qty = ptdS.toDecimal() + stillOutP;
-								}
-							}
-						}
-
-						if(miLn.Lot != null)
-						{
-							for each  lotSet in Raw_Material_Lot[ID == miLn.Lot]
-							{
-								ltiS = ifnull(lotSet.In_Transit_Qty,"0").toString().trim();
-								if(ltiS == "")
-								{
-									ltiS = "0";
-								}
-								ltdS = ifnull(lotSet.Disputed_Qty,"0").toString().trim();
-								if(ltdS == "")
-								{
-									ltdS = "0";
-								}
-								ltiQty = ltiS.toDecimal();
-								ltDrain = lnRemain;
-								if(ltDrain > ltiQty)
-								{
-									ltDrain = ltiQty;
-								}
-								if(ltDrain < 0)
-								{
-									ltDrain = 0.0;
-								}
-								lotSet.In_Transit_Qty = ltiQty - ltDrain;
-								if(stillOutP > 0)
-								{
-									lotSet.Disputed_Qty = ltdS.toDecimal() + stillOutP;
-								}
-							}
-						}
-						if(okJson != "")
-						{
-							okJson = okJson + ",";
-						}
-						okJson = okJson + "{\"id\":\"" + pIdTxt + "\",\"status\":\"success\"}";
-
-						if(stillOutP > 0)
-						{
-							pNoteShow = "";
-							if(pNoteTxt != "")
-							{
-								pNoteShow = " (" + pNoteTxt + ")";
-							}
-
-							try
-							{
-								pDispName = "";
-								pDispUnit = "";
-								for each  rm in Raw_Material[ID == miLn.Material]
-								{
-									pDispName = ifnull(rm.Material_Name,"").toString();
-									pDispUnit = ifnull(rm.Unit,"").toString();
-								}
-
-								pSoNo = "";
-								pPlanId = null;
-								if(miLn.Requirement != null)
-								{
-									for each  req in Material_Requirement[ID == miLn.Requirement]
-									{
-										if(req.Plan != null)
-										{
-											pPlanId = req.Plan;
-											pSoNo = ifnull(soNoByPlan.get(req.Plan + ""),"").toString();
-										}
-									}
-								}
-
-								newDispId = insert into Stock_Dispute
-								[
-									Material_Name=pDispName
-									Unit=pDispUnit
-									Is_Waste=false
-									Direction="Outbound"
-									Issued_Qty=lnRemain
-									Received_Qty=takeP
-									Disputed_Qty=stillOutP
-									Status="Open"
-									Raised_On=zoho.currentdate
-									Raised_Note="Short by " + stillOutP + " Mtr on receipt" + pNoteShow
-									Added_User=zoho.loginuser
-								];
-
-								for each  dsp in Stock_Dispute[ID == newDispId.toLong()]
-								{
-									dsp.Material = miLn.Material;
-									dsp.Supervisor = supId;
-									if(miLn.Lot != null)
-									{
-										dsp.Lot = miLn.Lot;
-									}
-									if(pPlanId != null)
-									{
-										dsp.Plan = pPlanId;
-									}
-									if(miLn.Requirement != null)
-									{
-										for each  req in Material_Requirement[ID == miLn.Requirement]
-										{
-											if(req.Plan_Item != null)
-											{
-												dsp.Plan_Item = req.Plan_Item;
-											}
-										}
-									}
-								}
-
-								dispRows.add(pDispName + " (printed piece)|" + pSoNo + "|Mtr|" + lnRemain + "|" + takeP + "|" + stillOutP);
-							}
-							catch (e3)
-							{
-								info "Stock_Dispute not raised for printed piece " + pIdTxt + ": " + e3.toString();
-							}
-
-							if(errJson != "")
-							{
-								errJson = errJson + ",";
-							}
-							errJson = errJson + "\"Printed piece: " + stillOutP + " of " + lnRemain + " Mtr not received" + pNoteShow + " - dispute raised\"";
-						}
-					}
-				}
-			}
-
-			if(foundLn == false)
+			if(pIdTxt == "" || pVTxt == "" || pGot < 0)
 			{
 				if(errJson != "")
 				{
 					errJson = errJson + ",";
 				}
-				errJson = errJson + "\"Printed piece " + pIdTxt + " not found\"";
-			}
-		}
-	}
-
-	//------------------------------------------------------------------------
-	// VOUCHER STATUS, straight off the lines this receipt just settled.
-	//
-	// Runs on EVERY chunk, not just the finalizing one - the flip is per
-	// voucher and each Issue_Line is only ever settled once, so a chunk that
-	// happens to settle a voucher's last line closes it there and then. It does
-	// not wait for finalize, does not look at Material_Issue.Plan, and does not
-	// need the voucher's plan to be in plansTouched - the exact three ways the
-	// sweep-only flip below could miss a voucher.
-	//
-	// Received  = every Issue_Line now has Settled_Qty >= Qty.
-	// Partially_Received = at least one line settled, some still owed.
-	// A voucher already "Received" is left alone (forward only).
-	//------------------------------------------------------------------------
-	for each  tvId in touchedVoucherIds
-	{
-		try
-		{
-			for each  vRec in Material_Issue[ID == tvId.toLong()]
-			{
-				if(ifnull(vRec.Issue_Status,"").toString().trim() != "Received")
-				{
-					allLinesSettled = true;
-					anyLine = false;
-					for each  vLn in vRec.Issue_Lines
-					{
-						anyLine = true;
-						vlQ = ifnull(vLn.Qty,"0").toString().trim();
-						if(vlQ == "")
-						{
-							vlQ = "0";
-						}
-						vlS = ifnull(vLn.Settled_Qty,"0").toString().trim();
-						if(vlS == "")
-						{
-							vlS = "0";
-						}
-						if(vlS.toDecimal() < vlQ.toDecimal())
-						{
-							allLinesSettled = false;
-						}
-					}
-					if(anyLine == true && allLinesSettled == true)
-					{
-						vRec.Issue_Status = "Received";
-					}
-					else
-					{
-						vRec.Issue_Status = "Partially_Received";
-					}
-				}
-			}
-		}
-		catch (eVs)
-		{
-			info "Issue_Status not set for voucher " + tvId + ": " + eVs.toString();
-		}
-	}
-
-	//------------------------------------------------------------------------
-	// READINESS SWEEP - ONLY the plans this receipt touched, and ONLY on the
-	// finalizing call. A non-last chunk has only half-applied the settlements,
-	// so sweeping now would roll a status on data that is still arriving.
-	//
-	// The widget named the plans; a receipt touches a handful, so this stays
-	// bounded however many plans are open. Same per-item / per-requirement /
-	// per-waste checks as before, and the same forward-only status guard.
-	//------------------------------------------------------------------------
-	// Take at most SWEEP_BUDGET plan ids off the front of the list this call was
-	// given; sweepRemaining is everything past that, handed back for the next
-	// finalize call. sweepAllDone is true only when nothing was left over.
-	sweepPlans = List();
-	sweepRemainingJson = "";
-	sweepAllDone = true;
-	if(doFinalize == true)
-	{
-		swIdx = 0;
-		for each  ptTake in touchedPlanIds
-		{
-			if(swIdx < SWEEP_BUDGET)
-			{
-				sweepPlans.add(ptTake);
+				errJson = errJson + "\"Printed piece: invalid received quantity\"";
 			}
 			else
 			{
-				sweepAllDone = false;
-				if(sweepRemainingJson != "")
+				foundLn = false;
+				for each  miRec in Material_Issue[ID == pVTxt.toLong()]
 				{
-					sweepRemainingJson = sweepRemainingJson + ",";
-				}
-				sweepRemainingJson = sweepRemainingJson + "\"" + ptTake + "\"";
-			}
-			swIdx = swIdx + 1;
-		}
-	}
-	for each  ptKey in sweepPlans
-	{
-		planId = ptKey.toLong();
-		planStNow = "";
-		for each  planHdr in Production_Planning[ID == planId]
-		{
-			planStNow = ifnull(planHdr.Order_Status,"").toString();
-		}
-
-		planItems = Plan_Item[Plan == planId];
-		allReadyCount = 0;
-		totalItemCount = 0;
-
-		for each  pItem in planItems
-		{
-			totalItemCount = totalItemCount + 1;
-			itemReady = true;
-			reqCount = 0;
-
-			for each  row in Material_Requirement[Plan_Item == pItem.ID]
-			{
-				reqCount = reqCount + 1;
-				isFab = row.Is_Fabric;
-
-				reqStr = ifnull(row.Required_Qty,"0").toString().trim();
-				if(reqStr == "")
-				{
-					reqStr = "0";
-				}
-				issStr = ifnull(row.Issued_Qty,"0").toString().trim();
-				if(issStr == "")
-				{
-					issStr = "0";
-				}
-				recStr = ifnull(row.Received_Qty,"0").toString().trim();
-				if(recStr == "")
-				{
-					recStr = "0";
-				}
-
-				reqQty = reqStr.toDecimal();
-				issQty = issStr.toDecimal();
-				recQty = recStr.toDecimal();
-
-				if(recQty < issQty)
-				{
-					itemReady = false;
-				}
-
-				if(isFab == true)
-				{
-					reqPcs = ifnull(row.Required_Pieces,0);
-					issPcs = ifnull(row.Pieces_From_Waste,0) + ifnull(row.Pieces_From_Raw,0);
-					if(reqPcs <= 0 || issPcs < reqPcs)
+					for each  miLn in miRec.Issue_Lines
 					{
-						itemReady = false;
+						if(miLn.ID == pIdTxt.toLong())
+						{
+							foundLn = true;
+							lnQtyS = ifnull(miLn.Qty,"0").toString().trim();
+							if(lnQtyS == "")
+							{
+								lnQtyS = "0";
+							}
+							lnSetS = ifnull(miLn.Settled_Qty,"0").toString().trim();
+							if(lnSetS == "")
+							{
+								lnSetS = "0";
+							}
+							lnRemain = lnQtyS.toDecimal() - lnSetS.toDecimal();
+
+							takeP = pGot;
+							if(takeP > lnRemain)
+							{
+								takeP = lnRemain;
+							}
+
+							miLn.Settled_Qty = lnSetS.toDecimal() + takeP;
+							stillOutP = lnRemain - takeP;
+
+							ppSpill = takeP;
+							if(miLn.Requirement != null)
+							{
+								ppItemId = null;
+								ppMatId = "";
+
+								for each  req in Material_Requirement[ID == miLn.Requirement]
+								{
+									ppItemId = req.Plan_Item;
+									ppMatId = ifnull(req.Material,"").toString().trim();
+
+									reqIssS = ifnull(req.Issued_Qty,"0").toString().trim();
+									if(reqIssS == "")
+									{
+										reqIssS = "0";
+									}
+									reqRcvS = ifnull(req.Received_Qty,"0").toString().trim();
+									if(reqRcvS == "")
+									{
+										reqRcvS = "0";
+									}
+
+									ppRoom = reqIssS.toDecimal() - reqRcvS.toDecimal();
+									if(ppRoom > ppSpill)
+									{
+										ppRoom = ppSpill;
+									}
+									if(ppRoom < 0)
+									{
+										ppRoom = 0.0;
+									}
+									req.Received_Qty = reqRcvS.toDecimal() + ppRoom;
+									ppSpill = ppSpill - ppRoom;
+								}
+
+								if(ppSpill > 0 && ppItemId != null && ppMatId != "")
+								{
+									for each  reqSib in Material_Requirement[Plan_Item == ppItemId]
+									{
+										if(ppSpill > 0 && (reqSib.ID + "") != (miLn.Requirement + "") && ifnull(reqSib.Material,"").toString().trim() == ppMatId)
+										{
+											sibIssS = ifnull(reqSib.Issued_Qty,"0").toString().trim();
+											if(sibIssS == "")
+											{
+												sibIssS = "0";
+											}
+											sibRcvS = ifnull(reqSib.Received_Qty,"0").toString().trim();
+											if(sibRcvS == "")
+											{
+												sibRcvS = "0";
+											}
+
+											sibRoom = sibIssS.toDecimal() - sibRcvS.toDecimal();
+											if(sibRoom > ppSpill)
+											{
+												sibRoom = ppSpill;
+											}
+											if(sibRoom > 0)
+											{
+												reqSib.Received_Qty = sibRcvS.toDecimal() + sibRoom;
+												ppSpill = ppSpill - sibRoom;
+											}
+										}
+									}
+								}
+							}
+
+							if(miLn.Material != null)
+							{
+								for each  rm in Raw_Material[ID == miLn.Material]
+								{
+									ptiS = ifnull(rm.In_Transit_Qty,"0").toString().trim();
+									if(ptiS == "")
+									{
+										ptiS = "0";
+									}
+									ptdS = ifnull(rm.Disputed_Qty,"0").toString().trim();
+									if(ptdS == "")
+									{
+										ptdS = "0";
+									}
+									ptiQty = ptiS.toDecimal();
+									ptDrain = lnRemain;
+									if(ptDrain > ptiQty)
+									{
+										ptDrain = ptiQty;
+									}
+									if(ptDrain < 0)
+									{
+										ptDrain = 0.0;
+									}
+									rm.In_Transit_Qty = ptiQty - ptDrain;
+									if(stillOutP > 0)
+									{
+										rm.Disputed_Qty = ptdS.toDecimal() + stillOutP;
+									}
+								}
+							}
+
+							if(miLn.Lot != null)
+							{
+								for each  lotSet in Raw_Material_Lot[ID == miLn.Lot]
+								{
+									ltiS = ifnull(lotSet.In_Transit_Qty,"0").toString().trim();
+									if(ltiS == "")
+									{
+										ltiS = "0";
+									}
+									ltdS = ifnull(lotSet.Disputed_Qty,"0").toString().trim();
+									if(ltdS == "")
+									{
+										ltdS = "0";
+									}
+									ltiQty = ltiS.toDecimal();
+									ltDrain = lnRemain;
+									if(ltDrain > ltiQty)
+									{
+										ltDrain = ltiQty;
+									}
+									if(ltDrain < 0)
+									{
+										ltDrain = 0.0;
+									}
+									lotSet.In_Transit_Qty = ltiQty - ltDrain;
+									if(stillOutP > 0)
+									{
+										lotSet.Disputed_Qty = ltdS.toDecimal() + stillOutP;
+									}
+								}
+							}
+							if(okJson != "")
+							{
+								okJson = okJson + ",";
+							}
+							okJson = okJson + "{\"id\":\"" + pIdTxt + "\",\"status\":\"success\"}";
+
+							if(stillOutP > 0)
+							{
+								pNoteShow = "";
+								if(pNoteTxt != "")
+								{
+									pNoteShow = " (" + pNoteTxt + ")";
+								}
+
+								try
+								{
+									pDispName = "";
+									pDispUnit = "";
+									for each  rm in Raw_Material[ID == miLn.Material]
+									{
+										pDispName = ifnull(rm.Material_Name,"").toString();
+										pDispUnit = ifnull(rm.Unit,"").toString();
+									}
+
+									pSoNo = "";
+									pPlanId = null;
+									if(miLn.Requirement != null)
+									{
+										for each  req in Material_Requirement[ID == miLn.Requirement]
+										{
+											if(req.Plan != null)
+											{
+												pPlanId = req.Plan;
+												pSoNo = ifnull(soNoByPlan.get(req.Plan + ""),"").toString();
+											}
+										}
+									}
+
+									newDispId = insert into Stock_Dispute
+									[
+										Material_Name=pDispName
+										Unit=pDispUnit
+										Is_Waste=false
+										Direction="Outbound"
+										Issued_Qty=lnRemain
+										Received_Qty=takeP
+										Disputed_Qty=stillOutP
+										Status="Open"
+										Raised_On=zoho.currentdate
+										Raised_Note="Short by " + stillOutP + " Mtr on receipt" + pNoteShow
+										Added_User=zoho.loginuser
+									];
+
+									for each  dsp in Stock_Dispute[ID == newDispId.toLong()]
+									{
+										dsp.Material = miLn.Material;
+										dsp.Supervisor = supId;
+										if(miLn.Lot != null)
+										{
+											dsp.Lot = miLn.Lot;
+										}
+										if(pPlanId != null)
+										{
+											dsp.Plan = pPlanId;
+										}
+										if(miLn.Requirement != null)
+										{
+											for each  req in Material_Requirement[ID == miLn.Requirement]
+											{
+												if(req.Plan_Item != null)
+												{
+													dsp.Plan_Item = req.Plan_Item;
+												}
+											}
+										}
+									}
+
+									if(newDispIdsJson != "")
+									{
+										newDispIdsJson = newDispIdsJson + ",";
+									}
+									newDispIdsJson = newDispIdsJson + "\"" + newDispId + "\"";
+								}
+								catch (e3)
+								{
+									info "Stock_Dispute not raised for printed piece " + pIdTxt + ": " + e3.toString();
+								}
+
+								if(errJson != "")
+								{
+									errJson = errJson + ",";
+								}
+								errJson = errJson + "\"Printed piece: " + stillOutP + " of " + lnRemain + " Mtr not received" + pNoteShow + " - dispute raised\"";
+							}
+						}
 					}
 				}
-				else
+
+				if(foundLn == false)
 				{
-					if(reqQty <= 0 || issQty < reqQty)
+					if(errJson != "")
 					{
-						itemReady = false;
+						errJson = errJson + ",";
+					}
+					errJson = errJson + "\"Printed piece " + pIdTxt + " not found\"";
+				}
+			}
+		}
+	}
+	else
+	{
+		//================================================================
+		// FINALIZE - one phase per call.
+		//================================================================
+		ph = ifnull(fnCur.get("ph"),"vouchers").toString().trim();
+		if(ph == "")
+		{
+			ph = "vouchers";
+		}
+
+		if(ph == "vouchers")
+		{
+			//----------------------------------------------------------
+			// Recheck Issue_Status for the vouchers this receipt confirmed.
+			// Moved here from every sweep slice - nothing reads voucher
+			// status mid-receipt, and re-scanning a voucher's whole subform
+			// per slice was O(lines squared).
+			//----------------------------------------------------------
+			vi = 0;
+			viS = ifnull(fnCur.get("vi"),"0").toString().trim();
+			if(viS != "" && viS.isNumber() == true)
+			{
+				vi = viS.toLong();
+			}
+
+			vc = 0;
+			vProc = 0;
+			for each  vRaw in vouchersIn
+			{
+				if(vc >= vi && vProc < VOUCHER_BUDGET)
+				{
+					vt2 = ifnull(vRaw,"").toString().trim();
+					if(vt2 != "" && vt2.isNumber() == true)
+					{
+						try
+						{
+							for each  vR2 in Material_Issue[ID == vt2.toLong()]
+							{
+								if(ifnull(vR2.Issue_Status,"").toString().trim() != "Received")
+								{
+									allS = true;
+									anyL = false;
+									for each  vL2 in vR2.Issue_Lines
+									{
+										anyL = true;
+										q2 = ifnull(vL2.Qty,"0").toString().trim();
+										if(q2 == "")
+										{
+											q2 = "0";
+										}
+										s2 = ifnull(vL2.Settled_Qty,"0").toString().trim();
+										if(s2 == "")
+										{
+											s2 = "0";
+										}
+										if(s2.toDecimal() < q2.toDecimal())
+										{
+											allS = false;
+										}
+									}
+									if(anyL == true && allS == true)
+									{
+										vR2.Issue_Status = "Received";
+									}
+									else
+									{
+										vR2.Issue_Status = "Partially_Received";
+									}
+								}
+							}
+						}
+						catch (evs)
+						{
+							info "Issue_Status not set for voucher " + vt2 + ": " + evs.toString();
+						}
+					}
+					vProc = vProc + 1;
+				}
+				vc = vc + 1;
+			}
+
+			newVi = vi + vProc;
+			finalizeDone = false;
+			if(newVi >= vouchersIn.size())
+			{
+				finalizeCursorJson = "{\"ph\":\"items\",\"pi\":0,\"ii\":0}";
+			}
+			else
+			{
+				finalizeCursorJson = "{\"ph\":\"vouchers\",\"vi\":" + newVi + "}";
+			}
+		}
+		else if(ph == "items")
+		{
+			//----------------------------------------------------------
+			// READINESS SWEEP over plansTouched, BUDGETED BY Plan_Item
+			// COUNT. pi = plan index, ii = item offset within that plan.
+			//----------------------------------------------------------
+			pi = 0;
+			piS = ifnull(fnCur.get("pi"),"0").toString().trim();
+			if(piS != "" && piS.isNumber() == true)
+			{
+				pi = piS.toLong();
+			}
+			ii = 0;
+			iiS = ifnull(fnCur.get("ii"),"0").toString().trim();
+			if(iiS != "" && iiS.isNumber() == true)
+			{
+				ii = iiS.toLong();
+			}
+
+			itemsThisCall = 0;
+			pc = 0;
+			nextPi = pi;
+			nextIi = ii;
+			stopped = false;
+
+			for each  ptRaw in plansTouchedIn
+			{
+				if(stopped == false && pc >= pi && itemsThisCall < ITEM_BUDGET)
+				{
+					pTxt2 = ifnull(ptRaw,"").toString().trim();
+					if(pTxt2 != "" && pTxt2.isNumber() == true)
+					{
+						plId = pTxt2.toLong();
+						plSt = "";
+						for each  plH in Production_Planning[ID == plId]
+						{
+							plSt = ifnull(plH.Order_Status,"").toString();
+						}
+
+						skipN = 0;
+						if(pc == pi)
+						{
+							skipN = ii;
+						}
+						iC = 0;
+						sweptHere = 0;
+
+						for each  pItem in Plan_Item[Plan == plId]
+						{
+							if(iC >= skipN && itemsThisCall < ITEM_BUDGET)
+							{
+								iStat = ifnull(pItem.Item_Status,"").toString();
+								if(iStat == "Awaiting_Material")
+								{
+									itemReady = true;
+									reqCount = 0;
+									for each  row in Material_Requirement[Plan_Item == pItem.ID]
+									{
+										reqCount = reqCount + 1;
+										isFab = row.Is_Fabric;
+
+										issStr = ifnull(row.Issued_Qty,"0").toString().trim();
+										if(issStr == "")
+										{
+											issStr = "0";
+										}
+										recStr = ifnull(row.Received_Qty,"0").toString().trim();
+										if(recStr == "")
+										{
+											recStr = "0";
+										}
+										reqStr = ifnull(row.Required_Qty,"0").toString().trim();
+										if(reqStr == "")
+										{
+											reqStr = "0";
+										}
+										issQty = issStr.toDecimal();
+										recQty = recStr.toDecimal();
+										reqQty = reqStr.toDecimal();
+
+										if(recQty < issQty)
+										{
+											itemReady = false;
+										}
+
+										if(isFab == true)
+										{
+											reqPcs = ifnull(row.Required_Pieces,0);
+											issPcs = ifnull(row.Pieces_From_Waste,0) + ifnull(row.Pieces_From_Raw,0);
+											if(reqPcs <= 0 || issPcs < reqPcs)
+											{
+												itemReady = false;
+											}
+										}
+										else
+										{
+											if(reqQty <= 0 || issQty < reqQty)
+											{
+												itemReady = false;
+											}
+										}
+									}
+
+									if(reqCount == 0)
+									{
+										itemReady = false;
+									}
+
+									for each  wiR in Waste_Movement[Plan_Item == pItem.ID && Movement_Type == "Issued"]
+									{
+										wC = ifnull(wiR.Piece_Count,0);
+										wR = 0;
+										for each  rvR in Waste_Movement[Parent_Movement == wiR.ID && Movement_Type == "Received"]
+										{
+											wR = wR + ifnull(rvR.Piece_Count,0);
+										}
+										if(wR < wC)
+										{
+											itemReady = false;
+										}
+									}
+
+									if(itemReady == true)
+									{
+										pItem.Item_Status = "Ready_For_Production";
+									}
+								}
+								itemsThisCall = itemsThisCall + 1;
+								sweptHere = sweptHere + 1;
+							}
+							iC = iC + 1;
+						}
+
+						doneIi = skipN + sweptHere;
+						if(doneIi >= iC)
+						{
+							// Plan's items fully swept - roll Order_Status off a
+							// count, not a re-walk. Forward-only.
+							awC = Plan_Item[Plan == plId && Item_Status == "Awaiting_Material"].count();
+							if(iC > 0 && plSt != "In Progress" && plSt != "Production Complete")
+							{
+								if(awC == 0)
+								{
+									for each  pu in Production_Planning[ID == plId]
+									{
+										pu.Order_Status = "Material Ready";
+									}
+								}
+								else if(plSt == "Pending" && awC < iC)
+								{
+									for each  pu in Production_Planning[ID == plId]
+									{
+										pu.Order_Status = "Partially Received";
+									}
+								}
+							}
+							nextPi = pc + 1;
+							nextIi = 0;
+						}
+						else
+						{
+							nextPi = pc;
+							nextIi = doneIi;
+							stopped = true;
+						}
+					}
+					else
+					{
+						nextPi = pc + 1;
+						nextIi = 0;
+					}
+				}
+				pc = pc + 1;
+			}
+
+			finalizeDone = false;
+			if(nextPi >= plansTouchedIn.size())
+			{
+				finalizeCursorJson = "{\"ph\":\"transfer\"}";
+			}
+			else
+			{
+				finalizeCursorJson = "{\"ph\":\"items\",\"pi\":" + nextPi + ",\"ii\":" + nextIi + "}";
+			}
+		}
+		else if(ph == "transfer")
+		{
+			//----------------------------------------------------------
+			// MOVE THE CLOTH TO THE PRODUCTION WAREHOUSE. Its own try/catch;
+			// stock has already moved, so a transfer failure must not make a
+			// completed receipt look failed.
+			//----------------------------------------------------------
+			try
+			{
+				info "transfer after receipt -> " + thisapp.postTransferOrders("auto");
+			}
+			catch (eto)
+			{
+				info "postTransferOrders after receipt threw: " + eto.toString();
+			}
+			finalizeCursorJson = "{\"ph\":\"notify\"}";
+			finalizeDone = false;
+		}
+		else if(ph == "notify")
+		{
+			//----------------------------------------------------------
+			// Build the dispute digest from the ids this receipt raised, so
+			// the mail block below sends ONE pair of mails for the whole
+			// receipt rather than one per sweep slice.
+			//----------------------------------------------------------
+			for each  didRaw in disputeIdsIn
+			{
+				didTxt = ifnull(didRaw,"").toString().trim();
+				if(didTxt != "" && didTxt.isNumber() == true)
+				{
+					for each  ndsp in Stock_Dispute[ID == didTxt.toLong()]
+					{
+						ndName = ifnull(ndsp.Material_Name,"").toString().replaceAll("\"","'");
+						if(ifnull(ndsp.Is_Waste,false) == true)
+						{
+							ndName = ndName + " (offcuts)";
+						}
+						ndUnit = ifnull(ndsp.Unit,"").toString();
+						ndIss = ifnull(ndsp.Issued_Qty,0);
+						ndRcv = ifnull(ndsp.Received_Qty,0);
+						ndShort = ifnull(ndsp.Disputed_Qty,0);
+						ndSo = "";
+						if(ndsp.Plan != null)
+						{
+							for each  npp in Production_Planning[ID == ndsp.Plan]
+							{
+								npSo = ifnull(npp.Sales_Order,"").toString().trim();
+								if(npSo != "")
+								{
+									for each  nso in Sales_Order[ID == npSo.toLong()]
+									{
+										ndSo = ifnull(nso.Sales_Order,"").toString().replaceAll("\"","'");
+									}
+								}
+							}
+						}
+						dispRows.add(ndName + "|" + ndSo + "|" + ndUnit + "|" + ndIss + "|" + ndRcv + "|" + ndShort);
 					}
 				}
 			}
-
-			if(reqCount == 0)
-			{
-				itemReady = false;
-			}
-
-			itemIssued = Waste_Movement[Plan_Item == pItem.ID && Movement_Type == "Issued"];
-			for each  wi in itemIssued
-			{
-				wCount = ifnull(wi.Piece_Count,0);
-				wRecv = 0;
-				for each  rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
-				{
-					wRecv = wRecv + ifnull(rv.Piece_Count,0);
-				}
-				if(wRecv < wCount)
-				{
-					itemReady = false;
-				}
-			}
-
-			if(itemReady == true && pItem.Item_Status == "Awaiting_Material")
-			{
-				pItem.Item_Status = "Ready_For_Production";
-			}
-
-			if(pItem.Item_Status != "Awaiting_Material")
-			{
-				allReadyCount = allReadyCount + 1;
-			}
+			finalizeCursorJson = "{\"ph\":\"done\"}";
+			finalizeDone = true;
 		}
-
-		if(totalItemCount > 0 && allReadyCount > 0 && planStNow != "In Progress" && planStNow != "Production Complete")
+		else
 		{
-			if(allReadyCount == totalItemCount)
-			{
-				for each  planUpd in Production_Planning[ID == planId]
-				{
-					planUpd.Order_Status = "Material Ready";
-				}
-			}
-			else if(planStNow == "Pending")
-			{
-				for each  planUpd in Production_Planning[ID == planId]
-				{
-					planUpd.Order_Status = "Partially Received";
-				}
-			}
-		}
-
-		// Issue_Status is NOT touched here any more. It used to flip every
-		// Material_Issue[Plan == planId] to Received/Partially_Received off the
-		// plan-level recvComplete flag - which is wrong for a voucher whose own
-		// lines are not all settled, and which missed a voucher whose Plan field
-		// was empty or pointed at another plan of a multi-plan handover. The
-		// per-voucher block above (driven by touchedVoucherIds and each
-		// voucher's own Issue_Lines) is the single place it is set now.
-	}
-
-	//--------------------------------------------------------------------
-	// MOVE THE CLOTH TO THE PRODUCTION WAREHOUSE IN ZOHO INVENTORY.
-	//
-	// FINALIZING CALL ONLY - one transfer sweep for the whole receipt, not one
-	// per chunk. It reads Settled_Qty - Transferred_Qty off the lines, which
-	// every chunk before this has been writing, so by here the full receipt is
-	// settled and one "auto" run posts every voucher's difference.
-	//
-	// Its own try/catch, and last inside the block. Stock has already moved,
-	// disputes raised, Item_Status rolled. A transfer that fails must never make
-	// a completed receipt look failed.
-	//--------------------------------------------------------------------
-	if(doFinalize == true && sweepAllDone == true)
-	{
-		try
-		{
-			info "transfer after receipt -> " + thisapp.postTransferOrders("auto");
-		}
-		catch (eTo)
-		{
-			info "postTransferOrders after receipt threw: " + eTo.toString();
+			finalizeCursorJson = "{\"ph\":\"done\"}";
+			finalizeDone = true;
 		}
 	}
 
@@ -1248,7 +1528,7 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	catch (e)
 	{
 		// Surfaces as an alert in the widget via the existing errors[] handling.
-		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"received\":[],\"sweepRemaining\":[],\"sweepDone\":true}";
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"received\":[],\"disputeIds\":[],\"sweepCursor\":null,\"sweepDone\":true,\"finalizeCursor\":{\"ph\":\"done\"},\"finalizeDone\":true}";
 	}
 
 	//------------------------------------------------------------------------
@@ -1256,9 +1536,9 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 	// that has to answer is the STORE. Admin gets its own copy. Two mails, not
 	// one with two recipients - they are not the same message.
 	//
-	// Outside the main try/catch and wrapped in its own. Everything is already
-	// written by here, and a mail failure must not turn a completed receipt into
-	// an error the supervisor will try again.
+	// dispRows is filled ONLY by the finalize "notify" phase, so this fires once
+	// per receipt. Outside the main try/catch and wrapped in its own - a mail
+	// failure must not turn a completed receipt into an error he retries.
 	//------------------------------------------------------------------------
 	adminTo = "gurdhian.helios@gmail.com";
 	storeTo = "gurdhian.helios@gmail.com";
@@ -1336,10 +1616,8 @@ string receiveMaterials(string supervisorId, string receiptsJson)
 
 	// Built by hand - List.toString() does not reliably wrap in [].
 	//
-	// sweepRemaining: plan ids a finalize call did not get to (it caps at
-	// SWEEP_BUDGET). The widget calls finalize again with exactly these until the
-	// list comes back empty; sweepDone == true means the readiness sweep AND the
-	// warehouse transfer are both finished. On a non-finalize chunk both are
-	// their empty / done defaults and the widget ignores them.
-	return "{\"errors\":[" + errJson + "],\"received\":[" + okJson + "],\"sweepRemaining\":[" + sweepRemainingJson + "],\"sweepDone\":" + sweepAllDone + "}";
+	// sweepCursor / sweepDone drive the sweep loop; finalizeCursor / finalizeDone
+	// drive the finalize loop. disputeIds is THIS slice's new disputes, unioned
+	// by the widget and handed to the "notify" phase.
+	return "{\"errors\":[" + errJson + "],\"received\":[" + okJson + "],\"disputeIds\":[" + newDispIdsJson + "],\"sweepCursor\":" + sweepCursorJson + ",\"sweepDone\":" + sweepDone + ",\"finalizeCursor\":" + finalizeCursorJson + ",\"finalizeDone\":" + finalizeDone + "}";
 }

@@ -3153,6 +3153,106 @@ th.col-num {
     white-space: nowrap;
 }
 
+/* ---- Phase 2: read-only "where this goes" breakdown under a material row ---- */
+
+.mat-name-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+/* The chevron is a real button here, not the card-header glyph, so size it down
+   and give it a hover of its own. */
+.chevron.mat-bd-toggle,
+.chevron.bd-chevron {
+    width: 1.4rem;
+    height: 1.4rem;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    background: rgba(37, 99, 235, 0.08);
+    box-shadow: none;
+    flex: 0 0 auto;
+}
+.chevron.mat-bd-toggle:hover { background: rgba(37, 99, 235, 0.16); }
+.chevron.mat-bd-toggle.is-open,
+.chevron.bd-chevron.is-open { transform: rotate(90deg); }
+
+.mat-breakdown > td {
+    padding: 0;
+    background: #f8fafc;
+    border-top: 1px solid var(--border);
+}
+
+.bd-wrap { padding: 0.75rem 1rem 0.9rem 2.4rem; }
+
+.bd-head {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+}
+
+.bd-order { border-top: 1px solid #eef2f6; }
+.bd-order:first-of-type { border-top: none; }
+
+.bd-order-head {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 0.45rem 0;
+    font-family: inherit;
+    font-size: 0.85rem;
+    color: var(--text-main);
+    cursor: pointer;
+    text-align: left;
+}
+.bd-order-head:hover .bd-order-name { text-decoration: underline; }
+
+.bd-order-name { font-weight: 600; }
+.bd-order-meta { color: var(--text-muted); font-size: 0.8rem; }
+.bd-order-meta b { color: var(--text-main); font-weight: 600; }
+
+.bd-order-items { padding: 0.15rem 0 0.6rem 1.95rem; }
+
+.bd-loading,
+.bd-empty {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    padding: 0.4rem 0;
+}
+
+.bd-item-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+}
+.bd-item-table th {
+    text-align: left;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    font-weight: 600;
+    padding: 0.25rem 0.6rem 0.25rem 0;
+    border-bottom: 1px solid #eef2f6;
+}
+.bd-item-table td {
+    padding: 0.35rem 0.6rem 0.35rem 0;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: top;
+}
+.bd-item-table td.bd-owed,
+.bd-item-table th.bd-owed {
+    text-align: right;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
 /* Which lot an offcut goes back to, in the waste dialog. Fixed when the cloth
    came off one lot; a picker when it was split, because only he can say. */
 .w-lot-fixed {

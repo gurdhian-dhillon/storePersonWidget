@@ -1,0 +1,113 @@
+string getReceiveItemBreakdown(string planId, string materialId)
+{
+	// READ-ONLY. For ONE plan and ONE material, the items on that plan that carry
+	// a requirement for it - SKU, name, still-owed metres/qty and pieces, and the
+	// item's status. The receive screen loads this lazily when the supervisor
+	// drills into an order under a material row, so a 100-order handover costs
+	// nothing until he opens one.
+	//
+	// BOUNDED: Plan_Item[Plan == planId], then that item's Material_Requirement
+	// rows. One plan's items - never a factory walk. Material is matched in code,
+	// not in the query (a lookup "==" filter on Material_Requirement is unreliable
+	// - the printed-piece sibling scan in receiveMaterials matches it in code for
+	// the same reason).
+
+	itemsJson = "";
+
+	try
+	{
+		pTxt = ifnull(planId,"").toString().trim();
+		mTxt = ifnull(materialId,"").toString().trim();
+		if(pTxt == "" || pTxt.isNumber() == false || mTxt == "" || mTxt.isNumber() == false)
+		{
+			return "{\"errors\":[\"planId and materialId are required\"],\"items\":[]}";
+		}
+		pId = pTxt.toLong();
+
+		// sort by on its own assignment, never inline in a for-each header.
+		plItems = Plan_Item[Plan == pId] sort by ID;
+		for each  pItem in plItems
+		{
+			owedQty = 0.0;
+			reqPcs = 0;
+			issPcs = 0;
+			isFab = false;
+			anyReq = false;
+			srcTxt = "";
+
+			for each  rq in Material_Requirement[Plan_Item == pItem.ID]
+			{
+				if(ifnull(rq.Material,"").toString().trim() == mTxt)
+				{
+					anyReq = true;
+					if(ifnull(rq.Is_Fabric,false) == true)
+					{
+						isFab = true;
+					}
+
+					issS = ifnull(rq.Issued_Qty,"0").toString().trim();
+					if(issS == "")
+					{
+						issS = "0";
+					}
+					recS = ifnull(rq.Received_Qty,"0").toString().trim();
+					if(recS == "")
+					{
+						recS = "0";
+					}
+					gap = issS.toDecimal() - recS.toDecimal();
+					if(gap > 0)
+					{
+						owedQty = owedQty + gap;
+					}
+
+					reqPcs = reqPcs + ifnull(rq.Required_Pieces,0);
+					issPcs = issPcs + ifnull(rq.Pieces_From_Raw,0) + ifnull(rq.Pieces_From_Waste,0);
+
+					if(srcTxt == "")
+					{
+						srcTxt = ifnull(rq.Source,"").toString().trim();
+					}
+				}
+			}
+
+			if(anyReq == true)
+			{
+				owedPcs = 0;
+				if(isFab == true)
+				{
+					owedPcs = reqPcs - issPcs;
+					if(owedPcs < 0)
+					{
+						owedPcs = 0;
+					}
+				}
+
+				// Item_Sku is a LOOKUP to Item_Master - the field holds a record
+				// id, not the SKU text.
+				skuTxt = "";
+				for each  imR in Item_Master[ID == pItem.Item_Sku]
+				{
+					skuTxt = ifnull(imR.SKU,"").toString().replaceAll("\"","'");
+				}
+
+				nameTxt = ifnull(pItem.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+				statTxt = ifnull(pItem.Item_Status,"").toString();
+				isRmk = ifnull(pItem.Is_Remake,false);
+				rmkWhy = ifnull(pItem.Remake_Reason,"").toString().trim();
+
+				if(itemsJson != "")
+				{
+					itemsJson = itemsJson + ",";
+				}
+				itemsJson = itemsJson + "{\"itemId\":\"" + pItem.ID + "\",\"sku\":\"" + skuTxt + "\",\"name\":\"" + nameTxt + "\",\"status\":\"" + statTxt + "\",\"isFabric\":" + isFab + ",\"owedQty\":" + owedQty + ",\"owedPieces\":" + owedPcs + ",\"reqPieces\":" + reqPcs + ",\"issuedPieces\":" + issPcs + ",\"isRemake\":" + isRmk + ",\"remakeReason\":\"" + rmkWhy + "\",\"source\":\"" + srcTxt + "\"}";
+			}
+		}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"items\":[]}";
+	}
+
+	return "{\"errors\":[],\"items\":[" + itemsJson + "]}";
+}
