@@ -701,14 +701,468 @@
 }
 
 @media (max-width: 760px) {
-    .pack-foot {
-        flex-wrap: wrap;
+    /* Header layout styling */
+    .packing-app .app-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.75rem;
+    }
+    .packing-app .app-header-right {
+        width: 100%;
+        display: flex;
+        gap: 0.5rem;
+    }
+    .packing-app .sup-select {
+        flex: 1;
+        min-width: 0;
+        width: 100%;
+        margin-right: 0;
     }
 
-    .pack-msg {
-        text-align: left;
+    /* Transform Main Items table into list of cards */
+    .packing-app .pack-scroll {
+        border: none;
+        background: transparent;
+    }
+    .packing-app .pack-tbl {
+        display: block;
         width: 100%;
-        order: 3;
+        border: none;
+        background: transparent;
+    }
+    .packing-app .pack-tbl thead {
+        display: none;
+    }
+    .packing-app .pack-tbl tbody {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        width: 100%;
+    }
+    .packing-app .pack-tbl tbody tr {
+        display: block;
+        padding: 1rem;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow-sm);
+        width: 100%;
+        position: relative;
+    }
+    .packing-app .pack-tbl tbody tr:hover {
+        background: var(--surface);
+    }
+    .packing-app .pack-tbl td {
+        display: block;
+        width: 100% !important;
+        padding: 0.25rem 0 !important;
+        text-align: left !important;
+        border: none !important;
+        white-space: normal !important;
+    }
+    
+    /* Cell 1: Item Name & SKU */
+    .packing-app .pack-tbl td:first-child {
+        font-size: 1rem;
+        margin-bottom: 0.5rem;
+        padding-bottom: 0.5rem !important;
+        border-bottom: 1px solid #f1f5f9 !important;
+    }
+    .packing-app .it-name {
+        display: block;
+        font-size: 1.05rem;
+    }
+    .packing-app .it-sku {
+        display: block;
+        margin-left: 0;
+        margin-top: 0.2rem;
+        font-size: 0.8rem;
+    }
+
+    /* Grid layout for Weight, Total Qty, Boxed, and Left */
+    .packing-app .pack-tbl td:nth-child(2),
+    .packing-app .pack-tbl td:nth-child(3),
+    .packing-app .pack-tbl td:nth-child(4),
+    .packing-app .pack-tbl td:nth-child(5) {
+        display: inline-flex;
+        align-items: center;
+        width: 50% !important;
+        float: left;
+        font-size: 0.875rem;
+        padding: 0.4rem 0 !important;
+    }
+    
+    /* Clear float after the inline cells */
+    .packing-app .pack-tbl tbody tr::after {
+        content: "";
+        display: table;
+        clear: both;
+    }
+
+    .packing-app .pack-tbl td:nth-child(2)::before { content: "Weight:\00a0"; font-weight: 600; color: var(--text-muted); }
+    .packing-app .pack-tbl td:nth-child(3)::before { content: "Total:\00a0"; font-weight: 600; color: var(--text-muted); }
+    .packing-app .pack-tbl td:nth-child(4)::before { content: "Boxed:\00a0"; font-weight: 600; color: var(--text-muted); }
+    .packing-app .pack-tbl td:nth-child(5)::before { content: "Left:\00a0"; font-weight: 600; color: var(--text-muted); }
+
+    /* Cell 6: Action Button (+ box) */
+    .packing-app .pack-tbl td:last-child {
+        display: block;
+        width: 100% !important;
+        padding-top: 0.75rem !important;
+        margin-top: 0.5rem;
+        border-top: 1px solid #f1f5f9 !important;
+        text-align: right !important;
+    }
+    
+    .packing-app .mini-btn {
+        width: 100%;
+        text-align: center;
+        padding: 0.55rem;
+        font-size: 0.9rem;
+    }
+
+    /* Box Card dimension field adjustments for narrow mobile screens */
+    .packing-app .box-dims {
+        display: flex;
+        flex-direction: column;
+        gap: 0.65rem;
+        padding: 0.65rem 0.75rem;
+        background: #f8fafc;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        margin-top: 0.5rem;
+    }
+    .packing-app .dim-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.35rem 0.3rem;
+        width: 100%;
+        padding-bottom: 0.45rem;
+        border-bottom: 1px dashed #e2e8f0;
+    }
+    .packing-app .dim-row:last-child {
+        padding-bottom: 0;
+        border-bottom: none;
+    }
+    .packing-app .dim-label {
+        width: 100% !important;
+        font-size: 0.72rem !important;
+        font-weight: 700 !important;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--primary) !important;
+        margin-bottom: 0.1rem;
+    }
+    .packing-app .dim-input {
+        flex: 1 1 0;
+        min-width: 3rem;
+        width: auto !important;
+        font-size: 0.875rem !important;
+        font-weight: 600;
+        text-align: center !important;
+        padding: 0.4rem 0.2rem !important;
+    }
+    .packing-app .dim-x {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        padding: 0 0.05rem;
+    }
+    .packing-app .dim-unit {
+        font-size: 0.72rem !important;
+        font-weight: 600;
+        color: #64748b;
+        margin-left: 0.1rem;
+        margin-right: 0.25rem;
+    }
+    .packing-app .dim-note {
+        width: 100%;
+        margin-left: 0;
+        margin-top: 0.15rem;
+        font-size: 0.72rem;
+    }
+
+    /* Transform Box Items table into clean block list for mobile */
+    .packing-app .box-items-tbl {
+        display: block;
+        width: 100%;
+        border: none;
+    }
+    .packing-app .box-items-tbl thead {
+        display: none;
+    }
+    .packing-app .box-items-tbl tbody,
+    .packing-app .box-items-tbl tr {
+        display: block;
+        width: 100%;
+    }
+    .packing-app .box-items-tbl tr {
+        padding: 0.6rem 0;
+        border-bottom: 1px dashed var(--border);
+        position: relative;
+    }
+    .packing-app .box-items-tbl tr:last-child {
+        border-bottom: none;
+    }
+    .packing-app .box-items-tbl td {
+        display: block;
+        width: 100% !important;
+        padding: 0.25rem 0 !important;
+        text-align: left !important;
+    }
+    .packing-app .box-items-tbl td::before {
+        content: none !important;
+    }
+    .packing-app .box-items-tbl td:first-child {
+        margin-bottom: 0.35rem;
+        border: none !important;
+    }
+    .packing-app .box-items-tbl .cell-select {
+        width: 100%;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        overflow: hidden;
+    }
+    .packing-app .box-items-tbl td:nth-child(2) {
+        display: inline-flex !important;
+        align-items: center;
+        width: 65% !important;
+        border: none !important;
+        float: left;
+    }
+    .packing-app .box-items-tbl td:nth-child(2)::before {
+        content: "Pieces:\00a0" !important;
+        font-weight: 600;
+        color: var(--text-muted);
+        margin-right: 0.5rem;
+    }
+    .packing-app .box-items-tbl td:nth-child(2) .cell-input {
+        width: 4rem;
+        text-align: center;
+        font-weight: 600;
+    }
+    .packing-app .box-items-tbl td:last-child {
+        display: inline-flex !important;
+        width: 35% !important;
+        justify-content: flex-end;
+        align-items: center;
+        border: none !important;
+        float: right;
+        margin-top: 0;
+        padding-top: 0 !important;
+    }
+    .packing-app .box-items-tbl td:last-child::before {
+        content: none !important;
+    }
+    /* Clear float on box items row */
+    .packing-app .box-items-tbl tr::after {
+        content: "";
+        display: table;
+        clear: both;
+    }
+
+    /* Box Card Section Header and Add box button stacking */
+    .packing-app .pack-sec-head {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.5rem;
+        padding: 1rem 0;
+    }
+    .packing-app .pack-sec-head h3 {
+        font-size: 0.85rem;
+    }
+    .packing-app .pack-sec-unit {
+        display: block;
+        margin-left: 0;
+        margin-top: 0.2rem;
+    }
+    .packing-app .pack-sec-head .mini-btn {
+        width: 100%;
+        text-align: center;
+        padding: 0.55rem;
+    }
+    .packing-app .pack-sec-head .pack-sec-hint {
+        display: block;
+        margin-top: 0.15rem;
+    }
+
+    /* Box Foot Weight details stacking */
+    .packing-app .box-foot {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.75rem;
+    }
+    .packing-app .box-stat {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.85rem;
+    }
+    .packing-app .box-weigh {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        width: 100%;
+        margin-left: 0;
+        margin-top: 0.25rem;
+    }
+    .packing-app .box-weigh .cell-input {
+        width: 50%;
+    }
+
+    /* Stack inclusion list as a full-width list of clean check buttons */
+    .packing-app .inc-list {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.5rem;
+    }
+    .packing-app .inc-item {
+        display: flex;
+        width: 100%;
+    }
+
+    /* Global footer full-width action layout */
+    .packing-app .pack-foot {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.75rem;
+    }
+    .packing-app .pack-msg {
+        text-align: center;
+        width: 100%;
+        margin-bottom: 0.25rem;
+    }
+    .packing-app .pack-foot .primary-btn {
+        width: 100%;
+        padding: 0.85rem;
+        font-size: 1rem;
+        text-align: center;
+    }
+
+    /* Mobile History Box Card & Table Styling */
+    .packing-app .hist-box {
+        padding: 0.75rem 0.65rem 0.85rem !important;
+        margin-bottom: 0.75rem !important;
+    }
+
+    .packing-app .hist-box-head {
+        gap: 0.4rem 0.6rem !important;
+    }
+
+    .packing-app .hist-box-pieces {
+        font-weight: 600;
+        font-size: 0.8rem !important;
+    }
+
+    /* Mobile Dimensions & Weight Summary Container */
+    .packing-app .hist-box-dims {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 0.35rem !important;
+        padding: 0.5rem 0.65rem !important;
+        background: #f8fafc !important;
+        border: 1px solid var(--border) !important;
+        border-radius: 6px !important;
+        margin: 0.5rem 0 !important;
+        font-size: 0.8rem !important;
+    }
+
+    .packing-app .hist-box-dims > span {
+        display: flex !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        width: 100% !important;
+        color: var(--text-muted) !important;
+    }
+
+    .packing-app .hist-box-dims b {
+        color: var(--text-main) !important;
+        font-weight: 700 !important;
+    }
+
+    /* Mobile History Items Table Formatting */
+    .packing-app .hist-box .table-wrapper {
+        border-radius: 6px !important;
+        overflow: hidden !important;
+        border: 1px solid var(--border) !important;
+        margin-top: 0.4rem !important;
+        background: var(--surface) !important;
+    }
+
+    .packing-app .hist-box table {
+        width: 100% !important;
+        table-layout: auto !important;
+        border-collapse: collapse !important;
+    }
+
+    .packing-app .hist-box th {
+        font-size: 0.68rem !important;
+        font-weight: 700 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.04em !important;
+        color: var(--text-muted) !important;
+        background: #f1f5f9 !important;
+        padding: 0.45rem 0.3rem !important;
+        border-bottom: 1px solid var(--border) !important;
+    }
+
+    .packing-app .hist-box td {
+        padding: 0.5rem 0.3rem !important;
+        font-size: 0.82rem !important;
+        border-bottom: 1px dashed #f1f5f9 !important;
+        vertical-align: middle !important;
+    }
+
+    .packing-app .hist-box tr:last-child td {
+        border-bottom: none !important;
+    }
+
+    /* Prevent awkward word splits (e.g. Line-n-Sylp-h-Throw) by allocating 46% width to Item name */
+    .packing-app .hist-box .material-name-cell {
+        width: 46% !important;
+        min-width: 115px !important;
+        text-align: left !important;
+        white-space: normal !important;
+        word-break: normal !important;
+        overflow-wrap: break-word !important;
+    }
+
+    .packing-app .hist-box .material-name-cell .mat-name {
+        font-size: 0.82rem !important;
+        font-weight: 600 !important;
+        color: var(--text-main) !important;
+        white-space: normal !important;
+        word-break: normal !important;
+        overflow-wrap: break-word !important;
+        line-height: 1.25 !important;
+    }
+
+    .packing-app .hist-box .material-name-cell .mat-sku {
+        font-size: 0.7rem !important;
+        color: #94a3b8 !important;
+        margin-top: 0.15rem !important;
+        display: block !important;
+    }
+
+    /* Numeric columns (Pieces, Unit kg, Est kg) equal 18% width allocation */
+    .packing-app .hist-box td.col-num {
+        text-align: right !important;
+        white-space: nowrap !important;
+        font-variant-numeric: tabular-nums !important;
+    }
+
+    .packing-app .hist-box th:nth-child(2),
+    .packing-app .hist-box td:nth-child(2) {
+        width: 18% !important;
+    }
+
+    .packing-app .hist-box th:nth-child(3),
+    .packing-app .hist-box td:nth-child(3) {
+        width: 18% !important;
+    }
+
+    .packing-app .hist-box th:nth-child(4),
+    .packing-app .hist-box td:nth-child(4) {
+        width: 18% !important;
     }
 }
 
