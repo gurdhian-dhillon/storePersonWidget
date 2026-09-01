@@ -1,3 +1,106 @@
+// ---------------------------------------------------------------------------
+// API CALL TRACER — temporary instrumentation.
+//
+// Wraps ZOHO.CREATOR.DATA.invokeCustomApi so every Custom API call this widget
+// makes is logged: a running number, the api_name, ms since the first call, and
+// a rolling 60-second count (the per-user, per-minute limit is ~50 — code 2955).
+// `window.__apiStats()` in the console prints a summary: total, calls per
+// api_name, and the peak calls-in-any-60s window.
+//
+// Remove this block once the call count is understood.
+// ---------------------------------------------------------------------------
+(function () {
+    try {
+        if (!(window.ZOHO && ZOHO.CREATOR && ZOHO.CREATOR.DATA &&
+              typeof ZOHO.CREATOR.DATA.invokeCustomApi === 'function')) {
+            console.warn('[api-trace] invokeCustomApi not available — tracer not installed');
+            return;
+        }
+        if (ZOHO.CREATOR.DATA.invokeCustomApi.__traced) return;
+
+        var orig = ZOHO.CREATOR.DATA.invokeCustomApi;
+        var seq = 0;
+        var t0 = 0;
+        var times = [];          // epoch ms of every call, for the rolling window
+        var byName = {};         // api_name -> count
+        var inflight = 0;
+        var peakWindow = 0;
+
+        function windowCount(now) {
+            var cut = now - 60000;
+            var c = 0;
+            for (var i = times.length - 1; i >= 0; i--) {
+                if (times[i] >= cut) c++; else break;
+            }
+            return c;
+        }
+
+        function trace(cfg) {
+            var now = Date.now();
+            if (!t0) t0 = now;
+            seq++;
+            times.push(now);
+            var name = (cfg && cfg.api_name) || '(unknown)';
+            byName[name] = (byName[name] || 0) + 1;
+            inflight++;
+            var win = windowCount(now);
+            if (win > peakWindow) peakWindow = win;
+
+            var mine = seq;
+            console.log(
+                '[api #' + mine + '] ' + name +
+                '  +' + (now - t0) + 'ms' +
+                '  · last60s=' + win +
+                (win >= 45 ? '  ⚠️ NEAR LIMIT' : '') +
+                '  · inflight=' + inflight
+            );
+
+            var started = now;
+            var p;
+            try {
+                p = orig.call(this, cfg);
+            } catch (e) {
+                inflight--;
+                console.error('[api #' + mine + '] ' + name + ' threw synchronously', e);
+                throw e;
+            }
+            if (p && typeof p.then === 'function') {
+                return p.then(function (r) {
+                    inflight--;
+                    console.log('[api #' + mine + '] ' + name + ' ✓ ' + (Date.now() - started) + 'ms');
+                    return r;
+                }, function (err) {
+                    inflight--;
+                    var msg = '';
+                    try { msg = JSON.stringify(err); } catch (e) { msg = String(err); }
+                    var throttled = /2955|too many request|rate.?limit|limit exceeded/i.test(msg);
+                    console.error('[api #' + mine + '] ' + name + ' ✗ ' + (Date.now() - started) + 'ms' +
+                        (throttled ? '  ← RATE LIMITED (2955)' : ''), err);
+                    throw err;
+                });
+            }
+            inflight--;
+            return p;
+        }
+        trace.__traced = true;
+        ZOHO.CREATOR.DATA.invokeCustomApi = trace;
+
+        window.__apiStats = function () {
+            var names = Object.keys(byName).sort(function (a, b) { return byName[b] - byName[a]; });
+            console.log('===== API CALL SUMMARY =====');
+            console.log('total calls: ' + seq + '  · span: ' + (times.length ? (times[times.length - 1] - t0) : 0) + 'ms' +
+                '  · peak in any 60s window: ' + peakWindow + (peakWindow >= 50 ? '  ⚠️ OVER LIMIT' : ''));
+            names.forEach(function (n) { console.log('  ' + byName[n] + '  ' + n); });
+            console.log('============================');
+            return { total: seq, peakWindow: peakWindow, byName: byName };
+        };
+
+        console.log('[api-trace] installed — call window.__apiStats() for a summary');
+    } catch (e) {
+        console.warn('[api-trace] failed to install', e);
+    }
+})();
+
 function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, function (c) {
         return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -231,28 +334,59 @@ function confirmLotOverride(supIdx, matIdx) {
 // because whether a remnant is usable depends on which lot the fresh cloth is
 // coming off, and only this side knows that.
 
-// One row's share of it. The allocation is no longer a suggestion he edits — it
-// is computed, because every figure it produces is a whole number of rows and a
-// hand-typed one is not.
-function recommendLots(m, supIdx, matIdx) {
-    // Decided in applyLotAllocation, per ORDER, with that order's own remnants
-    // counted as part of the lot. Summed to lot-index here because that is what
-    // the row's table and its hidden inputs are keyed on; the per-item split
-    // travels separately in `lotLines` so the server never has to guess it.
-    var lots = lotsFor(m);
-    var out = {};
-    (m.lotLines || []).forEach(function (ln) {
-        var idx = -1;
-        lots.forEach(function (l, i) { if (String(l.lotId) === String(ln.lotId)) idx = i; });
-        if (idx < 0) return;
-        out[idx] = round2((out[idx] || 0) + (Number(ln.qty) || 0));
-    });
-    return out;
+// One editable metres box + one checkbox PER LOT, on the SKU row. matIdx now
+// indexes one entry per SKU; lotIdx is the index into lotsFor(m).
+function lotLineInputId(supIdx, matIdx, lotIdx) {
+    return 'fab-lot-' + supIdx + '-' + matIdx + '-' + lotIdx;
+}
+function lotLineCheckId(supIdx, matIdx, lotIdx) {
+    return 'fab-lot-check-' + supIdx + '-' + matIdx + '-' + lotIdx;
 }
 
+// The metres a given lot on this SKU row currently carries — Σ of that lot's
+// lotLines, which is what the box shows and what the submit path issues.
+function lotLineMetres(m, lotId) {
+    return round2((m.lotLines || []).reduce(function (t, ln) {
+        return String(ln.lotId) === String(lotId) ? t + (Number(ln.qty) || 0) : t;
+    }, 0));
+}
 
-function lotInputId(supIdx, matIdx, lotIdx) {
-    return 'lot-input-' + supIdx + '-' + matIdx + '-' + lotIdx;
+// The auto (allocator) metres for a lot, for the LOT column figure — the
+// recommendation, which stays fixed while he edits the ISSUE NOW box.
+function lotLineAutoMetres(m, lotId) {
+    return round2((m.autoLotLines || []).reduce(function (t, ln) {
+        return String(ln.lotId) === String(lotId) ? t + (Number(ln.qty) || 0) : t;
+    }, 0));
+}
+
+// Total WASHED metres on the rack for one lot of this material — the TOTAL STOCK
+// column. issueMaterials moves Wash_Quantity, so this is the issuable figure.
+function lotWashedStock(m, lotId) {
+    var lots = lotsFor(m);
+    for (var i = 0; i < lots.length; i++) {
+        if (String(lots[i].lotId) === String(lotId)) {
+            return round2(Number(lots[i].wash) || 0);
+        }
+    }
+    return 0;
+}
+
+// Distinct lots this SKU row draws fresh cloth from, in lotsFor(m) order, each
+// with its lotsFor index so the ids line up with the allocator's lot list.
+function fabricLotLineList(m) {
+    var lots = lotsFor(m);
+    var seen = {};
+    var out = [];
+    (m.lotLines || []).forEach(function (ln) {
+        var lk = String(ln.lotId);
+        if (seen[lk]) return;
+        seen[lk] = true;
+        var idx = -1;
+        lots.forEach(function (l, i) { if (String(l.lotId) === lk) idx = i; });
+        out.push({ lotId: lk, lotIdx: idx,
+                   lotNumber: (lots[idx] && lots[idx].lotNumber) || lk });
+    });
+    return out;
 }
 
 // THE CEILING THE TYPED TOTAL IS CHECKED AGAINST, and for fabric issued from
@@ -380,6 +514,25 @@ function rowId(supIdx, matIdx) {
 }
 
 function validateRow(supIdx, matIdx, material) {
+    // FABRIC: validate each lot box against the shelf figure. The whole-SKU
+    // ceiling is the material's washed stock; a single lot box exceeding it is
+    // the only thing worth flagging (the server re-checks per lot anyway).
+    if (material && material.isFabric && !isFullyIssued(material)) {
+        var maxSku = issueCeiling(material);
+        fabricLotLineList(material).forEach(function (info) {
+            var b = document.getElementById(lotLineInputId(supIdx, matIdx, info.lotIdx));
+            if (!b) return;
+            var v = parseFloat(b.value) || 0;
+            if (v < 0 || v > maxSku + 0.0001) {
+                b.classList.add('invalid');
+                b.title = 'Max issuable is ' + fmt(maxSku) + ' ' + material.unit;
+            } else {
+                b.classList.remove('invalid');
+                b.title = '';
+            }
+        });
+        return;
+    }
     var input = document.getElementById(rowInputId(supIdx, matIdx));
     if (!input) return;
     var val = parseFloat(input.value) || 0;
@@ -395,51 +548,136 @@ function validateRow(supIdx, matIdx, material) {
 
 function markRowSelected(supIdx, matIdx) {
     var row = document.getElementById(rowId(supIdx, matIdx));
+    if (!row) return;
+    var material = window.__reqData[supIdx].materials[matIdx];
+    if (material && material.isFabric && !isFullyIssued(material)) {
+        var anyOn = fabricLotLineList(material).some(function (info) {
+            var c = document.getElementById(lotLineCheckId(supIdx, matIdx, info.lotIdx));
+            return c && c.checked;
+        }) || wastePicks(material).some(function (p, i) {
+            var c = document.getElementById(wasteCheckboxId(supIdx, matIdx, i));
+            return c && c.checked;
+        });
+        row.classList.toggle('row-selected', anyOn);
+        return;
+    }
     var checkbox = document.getElementById(rowCheckboxId(supIdx, matIdx));
-    if (!row || !checkbox) return;
+    if (!checkbox) return;
     row.classList.toggle('row-selected', checkbox.checked);
 }
 
+// NON-FABRIC ONLY. Fabric rows have per-lot boxes now (onLotLineInput); this is
+// the accessory metres box in renderQtyIssueRow.
 function onIssueInputChange(supIdx, matIdx) {
     var input = document.getElementById(rowInputId(supIdx, matIdx));
     var checkbox = document.getElementById(rowCheckboxId(supIdx, matIdx));
+    if (!input || !checkbox) return;
     var val = parseFloat(input.value);
     var material = window.__reqData[supIdx].materials[matIdx];
-    // Typing 0 metres does not clear the row when waste pieces still go with it.
-    checkbox.checked = !(isNaN(val) || val <= 0) || wastePicks(material).length > 0;
+
+    checkbox.checked = !(isNaN(val) || val <= 0);
     validateRow(supIdx, matIdx, material);
     markRowSelected(supIdx, matIdx);
     refreshCardState(supIdx);
 }
 
-function onIssueCheckboxChange(supIdx, matIdx) {
-    setRowChecked(supIdx, matIdx, document.getElementById(rowCheckboxId(supIdx, matIdx)).checked);
+// ---- Per-lot fabric metres boxes ----
+
+// He typed a new metres figure for ONE lot on a SKU row. Push it onto that lot's
+// lotLines via applyFabricOverride (keeps the lot split fixed, re-derives the
+// cut-piece credit as whole rows per line), repaint the lot cell, resync.
+function onLotLineInput(supIdx, matIdx, lotId) {
+    var material = window.__reqData[supIdx].materials[matIdx];
+    if (!material || !material.isFabric || isFullyIssued(material)) return;
+    var lots = lotsFor(material);
+    var lotIdx = -1;
+    lots.forEach(function (l, i) { if (String(l.lotId) === String(lotId)) lotIdx = i; });
+    var box = document.getElementById(lotLineInputId(supIdx, matIdx, lotIdx));
+    if (!box) return;
+    var val = parseFloat(box.value);
+    applyFabricOverride(material, lotId, isNaN(val) ? 0 : val);
+    validateRow(supIdx, matIdx, material);
+    // Keystroke — do NOT repaint the cell being typed in (loses the cursor).
+    refreshFabricRowLots(supIdx, matIdx, false);
+    markRowSelected(supIdx, matIdx);
     refreshCardState(supIdx);
 }
 
+// The per-lot checkbox toggled. Checked -> restore that lot to its auto metres;
+// unchecked -> zero that lot's lines (declines cloth off this roll).
+function onLotLineCheck(supIdx, matIdx, lotIdx) {
+    var material = window.__reqData[supIdx].materials[matIdx];
+    if (!material || !material.isFabric) return;
+    var info = fabricLotLineList(material).filter(function (x) { return x.lotIdx === lotIdx; })[0];
+    if (!info) return;
+    var chk = document.getElementById(lotLineCheckId(supIdx, matIdx, lotIdx));
+    if (!chk) return;
+    var target = chk.checked ? lotLineAutoMetres(material, info.lotId) : 0;
+    applyFabricOverride(material, info.lotId, target);
+    // Full repaint — the box value for this lot must be reset to 0 / auto.
+    refreshFabricRowLots(supIdx, matIdx, true);
+    markRowSelected(supIdx, matIdx);
+    refreshCardState(supIdx);
+}
+
+// After a KEYSTROKE in a per-lot box: the recommended figure and the washed
+// stock do not move, and repainting the cell the user is typing in would eat
+// the cursor. So this only syncs the checkbox for that lot and the headline.
+// `fullRepaint` (from onLotLineCheck / select-all, where a box value must be
+// reset) rebuilds all three sub-line columns.
+function refreshFabricRowLots(supIdx, matIdx, fullRepaint) {
+    var row = document.getElementById(rowId(supIdx, matIdx));
+    if (!row) return;
+    var material = window.__reqData[supIdx].materials[matIdx];
+
+    if (fullRepaint) {
+        var cols = lotLinesHtml(material, supIdx, matIdx, true);
+        var lotCell = row.querySelector('.col-lot-issue');
+        var stockCell = row.querySelector('.col-lot-stock');
+        var issueCell = row.querySelector('.col-issue');
+        if (lotCell) lotCell.innerHTML = cols.lot + lotShortHtml(material, supIdx, matIdx);
+        if (stockCell) stockCell.innerHTML = cols.stock;
+        if (issueCell) issueCell.innerHTML = cols.issue ||
+            '<span class="is-zero issue-cell-empty">&mdash;</span>';
+    } else {
+        // Keystroke: just keep this lot's checkbox in step with 0 / non-0.
+        fabricLotLineList(material).forEach(function (info) {
+            var chk = document.getElementById(lotLineCheckId(supIdx, matIdx, info.lotIdx));
+            if (chk) chk.checked = lotLineMetres(material, info.lotId) > 0;
+        });
+    }
+
+    // Headline "To be issued" — pinned to the auto figure today, but repaint so
+    // a future change stays consistent.
+    var head = row.querySelector('.col-num.col-strong .qty-big');
+    if (head) {
+        head.innerHTML = fmt(material.remaining) +
+            '<span class="unit">' + escapeHtml(material.unit) + '</span>';
+    }
+}
+
+function onIssueCheckboxChange(supIdx, matIdx) {
+    var cb = document.getElementById(rowCheckboxId(supIdx, matIdx));
+    if (!cb) return;
+    setRowChecked(supIdx, matIdx, cb.checked);
+    refreshCardState(supIdx);
+}
+
+// NON-FABRIC only — fabric uses onLotLineCheck per lot.
 function setRowChecked(supIdx, matIdx, checked) {
     var input = document.getElementById(rowInputId(supIdx, matIdx));
     var checkbox = document.getElementById(rowCheckboxId(supIdx, matIdx));
     if (!input || !checkbox || checkbox.disabled) return;
     var material = window.__reqData[supIdx].materials[matIdx];
 
-    // Nothing issuable — never let it appear selected.
     if (checked && !rowIssuable(material)) {
         checkbox.checked = false;
         input.value = 0;
     } else if (checked) {
         checkbox.checked = true;
         // The waste-adjusted figure, not the ceiling — select-all must not
-        // hand out more fabric than the cutting actually needs.
-        //
-        // For fabric that is what the LOTS grant, which is not the same number:
-        // suggestedIssue is capped by the material's whole washed stock, while
-        // the row can only have what its own lot can give. Re-ticking a row
-        // pinned to a small lot would otherwise put a figure in the box that no
-        // lot line backs, and the two would disagree at submit time.
-        input.value = material.isFabric
-            ? recommendedTotal(material, supIdx, matIdx)
-            : suggestedIssue(material);
+        // hand out more than the requirement actually needs.
+        input.value = suggestedIssue(material);
     } else {
         checkbox.checked = false;
         input.value = 0;
@@ -530,19 +768,24 @@ function onSelectAllChange(supIdx, section) {
     var master = document.getElementById(selectAllId(supIdx, section));
     var sup = window.__reqData[supIdx];
 
-    // Waste rows now live inside their material's fabric group, so the fabric
-    // master toggles both supply lines together.
+    // Waste rows live inside their material's fabric group, so the fabric master
+    // toggles every lot sub-line AND every waste pick of every SKU in the group.
     sup.materials.forEach(function (m, i) {
         if (sectionOf(m) !== section) return;
-        setRowChecked(supIdx, i, master.checked);
+        if (m.isFabric && !isFullyIssued(m)) {
+            fabricLotLineList(m).forEach(function (info) {
+                var target = master.checked ? lotLineAutoMetres(m, info.lotId) : 0;
+                applyFabricOverride(m, info.lotId, target);
+            });
+        } else {
+            setRowChecked(supIdx, i, master.checked);
+        }
         wastePicks(m).forEach(function (p, pickIdx) {
             setWasteChecked(supIdx, i, pickIdx, master.checked);
         });
     });
     // The sweep above changed DECLINES, and declines re-size the fresh metres.
-    // A full re-render, same as the single-checkbox path — refreshCardState
-    // alone would leave the metres box holding a figure the offcuts no longer
-    // cover.
+    // A full re-render, same as the single-checkbox path.
     render(window.__rawData || window.__reqData);
 }
 
@@ -581,10 +824,20 @@ function refreshCardState(supIdx) {
     materials.forEach(function (m, i) {
         var t = tally[sectionOf(m)];
 
-        var checkbox = document.getElementById(rowCheckboxId(supIdx, i));
-        if (checkbox && !checkbox.disabled) {
-            if (rowIssuable(m)) t.can++;
-            if (checkbox.checked) t.sel++;
+        if (m.isFabric && !isFullyIssued(m)) {
+            // Fabric: one checkbox per lot sub-line.
+            fabricLotLineList(m).forEach(function (info) {
+                var chk = document.getElementById(lotLineCheckId(supIdx, i, info.lotIdx));
+                if (!chk || chk.disabled) return;
+                t.can++;
+                if (chk.checked) t.sel++;
+            });
+        } else {
+            var checkbox = document.getElementById(rowCheckboxId(supIdx, i));
+            if (checkbox && !checkbox.disabled) {
+                if (rowIssuable(m)) t.can++;
+                if (checkbox.checked) t.sel++;
+            }
         }
 
         wastePicks(m).forEach(function (p, pickIdx) {
@@ -717,16 +970,25 @@ function closeExceptionDialog() {
     exceptionModalEl().classList.add('hidden');
 }
 
+// Same bar the load screen uses (.load-progress / .lp-*), wrapped in a modal so
+// it can sit over the issue card while a handover runs. A numeric `percentage`
+// fills the bar and shows a "NN%" count; omit it for an indeterminate crawl
+// (used by the "raising request" / "raising wash" spinners that have no steps).
 function progressModalEl() {
     var el = document.getElementById('progress-modal');
     if (!el) {
         el = document.createElement('div');
         el.id = 'progress-modal';
         el.className = 'exc-modal hidden';
-        el.innerHTML = '<div class="exc-panel" style="max-width: 380px; text-align: center;">' +
-            '<h3 id="progress-modal-title" style="margin-bottom: 0.5rem;">Issuing Materials...</h3>' +
-            '<div class="progress-text" id="progress-modal-text">0 of 0 batches</div>' +
-            '<div class="progress-container"><div class="progress-bar" id="progress-modal-bar"></div></div>' +
+        el.innerHTML = '<div class="exc-panel progress-panel">' +
+            '<div class="load-progress" id="progress-modal-card">' +
+            '<div class="lp-head">' +
+            '<span class="lp-title" id="progress-modal-title">Issuing Materials…</span>' +
+            '<span class="lp-count" id="progress-modal-count"></span>' +
+            '</div>' +
+            '<div class="lp-track"><div class="lp-fill" id="progress-modal-bar"></div></div>' +
+            '<div class="lp-sub" id="progress-modal-text"></div>' +
+            '</div>' +
             '</div>';
         document.body.appendChild(el);
     }
@@ -736,8 +998,22 @@ function progressModalEl() {
 function showProgressModal(title, text, percentage) {
     var el = progressModalEl();
     document.getElementById('progress-modal-title').textContent = title;
-    document.getElementById('progress-modal-text').textContent = text;
-    document.getElementById('progress-modal-bar').style.width = percentage + '%';
+    document.getElementById('progress-modal-text').textContent = text || '';
+
+    var card = document.getElementById('progress-modal-card');
+    var bar = document.getElementById('progress-modal-bar');
+    var count = document.getElementById('progress-modal-count');
+    var hasPct = typeof percentage === 'number' && isFinite(percentage);
+    if (hasPct) {
+        var pct = Math.max(0, Math.min(100, Math.round(percentage)));
+        card.classList.remove('is-indeterminate');
+        bar.style.width = pct + '%';
+        count.textContent = pct + '%';
+    } else {
+        card.classList.add('is-indeterminate');
+        bar.style.width = '';
+        count.textContent = '';
+    }
     el.classList.remove('hidden');
 }
 
@@ -1453,37 +1729,26 @@ function shortPill(m) {
         : '<span class="status-pill ' + s.cls + '">' + s.label + '</span>';
 }
 
-// This row's share of the allocation, totalled — what its metres box shows.
-function recommendedTotal(m, supIdx, matIdx) {
-    var rec = recommendLots(m, supIdx, matIdx);
-    var t = 0;
-    Object.keys(rec).forEach(function (k) { t += rec[k]; });
-    return round2(t);
-}
 
-// WHICH LOT THE CLOTH COMES OFF, said on the row itself.
+// THREE STACKED COLUMNS for a fabric SKU row, one sub-line per lot (and one per
+// waste pick):
+//   LOT        — "<roll> · <recommended metres>", read-only. The recommendation
+//                stays fixed while he edits ISSUE NOW.
+//   TOTAL STOCK — that lot's washed metres on the rack, read-only.
+//   ISSUE NOW   — the editable metres box + checkbox for that lot alone.
 //
-// Almost always ONE lot — that is what the allocator is for — and then this is a
-// single line: "from L3". A four-column table carrying one row of data is what
-// made this screen read as clutter, and its washed/unwashed columns answered a
-// question the store person had not asked.
+// Returns { lot, stock, issue } — three HTML fragments, each a vertical stack
+// aligned sub-line for sub-line. renderFabricRows drops them into three <td>s.
 //
-// When a split is forced it becomes one line per lot, in the same shape the
-// waste picks already use on these rows.
-//
-// The hidden inputs ride along here, one per lot taken, so the submit path reads
-// them exactly as it always did — nothing about the payload changes.
-function lotLinesHtml(m, supIdx, matIdx) {
-    var rec = recommendLots(m, supIdx, matIdx);
+// editable is false for the read-only receipt (a fully-issued row) and for a
+// Pieces lot, where a free metres figure has no physical meaning.
+function lotLinesHtml(m, supIdx, matIdx, editable) {
     var lots = lotsFor(m);
-    var used = Object.keys(rec).filter(function (k) { return rec[k] > 0; });
-
-    var hidden = '';
-    used.forEach(function (k) {
-        hidden += '<input type="hidden" class="lot-input" ' +
-            'id="' + lotInputId(supIdx, matIdx, k) + '" value="' + rec[k] + '" />';
-    });
-    if (used.length === 0) return hidden;
+    var lotLineList = fabricLotLineList(m);
+    var picks = wastePicks(m);
+    if (lotLineList.length === 0 && picks.length === 0) {
+        return { lot: '', stock: '', issue: '' };
+    }
 
     var lotName = function (k) {
         var l = lots[Number(k)];
@@ -1556,10 +1821,84 @@ function lotLinesHtml(m, supIdx, matIdx) {
         }).join('');
     };
 
-    return used.map(function (k) {
-        return '<div class="lot-from"><b>' + lotName(k) + '</b> &middot; ' +
-            fmt(rec[k]) + ' ' + escapeHtml(m.unit) + '</div>' + pieceLineHtml(k);
-    }).join('') + hidden;
+    var isPiecesLot = function (lotId) {
+        return (m.lotLines || []).some(function (ln) {
+            return String(ln.lotId) === String(lotId) && ln.pieces && ln.pieces.length;
+        });
+    };
+
+    var lotCol = '';
+    var stockCol = '';
+    var issueCol = '';
+
+    // ---- one sub-line per lot ----
+    lotLineList.forEach(function (info) {
+        var k = info.lotIdx;
+        var cur = lotLineMetres(m, info.lotId);
+        var auto = lotLineAutoMetres(m, info.lotId);
+        var washed = lotWashedStock(m, info.lotId);
+        var canEdit = editable && !isPiecesLot(info.lotId);
+
+        // LOT: roll name + recommended metres (fixed).
+        lotCol +=
+            '<div class="lot-from lot-line-row">' +
+            '<span class="lot-line-name"><b>' + lotName(k) + '</b></span>' +
+            '<span class="lot-line-rec">' + fmt(auto) + ' ' + escapeHtml(m.unit) + '</span>' +
+            '</div>' + pieceLineHtml(k);
+
+        // TOTAL STOCK: this lot's washed metres.
+        stockCol += '<div class="lot-line-cell">' + qty(washed, m.unit) + '</div>';
+
+        // ISSUE NOW: editable box + checkbox (or static text when not editable).
+        if (canEdit) {
+            issueCol +=
+                '<div class="lot-line-cell issue-cell">' +
+                '<span class="issue-input-group lot-line-box">' +
+                '<input type="number" step="0.01" min="0" ' +
+                'class="issue-input" id="' + lotLineInputId(supIdx, matIdx, k) + '" ' +
+                'value="' + cur + '" ' +
+                'oninput="onLotLineInput(' + supIdx + ',' + matIdx + ',\'' + info.lotId + '\')" />' +
+                '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
+                '</span>' +
+                '<input type="checkbox" class="issue-checkbox" ' +
+                'id="' + lotLineCheckId(supIdx, matIdx, k) + '" ' +
+                (cur > 0 ? 'checked ' : '') +
+                'aria-label="Issue ' + escapeHtml(m.material) + ' from ' + lotName(k) + '" ' +
+                'onchange="onLotLineCheck(' + supIdx + ',' + matIdx + ',' + k + ')" />' +
+                '</div>';
+        } else {
+            issueCol += '<div class="lot-line-cell"><span class="lot-line-static">' +
+                fmt(cur) + ' ' + escapeHtml(m.unit) + '</span></div>';
+        }
+    });
+
+    // ---- one sub-line per waste pick ----
+    // Waste has a lot + carton too (shown in LOT); no washed-stock figure for a
+    // remnant, so TOTAL STOCK is blank. ISSUE NOW is a pcs box + checkbox.
+    picks.forEach(function (p, pickIdx) {
+        lotCol += wasteWhereHtml(p);
+        stockCol += '<div class="lot-line-cell"><span class="is-zero">&mdash;</span></div>';
+        if (editable) {
+            issueCol +=
+                '<div class="lot-line-cell issue-cell issue-cell-waste" id="' + wasteRowId(supIdx, matIdx, pickIdx) + '">' +
+                '<span class="issue-input-group lot-line-box">' +
+                '<input type="number" step="1" min="0" max="' + rackCountFor(m, p) + '" ' +
+                'class="issue-input" id="' + wasteInputId(supIdx, matIdx, pickIdx) + '" value="' + p.pieces + '" ' +
+                'oninput="onWasteInputChange(' + supIdx + ',' + matIdx + ',' + pickIdx + ')" />' +
+                '<span class="issue-unit">pcs</span>' +
+                '</span>' +
+                '<input type="checkbox" class="issue-checkbox" id="' + wasteCheckboxId(supIdx, matIdx, pickIdx) + '" ' +
+                (wasteCheckedFor(p) ? 'checked ' : '') +
+                'aria-label="Issue waste pieces of ' + escapeHtml(m.material) + '" ' +
+                'onchange="onWasteCheckboxChange(' + supIdx + ',' + matIdx + ',' + pickIdx + ')" />' +
+                '</div>';
+        } else {
+            issueCol += '<div class="lot-line-cell"><span class="lot-line-static">' +
+                p.pieces + ' pcs</span></div>';
+        }
+    });
+
+    return { lot: lotCol, stock: stockCol, issue: issueCol };
 }
 
 // WHY THE FIGURE IS SHORT, and only when it is.
@@ -1645,20 +1984,15 @@ function lotShortHtml(m, supIdx, matIdx) {
 
 
 
+// NON-FABRIC ROWS ONLY (trims: thread, labels, cones). Fabric goes through
+// renderFabricRows, which now draws one row per SKU with per-lot editable boxes
+// — a completely different shape, so there is no shared fallback to keep in step
+// any more. If fabric is ever routed here it will render a bare metres box with
+// no lot column and issue nothing, which is a visible fault, not a silent one.
 function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
     var done = isFullyIssued(m);
-    var lots = lotsFor(m);
-    // Fabric is typed into its lots, so the row's own box is a running total.
-    //
-    // Today every fabric row goes through renderFabricRows and this function is
-    // only ever called with non-fabric, so byLot is always false here. Kept so
-    // the two renderers cannot disagree if fabric is ever routed back through
-    // this one — which is exactly how the lot strip came to be missing from the
-    // issue screen the first time.
-    var byLot = m.isFabric && !done;
-    var defaultIssue = byLot ? 0 : suggestedIssue(m);
+    var defaultIssue = suggestedIssue(m);
     var disabled = maxIssuable(m) > 0 ? '' : 'disabled';
-    if (byLot && lots.length === 0) disabled = 'disabled';
 
     var issueCell;
     if (done) {
@@ -1672,13 +2006,12 @@ function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
         issueCell =
             '<div class="issue-cell">' +
             '<input type="checkbox" class="issue-checkbox" id="' + rowCheckboxId(supIdx, matIdx) + '" ' +
-            (rowIssuable(m) && !byLot ? 'checked' : '') + ' ' + disabled + ' ' +
+            (rowIssuable(m) ? 'checked' : '') + ' ' + disabled + ' ' +
             'aria-label="Issue ' + escapeHtml(m.material) + '" ' +
             'onchange="onIssueCheckboxChange(' + supIdx + ',' + matIdx + ')" />' +
             '<span class="issue-input-group">' +
             '<input type="number" step="0.01" min="0" max="' + issueCeiling(m) + '" ' +
             'class="issue-input" id="' + rowInputId(supIdx, matIdx) + '" ' + disabled + ' ' +
-            (byLot ? 'readonly ' : '') +
             'value="' + defaultIssue + '" oninput="onIssueInputChange(' + supIdx + ',' + matIdx + ')" />' +
             '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
             '</span>' +
@@ -1740,32 +2073,24 @@ function renderFabricRows(m, supIdx, matIdx) {
     // needs none, so it gets no lot strip — there is no fresh fabric to source.
     var byLot = !done && wantsFresh;
 
-    // ---- "To be issued": fresh metres as the headline, waste beneath it ----
-    // NO STATUS PILL ON A FABRIC ROW.
-    //
-    // The lot column beside it now says the one thing he can act on, and the pill
-    // could only categorise it — badly. A row waiting on a wash got "Cannot cut",
-    // which is false: the cloth is there, it is greige, and the line next to it
-    // already says how much to send. Two labels for one condition, and the shorter
-    // one was the wrong one.
+    // ---- "To be issued": the SKU total metres, one figure. ----
     var toIssue = '';
     if (wantsFresh) {
         toIssue =
             '<span class="qty-big">' + fmt(m.remaining) +
             '<span class="unit">' + escapeHtml(m.unit) + '</span></span>';
     }
-    picks.forEach(function (p) {
-        toIssue +=
-            '<div class="qty-sub qty-sub-waste">' +
-            '<div>&#9851; ' + p.pieces + ' pc' + (p.pieces === 1 ? '' : 's') + ' waste</div>' +
-            '<div class="waste-dim">' + fmt(p.length) + ' &times; ' + fmt(p.width) + ' cm</div>' +
-            '</div>';
-    });
     if (!toIssue) {
         toIssue = '<span class="is-zero">&mdash;</span>';
     }
 
-    // ---- "Issue now": one control per source, stacked ----
+    // Three stacked columns: LOT (roll · recommended), TOTAL STOCK (lot washed),
+    // ISSUE NOW (editable box + checkbox). One sub-line per lot and per waste
+    // pick, aligned across the three <td>s.
+    var cols = done
+        ? { lot: '', stock: '', issue: '' }
+        : lotLinesHtml(m, supIdx, matIdx, true);
+
     var issueCell;
     if (done) {
         issueCell = '<span class="issued-tag">&#10003; ' + fmt(m.issued) +
@@ -1775,73 +2100,9 @@ function renderFabricRows(m, supIdx, matIdx) {
                 '<span class="unit">pcs from waste</span></span>';
         }
     } else {
-        var disabled = maxIssuable(m) > 0 ? '' : 'disabled';
-        // NOTHING ALLOCATED MEANS NOTHING TO ISSUE, whatever the shelf total
-        // says — no lot at all, or lots holding only ends too short to cut.
-        //
-        // maxIssuable is the shelf figure, so on a fragmented material it left
-        // this box live at zero: he could tick it, press Issue, and be handed
-        // nothing with no error. The lot strip beside it explains why.
-        if (byLot && recommendedTotal(m, supIdx, matIdx) <= 0) disabled = 'disabled';
-        issueCell = '<div class="issue-stack">';
-
-        if (wantsFresh) {
-            // Pre-filled from the recommendation, so the common case is one
-            // glance and one press. He can still change any of it.
-            var startQty = byLot ? recommendedTotal(m, supIdx, matIdx) : suggestedIssue(m);
-
-            issueCell +=
-                '<div class="issue-cell">' +
-                '<input type="checkbox" class="issue-checkbox" id="' + rowCheckboxId(supIdx, matIdx) + '" ' +
-                (rowIssuable(m) && startQty > 0 ? 'checked' : '') + ' ' + disabled + ' ' +
-                'aria-label="Issue ' + escapeHtml(m.material) + '" ' +
-                'onchange="onIssueCheckboxChange(' + supIdx + ',' + matIdx + ')" />' +
-                '<span class="issue-input-group">' +
-                // Read-only when it comes off lots: this box is the
-                // running total of what he typed against each lot, not
-                // somewhere to type. Keeping it means the checkbox,
-                // validation and card footer all work unchanged.
-                '<input type="number" step="0.01" min="0" max="' + issueCeiling(m) + '" ' +
-                'class="issue-input" id="' + rowInputId(supIdx, matIdx) + '" ' + disabled + ' ' +
-                (byLot ? 'readonly ' : '') +
-                'value="' + startQty + '" ' +
-                'oninput="onIssueInputChange(' + supIdx + ',' + matIdx + ')" />' +
-                '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
-                '</span>' +
-                '</div>';
-        }
-
-        // Each piece size keeps its own checkbox — a remnant can be declined
-        // without giving up the fresh length that goes with it.
-        picks.forEach(function (p, pickIdx) {
-            issueCell +=
-                '<div class="issue-cell issue-cell-waste" id="' + wasteRowId(supIdx, matIdx, pickIdx) + '">' +
-                '<input type="checkbox" class="issue-checkbox" id="' + wasteCheckboxId(supIdx, matIdx, pickIdx) + '" ' +
-                (wasteCheckedFor(p) ? 'checked ' : '') +
-                'aria-label="Issue waste pieces of ' + escapeHtml(m.material) + '" ' +
-                'onchange="onWasteCheckboxChange(' + supIdx + ',' + matIdx + ',' + pickIdx + ')" />' +
-                '<span class="issue-input-group">' +
-                '<input type="number" step="1" min="0" max="' + rackCountFor(m, p) + '" ' +
-                'class="issue-input" id="' + wasteInputId(supIdx, matIdx, pickIdx) + '" value="' + p.pieces + '" ' +
-                'oninput="onWasteInputChange(' + supIdx + ',' + matIdx + ',' + pickIdx + ')" />' +
-                '<span class="issue-unit">pcs</span>' +
-                '</span>' +
-                '</div>';
-        });
-
-        issueCell += '</div>';
+        issueCell = cols.issue || '<span class="is-zero issue-cell-empty">&mdash;</span>';
     }
 
-    // NO "ALSO NEEDED BY" ON A FABRIC ROW.
-    //
-    // It named something he cannot act on. Under the old screen he could favour
-    // one supervisor by typing a smaller number; the allocation is computed now,
-    // there is no per-order control, and the row he would type into is read-only.
-    // Contention is settled where it can actually be settled — issueMaterials
-    // re-checks every lot, and whoever presses second gets what is really left.
-    //
-    // It stays on ACCESSORY rows, where he still types the quantity and the
-    // warning is therefore something he can do something about.
     return '' +
         '<tr id="' + rowId(supIdx, matIdx) + '" class="' + (done ? 'row-issued' : 'row-selected') + '">' +
         '<td class="material-name-cell">' +
@@ -1852,14 +2113,13 @@ function renderFabricRows(m, supIdx, matIdx) {
         reissueWhy(m) +
         '</td>' +
         '<td class="col-num col-strong">' + toIssue + '</td>' +
-        // The hidden inputs live in here now. They are keyed by id, not by
-        // position, so the submit path reads them exactly as before.
+        // LOT: roll name + the recommended metres for that roll (fixed).
         '<td class="col-lot-issue">' +
-        (byLot ? lotLinesHtml(m, supIdx, matIdx) + lotShortHtml(m, supIdx, matIdx) : '') +
-        // WHERE TO FETCH EACH WASTE PIECE FROM — carton and lot, now
-        // shown in the LOT column so all location info is grouped.
-        picks.map(function (p) { return wasteWhereHtml(p); }).join('') +
+        (done ? '' : cols.lot + lotShortHtml(m, supIdx, matIdx)) +
         '</td>' +
+        // TOTAL STOCK: that lot's washed metres on the rack.
+        '<td class="col-num col-lot-stock">' + (done ? '' : cols.stock) + '</td>' +
+        // ISSUE NOW: the editable box + checkbox per lot / per waste pick.
         '<td class="col-issue">' + issueCell + '</td>' +
         '</tr>';
 }
@@ -2383,7 +2643,8 @@ function renderSupervisorCard(sup, idx, arr) {
     var fabricHead =
         '<th>Material</th>' +
         '<th class="col-num">To be issued</th>' +
-        '<th class="col-lot-issue">Lot</th>';
+        '<th class="col-lot-issue">Lot</th>' +
+        '<th class="col-num col-lot-stock">Total stock</th>';
 
     var otherHead =
         '<th>Material</th>' +
@@ -2659,30 +2920,47 @@ function render(data) {
 //   issueLines   — one per allocation, expanded one-per-physical-piece for a
 //                  PRINTED_PIECE line so the supervisor can receive each piece.
 //
-// `picks` is the array of { wasteId, pieces, planItemId } gathered from the
-// ticked waste checkboxes.
+// `picks` is the array of { wasteId, pieces, planItemId, mrqId } gathered from
+// the ticked waste checkboxes.
+//
+// KEYED BY mrqId, NOT planItemId. One Plan_Item can have TWO Material_Requirement
+// rows for this fabric — a body panel and a facing off the same cloth, two cut
+// sizes, one item id. Keying the payload by planItemId merged the two rows into
+// one allocation: the second mrqId was never sent, its requirement stayed open
+// for ever, and the first row was over-credited with both cuts' metres. So every
+// per-row map below is keyed on the requirement row.
 function buildFabricIssueLine(m, picks) {
-    var cutW = Number(m.cutWidth) || 0;
-    var cutL = Number(m.cutLength) || 0;
     var src = m.isReissue === true ? 'Reissue' : 'Plan';
 
     var lotLines = (m.lotLines || []).filter(function (ln) {
         return (Number(ln.qty) || 0) > 0;
     });
 
-    // planItemId -> the mrq it belongs to, and how many cut pieces it still
-    // owes — from the server's per-row lines. The owed figure is the ceiling on
-    // giveRaw + giveWaste: the allocator caps at it too, and adding more than
-    // the row owes to Pieces_From_Raw / Pieces_From_Waste over-closes it.
-    var mrqByItem = {};
-    var planByItem = {};
-    var owedByItem = {};
+    // The mrqId of a lot line, from the line itself, or resolved from m.lines by
+    // (planItemId, cut) for an older allocator run that did not stamp it.
+    var lineMrq = function (ln) {
+        if (ln.mrqId) return String(ln.mrqId);
+        var hit = (m.lines || []).filter(function (x) {
+            return String(x.planItemId || '') === String(ln.planItemId || '') &&
+                   (Number(x.cutW) || 0) === (Number(ln.cutW) || 0) &&
+                   (Number(x.cutL) || 0) === (Number(ln.cutL) || 0);
+        })[0];
+        return hit ? String(hit.mrqId || '') : '';
+    };
+
+    // mrqId -> the item it belongs to, its plan, how many cut pieces it still
+    // owes, and its cut size — from the server's per-row lines.
+    var itemByMrq = {};
+    var planByMrq = {};
+    var owedByMrq = {};
+    var cutByMrq = {};
     (m.lines || []).forEach(function (ln) {
-        var it = String(ln.planItemId || '');
-        if (it && mrqByItem[it] === undefined) {
-            mrqByItem[it] = ln.mrqId;
-            planByItem[it] = ln.planId;
-            owedByItem[it] = Math.max(0, (Number(ln.reqPieces) || 0) - (Number(ln.issPieces) || 0));
+        var q = String(ln.mrqId || '');
+        if (q && owedByMrq[q] === undefined) {
+            itemByMrq[q] = String(ln.planItemId || '');
+            planByMrq[q] = ln.planId;
+            owedByMrq[q] = Math.max(0, (Number(ln.reqPieces) || 0) - (Number(ln.issPieces) || 0));
+            cutByMrq[q] = { w: Number(ln.cutW) || 0, l: Number(ln.cutL) || 0 };
         }
     });
 
@@ -2707,98 +2985,120 @@ function buildFabricIssueLine(m, picks) {
     });
     var lotMoves = moveOrder.map(function (k) { return moveByLot[k]; });
 
-    // ---- allocations: one per plan item the allocator served ----
+    // ---- allocations: one per REQUIREMENT ROW the allocator served ----
     // giveQty / giveRaw / giveWaste come STRAIGHT off the allocator's lotLines
     // (fromRaw / fromWaste added in spend()) — never recomputed here. A demand
     // covered entirely by offcuts has no lotLine, so its waste credit is
     // recovered from the physical picks instead.
-    var qtyByItem = {};
-    var rawByItem = {};
-    var wasteByItem = {};
-    var lotByItem = {};
-    var itemOrder = [];
-    var seenItem = {};
+    var qtyByMrq = {};
+    var rawByMrq = {};
+    var wasteByMrq = {};
+    var lotByMrq = {};
+    var mrqOrder = [];
+    var seenMrq = {};
     lotLines.forEach(function (ln) {
-        var it = String(ln.planItemId || '');
-        if (!seenItem[it]) {
-            seenItem[it] = true; itemOrder.push(it);
-            qtyByItem[it] = 0; rawByItem[it] = 0; wasteByItem[it] = 0;
+        var q = lineMrq(ln);
+        if (!q) return;
+        if (!seenMrq[q]) {
+            seenMrq[q] = true; mrqOrder.push(q);
+            qtyByMrq[q] = 0; rawByMrq[q] = 0; wasteByMrq[q] = 0;
         }
-        qtyByItem[it] = round2(qtyByItem[it] + (Number(ln.qty) || 0));
-        rawByItem[it] += Number(ln.fromRaw) || 0;
-        wasteByItem[it] += Number(ln.fromWaste) || 0;
-        if (!lotByItem[it]) lotByItem[it] = ln.lotId;
+        qtyByMrq[q] = round2(qtyByMrq[q] + (Number(ln.qty) || 0));
+        rawByMrq[q] += Number(ln.fromRaw) || 0;
+        wasteByMrq[q] += Number(ln.fromWaste) || 0;
+        if (!lotByMrq[q]) lotByMrq[q] = ln.lotId;
     });
 
     // ---- wastePicks payload, and the offcut-only credit fallback ----
-    // Total remnant yield per item from the ticked picks. Used ONLY for a plan
-    // item with no lotLine at all (offcut-complete) — otherwise the allocator's
-    // per-line fromWaste above is authoritative.
-    var wasteYieldByItem = {};
+    // Total remnant yield per requirement row from the ticked picks. Used ONLY
+    // for a row with no lotLine at all (offcut-complete) — otherwise the
+    // allocator's per-line fromWaste above is authoritative.
+    var wasteYieldByMrq = {};
     var wastePicksOut = [];
     picks.forEach(function (pk) {
         var src2 = (m.wastePicks || []).filter(function (x) {
+            return String(x.wasteId) === String(pk.wasteId) &&
+                   (pk.mrqId ? String(x.mrqId || '') === String(pk.mrqId) : true);
+        })[0] || (m.wastePicks || []).filter(function (x) {
             return String(x.wasteId) === String(pk.wasteId);
         })[0] || {};
         var w = Number(src2.width) || 0;
         var l = Number(src2.length) || 0;
-        var yieldPer = remnantYield({ width: w, length: l }, cutW, cutL);
-        var it = String(pk.planItemId || src2.planItemId || '');
-        wasteYieldByItem[it] = (wasteYieldByItem[it] || 0) + pk.pieces * yieldPer;
+        var q = String(pk.mrqId || src2.mrqId || '');
+        var it = itemByMrq[q] || String(pk.planItemId || src2.planItemId || '');
+        // Yield is against THIS requirement row's cut. Prefer the cut recorded on
+        // the pick / the row's line; fall back to the pick's own dims.
+        var ic = cutByMrq[q] ||
+                 (src2.cutW ? { w: Number(src2.cutW) || 0, l: Number(src2.cutL) || 0 } : { w: 0, l: 0 });
+        var yieldPer = (ic.w > 0 && ic.l > 0)
+            ? remnantYield({ width: w, length: l }, ic.w, ic.l)
+            : 0;
+        wasteYieldByMrq[q] = (wasteYieldByMrq[q] || 0) + pk.pieces * yieldPer;
         wastePicksOut.push({
             wasteId: pk.wasteId,
             pieces: pk.pieces,
-            planId: planByItem[it] || '',
+            planId: planByMrq[q] || '',
             planItemId: it,
             yieldPer: yieldPer,
             pieceWidth: w,
-            pieceLength: l
+            pieceLength: l,
+            // This pick's target-row cut, so issueMaterials stamps the
+            // Waste_Movement's Cut_Size_* correctly — there is no single cut on
+            // the SKU wrapper any more.
+            cutW: ic.w || 0,
+            cutL: ic.l || 0
         });
     });
-    Object.keys(wasteYieldByItem).forEach(function (it) {
-        if (it === '') return;
-        if (!seenItem[it]) {
+    Object.keys(wasteYieldByMrq).forEach(function (q) {
+        if (q === '') return;
+        if (!seenMrq[q]) {
             // Offcut-complete: no fresh cloth, no lotLine. Credit from the picks.
-            seenItem[it] = true; itemOrder.push(it);
-            qtyByItem[it] = 0; rawByItem[it] = 0;
-            wasteByItem[it] = wasteYieldByItem[it];
+            seenMrq[q] = true; mrqOrder.push(q);
+            qtyByMrq[q] = 0; rawByMrq[q] = 0;
+            wasteByMrq[q] = wasteYieldByMrq[q];
         }
     });
 
-    var allocations = itemOrder.filter(function (it) {
-        return it !== '' && mrqByItem[it] !== undefined;
-    }).map(function (it) {
-        var owed = owedByItem[it] === undefined ? Infinity : owedByItem[it];
-        var raw = rawByItem[it] || 0;
-        var wst = wasteByItem[it] || 0;
+    var allocations = mrqOrder.filter(function (q) {
+        return q !== '' && owedByMrq[q] !== undefined;
+    }).map(function (q) {
+        var owed = owedByMrq[q] === undefined ? Infinity : owedByMrq[q];
+        var raw = rawByMrq[q] || 0;
+        var wst = wasteByMrq[q] || 0;
         // Never credit more pieces than the row still owes — the allocator caps
         // at this too. Waste first (scarcer, already paid for), then fresh.
         if (wst > owed) { wst = owed; }
         if (raw > owed - wst) { raw = Math.max(0, owed - wst); }
         return {
-            mrqId: mrqByItem[it],
-            planId: planByItem[it] || '',
-            planItemId: it,
-            giveQty: round2(qtyByItem[it] || 0),
+            mrqId: q,
+            planId: planByMrq[q] || '',
+            planItemId: itemByMrq[q] || '',
+            giveQty: round2(qtyByMrq[q] || 0),
             giveRaw: raw,
             giveWaste: wst,
-            issuedLot: String(lotByItem[it] || '')
+            issuedLot: String(lotByMrq[q] || '')
         };
     });
 
     // ---- issueLines: one per allocation, PRINTED_PIECE expanded per piece ----
+    // Cut_Size_* per line comes from the matching lot line's own cut (matched by
+    // mrqId — a Plan_Item at two cut sizes has two lot lines), falling back to
+    // the requirement row's line cut, then to zero.
     var issueLinesOut = [];
     allocations.forEach(function (a) {
         var ln = lotLines.filter(function (x) {
-            return String(x.planItemId || '') === a.planItemId;
+            return lineMrq(x) === a.mrqId;
         })[0] || {};
+        var ic = cutByMrq[a.mrqId] || { w: 0, l: 0 };
+        var lnW = Number(ln.cutW) || ic.w || 0;
+        var lnL = Number(ln.cutL) || ic.l || 0;
         if (ln.pieces && ln.pieces.length && ln.cutSummary) {
             var baseNote = ln.note ? ln.note + ' | ' : '';
             ln.pieces.forEach(function (p) {
                 issueLinesOut.push({
                     mrqId: a.mrqId, planItemId: a.planItemId, lotId: a.issuedLot,
                     qty: round2(((Number(p.cutLengthCm) || 0) * (Number(p.count) || 0)) / 100),
-                    unit: m.unit, cutW: cutW, cutL: cutL,
+                    unit: m.unit, cutW: lnW, cutL: lnL,
                     note: baseNote + 'PRINTED_PIECE | ' + ln.cutSummary,
                     overrideFrom: ln.overrideFrom || ''
                 });
@@ -2806,7 +3106,7 @@ function buildFabricIssueLine(m, picks) {
         } else {
             issueLinesOut.push({
                 mrqId: a.mrqId, planItemId: a.planItemId, lotId: a.issuedLot,
-                qty: a.giveQty, unit: m.unit, cutW: cutW, cutL: cutL,
+                qty: a.giveQty, unit: m.unit, cutW: lnW, cutL: lnL,
                 note: ln.note || '', overrideFrom: ln.overrideFrom || ''
             });
         }
@@ -2816,8 +3116,11 @@ function buildFabricIssueLine(m, picks) {
         materialId: m.materialId,
         source: src,
         isFabric: true,
-        cutWidth: cutW,
-        cutLength: cutL,
+        // NO SINGLE CUT ON THE WRAPPER — a SKU row spans many. issueMaterials
+        // reads cutWidth/cutLength only as a fallback for an issue line that
+        // omits its own, and every line above carries one, so 0 here is safe.
+        cutWidth: 0,
+        cutLength: 0,
         allocations: allocations,
         lotMoves: lotMoves,
         wastePicks: wastePicksOut,
@@ -2888,16 +3191,29 @@ function issueForSupervisor(supIdx) {
     var hasInvalid = false;
 
     sup.materials.forEach(function (m, matIdx) {
-        // No metres input means either a fully-issued row (a receipt) or a
-        // fabric line wholly covered by waste. The second still has pieces to
-        // hand over, so this must not bail out — it falls through at 0 metres.
-        var input = document.getElementById(rowInputId(supIdx, matIdx));
+        // "val" is the total fresh metres this material is issuing. For fabric it
+        // is Σ of the ticked lot boxes; for a non-fabric accessory it is the one
+        // metres box. A fabric line wholly covered by waste falls through at 0.
         var val = 0;
-        if (input) {
-            val = parseFloat(input.value) || 0;
+        if (m.isFabric && !isFullyIssued(m)) {
             validateRow(supIdx, matIdx, m);
-            if (input.classList.contains('invalid')) {
-                hasInvalid = true;
+            fabricLotLineList(m).forEach(function (info) {
+                var chk = document.getElementById(lotLineCheckId(supIdx, matIdx, info.lotIdx));
+                var box = document.getElementById(lotLineInputId(supIdx, matIdx, info.lotIdx));
+                if (!box) return;
+                if (box.classList.contains('invalid')) hasInvalid = true;
+                if (chk && !chk.checked) return;
+                val += parseFloat(box.value) || 0;
+            });
+            val = Math.round(val * 1000) / 1000;
+        } else {
+            var input = document.getElementById(rowInputId(supIdx, matIdx));
+            if (input) {
+                val = parseFloat(input.value) || 0;
+                validateRow(supIdx, matIdx, m);
+                if (input.classList.contains('invalid')) {
+                    hasInvalid = true;
+                }
             }
         }
         // Waste pieces live in their own section, so gather whatever was ticked
@@ -2909,12 +3225,14 @@ function issueForSupervisor(supIdx) {
             var wInput = document.getElementById(wasteInputId(supIdx, matIdx, pickIdx));
             if (!wCheck || !wCheck.checked || !wInput) return;
             var pieces = parseInt(wInput.value, 10) || 0;
-            // planItemId travels with the pick so the server credits the item
-            // this remnant was actually allocated to, rather than the oldest row
-            // that happens to match on material and cut size.
+            // mrqId + planItemId travel with the pick so the server credits the
+            // exact requirement row this remnant was allocated to (one item can
+            // have two rows for this fabric), not the oldest row that happens to
+            // match on material and cut size.
             if (pieces > 0) picks.push({
                 wasteId: p.wasteId, pieces: pieces,
-                planItemId: p.planItemId || ''
+                planItemId: p.planItemId || '',
+                mrqId: p.mrqId || ''
             });
         });
 
@@ -3063,7 +3381,8 @@ function issueForSupervisor(supIdx) {
 
     function processNextChunk() {
         if (chunkIndex >= issueChunks.length) {
-            closeProgressModal();
+            showProgressModal('Issued to ' + sup.supervisorName, 'Done', 100);
+            setTimeout(closeProgressModal, 350);
 
             if (allErrors.length > 0) {
                 alert('Some materials could not be issued:\n' + allErrors.join('\n'));
@@ -3098,9 +3417,14 @@ function issueForSupervisor(supIdx) {
         btn.textContent = displayTotal > 1
             ? 'Issuing… (' + (chunkIndex + 1) + '/' + displayTotal + ')' : 'Issuing…';
 
-        var pct = (chunkIndex / displayTotal) * 100;
-        showProgressModal('Issuing to ' + sup.supervisorName,
-            'Batch ' + (chunkIndex + 1) + ' of ' + displayTotal, pct);
+        if (displayTotal > 1) {
+            showProgressModal('Issuing to ' + sup.supervisorName,
+                'Batch ' + (chunkIndex + 1) + ' of ' + displayTotal,
+                (chunkIndex / displayTotal) * 100);
+        } else {
+            showProgressModal('Issuing to ' + sup.supervisorName,
+                'Sending the handover…');
+        }
 
         ZOHO.CREATOR.DATA.invokeCustomApi({
             api_name: 'issueMaterials',
@@ -3232,9 +3556,11 @@ function mergeRequirementPages(target, page) {
                 var existingMat = null;
                 for (var n = 0; n < existing.materials.length; n++) {
                     var em = existing.materials[n];
+                    // ONE ROW PER (materialId, source). Cut size is no longer in
+                    // the key — the server merged those — so a supervisor whose
+                    // demand for a fabric is split across parallel pages lands on
+                    // ONE entry, with lines / cuts / piece counts summed below.
                     if (em.materialId === bm.materialId &&
-                        em.cutWidth === bm.cutWidth &&
-                        em.cutLength === bm.cutLength &&
                         em.isReissue === bm.isReissue) {
                         existingMat = em;
                         break;
@@ -3259,6 +3585,28 @@ function mergeRequirementPages(target, page) {
                         existingMat.requiredTotal = (existingMat.requiredTotal || 0) + (bm.requiredTotal || 0);
                         if (bm.wastePicks && bm.wastePicks.length > 0) {
                             existingMat.wastePicks = (existingMat.wastePicks || []).concat(bm.wastePicks);
+                        }
+                        // MERGE THE PER-CUT SUMMARY. A supervisor's demand for one
+                        // fabric can land on two parallel pages — page 2 may carry
+                        // a cut size page 1 did not. The allocator rebuilds the
+                        // cut list from the (fully merged) lines anyway, but keep
+                        // m.cuts complete for anything else that reads it.
+                        if (bm.cuts && bm.cuts.length) {
+                            existingMat.cuts = existingMat.cuts || [];
+                            var seen = {};
+                            existingMat.cuts.forEach(function (c) {
+                                seen[(c.cutW || 0) + 'x' + (c.cutL || 0)] = c;
+                            });
+                            bm.cuts.forEach(function (c) {
+                                var k = (c.cutW || 0) + 'x' + (c.cutL || 0);
+                                if (seen[k]) {
+                                    seen[k].reqPieces = (seen[k].reqPieces || 0) + (c.reqPieces || 0);
+                                    seen[k].issPieces = (seen[k].issPieces || 0) + (c.issPieces || 0);
+                                } else {
+                                    existingMat.cuts.push(c);
+                                    seen[k] = c;
+                                }
+                            });
                         }
                     }
                 } else {
@@ -3289,19 +3637,93 @@ function mergeRequirementPages(target, page) {
 // still there, unchanged.
 var REQ_PAGE_PLANS = 25;
 
+// ---- Load progress bar ----
+//
+// getStoreMaterialRequirements is paged; on a big backlog that is one
+// getOpenPlanCount call plus a handful of page calls. The bar tracks REAL
+// completion:
+//   parallel mode  — total is known (ceil(planCount / REQ_PAGE_PLANS) + 1 for
+//                    the count call); every finished call advances it.
+//   sequential mode — total is unknown, so it runs indeterminate with a live
+//                    "page N" counter.
+var LoadProgress = {
+    el: null,
+    total: 0,
+    done: 0,
+
+    // total 0 => indeterminate.
+    start: function (contentEl, title, total) {
+        this.total = total || 0;
+        this.done = 0;
+        contentEl.innerHTML =
+            '<div class="load-progress' + (this.total ? '' : ' is-indeterminate') + '" id="load-progress">' +
+            '<div class="lp-head">' +
+            '<span class="lp-title" id="lp-title"></span>' +
+            '<span class="lp-count" id="lp-count"></span>' +
+            '</div>' +
+            '<div class="lp-track"><div class="lp-fill" id="lp-fill"></div></div>' +
+            '<div class="lp-sub" id="lp-sub">This can take a moment on a large order backlog.</div>' +
+            '</div>';
+        this.el = document.getElementById('load-progress');
+        this.setTitle(title || 'Loading material requirements…');
+        this._paint();
+    },
+
+    setTitle: function (t) {
+        var n = document.getElementById('lp-title');
+        if (n) n.textContent = t;
+    },
+
+    setSub: function (t) {
+        var n = document.getElementById('lp-sub');
+        if (n) n.textContent = t;
+    },
+
+    // Mark one unit of work complete (one API call returned).
+    tick: function () {
+        this.done++;
+        this._paint();
+    },
+
+    // Sequential mode: just bump a visible page counter, no bar fill.
+    setPage: function (n) {
+        var c = document.getElementById('lp-count');
+        if (c) c.textContent = 'Page ' + n;
+    },
+
+    _paint: function () {
+        var fill = document.getElementById('lp-fill');
+        var count = document.getElementById('lp-count');
+        if (!fill) return;
+        if (this.total > 0) {
+            var pct = Math.min(100, Math.round((this.done / this.total) * 100));
+            fill.style.width = pct + '%';
+            if (count) count.textContent = this.done + ' / ' + this.total;
+        }
+    },
+
+    // Snap to 100% briefly before render() swaps the content out.
+    finish: function () {
+        if (this.el && this.total > 0) {
+            var fill = document.getElementById('lp-fill');
+            if (fill) fill.style.width = '100%';
+        }
+        this.el = null;
+    }
+};
+
 function loadRequirements() {
     var content = document.getElementById('dynamic-content');
     var emptyState = document.getElementById('empty-state');
     var refreshBtn = document.getElementById('refresh-btn');
     emptyState.classList.add('hidden');
     refreshBtn.disabled = true;
-    content.innerHTML =
-        '<div class="skeleton-card"><div class="skeleton-line w-40"></div>' +
-        '<div class="skeleton-line"></div><div class="skeleton-line"></div>' +
-        '<div class="skeleton-line w-70"></div></div>';
+    // Kick off indeterminate until getOpenPlanCount tells us the page count.
+    LoadProgress.start(content, 'Counting open orders…', 0);
 
     function done(merged) {
         console.log('merged requirements:', merged);
+        LoadProgress.finish();
         refreshBtn.disabled = false;
         try {
             render(merged);
@@ -3312,6 +3734,7 @@ function loadRequirements() {
     }
     function fail(err) {
         console.error('loadRequirements error:', err);
+        LoadProgress.finish();
         refreshBtn.disabled = false;
         content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Failed to load requirements</h2><p>Check the browser console for details.</p></div>';
     }
@@ -3327,6 +3750,7 @@ function loadRequirements() {
         if (!count || count < 0) {
             // Nothing open, or the count call gave us nothing usable — the
             // sequential walk handles both (it returns [] fast when empty).
+            LoadProgress.setTitle('Loading material requirements…');
             return loadRequirementsSequential(content, done, fail);
         }
 
@@ -3334,6 +3758,13 @@ function loadRequirements() {
         var merged = [];
         var pending = pages;
         var failed = false;
+
+        // Total units of work = the count call (already done) + one per page.
+        LoadProgress.start(content, 'Loading ' + count + ' order' + (count === 1 ? '' : 's') + '…', pages + 1);
+        LoadProgress.tick(); // the getOpenPlanCount call that just returned
+        LoadProgress.setSub(pages === 1
+            ? 'One page to fetch.'
+            : pages + ' pages to fetch, in parallel.');
 
         for (var p = 0; p < pages; p++) {
             (function (skip) {
@@ -3348,6 +3779,7 @@ function loadRequirements() {
                     if (failed) return;
                     var parsed = JSON.parse(resp.result);
                     mergeRequirementPages(merged, parsed.plans || []);
+                    LoadProgress.tick();
                     pending--;
                     if (pending === 0) done(merged);
                 }).catch(function (err) {
@@ -3356,12 +3788,14 @@ function loadRequirements() {
                     // One window failed — fall back to the sequential walk from
                     // scratch rather than render a half-loaded screen.
                     console.warn('parallel page at skip ' + skip + ' failed, falling back to sequential', err);
+                    LoadProgress.start(content, 'Loading material requirements…', 0);
                     loadRequirementsSequential(content, done, fail);
                 });
             })(p * REQ_PAGE_PLANS);
         }
     }).catch(function (err) {
         console.warn('getOpenPlanCount failed, falling back to sequential paging', err);
+        LoadProgress.start(content, 'Loading material requirements…', 0);
         loadRequirementsSequential(content, done, fail);
     });
 }
@@ -3382,6 +3816,7 @@ function loadRequirementsSequential(content, done, fail) {
             console.error('loadRequirements: hit MAX_CALLS safety cap, stopping - server may not be advancing plansConsumed correctly');
             return;
         }
+        LoadProgress.setPage(callsSoFar + 1);
         return ZOHO.CREATOR.DATA.invokeCustomApi({
             api_name: 'getStoreMaterialRequirements',
             http_method: 'POST',

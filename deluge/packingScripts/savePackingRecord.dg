@@ -553,6 +553,12 @@ string savePackingRecord(string payloadJson)
 			packRec.Packed_Box_Items.insert(itemsCollection);
 		}
 
+		// Box photos are a MULTI-IMAGE FIELD ON THE PARENT (Packing.Box_Images),
+		// not on the subform - Creator will not show a subform file field in a
+		// report or hand it to the widget SDK cleanly. The widget uploads every
+		// box's photos to Box_Images against this record's id (packId), so all it
+		// needs back is packingId, which it already gets below.
+
 		//------------------------------------------------------------------
 		// THE ORDER. Forward only, from the one status guard 1 admitted.
 		//------------------------------------------------------------------

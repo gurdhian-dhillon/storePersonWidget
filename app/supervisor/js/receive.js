@@ -27,6 +27,93 @@ function printedShortId(i) { return 'printed-short-' + i; }
 function printedInputId(i) { return 'printed-input-' + i; }
 function printedRowId(i) { return 'printed-row-' + i; }
 function printedNoteId(i) { return 'printed-note-' + i; }
+// Phase 2 — read-only breakdown expand-in-place under a material row.
+function matBdRowId(i) { return 'mat-bd-' + i; }
+function matChevId(i) { return 'mat-chev-' + i; }
+function ordItemsId(i, j) { return 'ord-bd-' + i + '-' + j; }
+function ordChevId(i, j) { return 'ord-chev-' + i + '-' + j; }
+
+// planId|materialId -> { state: 'loading'|'ok'|'error', items: [...] }
+var BD_CACHE = {};
+
+// ---- Progress bar (shared look with the store Issue screen) ----
+//
+// getSupervisorMaterials is paged by Issue_Line row - a big backlog is a
+// handful of sequential calls, total unknown until linesConsumed hits 0. So the
+// load bar runs INDETERMINATE with a live "Page N". The receipt bar is the same
+// bar in a modal, one tick per sweep slice / finalize phase.
+var LoadProgress = {
+    el: null,
+
+    start: function (contentEl, title, sub) {
+        contentEl.innerHTML =
+            '<div class="load-progress is-indeterminate" id="rcv-load-progress">' +
+            '<div class="lp-head">' +
+            '<span class="lp-title" id="rcv-lp-title"></span>' +
+            '<span class="lp-count" id="rcv-lp-count"></span>' +
+            '</div>' +
+            '<div class="lp-track"><div class="lp-fill"></div></div>' +
+            '<div class="lp-sub" id="rcv-lp-sub"></div>' +
+            '</div>';
+        this.el = document.getElementById('rcv-load-progress');
+        this.setTitle(title || 'Loading your deliveries…');
+        this.setSub(sub || 'This can take a moment on a large order backlog.');
+    },
+    setTitle: function (t) { var n = document.getElementById('rcv-lp-title'); if (n) n.textContent = t; },
+    setSub: function (t) { var n = document.getElementById('rcv-lp-sub'); if (n) n.textContent = t || ''; },
+    setPage: function (n) { var c = document.getElementById('rcv-lp-count'); if (c) c.textContent = 'Page ' + n; },
+    finish: function () { this.el = null; }
+};
+
+// The receipt-time bar, in a modal so it sits over the card while the sweep +
+// finalize batches run. `percentage` numeric => a filled bar; omit it for the
+// indeterminate crawl (the batch count is not known ahead of time).
+function rcvProgressModalEl() {
+    var el = document.getElementById('rcv-progress-modal');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'rcv-progress-modal';
+        el.className = 'exc-modal hidden';
+        el.innerHTML = '<div class="exc-panel progress-panel">' +
+            '<div class="load-progress" id="rcv-pm-card">' +
+            '<div class="lp-head">' +
+            '<span class="lp-title" id="rcv-pm-title">Receiving materials</span>' +
+            '<span class="lp-count" id="rcv-pm-count"></span>' +
+            '</div>' +
+            '<div class="lp-track"><div class="lp-fill" id="rcv-pm-fill"></div></div>' +
+            '<div class="lp-sub" id="rcv-pm-sub"></div>' +
+            '</div>' +
+            '</div>';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+function showRcvProgress(title, sub, percentage) {
+    var el = rcvProgressModalEl();
+    document.getElementById('rcv-pm-title').textContent = title || 'Receiving materials';
+    document.getElementById('rcv-pm-sub').textContent = sub || '';
+    var card = document.getElementById('rcv-pm-card');
+    var fill = document.getElementById('rcv-pm-fill');
+    var count = document.getElementById('rcv-pm-count');
+    var hasPct = typeof percentage === 'number' && isFinite(percentage);
+    if (hasPct) {
+        var pct = Math.max(0, Math.min(100, Math.round(percentage)));
+        card.classList.remove('is-indeterminate');
+        fill.style.width = pct + '%';
+        count.textContent = pct + '%';
+    } else {
+        card.classList.add('is-indeterminate');
+        fill.style.width = '';
+        count.textContent = '';
+    }
+    el.classList.remove('hidden');
+}
+
+function closeRcvProgress() {
+    var el = document.getElementById('rcv-progress-modal');
+    if (el) el.classList.add('hidden');
+}
 
 // ---- Mode ----
 //
@@ -70,95 +157,190 @@ function lotColumn(m) {
     return '<td class="col-lot">' + parts + '</td>';
 }
 
+function rcvCols() { return EDIT ? 5 : 4; }
+
+var CHEV_SVG = '<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+    '<path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+// STATUS words the shop floor uses, not the picklist codes.
+function itemStatusLabel(s) {
+    return ({
+        Awaiting_Material: 'No material yet',
+        Ready_For_Production: 'Ready',
+        In_Production: 'In production',
+        Awaiting_Check: 'Awaiting check',
+        Complete: 'Complete'
+    })[s] || (s || '').replace(/_/g, ' ');
+}
+
+// The read-only breakdown that expands under a material row. "Where this goes":
+// one line per order (from m.orders, rolled up per plan by getSupervisorMaterials),
+// each expandable to the items on that order that still owe this material -
+// fetched lazily via getReceiveItemBreakdown when he opens it.
+function matBreakdownHtml(m, i) {
+    var orders = m.orders || [];
+    if (orders.length === 0) {
+        return '<div class="bd-empty">No order detail for this material.</div>';
+    }
+    var rows = orders.map(function (o, j) {
+        var name = escapeHtml(o.salesOrder || o.planNo || 'Order');
+        var metaBits = 'needs <b>' + fmt(o.pending) + '</b> ' + escapeHtml(m.unit);
+        if (o.lineCount > 1) metaBits += ' &middot; ' + o.lineCount + ' lines';
+        return '' +
+            '<div class="bd-order">' +
+                '<button type="button" class="bd-order-head" ' +
+                    'onclick="toggleOrderBreakdown(' + i + ',' + j + ')">' +
+                    '<span class="chevron bd-chevron" id="' + ordChevId(i, j) + '">' + CHEV_SVG + '</span>' +
+                    '<span class="bd-order-name">' + name + '</span>' +
+                    '<span class="bd-order-meta">' + metaBits + '</span>' +
+                    (o.isReissue === true ? '<span class="reissue-tag">reissue</span>' : '') +
+                '</button>' +
+                '<div class="bd-order-items hidden" id="' + ordItemsId(i, j) + '"></div>' +
+            '</div>';
+    }).join('');
+    return '' +
+        '<div class="bd-wrap">' +
+            '<div class="bd-head">Where this goes &mdash; <b>' + orders.length +
+                (orders.length === 1 ? '</b> order' : '</b> orders') + '</div>' +
+            rows +
+        '</div>';
+}
+
 function renderMaterialRow(m, i) {
     var qtyCell = '<span class="qty-big">' + fmt(m.pending) +
         '<span class="unit">' + escapeHtml(m.unit) + '</span></span>';
 
-    // The per-order split only matters when he is short and has to decide who
-    // goes without, so it stays folded away until then. Each chip spells out
-    // what that order is expecting — "SO-00003 · 14.6" alone left him guessing
-    // whether the number was ordered, issued or outstanding.
-    var orders = '';
-    if (EDIT && m.orders && m.orders.length > 0) {
-        orders = '<div class="order-split">' + m.orders.map(function (o) {
-            // WHICH of the orders behind the figure is the reissue, and why. The
-            // header badge only says one of them is; when he is short and has to
-            // decide who goes without, "this 1.2m replaces panels I cut through"
-            // is a different call from "this order is still owed 14.6m".
-            return '<span class="order-chip' + (o.isReissue === true ? ' is-reissue' : '') + '"' +
-                (o.reason ? ' title="' + escapeHtml(o.reason) + '"' : '') + '>' +
-                escapeHtml(o.salesOrder || o.planNo) +
-                (o.isReissue === true ? ' <b>reissue</b>' : '') +
-                ' needs <b>' + fmt(o.pending) + '</b> ' + escapeHtml(m.unit) + '</span>';
-        }).join('') + '</div>';
-    }
-
-    if (!EDIT) {
-        return '' +
-            '<tr id="' + matRowId(i) + '">' +
-                '<td class="material-name-cell">' +
-                    '<div class="mat-name">' + escapeHtml(m.material) +
-                        (m.isFabric ? '<span class="fabric-badge">Fabric</span>' : '') +
-                        // Part of this delivery replaces material he ruined. The
-                        // pending figure merges every plan and requirement behind
-                        // it into one number, so without this he signs for a
-                        // quantity with no idea that some of it is the cloth he
-                        // asked for himself — the one thing about the delivery he
-                        // already has context for.
-                        (m.isReissue === true
-                            ? '<span class="reissue-tag">incl. reissue</span>'
-                            : '') +
-                    '</div>' +
-                '</td>' +
-                lotColumn(m) +
-                '<td class="col-num col-strong">' + qtyCell + '</td>' +
-                '<td class="col-issue">' +
-                    '<span class="status-pill status-partial">Awaiting check</span>' +
-                '</td>' +
-            '</tr>';
-    }
-
-    // The note gets its own column rather than sitting under the quantity. In
-    // one cell it doubled every row's height and pushed the figures out of line
-    // with their own column headings.
-    return '' +
-        '<tr id="' + matRowId(i) + '">' +
-            '<td class="material-name-cell">' +
+    var hasBreakdown = m.orders && m.orders.length > 0;
+    var nameCell =
+        '<td class="material-name-cell">' +
+            '<div class="mat-name-row">' +
+                (hasBreakdown
+                    ? '<button type="button" class="chevron mat-bd-toggle" id="' + matChevId(i) + '" ' +
+                          'onclick="toggleMatBreakdown(' + i + ')" aria-label="Show where this goes">' +
+                          CHEV_SVG + '</button>'
+                    : '') +
                 '<div class="mat-name">' + escapeHtml(m.material) +
                     (m.isFabric ? '<span class="fabric-badge">Fabric</span>' : '') +
-                    // Part of this delivery replaces material he ruined. The
-                    // pending figure merges every plan and requirement behind it
-                    // into one number, so without this he signs for a quantity
-                    // with no idea that some of it is the cloth he asked for
-                    // himself — the one thing about the delivery he already has
-                    // context for.
-                    (m.isReissue === true
-                        ? '<span class="reissue-tag">incl. reissue</span>'
-                        : '') +
+                    (m.isReissue === true ? '<span class="reissue-tag">incl. reissue</span>' : '') +
                 '</div>' +
-                orders +
-            '</td>' +
+            '</div>' +
+        '</td>';
+
+    var actionCell = EDIT
+        ? '<td class="col-issue">' +
+              '<span class="issue-input-group">' +
+                  '<input type="number" step="0.01" min="0" max="' + round2(m.pending) + '" ' +
+                      'class="issue-input" id="' + matInputId(i) + '" value="' + round2(m.pending) + '" ' +
+                      'oninput="onMatInput(' + i + ')" onblur="onMatCommit(' + i + ')" />' +
+                  '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
+              '</span>' +
+              '<div class="short-hint" id="' + matShortId(i) + '"></div>' +
+          '</td>' +
+          '<td class="col-note">' +
+              '<input type="text" class="note-input" id="' + matNoteId(i) + '" ' +
+                  'placeholder="Why is it short?" disabled />' +
+          '</td>'
+        : '<td class="col-issue"><span class="status-pill status-partial">Awaiting check</span></td>';
+
+    var mainRow =
+        '<tr id="' + matRowId(i) + '">' +
+            nameCell +
             lotColumn(m) +
             '<td class="col-num col-strong">' + qtyCell + '</td>' +
-            '<td class="col-issue">' +
-                '<span class="issue-input-group">' +
-                    '<input type="number" step="0.01" min="0" max="' + round2(m.pending) + '" ' +
-                        'class="issue-input" ' +
-                        'id="' + matInputId(i) + '" value="' + round2(m.pending) + '" ' +
-                        'oninput="onMatInput(' + i + ')" ' +
-                        'onblur="onMatCommit(' + i + ')" />' +
-                    '<span class="issue-unit">' + escapeHtml(m.unit) + '</span>' +
-                '</span>' +
-                // Says the shortfall out loud instead of leaving him to subtract
-                // two numbers in his head — and it is the shortfall, not the
-                // typed figure, that becomes a dispute.
-                '<div class="short-hint" id="' + matShortId(i) + '"></div>' +
-            '</td>' +
-            '<td class="col-note">' +
-                '<input type="text" class="note-input" id="' + matNoteId(i) + '" ' +
-                    'placeholder="Why is it short?" disabled />' +
-            '</td>' +
+            actionCell +
         '</tr>';
+
+    var bdRow = hasBreakdown
+        ? '<tr class="mat-breakdown hidden" id="' + matBdRowId(i) + '">' +
+              '<td colspan="' + rcvCols() + '">' + matBreakdownHtml(m, i) + '</td>' +
+          '</tr>'
+        : '';
+
+    return mainRow + bdRow;
+}
+
+// ---- Breakdown expand / lazy load ----
+
+function toggleMatBreakdown(i) {
+    var row = document.getElementById(matBdRowId(i));
+    var chev = document.getElementById(matChevId(i));
+    if (!row) return;
+    var open = row.classList.toggle('hidden') === false;
+    if (chev) chev.classList.toggle('is-open', open);
+}
+
+function toggleOrderBreakdown(i, j) {
+    var box = document.getElementById(ordItemsId(i, j));
+    var chev = document.getElementById(ordChevId(i, j));
+    if (!box) return;
+    var open = box.classList.toggle('hidden') === false;
+    if (chev) chev.classList.toggle('is-open', open);
+    if (!open) return;
+
+    var m = (window.__data.materials || [])[i];
+    var o = m && (m.orders || [])[j];
+    if (!m || !o || !o.planId) { box.innerHTML = '<div class="bd-empty">No order.</div>'; return; }
+
+    var key = String(o.planId) + '|' + String(m.materialId);
+    var hit = BD_CACHE[key];
+    if (hit && hit.state === 'ok') { box.innerHTML = renderOrderItems(hit.items, m); return; }
+    if (hit && hit.state === 'loading') { box.innerHTML = '<div class="bd-loading">Loading…</div>'; return; }
+
+    BD_CACHE[key] = { state: 'loading', items: [] };
+    box.innerHTML = '<div class="bd-loading">Loading…</div>';
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getReceiveItemBreakdown',
+        http_method: 'POST',
+        payload: { planId: String(o.planId), materialId: String(m.materialId) }
+    }).then(function (response) {
+        var parsed;
+        try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+        if (!parsed || (parsed.errors && parsed.errors.length)) {
+            console.warn('getReceiveItemBreakdown:', parsed && parsed.errors);
+            BD_CACHE[key] = { state: 'error', items: [] };
+        } else {
+            BD_CACHE[key] = { state: 'ok', items: parsed.items || [] };
+        }
+        // Only paint if the box is still open and still in the DOM.
+        var cur = document.getElementById(ordItemsId(i, j));
+        if (cur && !cur.classList.contains('hidden')) {
+            cur.innerHTML = BD_CACHE[key].state === 'ok'
+                ? renderOrderItems(BD_CACHE[key].items, m)
+                : '<div class="bd-empty">Could not load the item list.</div>';
+        }
+    }).catch(function (err) {
+        console.error('getReceiveItemBreakdown failed:', err);
+        BD_CACHE[key] = { state: 'error', items: [] };
+        var cur = document.getElementById(ordItemsId(i, j));
+        if (cur && !cur.classList.contains('hidden')) {
+            cur.innerHTML = '<div class="bd-empty">Could not load the item list.</div>';
+        }
+    });
+}
+
+function renderOrderItems(items, m) {
+    if (!items || items.length === 0) {
+        return '<div class="bd-empty">No item still owes this material.</div>';
+    }
+    var rows = items.map(function (it) {
+        var owed = it.isFabric
+            ? (Number(it.owedPieces) || 0) + (Number(it.owedPieces) === 1 ? ' pc' : ' pcs')
+            : fmt(it.owedQty) + ' ' + escapeHtml(m.unit);
+        var label = escapeHtml(it.sku || '') + (it.name ? ' &middot; ' + escapeHtml(it.name) : '');
+        return '<tr>' +
+            '<td>' + label +
+                (it.isRemake === true
+                    ? ' <span class="reissue-tag">' + escapeHtml((it.remakeReason || 'remake').replace(/_/g, ' ')) + '</span>'
+                    : '') +
+            '</td>' +
+            '<td class="bd-owed">' + owed + '</td>' +
+            '<td><span class="status-pill status-partial">' + escapeHtml(itemStatusLabel(it.status)) + '</span></td>' +
+            '</tr>';
+    }).join('');
+    return '<table class="bd-item-table"><thead><tr>' +
+        '<th>Item</th><th class="bd-owed">Still owed</th><th>Status</th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 // Waste pieces are NOT merged the way metres and cones are. He is holding one
@@ -560,175 +742,113 @@ function updateShortSummary() {
 }
 
 // ---- Submit ----
+//
+// The widget no longer distributes settlements per line. It names the vouchers
+// it is confirming and, only for a material he marked short, how much arrived.
+// receiveMaterials walks each voucher's Issue_Lines itself, in budgeted
+// resumable SWEEP slices, then a phased FINALIZE (voucher status -> readiness
+// sweep -> warehouse transfer -> dispute digest). Two loops here, one cursor
+// each, mirroring that.
 
 function submitReceipt() {
     var data = window.__data;
     var supId = document.getElementById('sup-select').value;
     if (!supId) return;
 
-    var payload = { materials: [], waste: [], printedPieces: [], plansTouched: [] };
-
-    // Plans this receipt touches - receiveMaterials runs its readiness sweep on
-    // exactly these instead of walking every open plan (the old statement-limit
-    // path). Union of every settlement line's planId plus every waste/printed
-    // row's plan, deduped.
+    // ---- gather the sweep scope + short flags ----
+    var voucherSet = {};
+    var voucherOrder = [];          // newest-first (voucherIds are emitted desc)
     var plansTouched = {};
+    var shortMaterials = [];
 
     (data.materials || []).forEach(function (m, i) {
-        var input = document.getElementById(matInputId(i));
-        var note = document.getElementById(matNoteId(i));
-        // Not in edit mode means "all as listed", so the full pending amount.
-        var val = input ? (parseFloat(input.value) || 0) : m.pending;
-        // Clamped again here rather than trusting the field. Blur normally
-        // settles it, but pressing Enter submits without one, and receiving
-        // more than was issued would settle stock that never moved.
-        if (val < 0) val = 0;
-        if (val > m.pending) val = m.pending;
-
-        // DISTRIBUTE the confirmed quantity across the still-owed Issue_Lines,
-        // OLDEST FIRST - the same rule receiveMaterials used to run server-side.
-        // getSupervisorMaterials emits m.lines newest-first (voucher loop is
-        // Added_Time desc), so reverse. Each line owes `pending`; the whole of
-        // that is settled off In_Transit either way, and `confirmed` is how much
-        // of it he actually got - the rest becomes the shortfall / dispute.
-        var lines = (m.lines || []).slice().reverse();
-        var confirmLeft = round2(val);
-        var settlements = [];
-        lines.forEach(function (ln) {
-            var owe = Number(ln.pending) || 0;
-            if (owe <= 0) return;
-            var conf = confirmLeft;
-            if (conf > owe) conf = owe;
-            confirmLeft = round2(confirmLeft - conf);
-            settlements.push({
-                issueLineId: ln.issueLineId,
-                voucherId: ln.voucherId,
-                lot: ln.lot || '',
-                requirementId: ln.requirementId || '',
-                planId: ln.planId || '',
-                settle: round2(owe),
-                confirmed: round2(conf)
-            });
-            if (ln.planId) plansTouched[String(ln.planId)] = 1;
+        (m.voucherIds || []).forEach(function (v) {
+            v = String(v);
+            if (!voucherSet[v]) { voucherSet[v] = 1; voucherOrder.push(v); }
+        });
+        (m.orders || []).forEach(function (o) {
+            if (o.planId) plansTouched[String(o.planId)] = 1;
         });
 
-        payload.materials.push({
-            materialId: m.materialId,
-            received: round2(val),
-            remark: note ? note.value : '',
-            settlements: settlements
-        });
+        // Not in EDIT mode means "all as listed" - never short. In EDIT mode a
+        // material is short only when he typed LESS than the pending figure.
+        if (EDIT) {
+            var input = document.getElementById(matInputId(i));
+            var note = document.getElementById(matNoteId(i));
+            if (input) {
+                var typed = parseFloat(input.value);
+                if (isNaN(typed) || typed < 0) typed = 0;
+                if (typed > m.pending) typed = m.pending;
+                if (round2(typed) < round2(m.pending)) {
+                    shortMaterials.push({
+                        materialId: m.materialId,
+                        owed: round2(m.pending),
+                        received: round2(typed),
+                        remark: note ? note.value : ''
+                    });
+                }
+            }
+        }
     });
 
+    // Waste + printed rows stay explicit (one per physical piece, bounded).
+    var wasteRows = [];
     (data.waste || []).forEach(function (w, i) {
         var input = document.getElementById(wasteInputId(i));
         var note = document.getElementById(wasteNoteId(i));
-        var val = input ? (parseInt(input.value, 10) || 0) : w.pending;
+        var val = (EDIT && input) ? (parseInt(input.value, 10) || 0) : w.pending;
         if (val < 0) val = 0;
         if (val > w.pending) val = w.pending;
-        payload.waste.push({
-            rowId: w.rowId,
-            received: val,
-            remark: note ? note.value : ''
-        });
+        wasteRows.push({ rowId: w.rowId, received: val, remark: note ? note.value : '' });
         if (w.planId) plansTouched[String(w.planId)] = 1;
     });
 
+    var printedRows = [];
     (data.printedPieces || []).forEach(function (p, i) {
         var input = document.getElementById(printedInputId(i));
         var note = document.getElementById(printedNoteId(i));
-        var val = input ? (parseFloat(input.value) || 0) : p.pending;
+        var val = (EDIT && input) ? (parseFloat(input.value) || 0) : p.pending;
         if (val < 0) val = 0;
         if (val > p.pending) val = p.pending;
-        payload.printedPieces.push({
-            issueLineId: p.issueLineId,
-            voucherId: p.voucherId,
-            received: round2(val),
-            remark: note ? note.value : ''
+        printedRows.push({
+            issueLineId: p.issueLineId, voucherId: p.voucherId,
+            received: round2(val), remark: note ? note.value : ''
         });
         if (p.planId) plansTouched[String(p.planId)] = 1;
+        var pv = String(p.voucherId || '');
+        if (pv && !voucherSet[pv]) { voucherSet[pv] = 1; voucherOrder.push(pv); }
     });
 
-    var allPlansTouched = Object.keys(plansTouched);
+    // The server sweeps in list order; oldest-first keeps shortfall attribution
+    // on the newest orders (older orders ship sooner). voucherIds arrive
+    // newest-first, so reverse the union.
+    var vouchers = voucherOrder.slice().reverse();
+    var plansTouchedArr = Object.keys(plansTouched);
 
     var btn = document.getElementById('confirm-btn');
     btn.disabled = true;
     btn.textContent = 'Saving…';
+    showRcvProgress('Receiving materials', 'Confirming your handover…');
 
-    // ---- CHUNKING ----
-    //
-    // A big receipt has hundreds of settlement lines - one invokeCustomApi
-    // payload cannot carry them and one execution cannot apply them (the
-    // statement-execution limit, which is not catchable). Same shape as
-    // issueForSupervisor: split into chunks of at most MAX_ROWS settlement /
-    // waste / printed rows, send them sequentially, recover from rate limiting.
-    //
-    // Every chunk but the last carries finalize:false - it only applies its
-    // rows. The last carries finalize:true and the FULL plansTouched list, and
-    // does the readiness sweep + warehouse transfer once for the whole receipt.
-    var MAX_ROWS = 120;
-
-    // Flatten every settlement into a work list, tagged with its parent material
-    // so a chunk can rebuild the materials[] wrapper. Waste + printed rows ride
-    // along in the same budget.
-    var work = [];
-    payload.materials.forEach(function (m) {
-        (m.settlements || []).forEach(function (s) {
-            work.push({ kind: 'mat', materialId: m.materialId, received: m.received,
-                remark: m.remark, s: s });
-        });
-        if (!m.settlements || m.settlements.length === 0) {
-            // A material with nothing still owed (received === 0 lines) - keep it
-            // so its okJson row is still emitted. Rare; costs one slot.
-            work.push({ kind: 'mat', materialId: m.materialId, received: m.received,
-                remark: m.remark, s: null });
-        }
-    });
-    payload.waste.forEach(function (w) { work.push({ kind: 'waste', w: w }); });
-    payload.printedPieces.forEach(function (p) { work.push({ kind: 'printed', p: p }); });
-
-    // Build the chunk payloads.
-    var chunks = [];
-    for (var off = 0; off < work.length; off += MAX_ROWS) {
-        var slice = work.slice(off, off + MAX_ROWS);
-        var matMap = {};
-        var order = [];
-        var cp = { materials: [], waste: [], printedPieces: [], plansTouched: [],
-            finalize: false };
-        slice.forEach(function (item) {
-            if (item.kind === 'mat') {
-                var mw = matMap[item.materialId];
-                if (!mw) {
-                    mw = { materialId: item.materialId, received: item.received,
-                        remark: item.remark, settlements: [] };
-                    matMap[item.materialId] = mw;
-                    order.push(item.materialId);
-                }
-                if (item.s) mw.settlements.push(item.s);
-            } else if (item.kind === 'waste') {
-                cp.waste.push(item.w);
-            } else {
-                cp.printedPieces.push(item.p);
-            }
-        });
-        order.forEach(function (id) { cp.materials.push(matMap[id]); });
-        chunks.push(cp);
-    }
-    // Every settlement chunk carries finalize:false - it only applies its rows.
-    // The readiness sweep + warehouse transfer run afterwards, in finalizeLoop,
-    // which is itself resumable (receiveMaterials caps the sweep per call and
-    // hands back the plan ids it did not reach).
-    chunks.forEach(function (cp) { cp.finalize = false; });
-
-    var chunkIndex = 0;
-    var retryCount = 0;
     var RETRY_WAITS_MS = [3000, 8000, 20000, 45000, 60000];
+    var retryCount = 0;
     var collectedErrors = [];
+    var disputeIds = {};
 
-    // Plan ids still to sweep. Seeded with the whole set; each finalize call
-    // returns sweepRemaining and we go again until sweepDone.
-    var sweepQueue = allPlansTouched.slice();
-    var finalizePass = 0;
+    var sweepCursor = {};
+    var firstSweep = true;
+    var sweepN = 0;
+    var finalizeN = 0;
+    var finalizeCursor = {};
+    var stage = 'sweep';
+
+    var FINALIZE_PHASE_LABEL = {
+        '': 'Updating handover status…',
+        vouchers: 'Updating handover status…',
+        items: 'Updating your orders…',
+        transfer: 'Moving stock to production…',
+        notify: 'Wrapping up…'
+    };
 
     function isRateLimited(err) {
         var msg = ((err && (err.message || err.error || err.toString())) || '')
@@ -738,13 +858,114 @@ function submitReceipt() {
             msg.indexOf('throttl') >= 0 || msg.indexOf('limit exceeded') >= 0;
     }
 
+    function post(receiptsJson, onOk) {
+        // Cursors go over as JSON STRINGS, not nested objects - the Deluge side
+        // reads them with .toString().toMap(), and a hand-built Deluge Map's
+        // toString() is not valid JSON, so never make the server round-trip one.
+        if (receiptsJson.sweepCursor !== undefined) receiptsJson.sweepCursor = JSON.stringify(receiptsJson.sweepCursor || {});
+        if (receiptsJson.finalizeCursor !== undefined) receiptsJson.finalizeCursor = JSON.stringify(receiptsJson.finalizeCursor || {});
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'receiveMaterials',
+            http_method: 'POST',
+            payload: { supervisorId: supId, receiptsJson: JSON.stringify(receiptsJson) }
+        }).then(function (response) {
+            var parsed;
+            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+            if (parsed && parsed.errors && parsed.errors.length > 0) {
+                if (parsed.errors.some(function (e) { return isRateLimited({ message: e }); })) {
+                    scheduleRetry({ message: parsed.errors.join(' ') });
+                    return;
+                }
+                collectedErrors = collectedErrors.concat(parsed.errors);
+            }
+            retryCount = 0;
+            onOk(parsed || {});
+        }).catch(function (err) {
+            if (isRateLimited(err)) { scheduleRetry(err); return; }
+            abortRun(err);
+        });
+    }
+
+    function scheduleRetry(err) {
+        if (retryCount >= RETRY_WAITS_MS.length) { abortRun(err); return; }
+        var waitMs = RETRY_WAITS_MS[retryCount];
+        retryCount++;
+        console.warn('receiveMaterials rate-limited; retry ' + retryCount + '/' +
+            RETRY_WAITS_MS.length + ' in ' + waitMs + 'ms');
+        btn.textContent = 'Rate limited — retrying…';
+        showRcvProgress(stage === 'sweep' ? 'Receiving materials' : 'Finishing',
+            'Store is busy — retrying in ' + Math.round(waitMs / 1000) + 's…');
+        setTimeout(stage === 'sweep' ? sweepStep : finalizeStep, waitMs);
+    }
+
+    function abortRun(err) {
+        console.error('receiveMaterials aborted', err);
+        closeRcvProgress();
+        alert(stage === 'finalize'
+            ? 'Receipt recorded. The status update did not finish — press Confirm again to complete it.'
+            : 'Receipt saved so far. Press Confirm again to finish — it picks up where it stopped.');
+        btn.disabled = false;
+        btn.textContent = EDIT ? 'Confirm' : 'All received as listed';
+    }
+
+    function sweepStep() {
+        stage = 'sweep';
+        sweepN++;
+        btn.textContent = 'Saving…';
+        showRcvProgress('Receiving materials',
+            sweepN === 1 ? 'Confirming your handover…' : 'Batch ' + sweepN + '…');
+        var payload = {
+            vouchers: vouchers,
+            shortMaterials: shortMaterials,
+            waste: firstSweep ? wasteRows : [],
+            printedPieces: firstSweep ? printedRows : [],
+            sweepCursor: sweepCursor,
+            finalize: false
+        };
+        firstSweep = false;
+        post(payload, function (parsed) {
+            (parsed.disputeIds || []).forEach(function (d) { disputeIds[String(d)] = 1; });
+            if (parsed.sweepDone === true || !parsed.sweepCursor) {
+                finalizeCursor = {};
+                finalizeStep();
+            } else {
+                sweepCursor = parsed.sweepCursor;
+                setTimeout(sweepStep, 250);
+            }
+        });
+    }
+
+    function finalizeStep() {
+        stage = 'finalize';
+        finalizeN++;
+        btn.textContent = 'Finishing…';
+        var ph = (finalizeCursor && finalizeCursor.ph) || '';
+        showRcvProgress('Finishing', FINALIZE_PHASE_LABEL[ph] || 'Finishing up…');
+        var payload = {
+            vouchers: vouchers,
+            plansTouched: plansTouchedArr,
+            disputeIds: Object.keys(disputeIds),
+            finalize: true,
+            finalizeCursor: finalizeCursor
+        };
+        post(payload, function (parsed) {
+            if (parsed.finalizeDone === true) {
+                finishOk();
+            } else {
+                finalizeCursor = parsed.finalizeCursor || {};
+                setTimeout(finalizeStep, 250);
+            }
+        });
+    }
+
     function finishOk() {
+        showRcvProgress('Done', 'Receipt recorded', 100);
+        setTimeout(closeRcvProgress, 400);
         if (collectedErrors.length > 0) {
             alert('Recorded, with discrepancies:\n' + collectedErrors.join('\n'));
         }
-        // Push the consumption straight to Inventory rather than waiting for the
-        // nightly drain. Not awaited, never surfaced - the receipt is recorded;
-        // a failed post is retried by the scheduled run.
+        // Push the consumption to Inventory now rather than waiting for the
+        // nightly drain. Not awaited - the receipt is already recorded.
         ZOHO.CREATOR.DATA.invokeCustomApi({
             api_name: 'postInventoryQueue',
             http_method: 'POST',
@@ -755,18 +976,10 @@ function submitReceipt() {
             console.warn('inventory drain failed, scheduled run will retry:', drainErr);
         });
 
-        // WAREHOUSE TRANSFER ORDERS - drain the rest.
-        //
-        // receiveMaterials already called postTransferOrders('auto') once on its
-        // finalize pass, but that posts at most maxOrders (10) transfer orders
-        // per execution - and a chunked handover is now MANY small SIV vouchers
-        // (one per issue chunk), so one receipt can leave 15-25 vouchers still
-        // Pending. Each is its own transfer order keyed to its own SIV number;
-        // nothing merges. So keep calling 'auto' - each call its own unmetered
-        // execution - until it reports nothing left waiting, no progress was
-        // made, or a safety cap is hit. Not awaited by the UI: the receipt is
-        // already saved and a leftover Pending voucher is picked up by the next
-        // receipt or a scheduled run.
+        // receiveMaterials already ran postTransferOrders('auto') once (finalize
+        // transfer phase), but that posts at most maxOrders per execution and a
+        // receipt can span many SIV vouchers. Keep draining until nothing is
+        // left waiting or no progress is made. Not awaited by the UI.
         drainTransferOrders(0);
 
         EDIT = false;
@@ -774,7 +987,7 @@ function submitReceipt() {
     }
 
     function drainTransferOrders(callsSoFar) {
-        var MAX_TO_CALLS = 12; // 12 * maxOrders(10) = 120 vouchers, well past any real receipt
+        var MAX_TO_CALLS = 12;
         if (callsSoFar >= MAX_TO_CALLS) {
             console.warn('drainTransferOrders: hit call cap, leaving the rest for the next run');
             return;
@@ -803,130 +1016,12 @@ function submitReceipt() {
             if (pending > 0 && progressed > 0) {
                 setTimeout(function () { drainTransferOrders(callsSoFar + 1); }, 400);
             }
-            // pending>0 but progressed==0 -> the rest are Failed/needsHuman; stop.
         }).catch(function (err) {
             console.warn('postTransferOrders call failed, scheduled run will retry:', err);
         });
     }
 
-    // `stage` is which loop the retry timer should resume - 'chunk' or 'final'.
-    var retryStage = 'chunk';
-
-    function abortRun(err) {
-        console.error('receiveMaterials aborted', err);
-        var where = retryStage === 'final'
-            ? 'Settlements saved. Status update did not finish — press Confirm again to complete it.'
-            : 'Receipt saved up to batch ' + chunkIndex + ' of ' + chunks.length +
-              '. Batches before this went through. Press Confirm again to finish the rest.';
-        alert(where);
-        btn.disabled = false;
-        btn.textContent = EDIT ? 'Confirm' : 'All received as listed';
-    }
-
-    function scheduleRetry(err) {
-        if (retryCount >= RETRY_WAITS_MS.length) { abortRun(err); return; }
-        var waitMs = RETRY_WAITS_MS[retryCount];
-        retryCount++;
-        console.warn('receiveMaterials rate-limited; retry ' + retryCount + '/' +
-            RETRY_WAITS_MS.length + ' in ' + waitMs + 'ms');
-        btn.textContent = 'Rate limited — retrying in ' + Math.round(waitMs / 1000) + 's…';
-        setTimeout(retryStage === 'final' ? finalizeLoop : processNextChunk, waitMs);
-    }
-
-    function processNextChunk() {
-        retryStage = 'chunk';
-        if (chunkIndex >= chunks.length) { finalizeLoop(); return; }
-
-        var cp = chunks[chunkIndex];
-        btn.textContent = 'Saving… (' + (chunkIndex + 1) + '/' + chunks.length + ')';
-
-        ZOHO.CREATOR.DATA.invokeCustomApi({
-            api_name: 'receiveMaterials',
-            http_method: 'POST',
-            payload: {
-                supervisorId: supId,
-                receiptsJson: JSON.stringify(cp)
-            }
-        }).then(function (response) {
-            var parsed;
-            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
-
-            if (parsed && parsed.errors && parsed.errors.length > 0) {
-                // A Deluge-side throttle surfaces here, not in .catch.
-                if (parsed.errors.some(function (e) { return isRateLimited({ message: e }); })) {
-                    scheduleRetry({ message: parsed.errors.join(' ') });
-                    return;
-                }
-                collectedErrors = collectedErrors.concat(parsed.errors);
-            }
-
-            chunkIndex++;
-            retryCount = 0;
-            setTimeout(processNextChunk, 400); // pace between chunks
-        }).catch(function (err) {
-            if (isRateLimited(err)) { scheduleRetry(err); return; }
-            abortRun(err);
-        });
-    }
-
-    // Readiness sweep + warehouse transfer, resumable. Each call sweeps a
-    // budgeted slice of sweepQueue and returns the rest in sweepRemaining; we
-    // keep calling until sweepDone. A receipt with no plansTouched still makes
-    // one pass so postTransferOrders runs.
-    function finalizeLoop() {
-        retryStage = 'final';
-        finalizePass++;
-        btn.textContent = 'Finishing… (' + finalizePass + ')';
-
-        var cp = {
-            materials: [], waste: [], printedPieces: [],
-            finalize: true,
-            plansTouched: sweepQueue
-        };
-
-        ZOHO.CREATOR.DATA.invokeCustomApi({
-            api_name: 'receiveMaterials',
-            http_method: 'POST',
-            payload: {
-                supervisorId: supId,
-                receiptsJson: JSON.stringify(cp)
-            }
-        }).then(function (response) {
-            var parsed;
-            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
-
-            if (parsed && parsed.errors && parsed.errors.length > 0) {
-                if (parsed.errors.some(function (e) { return isRateLimited({ message: e }); })) {
-                    scheduleRetry({ message: parsed.errors.join(' ') });
-                    return;
-                }
-                collectedErrors = collectedErrors.concat(parsed.errors);
-            }
-
-            var remaining = (parsed && parsed.sweepRemaining) || [];
-            var done = !parsed || parsed.sweepDone === true || remaining.length === 0;
-
-            if (!done && remaining.length > 0 && remaining.length < sweepQueue.length) {
-                // Progress made - go again with what's left.
-                sweepQueue = remaining;
-                retryCount = 0;
-                setTimeout(finalizeLoop, 400);
-                return;
-            }
-            if (!done && remaining.length >= sweepQueue.length) {
-                // No progress - stop rather than loop forever.
-                console.error('finalize made no progress; remaining plans:', remaining);
-                collectedErrors.push('Status update did not finish for ' +
-                    remaining.length + ' order(s). Press Confirm again.');
-            }
-            finishOk();
-        }).catch(function (err) {
-            if (isRateLimited(err)) { scheduleRetry(err); return; }
-            abortRun(err);
-        });
-    }
-
-    processNextChunk();
+    sweepStep();
 }
 
 // ---- Load ----
@@ -970,8 +1065,9 @@ function fillSupervisors(list) {
 // skipLines += linesConsumed until linesConsumed === 0, merging the slices.
 //
 // Merge rules mirror the payload contract:
-//   materials  - keyed by materialId; pending sums, orders concat, lots merge
-//                by lot label (qty sums). isFabric/isReissue OR together.
+//   materials  - keyed by materialId; pending sums, isFabric/isReissue OR.
+//                orders merge by planId (a plan can be split across pages);
+//                lots merge by lot label (qty sums); voucherIds union.
 //   waste      - per Waste_Movement row, no overlap between pages: concat.
 //   printedPieces - per issueLineId, no overlap: concat.
 //   planFed    - union of plan ids; plansAwaiting = plansAssigned - |union|.
@@ -996,20 +1092,43 @@ function mergeReceiptPages(target, page) {
             target.materials.push(JSON.parse(JSON.stringify(bm)));
             return;
         }
-        em.pending = (Number(em.pending) || 0) + (Number(bm.pending) || 0);
+        em.pending = round2((Number(em.pending) || 0) + (Number(bm.pending) || 0));
         if (bm.isFabric) em.isFabric = true;
         if (bm.isReissue) em.isReissue = true;
-        em.orders = (em.orders || []).concat(bm.orders || []);
-        // The per-Issue_Line detail receiveMaterials settles against. Pages never
-        // overlap on a line (the cursor steps each line exactly once), so concat.
-        em.lines = (em.lines || []).concat(bm.lines || []);
+
+        // orders: one entry per plan; a plan whose lines span two pages appears
+        // on both, so merge by planId rather than concat.
+        em.orders = em.orders || [];
+        (bm.orders || []).forEach(function (bo) {
+            var eo = null;
+            for (var j = 0; j < em.orders.length; j++) {
+                if (String(em.orders[j].planId) === String(bo.planId)) { eo = em.orders[j]; break; }
+            }
+            if (eo) {
+                eo.pending = round2((Number(eo.pending) || 0) + (Number(bo.pending) || 0));
+                eo.lineCount = (Number(eo.lineCount) || 0) + (Number(bo.lineCount) || 0);
+                if (bo.isReissue) eo.isReissue = true;
+                if (!eo.reason && bo.reason) eo.reason = bo.reason;
+            } else {
+                em.orders.push(JSON.parse(JSON.stringify(bo)));
+            }
+        });
+
+        // voucherIds: the sweep scope. Union, order does not matter here (the
+        // widget reverses the whole set before sending).
+        em.voucherIds = em.voucherIds || [];
+        (bm.voucherIds || []).forEach(function (v) {
+            if (em.voucherIds.indexOf(String(v)) < 0) em.voucherIds.push(String(v));
+        });
+
+        em.lots = em.lots || [];
         (bm.lots || []).forEach(function (bl) {
             var el = null;
-            for (var j = 0; j < (em.lots || []).length; j++) {
-                if (em.lots[j].lot === bl.lot) { el = em.lots[j]; break; }
+            for (var k = 0; k < em.lots.length; k++) {
+                if (em.lots[k].lot === bl.lot) { el = em.lots[k]; break; }
             }
-            if (el) el.qty = (Number(el.qty) || 0) + (Number(bl.qty) || 0);
-            else { em.lots = em.lots || []; em.lots.push(JSON.parse(JSON.stringify(bl))); }
+            if (el) el.qty = round2((Number(el.qty) || 0) + (Number(bl.qty) || 0));
+            else em.lots.push(JSON.parse(JSON.stringify(bl)));
         });
     });
 
@@ -1026,10 +1145,8 @@ function loadMaterials() {
 
     emptyState.classList.add('hidden');
     refreshBtn.disabled = true;
-    content.innerHTML =
-        '<div class="skeleton-card"><div class="skeleton-line w-40"></div>' +
-        '<div class="skeleton-line"></div><div class="skeleton-line"></div>' +
-        '<div class="skeleton-line w-70"></div></div>';
+    LoadProgress.start(content, 'Loading your deliveries…',
+        'Reading the handovers the store has made to you.');
 
     var merged = {};
     var MAX_CALLS = 60; // safety cap - real stop is linesConsumed===0
@@ -1039,6 +1156,7 @@ function loadMaterials() {
             console.error('loadMaterials: hit MAX_CALLS safety cap, stopping');
             return Promise.resolve();
         }
+        LoadProgress.setPage(callsSoFar + 1);
         return ZOHO.CREATOR.DATA.invokeCustomApi({
             api_name: 'getSupervisorMaterials',
             http_method: 'POST',
@@ -1058,6 +1176,8 @@ function loadMaterials() {
             mergeReceiptPages(merged, parsed);
             var consumed = Number(parsed.linesConsumed) || 0;
             if (consumed > 0) {
+                LoadProgress.setSub('Loaded ' + (merged.materials || []).length +
+                    ' material' + ((merged.materials || []).length === 1 ? '' : 's') + ' so far…');
                 return fetchPage(skipLines + consumed, callsSoFar + 1);
             }
         });
@@ -1065,6 +1185,7 @@ function loadMaterials() {
 
     fetchPage(0, 0).then(function (restart) {
         refreshBtn.disabled = false;
+        LoadProgress.finish();
         if (restart === null) { loadMaterials(); return; }
 
         merged.plansAwaiting = Math.max(0,
@@ -1083,6 +1204,7 @@ function loadMaterials() {
     }).catch(function (err) {
         console.error('invokeCustomApi error:', err);
         refreshBtn.disabled = false;
+        LoadProgress.finish();
         content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Failed to load</h2><p>Check the browser console for details.</p></div>';
     });
 }

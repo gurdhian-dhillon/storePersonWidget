@@ -389,7 +389,7 @@ string getPackingHistory(string payloadJson)
 						boxesJson = boxesJson + ",";
 					}
 
-					boxesJson = boxesJson + "{\"boxNo\":" + ifnull(bx.Box_No,0) + ",\"carton\":\"" + bxName + "\","
+					boxesJson = boxesJson + "{\"boxNo\":" + ifnull(bx.Box_No,0) + ",\"id\":\"" + bx.ID + "\",\"carton\":\"" + bxName + "\","
 						+ "\"usesInner\":" + bxUsesInner + ",\"legacyDims\":" + bxLegacyDims + ","
 						+ "\"innerLength\":" + bxInnL + ",\"innerWidth\":" + bxInnW + ",\"innerHeight\":" + bxInnH + ","
 						+ "\"outerLength\":" + bxOutL + ",\"outerWidth\":" + bxOutW + ",\"outerHeight\":" + bxOutH + ","
@@ -435,12 +435,36 @@ string getPackingHistory(string payloadJson)
 					chargeable = totVol;
 				}
 
+				// PHOTOS ARE ON THE PARENT (Packing.Box_Images), a multi-image
+				// field, not on a box. Deluge cannot build a widget-renderable URL
+				// for one reliably, so only the COUNT travels here; the widget
+				// fetches the actual images with getRecords when a card is opened.
+				// The stored value is a separator-joined list of file names -
+				// newline in most cases, comma in some - so both are tried.
+				imgCount = 0;
+				imgRaw = ifnull(pk.Box_Images,"").toString().replaceAll("\r","").trim();
+				if(imgRaw != "")
+				{
+					imgList = imgRaw.toList("\n");
+					if(imgList.size() <= 1 && imgRaw.contains(","))
+					{
+						imgList = imgRaw.toList(",");
+					}
+					for each  ipRow in imgList
+					{
+						if(ipRow.trim() != "")
+						{
+							imgCount = imgCount + 1;
+						}
+					}
+				}
+
 				if(rowsJson != "")
 				{
 					rowsJson = rowsJson + ",";
 				}
 				// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-				rowsJson = rowsJson + "{\"id\":\"" + pk.ID + "\",\"salesOrder\":\"" + soNo + "\",\"source\":\"" + soSrc + "\",\"planNo\":\"" + planNo + "\",\"supervisorId\":\"" + rowSupKey + "\",\"supervisor\":\"" + rowSupName + "\",\"packedBy\":\"" + packedBy + "\",\"packedOn\":\"" + packedOn + "\",\"boxCount\":" + rowBoxes + ",\"innerBoxCount\":" + rowInnerBoxes + ",\"pieces\":" + rowPieces + ",\"estimatedWeight\":" + totEst + ",\"grossWeight\":" + totGross + ",\"volumetricWeight\":" + totVol + ",\"chargeableWeight\":" + chargeable + ",\"boxes\":[" + boxesJson + "]}";
+				rowsJson = rowsJson + "{\"id\":\"" + pk.ID + "\",\"salesOrder\":\"" + soNo + "\",\"source\":\"" + soSrc + "\",\"planNo\":\"" + planNo + "\",\"supervisorId\":\"" + rowSupKey + "\",\"supervisor\":\"" + rowSupName + "\",\"packedBy\":\"" + packedBy + "\",\"packedOn\":\"" + packedOn + "\",\"boxCount\":" + rowBoxes + ",\"innerBoxCount\":" + rowInnerBoxes + ",\"pieces\":" + rowPieces + ",\"estimatedWeight\":" + totEst + ",\"grossWeight\":" + totGross + ",\"volumetricWeight\":" + totVol + ",\"chargeableWeight\":" + chargeable + ",\"imageCount\":" + imgCount + ",\"boxes\":[" + boxesJson + "]}";
 
 				shownCount = shownCount + 1;
 			}

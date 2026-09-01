@@ -465,6 +465,8 @@ string sendToPrint(string payloadJson)
 
 		if(errTxt == "" && printedId == 0)
 		{
+			errTxt = "Creating new printed SKUs is disabled - choose an existing one";
+			/*
 			//----------------------------------------------------------------
 			// MINTING. This is permanent master data and the join key Inventory
 			// will use later, so the widget shows the code and the name before
@@ -609,6 +611,7 @@ string sendToPrint(string payloadJson)
 
 				info "minted printed SKU " + wantSku + " (" + wantName + ") id=" + printedId;
 			}
+			*/
 		}
 
 		if(errTxt == "" && printedId == 0)

@@ -233,24 +233,28 @@ string getSupervisorMaterials(string supervisorId, string skipLinesTxt)
 	// mat id -> aggregate Map {matId,name,unit,isFabric,pending,hasReissue}
 	agg = Map();
 	orderedKeys = List();
-	// mat id -> per-order detail JSON fragments
-	detail = Map();
-	// mat id -> "~"-joined parallel lists of lot id / qty / note, newest first
-	lineLotByMat = Map();
-	lineQtyByMat = Map();
-	lineNoteByMat = Map();
-	// mat id -> per-Issue_Line JSON fragments for the still-owed lines, newest
-	// first. receiveMaterials settles these by point-lookup id - it no longer
-	// walks the vouchers itself, so the whole line is described here: which
-	// voucher and line, how much it still owes, and the plan / requirement / lot
-	// the settlement has to touch. Same idea as the accessory allocations array
-	// and issueMaterials - the widget decides, Deluge applies by id.
-	lineRowsByMat = Map();
+	// PER-PLAN ROLL-UP, not per line. "matId|planId" -> Map {planId,planNo,
+	// salesOrder,pending,isReissue,reason,lineCount}. ordKeys is matId -> ordered
+	// list of its plan keys. One entry per plan a SKU feeds, so a trim across
+	// 100 plans is 100 entries - not one JSON fragment per Issue_Line, which at
+	// 100 items/order was 10,000 on a single material row.
+	ordAgg = Map();
+	ordKeys = Map();
+	// mat id -> (lot id -> summed still-owed qty), and mat id -> (lot id -> note
+	// text). Replaces three "~"-joined parallel strings that grew one entry per
+	// line. The old emit walked them "up to adjPending" newest-first; that cap
+	// was a no-op (non-printed line pendings already sum to adjPending), so a
+	// plain per-lot sum is equivalent.
+	lotAgg = Map();
+	lotNoteAgg = Map();
+	// mat id -> list of distinct voucher ids the material sits on. The widget
+	// unions these into the "vouchers" sweep scope it posts back; receiveMaterials
+	// walks each voucher's Issue_Lines itself now, so no per-line array is sent.
+	vouchByMat = Map();
 	// mat id -> metres still owed on printed-piece lines (deducted from agg)
 	printedPendByMat = Map();
 	// lot id -> readable number, filled lazily
 	lotNumById = Map();
-	lotNotes = Map();
 
 	// Requirement id -> "planId|planNo|salesOrder|source|reason", resolved once
 	// per DISTINCT requirement actually named on a still-owed line. This is the
@@ -499,7 +503,6 @@ string getSupervisorMaterials(string supervisorId, string skipLinesTxt)
 				cur.put("hasReissue","false");
 				agg.put(lnMat,cur);
 				orderedKeys.add(lnMat);
-				detail.put(lnMat,"");
 			}
 			cur.put("pending",cur.get("pending") + lnPend);
 			if(isRe == "true")
@@ -508,40 +511,88 @@ string getSupervisorMaterials(string supervisorId, string skipLinesTxt)
 			}
 			agg.put(lnMat,cur);
 
-			dJson = detail.get(lnMat);
-			if(dJson != "")
+			// PER-PLAN ROLL-UP. One accumulator per plan this material feeds, not
+			// one JSON fragment per Issue_Line. rPlanId "" (requirement resolved
+			// no plan) rolls into a single "matId|" bucket.
+			pKeyM = lnMat + "|" + rPlanId;
+			oCur = ordAgg.get(pKeyM);
+			if(oCur == null)
 			{
-				dJson = dJson + ",";
+				oCur = Map();
+				oCur.put("planId",rPlanId);
+				oCur.put("planNo",rPlanNo);
+				oCur.put("salesOrder",rSalesOrder);
+				oCur.put("pending",0.0);
+				oCur.put("isReissue","false");
+				oCur.put("reason","");
+				oCur.put("lineCount",0);
+				ordAgg.put(pKeyM,oCur);
+				okList = ordKeys.get(lnMat);
+				if(okList == null)
+				{
+					okList = List();
+				}
+				okList.add(pKeyM);
+				ordKeys.put(lnMat,okList);
 			}
-			dJson = dJson + "{\"planNo\":\"" + rPlanNo.replaceAll("\"","'") + "\",\"salesOrder\":\"" + rSalesOrder.replaceAll("\"","'") + "\",\"pending\":" + lnPend + ",\"isReissue\":" + isRe + ",\"reason\":\"" + rReason + "\"}";
-			detail.put(lnMat,dJson);
+			oCur.put("pending",oCur.get("pending") + lnPend);
+			oCur.put("lineCount",oCur.get("lineCount") + 1);
+			if(isRe == "true")
+			{
+				oCur.put("isReissue","true");
+			}
+			if(ifnull(oCur.get("reason"),"").toString() == "" && rReason != "")
+			{
+				oCur.put("reason",rReason);
+			}
+			ordAgg.put(pKeyM,oCur);
 
-			// Parallel lists for the per-lot breakdown - newest first, because
-			// the voucher loop is Added_Time desc.
-			prevL = ifnull(lineLotByMat.get(lnMat),"").toString();
-			prevQ = ifnull(lineQtyByMat.get(lnMat),"").toString();
-			prevN = ifnull(lineNoteByMat.get(lnMat),"").toString();
-			if(prevL != "")
+			// PER-LOT ROLL-UP. lot id -> summed still-owed qty for this material.
+			// Inner map pulled into a variable before .put - Deluge cannot chain
+			// a method onto a Map.get() result.
+			lidM = ifnull(miLn.Lot,"").toString().trim();
+			if(lidM == "")
 			{
-				prevL = prevL + "~";
-				prevQ = prevQ + "~";
-				prevN = prevN + "~";
+				lidM = "none";
 			}
-			lineLotByMat.put(lnMat,prevL + ifnull(miLn.Lot,"").toString().trim());
-			lineQtyByMat.put(lnMat,prevQ + lnPend);
-			lineNoteByMat.put(lnMat,prevN + lnNote);
+			lMap = lotAgg.get(lnMat);
+			if(lMap == null)
+			{
+				lMap = Map();
+			}
+			lMap.put(lidM,ifnull(lMap.get(lidM),0.0) + lnPend);
+			lotAgg.put(lnMat,lMap);
+			if(lnNote != "")
+			{
+				nMap = lotNoteAgg.get(lnMat);
+				if(nMap == null)
+				{
+					nMap = Map();
+				}
+				haveN = ifnull(nMap.get(lidM),"").toString();
+				if(haveN.contains(lnNote) == false)
+				{
+					if(haveN != "")
+					{
+						haveN = haveN + ", ";
+					}
+					nMap.put(lidM,haveN + lnNote);
+					lotNoteAgg.put(lnMat,nMap);
+				}
+			}
 
-			// The still-owed line, described in full so receiveMaterials can
-			// settle it with point lookups only. "pending" here is already NET
-			// of the dispute netting applied above - the same figure the widget
-			// shows him - so the widget distributes his confirmed quantity across
-			// these and posts back {issueLineId, settle, confirmed} per line.
-			prevRows = ifnull(lineRowsByMat.get(lnMat),"").toString();
-			if(prevRows != "")
+			// Distinct vouchers this material sits on.
+			vList = vouchByMat.get(lnMat);
+			if(vList == null)
 			{
-				prevRows = prevRows + ",";
+				vList = List();
 			}
-			lineRowsByMat.put(lnMat,prevRows + "{\"issueLineId\":\"" + miLn.ID + "\",\"voucherId\":\"" + miRec.ID + "\",\"lot\":\"" + ifnull(miLn.Lot,"").toString().trim() + "\",\"requirementId\":\"" + lnReqTxt + "\",\"planId\":\"" + rPlanId + "\",\"planNo\":\"" + rPlanNo.replaceAll("\"","'") + "\",\"salesOrder\":\"" + rSalesOrder.replaceAll("\"","'") + "\",\"pending\":" + lnPend + "}");
+			vIdTxt = miRec.ID + "";
+			if(vList.contains(vIdTxt) == false)
+			{
+				vList.add(vIdTxt);
+			}
+			vouchByMat.put(lnMat,vList);
 			}
 			// end of the "within this page's budget" else
 		}
@@ -638,9 +689,8 @@ string getSupervisorMaterials(string supervisorId, string skipLinesTxt)
 	}
 
 	//------------------------------------------------------------------------
-	// EMIT. Per material: the aggregate, its per-order detail, and the per-lot
-	// breakdown of the still-owed metres (newest lines first, taken up to the
-	// pending figure - so the lot named is the roll he actually has to check).
+	// EMIT. Per material: the aggregate, its per-plan order roll-up, the per-lot
+	// breakdown, and the distinct vouchers it sits on (the widget's sweep scope).
 	//------------------------------------------------------------------------
 	for each  k in orderedKeys
 	{
@@ -652,106 +702,96 @@ string getSupervisorMaterials(string supervisorId, string skipLinesTxt)
 			continue;
 		}
 
+		// --- lots: straight off the per-lot roll-up ---
 		lotsJson = "";
-		leftToName = adjPending;
-		lotSeen = List();
-		lotQty = Map();
-
-		lotTxt = ifnull(lineLotByMat.get(k),"").toString();
-		qtyTxt = ifnull(lineQtyByMat.get(k),"").toString();
-		noteTxt = ifnull(lineNoteByMat.get(k),"").toString();
-
-		if(lotTxt != "")
+		kLotMap = lotAgg.get(k);
+		kNoteMap = lotNoteAgg.get(k);
+		if(kLotMap != null)
 		{
-			lotParts = lotTxt.toList("~");
-			qtyParts = qtyTxt.toList("~");
-			noteParts = noteTxt.toList("~");
-
-			idxN = 0;
-			for each  qPart in qtyParts
+			lotKeys = kLotMap.keys();
+			for each  lotKey in lotKeys
 			{
-				if(leftToName > 0)
+				lotVal = kLotMap.get(lotKey);
+				if(lotVal > 0)
 				{
-					takeHere = qPart.toDecimal();
-					if(takeHere > leftToName)
+					lotLabelTxt = "Not recorded";
+					if(lotKey != "none")
 					{
-						takeHere = leftToName;
-					}
-
-					if(takeHere > 0)
-					{
-						thisLot = lotParts.get(idxN).toString();
-						// A line issued before lots existed carries none. Named
-						// rather than dropped - the metres are real.
-						if(thisLot == "")
+						if(lotNumById.get(lotKey) == null)
 						{
-							thisLot = "none";
-						}
-
-						if(lotSeen.contains(thisLot) == false)
-						{
-							lotSeen.add(thisLot);
-							lotQty.put(thisLot,0.0);
-							lotNotes.put(thisLot,"");
-						}
-						lotQty.put(thisLot,lotQty.get(thisLot) + takeHere);
-
-						thisNote = ifnull(noteParts.get(idxN),"").toString().trim();
-						if(thisNote != "")
-						{
-							haveNote = ifnull(lotNotes.get(thisLot),"").toString();
-							if(haveNote != "" && haveNote.contains(thisNote) == false)
+							lotNumById.put(lotKey,"");
+							for each  lotRef in Raw_Material_Lot[ID == lotKey.toLong()]
 							{
-								haveNote = haveNote + ", ";
-							}
-							if(haveNote.contains(thisNote) == false)
-							{
-								lotNotes.put(thisLot,haveNote + thisNote);
+								lotNumById.put(lotKey,ifnull(lotRef.Lot_Number,"").toString());
 							}
 						}
-
-						leftToName = leftToName - takeHere;
+						lotLabelTxt = ifnull(lotNumById.get(lotKey),"").toString();
+						if(lotLabelTxt == "")
+						{
+							lotLabelTxt = "Not recorded";
+						}
 					}
+
+					nTxt = "";
+					if(kNoteMap != null)
+					{
+						nTxt = ifnull(kNoteMap.get(lotKey),"").toString();
+					}
+					if(nTxt != "")
+					{
+						lotLabelTxt = lotLabelTxt + " (" + nTxt + ")";
+					}
+
+					if(lotsJson != "")
+					{
+						lotsJson = lotsJson + ",";
+					}
+					lotsJson = lotsJson + "{\"lot\":\"" + lotLabelTxt.replaceAll("\"","'") + "\",\"qty\":" + lotVal + "}";
 				}
-				idxN = idxN + 1;
 			}
 		}
 
-		for each  lotKey in lotSeen
+		// --- orders: one entry per plan this material feeds ---
+		ordersJson = "";
+		kOrdKeys = ordKeys.get(k);
+		if(kOrdKeys != null)
 		{
-			if(lotsJson != "")
+			for each  ok in kOrdKeys
 			{
-				lotsJson = lotsJson + ",";
-			}
-			if(lotNumById.get(lotKey) == null)
-			{
-				lotNumById.put(lotKey,"");
-				for each  lotRef in Raw_Material_Lot[ID == lotKey.toLong()]
+				oe = ordAgg.get(ok);
+				if(oe != null)
 				{
-					lotNumById.put(lotKey,ifnull(lotRef.Lot_Number,"").toString());
+					if(ordersJson != "")
+					{
+						ordersJson = ordersJson + ",";
+					}
+					// reason was flattened of quotes / newlines / tabs where it
+					// was built (reqInfo), so it needs no re-escape here.
+					ordersJson = ordersJson + "{\"planId\":\"" + ifnull(oe.get("planId"),"").toString() + "\",\"planNo\":\"" + ifnull(oe.get("planNo"),"").toString().replaceAll("\"","'") + "\",\"salesOrder\":\"" + ifnull(oe.get("salesOrder"),"").toString().replaceAll("\"","'") + "\",\"pending\":" + ifnull(oe.get("pending"),0.0) + ",\"isReissue\":" + ifnull(oe.get("isReissue"),"false") + ",\"reason\":\"" + ifnull(oe.get("reason"),"").toString() + "\",\"lineCount\":" + ifnull(oe.get("lineCount"),0) + "}";
 				}
 			}
+		}
 
-			lotLabelTxt = ifnull(lotNumById.get(lotKey),"").toString();
-			if(lotLabelTxt == "")
+		// --- voucher ids this material sits on ---
+		vJson = "";
+		kV = vouchByMat.get(k);
+		if(kV != null)
+		{
+			for each  vv in kV
 			{
-				lotLabelTxt = "Not recorded";
+				if(vJson != "")
+				{
+					vJson = vJson + ",";
+				}
+				vJson = vJson + "\"" + vv + "\"";
 			}
-
-			nTxt = ifnull(lotNotes.get(lotKey),"").toString();
-			if(nTxt != "")
-			{
-				lotLabelTxt = lotLabelTxt + " (" + nTxt + ")";
-			}
-
-			lotsJson = lotsJson + "{\"lot\":\"" + lotLabelTxt.replaceAll("\"","'") + "\",\"qty\":" + lotQty.get(lotKey) + "}";
 		}
 
 		if(matJson != "")
 		{
 			matJson = matJson + ",";
 		}
-		matJson = matJson + "{\"materialId\":\"" + eAgg.get("matId") + "\",\"material\":\"" + eAgg.get("name").toString().replaceAll("\"","'") + "\",\"unit\":\"" + eAgg.get("unit") + "\",\"isFabric\":" + eAgg.get("isFabric") + ",\"isReissue\":" + ifnull(eAgg.get("hasReissue"),"false") + ",\"pending\":" + eAgg.get("pending") + ",\"lots\":[" + lotsJson + "],\"orders\":[" + detail.get(k) + "],\"lines\":[" + ifnull(lineRowsByMat.get(k),"").toString() + "]}";
+		matJson = matJson + "{\"materialId\":\"" + eAgg.get("matId") + "\",\"material\":\"" + eAgg.get("name").toString().replaceAll("\"","'") + "\",\"unit\":\"" + eAgg.get("unit") + "\",\"isFabric\":" + eAgg.get("isFabric") + ",\"isReissue\":" + ifnull(eAgg.get("hasReissue"),"false") + ",\"pending\":" + eAgg.get("pending") + ",\"lots\":[" + lotsJson + "],\"orders\":[" + ordersJson + "],\"voucherIds\":[" + vJson + "]}";
 	}
 
 	}

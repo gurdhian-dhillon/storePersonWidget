@@ -1,0 +1,68 @@
+string createSalesOrder00020()
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		testQty = 5;
+		custId = 0;
+		for each cust in Customer_Master[ID != 0]
+		{
+			custId = cust.ID;
+		}
+		if(custId == 0)
+		{
+			return "{\"errors\":[\"No customer found in Customer.\"]}";
+		}
+		rowCollection = Collection();
+		rowCount = 0;
+		grand = 0.0;
+		items = Item_Master[SKU.startsWith("SKU-00")] sort by SKU;
+		for each itemRec in items
+		{
+			rateTxt = ifnull(itemRec.Sales_Price,"0").toString().trim();
+			if(rateTxt == "")
+			{
+				rateTxt = "0";
+			}
+			rateVal = rateTxt.toDecimal();
+			if(rateVal <= 0)
+			{
+				rateVal = 100.0;
+			}
+			lineAmount = rateVal * testQty;
+			newRow = Sales_Order.Item_Table();
+			newRow.SKU = itemRec.ID;
+			newRow.Item_Name = ifnull(itemRec.Item_Name,"").toString();
+			newRow.Color = ifnull(itemRec.Color,"").toString();
+			newRow.Size = ifnull(itemRec.Size,"").toString();
+			newRow.Quantity = testQty;
+			newRow.Rate = rateVal;
+			newRow.Amount = lineAmount;
+			rowCollection.insert(newRow);
+			rowCount = rowCount + 1;
+			grand = grand + lineAmount;
+		}
+		if(rowCount == 0)
+		{
+			return "{\"errors\":[\"No Item_Master rows matched SKU starting SKU-00.\"]}";
+		}
+		newSoId = insert into Sales_Order
+		[
+			Sales_Order="SO-00020"
+			Sales_Order_Date=zoho.currentdate
+			Customer=custId
+			Order_Source="Test Script"
+			Order_Status="Pending"
+			Sub_Total1=grand
+			Grand_Total=grand
+			Item_Table=rowCollection
+			Added_User=zoho.loginuser
+		];
+		res = "{\"errors\":[],\"salesOrderId\":\"" + newSoId + "\",\"lines\":" + rowCount + ",\"grandTotal\":" + grand + "}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

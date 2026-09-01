@@ -658,6 +658,12 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
     Object.keys(pinOf).forEach(function (oid) { origPin[oid] = pinOf[oid]; });
 
     // PASS 2 — the demand itself, from lines that still owe something.
+    //
+    // CUT SIZE COMES OFF THE LINE, not the entry. One SKU row now spans every
+    // cut its fabric is used at, so the marker layout for a demand is whatever
+    // THIS plan item's line recorded — grain is fixed, one width across the
+    // cloth, one length along it. lotFill already scores every demand by its own
+    // d.cutW / d.cutL, so a mixed-cut set allocates correctly in one pass.
     rows.forEach(function (rw) {
         (rw.m.lines || []).forEach(function (ln) {
             var owed = (Number(ln.reqPieces) || 0) - (Number(ln.issPieces) || 0);
@@ -678,8 +684,17 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                 // the guarantee is worth exactly as much as its weakest caller.
                 planId: oid,
                 planItemId: String(ln.planItemId || ''),
-                cutW: rw.m.cutWidth,
-                cutL: rw.m.cutLength,
+                // THE REQUIREMENT ROW. One Plan_Item can need this fabric at TWO
+                // cut sizes (a body panel and a facing off the same cloth) — two
+                // Material_Requirement rows, one planItemId. The payload must fan
+                // back to each row, so the demand and every lot line it produces
+                // carry the mrqId, not just the item id.
+                mrqId: String(ln.mrqId || ''),
+                // Cut size off the LINE. Fall back to a cut on the entry only for
+                // a payload that predates the per-line field (older tests, a
+                // stale server) — the live server always sends it per line.
+                cutW: Number(ln.cutW) || Number(rw.m.cutWidth) || 0,
+                cutL: Number(ln.cutL) || Number(rw.m.cutLength) || 0,
                 pieces: owed
             });
         });
@@ -702,6 +717,12 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
     rows.forEach(function (rw) {
         res[rw.idx] = { picks: {}, lotLines: [], fromWaste: 0, fromFresh: 0,
                         freshMetres: 0, owed: 0,
+                        // PER CUT SIZE, keyed "cutWxcutL". A SKU row spans many
+                        // cuts and the "still needs" metres figure is only
+                        // meaningful per cut length, so the write-back walks
+                        // these instead of one cut on the entry. owedByCut is
+                        // seeded from the demands; wasteByCut is filled by spend().
+                        owedByCut: {}, wasteByCut: {},
                         washLotId: '', washLotNumber: '', washQty: 0,
                         // EVERY lot this row is waiting on, not the last one
                         // written. One row carries several orders and each picks
@@ -812,27 +833,54 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                 // physical remnant picks travel separately in `picks`.
                 r.lotLines.push({ lotId: lot.lotId, lotNumber: lot.lotNumber,
                                   qty: fill.metresPer[i], planItemId: d.planItemId,
-                                  planId: d.planId, pieces: lnPieces, cutSummary: cSumm,
+                                  planId: d.planId,
+                                  // THE REQUIREMENT ROW this line serves. One
+                                  // Plan_Item can have two Material_Requirement
+                                  // rows for this fabric (two cut sizes), so the
+                                  // payload must fan back to the mrqId, not the
+                                  // item id — planItemId alone would merge the
+                                  // two rows into one allocation and leave the
+                                  // second requirement uncredited for ever.
+                                  mrqId: String(d.mrqId || ''),
+                                  // THE CUT SIZE FOR THIS LINE, carried through
+                                  // to the payload so issueMaterials stamps
+                                  // Cut_Size_* per Issue_Line. The SKU entry has
+                                  // no single cut any more, so every consumer of
+                                  // a lot line reads it from here.
+                                  cutW: Number(d.cutW) || 0, cutL: Number(d.cutL) || 0,
+                                  pieces: lnPieces, cutSummary: cSumm,
                                   fromRaw: fill.fromFresh[i], fromWaste: fill.fromWaste[i],
                                   note: noteOn, overrideFrom: fromOn });
             }
-            // KEYED BY REMNANT **AND** ITEM.
+            // CREDIT THE OFFCUT PIECES TO THIS DEMAND'S CUT. The write-back
+            // needs the remnant coverage per cut size to work out how much
+            // fresh cloth each cut still needs.
+            if (fill.fromWaste[i] > 0) {
+                var wk = (Number(d.cutW) || 0) + 'x' + (Number(d.cutL) || 0);
+                r.wasteByCut[wk] = (r.wasteByCut[wk] || 0) + fill.fromWaste[i];
+            }
+            // KEYED BY REMNANT **AND** REQUIREMENT ROW.
             //
-            // One remnant can yield cuts for two items of an order, and keying
-            // on the remnant alone stamped the whole yield with whichever item
-            // happened to reach it first. The server then credits that item's
-            // rows only, the second item silently draws fresh cloth instead, and
-            // the offcut it was supposed to use sits on the rack marked spent.
+            // One remnant can yield cuts for two requirement rows — two items of
+            // an order, OR one item at two cut sizes — and keying on the remnant
+            // alone stamped the whole yield with whichever row reached it first.
+            // The server then credits that row only, the other silently draws
+            // fresh cloth instead, and the offcut it was supposed to use sits on
+            // the rack marked spent. Keyed on mrqId (not planItemId) so the two
+            // cut sizes of one item stay apart and each is stamped with its own
+            // cut for the Waste_Movement record.
             //
-            // Two items off one remnant therefore show as two rows. They are not
+            // Two claims off one remnant therefore show as two rows. They are not
             // the duplicate rows the cutting dialog merges away — those were the
             // same piece described twice, these are genuinely different claims.
             Object.keys(fill.picksPer[i]).forEach(function (wid) {
-                var k = wid + '|' + d.planItemId;
+                var k = wid + '|' + (d.mrqId || d.planItemId);
                 if (!r.picks[k]) {
                     var src = lot.waste.filter(function (x) { return String(x.wasteId) === String(wid); })[0] || {};
                     r.picks[k] = { wasteId: wid, pieces: 0, width: src.width, length: src.length,
-                                   lot: lot.lotNumber, carton: src.carton, planItemId: d.planItemId };
+                                   lot: lot.lotNumber, carton: src.carton,
+                                   planItemId: d.planItemId, mrqId: String(d.mrqId || ''),
+                                   cutW: Number(d.cutW) || 0, cutL: Number(d.cutL) || 0 };
                 }
                 r.picks[k].pieces += fill.picksPer[i][wid];
             });
@@ -880,7 +928,12 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
 
     orderSeq.forEach(function (oid) {
         var ord = byOrder[oid];
-        ord.demands.forEach(function (d) { res[d.rowIdx].owed += d.pieces; });
+        ord.demands.forEach(function (d) {
+            res[d.rowIdx].owed += d.pieces;
+            // Per cut size too, so the write-back can size fresh cloth per cut.
+            var ok = (Number(d.cutW) || 0) + 'x' + (Number(d.cutL) || 0);
+            res[d.rowIdx].owedByCut[ok] = (res[d.rowIdx].owedByCut[ok] || 0) + d.pieces;
+        });
 
         // CAN THE PINNED LOT STILL SERVE THIS ORDER AT ALL?
         //
@@ -1143,7 +1196,7 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
             if (already) return;
             m.wastePicks.push({ wasteId: rk.wasteId, pieces: 0, width: rk.width,
                                 length: rk.length, lot: rk.lot, carton: rk.carton,
-                                planItemId: '' });
+                                planItemId: '', mrqId: '' });
         });
         m.piecesCoveredByWaste = r.fromWaste;
         m.freshPieces = Math.max(0, r.owed - r.fromWaste);
@@ -1160,36 +1213,96 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
         // So this stays what it has always been — the waste-adjusted fresh
         // requirement. What can actually go out today is the lot allocation,
         // and that travels separately in `lotLines`.
-        var prNeed = perRowFor({ fabricWidthCm: m.fabricWidthCm }, m.cutWidth);
-        var cl = Number(m.cutLength) || 0;
-        // THE SAME TEST getStoreMaterialRequirements USES, deliberately:
-        // reqPieces > 0 AND a countable cut. A row planned before Required_Pieces
-        // existed has a perfectly good cut size and no pieces, so testing the cut
-        // alone said "countable" and produced 0 — the row read "0 Mtr" and
-        // dropped off the shortfall summary as well. Two screens, one silent
-        // disappearance, from a condition that was nearly right.
-        var need;
-        if ((Number(m.requiredPieces) || 0) > 0 && prNeed > 0 && cl > 0) {
-            need = m.freshPieces > 0
-                ? round2((Math.ceil(m.freshPieces / prNeed) * cl) / 100)
-                : 0;
-        } else {
-            // NO PIECE DATA TO COUNT WITH — a row planned before Required_Pieces
-            // existed, a cut wider than the cloth, or a fabric whose width was
-            // never recorded. Keep the server's metres estimate.
-            //
-            // Quoting 0 here does not merely make the row approximate, it makes
-            // it VANISH: the row reads "0 Mtr to be issued", and because the
-            // shortfall summary skips anything with no gap, the material drops
-            // off that screen too. A fabric with a missing width would disappear
-            // from the app rather than ask to be fixed.
+        // WHAT THE ROW STILL NEEDS, SUMMED OVER EVERY CUT SIZE. A SKU row is one
+        // line but its cloth is cut to several sizes, and metres are only
+        // meaningful per cut length — so this walks m.cuts (the per-cut piece
+        // counts the server sent) and adds each cut's whole-marker-row metres for
+        // the pieces its offcuts did not cover.
+        //
+        // SAME TEST getStoreMaterialRequirements USES, per cut: reqPieces > 0 AND
+        // a countable cut. A cut planned before Required_Pieces existed has a
+        // good size and no pieces, so testing the size alone would read
+        // "countable" and produce 0 — the row goes to "0 Mtr" and drops off the
+        // shortfall summary. When NO cut is countable, fall back to the server's
+        // whole-SKU metres estimate rather than quoting 0, which would make the
+        // row vanish from the screen entirely.
+        // THE UNION of every cut size this row knows about: the demands built
+        // from m.lines (always complete, even when the SKU spans several server
+        // pages) PLUS anything on m.cuts. m.cuts alone is NOT trusted — when a
+        // supervisor's demand for this fabric is split across parallel pages,
+        // mergeRequirementPages sums the lines but keeps only the first page's
+        // m.cuts, so a cut size that first appeared on page 2 would be missing
+        // and the headline would under-report. owedByCut is keyed off the merged
+        // lines, so it always has every cut with outstanding pieces; m.cuts adds
+        // the countability signal for a cut that is fully issued (owed 0).
+        var cutMap = {};
+        Object.keys(r.owedByCut).forEach(function (k) {
+            var parts = k.split('x');
+            cutMap[k] = { cutW: Number(parts[0]) || 0, cutL: Number(parts[1]) || 0,
+                          reqPieces: r.owedByCut[k] || 0 };
+        });
+        (m.cuts || []).forEach(function (ck) {
+            var key = (Number(ck.cutW) || 0) + 'x' + (Number(ck.cutL) || 0);
+            if (!cutMap[key]) {
+                cutMap[key] = { cutW: Number(ck.cutW) || 0, cutL: Number(ck.cutL) || 0,
+                                reqPieces: Number(ck.reqPieces) || 0 };
+            }
+        });
+        var cutList = Object.keys(cutMap).map(function (k) { return cutMap[k]; });
+        var need = 0;
+        var anyCountable = false;
+        cutList.forEach(function (ck) {
+            var cutW = Number(ck.cutW) || 0;
+            var cl = Number(ck.cutL) || 0;
+            var pr = perRowFor({ fabricWidthCm: m.fabricWidthCm }, cutW);
+            if (!((Number(ck.reqPieces) || 0) > 0 && pr > 0 && cl > 0)) return;
+            anyCountable = true;
+            var key = cutW + 'x' + cl;
+            var owedCut = r.owedByCut[key] || 0;
+            var wasteCut = r.wasteByCut[key] || 0;
+            var freshCut = Math.max(0, owedCut - wasteCut);
+            if (freshCut > 0) {
+                need = round2(need + (Math.ceil(freshCut / pr) * cl) / 100);
+            }
+        });
+        if (!anyCountable) {
+            // NO PIECE DATA TO COUNT WITH on any cut — rows planned before
+            // Required_Pieces existed, a cut wider than the cloth, or a fabric
+            // whose width was never recorded. Keep the server's metres estimate;
+            // quoting 0 would make the row vanish from the screen.
             need = round2(Math.max(0, Number(m.freshMeters) || 0));
             r.noPieceData = true;
         }
         m.freshMeters = need;
-        m.remaining = need;
         m.noPieceData = !!r.noPieceData;
         m.lotLines = r.lotLines;
+
+        // "TO BE ISSUED" = WHAT ACTUALLY LEAVES THE ROLL: the sum of the per-lot
+        // lines, which is exactly what the ISSUE NOW boxes total to.
+        //
+        // `need` above is the PLANNING estimate — it rounds each cut size up to
+        // whole marker rows ONCE, as if every item sharing that cut were laid on
+        // one continuous marker. The lot lines round up PER Plan_Item, because
+        // each item is cut on its own lay and cannot share a part-row with
+        // another. That difference is a handful of real part-rows and IS the
+        // cloth he hands over — so on a fully-covered row the headline shows the
+        // lot total, or "To be issued" and "Issue now" disagree for no reason he
+        // can see.
+        //
+        // BUT the lot total is ONLY safe as the headline when it actually covers
+        // the requirement. On a row committed to a lot that is mostly greige /
+        // at the wash, `lotFill` emits only the washed metres — a fraction of
+        // what is needed. Showing that fraction makes the gap read as zero and
+        // the shortfall summary then raises no wash ticket at all (this exact
+        // trap is why the old code always used `need` here). So: use the lot
+        // total only when it is >= `need` (nothing is waiting on a wash);
+        // otherwise keep `need`, which still drives the wash / purchase ticket.
+        var lotTotal = round2((r.lotLines || []).reduce(function (t, ln) {
+            return t + (Number(ln.qty) || 0);
+        }, 0));
+        m.remaining = (r.lotLines && r.lotLines.length && lotTotal + 0.0001 >= need)
+            ? lotTotal
+            : need;
         // Which lot this row is waiting on, so the shortfall summary sends the
         // right greige to the wash instead of the biggest pile.
         m.washLotId = r.washLotId;
@@ -1227,7 +1340,191 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
         m.printBaseName = String(m0.printBaseName || '');
         m.printBaseLots = m0.printBaseLots || [];
         m.shortReason = shortReasonFor(m, r, lots);
+        // The auto figure, kept so the store screen can show "auto: X" beside a
+        // box he has hand-edited and applyFabricOverride can be undone back to it.
+        // Set here, once, from the allocation — never touched again.
+        m.autoMetres = round2((m.lotLines || []).reduce(function (t, ln) {
+            return t + (Number(ln.qty) || 0);
+        }, 0));
+        m.autoLotLines = JSON.parse(JSON.stringify(m.lotLines || []));
+        m.autoRemaining = round2(Number(m.remaining) || 0);
+        m.metresEdited = false;
     });
+}
+
+// ---- Hand-edited fabric metres, PER LOT ----
+//
+// The store person is allowed to cut MORE or LESS than the allocator worked out
+// (a ruined marker row, an order he knows changed, cloth he wants to send spare).
+// Each lot sub-line on the SKU row has its own box; the submit path reads ONLY
+// `m.lotLines` — never the boxes — so an edit has to be pushed back onto the
+// lines for THAT lot here or it does nothing.
+//
+// SCOPE IS ONE LOT. He is changing how much comes off one roll; every other lot
+// on the row is untouched. The tone decision (which lot serves which order) is
+// the allocator's and the pin's and a metres edit must never move it.
+//
+// FULFILMENT IS STILL COUNTED IN WHOLE CUT ROWS, and this is the load-bearing
+// part. `giveRaw` / `Pieces_From_Raw` is what receiveMaterials and the store
+// screen read to decide a fabric row is done — NOT the metres. Per line, using
+// THAT LINE'S OWN cut size (a SKU row spans several):
+//
+//   rows      = floor(lineMetres / cutLength_line)  -- a part-cut row is 0, it is
+//                                                      the damaged one
+//   fromRaw   = min(rows * perRow_line, owed - fromWaste)
+//
+// A short edit therefore leaves the requirement OPEN for the rows he did not
+// cut — next Issue re-covers them off the same lot. It is never
+// `required - issued` metres.
+//
+// OVER-ISSUE rides the handover. Surplus metres above the recommendation are
+// added to the largest line on that lot (so lotMoves charges the roll for the
+// cloth that physically leaves) but `fromRaw` is still capped at `owed` — the
+// extra comes back as an offcut the supervisor declares through the normal waste
+// flow, not something issueMaterials records.
+//
+// Metres he types that are not a whole number of rows are sent AS TYPED (the lot
+// is charged the real figure) and the stray part-row counts 0 pieces.
+//
+// PURE, like the rest of this file: mutates `m` and returns nothing. Called only
+// from the store screen's oninput — the admin audit never runs it.
+function applyFabricOverride(m, lotId, editedMetres) {
+    if (!m || !m.isFabric) return;
+    var base = m.autoLotLines || [];
+    if (base.length === 0) return;
+    var lotKey = String(lotId);
+
+    // A Pieces lot line carries a per-piece cut list the server needs to
+    // decrement Fabric_Piece. A hand-sized metres figure cannot be mapped onto
+    // discrete pieces, so an override of THIS lot is refused when any of its
+    // lines is one — the box is rendered read-only for the same reason.
+    var thisLotBase = base.filter(function (ln) { return String(ln.lotId) === lotKey; });
+    if (thisLotBase.length === 0) return;
+    if (thisLotBase.some(function (ln) { return ln.pieces && ln.pieces.length; })) return;
+
+    var autoThisLot = round2(thisLotBase.reduce(function (t, ln) {
+        return t + (Number(ln.qty) || 0);
+    }, 0));
+    var want = Math.max(0, Number(editedMetres) || 0);
+
+    // Rebuild m.lotLines: other lots' lines straight from auto, this lot's lines
+    // re-derived. Start from whatever is currently on m.lotLines for the other
+    // lots (they may carry earlier per-lot edits) but re-seed this lot from auto.
+    var otherLines = (m.lotLines || []).filter(function (ln) {
+        return String(ln.lotId) !== lotKey;
+    });
+
+    // Back to exactly what the allocator decided for this lot.
+    if (Math.abs(want - autoThisLot) < 0.005) {
+        var restored = JSON.parse(JSON.stringify(thisLotBase));
+        m.lotLines = otherLines.concat(restored);
+        recomputeMetresEdited(m);
+        setOverrideRemaining(m);
+        return;
+    }
+
+    // mrqId -> pieces still owed (ceiling on fromRaw), from the server lines.
+    // Keyed on the requirement ROW, not the item: one Plan_Item can have two
+    // rows for this fabric (two cut sizes), each with its own owed count, and
+    // capping both against the first row's count would strand the second.
+    // Offcut credit per row comes from ALL of that row's auto lines, not just
+    // this lot's, so a short edit here cannot silently re-charge waste-covered
+    // pieces to fresh cloth.
+    var owedBy = {}, wasteBy = {};
+    (m.lines || []).forEach(function (ln) {
+        var q = String(ln.mrqId || '');
+        if (q && owedBy[q] === undefined) {
+            owedBy[q] = Math.max(0, (Number(ln.reqPieces) || 0) - (Number(ln.issPieces) || 0));
+        }
+    });
+    (base || []).forEach(function (ln) {
+        var q = String(ln.mrqId || ln.planItemId || '');
+        wasteBy[q] = (wasteBy[q] || 0) + (Number(ln.fromWaste) || 0);
+    });
+
+    // Spread the edited total across this lot's lines, weighted by their auto qty.
+    var lines = JSON.parse(JSON.stringify(thisLotBase));
+    var autoSum = lines.reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0);
+    if (autoSum <= 0) { autoSum = lines.length; lines.forEach(function (ln) { ln.qty = 1; }); }
+
+    var biggest = 0;
+    lines.forEach(function (ln, i) {
+        ln.qty = round2(want * ((Number(ln.qty) || 0) / autoSum));
+        if ((Number(lines[i].qty) || 0) > (Number(lines[biggest].qty) || 0)) biggest = i;
+    });
+    var spread = lines.reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0);
+    lines[biggest].qty = round2((Number(lines[biggest].qty) || 0) + (want - spread));
+    if ((Number(lines[biggest].qty) || 0) < 0) lines[biggest].qty = 0;
+
+    // fromRaw per line: whole rows using THIS LINE'S cut, capped at what the
+    // requirement row still owes after its offcuts and after any credit already
+    // taken on another line for the same row (a row's cut can be split across
+    // two lots).
+    var rawTaken = {};
+    // Seed rawTaken from the OTHER lots' lines for the same row, so the cap is
+    // against the row's total outstanding, not just this lot's slice.
+    otherLines.forEach(function (ln) {
+        var q = String(ln.mrqId || ln.planItemId || '');
+        rawTaken[q] = (rawTaken[q] || 0) + (Number(ln.fromRaw) || 0);
+    });
+    lines.forEach(function (ln) {
+        var q = String(ln.mrqId || ln.planItemId || '');
+        var lineCutL = Number(ln.cutL) || 0;
+        var lineCutLcm = lineCutL * 100;
+        var perRow = perRowFor({ fabricWidthCm: m.fabricWidthCm }, Number(ln.cutW) || 0);
+        var rows = (lineCutLcm > 0) ? Math.floor(((Number(ln.qty) || 0) * 100 + 0.5) / lineCutLcm) : 0;
+        var gross = rows * perRow;
+        var owed = owedBy[q] === undefined ? gross : owedBy[q];
+        var wasteCredit = wasteBy[q] || 0;
+        var already = rawTaken[q] || 0;
+        var room = Math.max(0, owed - wasteCredit - already);
+        var give = Math.min(gross, room);
+        rawTaken[q] = already + give;
+        ln.fromRaw = give;
+        // fromWaste is the physical-pick credit and is not a function of metres —
+        // leave it exactly as the allocator set it.
+    });
+
+    m.lotLines = otherLines.concat(lines);
+    recomputeMetresEdited(m);
+    setOverrideRemaining(m);
+}
+
+// `remaining` STAYS the true outstanding need — it caps the box max, feeds
+// maxIssuable and drives the shortfall summary. A short edit must not shrink it
+// (the uncut rows are still owed) and an over-edit must not raise it (surplus is
+// spare cloth, not a bigger requirement). So it is pinned to the auto figure.
+function setOverrideRemaining(m) {
+    var v = m.autoRemaining !== undefined
+        ? m.autoRemaining
+        : round2(Number(m.autoMetres) || 0);
+    m.remaining = m.freshMeters = v;
+}
+
+// m.metresEdited is true when ANY lot line diverges from its auto value.
+function recomputeMetresEdited(m) {
+    var auto = {};
+    (m.autoLotLines || []).forEach(function (ln, i) { auto[i] = ln; });
+    var edited = false;
+    var byKey = function (ln) {
+        return String(ln.lotId) + '|' + String(ln.planItemId) + '|' +
+               (ln.cutW || 0) + 'x' + (ln.cutL || 0);
+    };
+    var autoQ = {};
+    (m.autoLotLines || []).forEach(function (ln) {
+        autoQ[byKey(ln)] = (autoQ[byKey(ln)] || 0) + (Number(ln.qty) || 0);
+    });
+    var curQ = {};
+    (m.lotLines || []).forEach(function (ln) {
+        curQ[byKey(ln)] = (curQ[byKey(ln)] || 0) + (Number(ln.qty) || 0);
+    });
+    Object.keys(autoQ).forEach(function (k) {
+        if (Math.abs((autoQ[k] || 0) - (curQ[k] || 0)) > 0.005) edited = true;
+    });
+    Object.keys(curQ).forEach(function (k) {
+        if (autoQ[k] === undefined && (curQ[k] || 0) > 0.005) edited = true;
+    });
+    m.metresEdited = edited;
 }
 
 // ONE ROW, ONE PROBLEM, ONE LINE.

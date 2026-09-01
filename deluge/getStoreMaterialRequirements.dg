@@ -272,9 +272,14 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 					isReissue = true;
 				}
 
-				// Non-fabric rows carry 0x0, so they collapse to one line per
-				// material exactly as before.
-				key = supId + "|" + matId + "|" + cutW + "x" + cutL + "|" + srcTxt;
+				// ONE ROW PER (supervisor, material, source) - CUT SIZE IS NO
+				// LONGER IN THE KEY. The store person issues one combined handover
+				// of a fabric SKU per supervisor; he never works a cut size. The
+				// per-cut detail is kept in "cuts" below and per-line in "lines"
+				// so the allocator and the payload still fan every metre back to
+				// the exact Plan_Item that owes it. Non-fabric rows carried 0x0
+				// and already collapsed to one line per material - unchanged.
+				key = supId + "|" + matId + "|" + srcTxt;
 
 				cur = agg.get(key);
 				if(cur == null)
@@ -286,13 +291,16 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 					cur.put("unit",mr.Unit);
 					cur.put("isFabric",isFab);
 					cur.put("isReissue",isReissue);
-					cur.put("cutW",cutW);
-					cur.put("cutL",cutL);
 					cur.put("required",0.0);
 					cur.put("issued",0.0);
 					cur.put("reqPieces",0);
 					cur.put("issPieces",0);
 					cur.put("wasteIssPieces",0);
+					// PER-CUT PIECE COUNTS, keyed "widthxlength". Fabric fulfilment
+					// is counted in cut pieces and metres are only meaningful per
+					// cut length, so the headline metres estimate and the allocator
+					// both walk this rather than one cut size on the entry.
+					cur.put("cuts",Map());
 					// The aggregate collapses every plan into one number, which is
 					// what the screen needs but leaves a shortage untraceable - it
 					// cannot say which orders wanted it. One line per requirement
@@ -312,6 +320,30 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 				cur.put("reqPieces",cur.get("reqPieces") + reqPieces);
 				cur.put("issPieces",cur.get("issPieces") + issPieces);
 				cur.put("wasteIssPieces",cur.get("wasteIssPieces") + wasteIssPieces);
+
+				// Roll this row into the per-cut summary. Only fabric carries a
+				// real cut; non-fabric is 0x0 and produces a single harmless entry
+				// nothing reads. The nested map is pulled into its own variable
+				// before any method call on it - chaining .get().put() is the
+				// shape that will not parse here.
+				if(isFab == true)
+				{
+					cutsMap = cur.get("cuts");
+					ckey = cutW + "x" + cutL;
+					ccur = cutsMap.get(ckey);
+					if(ccur == null)
+					{
+						ccur = Map();
+						ccur.put("cutW",cutW);
+						ccur.put("cutL",cutL);
+						ccur.put("reqPieces",0);
+						ccur.put("issPieces",0);
+					}
+					ccur.put("reqPieces",ccur.get("reqPieces") + reqPieces);
+					ccur.put("issPieces",ccur.get("issPieces") + issPieces);
+					cutsMap.put(ckey,ccur);
+					cur.put("cuts",cutsMap);
+				}
 
 				// Which ITEM on the order wanted this, and whether it is a QC
 				// remake. Without it, an order that has both an original line
@@ -357,6 +389,12 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 				lnMap.put("supervisorId",supId + "");
 				lnMap.put("required",ifnull(mr.Required_Qty,0));
 				lnMap.put("issued",ifnull(mr.Issued_Qty,0));
+				// CUT SIZE PER LINE. Now that the entry no longer carries one cut
+				// size, this is how the allocator and the payload builder know the
+				// marker layout for THIS item's cloth - grain is fixed, so a cut
+				// is one width across the fabric and one length along it.
+				lnMap.put("cutW",cutW);
+				lnMap.put("cutL",cutL);
 				// PIECES PER LINE. Lots are allocated per plan item - one item is
 				// one tone - and fulfilment is counted in cut pieces, not metres.
 				// The aggregate above cannot answer "how many does THIS item still
@@ -1106,18 +1144,35 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 
 		if(isFab == true)
 		{
-			cutW = e.get("cutW");
-			cutL = e.get("cutL");
 			outstandingPieces = e.get("reqPieces") - e.get("issPieces");
 			if(outstandingPieces < 0)
 			{
 				outstandingPieces = 0;
 			}
 
+			// THE PER-CUT BREAKDOWN, as a JSON array on the entry. The widget's
+			// allocator needs a cut length to turn pieces into metres and to score
+			// remnant yield, and there is no single one any more. Non-fabric has
+			// no "cuts" map (see the aggregation block); fabric always does.
+			cutsJson = "";
+			cutsMapE = e.get("cuts");
+			cutsKeysE = cutsMapE.keys();
+			for each  ckKey in cutsKeysE
+			{
+				ck = cutsMapE.get(ckKey);
+				if(cutsJson != "")
+				{
+					cutsJson = cutsJson + ",";
+				}
+				cutsJson = cutsJson + "{\"cutW\":" + ck.get("cutW") + ",\"cutL\":" + ck.get("cutL") + ",\"reqPieces\":" + ck.get("reqPieces") + ",\"issPieces\":" + ck.get("issPieces") + "}";
+			}
+
 			matEntry.put("unwashedStock",unwashedStock);
 			matEntry.put("inWashStock",inWashStock);
-			matEntry.put("cutWidth",cutW);
-			matEntry.put("cutLength",cutL);
+			// cutWidth / cutLength ARE GONE from the entry - one SKU row spans many
+			// cut sizes now. The per-cut data travels in cutsJson and per line in
+			// lines[]. Anything still reading matEntry.cutWidth is stale.
+			matEntry.put("cutsJson","[" + cutsJson + "]");
 			matEntry.put("fabricWidthCm",fabricWidthCm);
 			matEntry.put("requiredPieces",e.get("reqPieces"));
 			matEntry.put("issuedPieces",e.get("issPieces"));
@@ -1218,40 +1273,57 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 			//----------------------------------------------------------
 			// Whatever the waste could not cover comes off fresh fabric.
 			//
-			// OUTSIDE the guard above, so this runs for EVERY fabric row -
-			// remnants or none. With no remnants the allocation simply did
-			// not touch remainPcs, and this asks for exactly the cloth the
-			// outstanding pieces need.
+			// SUMMED OVER EVERY CUT SIZE this SKU is used at. A SKU row is
+			// one line on screen but its cloth is cut to several sizes, and
+			// metres are only meaningful per cut length - 40 pieces at 55cm
+			// and 40 at 240cm are not 80 of anything. So this walks the
+			// per-cut map and adds each cut's whole-marker-row metres.
+			//
+			// OUTSIDE the waste guard above, so it runs for EVERY fabric row
+			// - remnants or none. With no remnants the allocation did not
+			// touch remainPcs, and this asks for exactly the cloth the
+			// outstanding pieces need. The widget overwrites freshMeters in
+			// applyLotAllocation before anything renders; this is the honest
+			// pre-waste figure a stale widget falls back to.
 			//----------------------------------------------------------
-			perRowR = 0;
-			canCount = false;
-			if(e.get("reqPieces") > 0 && cutW > 0 && cutL > 0 && fabricWidthCm > 0)
+			freshMeters = 0.0;
+			anyCountable = false;
+			fmCutsMap = e.get("cuts");
+			fmCutsKeys = fmCutsMap.keys();
+			for each  fmCkKey in fmCutsKeys
 			{
-				perRowR = (fabricWidthCm / cutW).floor();
-				if(perRowR > 0)
+				fmCk = fmCutsMap.get(fmCkKey);
+				fmCutW = fmCk.get("cutW");
+				fmCutL = fmCk.get("cutL");
+				fmRemain = fmCk.get("reqPieces") - fmCk.get("issPieces");
+				if(fmRemain < 0)
 				{
-					canCount = true;
+					fmRemain = 0;
+				}
+				if(fmCk.get("reqPieces") > 0 && fmCutW > 0 && fmCutL > 0 && fabricWidthCm > 0)
+				{
+					fmPerRow = (fabricWidthCm / fmCutW).floor();
+					if(fmPerRow > 0)
+					{
+						anyCountable = true;
+						if(fmRemain > 0)
+						{
+							// * 1.0 so the integer quotient is not truncated
+							// before .ceil() rounds it up - one row too few
+							// of fresh cloth otherwise.
+							fmRows = ((fmRemain * 1.0) / fmPerRow).ceil();
+							freshMeters = freshMeters + (fmRows * fmCutL) / 100;
+						}
+					}
 				}
 			}
 
-			if(canCount == true)
+			if(anyCountable == false)
 			{
-				freshMeters = 0.0;
-				if(remainPcs > 0)
-				{
-					// * 1.0 for the same reason as takePcs above - an integer
-					// quotient is truncated before .ceil() can round it up,
-					// which would ask for one row too few of fresh cloth.
-					rowsR = ((remainPcs * 1.0) / perRowR).ceil();
-					freshMeters = (rowsR * cutL) / 100;
-				}
-			}
-			else
-			{
-				// No piece data to count with - a row planned before
-				// Required_Pieces existed, a cut wider than the cloth, or a
-				// fabric whose width was never recorded. The metres estimate
-				// is all there is, and quoting 0 would make the row
+				// No piece data to count with on any cut - rows planned
+				// before Required_Pieces existed, a cut wider than the cloth,
+				// or a fabric whose width was never recorded. The metres
+				// estimate is all there is, and quoting 0 would make the row
 				// unissuable rather than merely approximate.
 				freshMeters = req - iss;
 				if(freshMeters < 0)
@@ -1334,7 +1406,7 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 				{
 					linesJson = linesJson + ",";
 				}
-				linesJson = linesJson + "{\"mrqId\":\"" + lnE.get("mrqId") + "\",\"planId\":\"" + lnE.get("planId") + "\",\"salesOrder\":\"" + lnE.get("salesOrder").toString().replaceAll("\"","'") + "\",\"planItemId\":\"" + lnE.get("planItemId") + "\",\"item\":\"" + lnE.get("item") + "\",\"isRemake\":" + lnE.get("isRemake") + ",\"supervisorId\":\"" + lnE.get("supervisorId") + "\",\"required\":" + lnE.get("required") + ",\"issued\":" + lnE.get("issued") + ",\"reqPieces\":" + lnE.get("reqPieces") + ",\"issPieces\":" + lnE.get("issPieces") + ",\"issuedLot\":\"" + ifnull(lnE.get("issuedLot"),"").toString() + "\",\"issuedLotNo\":\"" + ifnull(lotNameById.get(ifnull(lnE.get("issuedLot"),"").toString().trim()),"").toString() + "\",\"reason\":\"" + lnE.get("reason") + "\"}";
+				linesJson = linesJson + "{\"mrqId\":\"" + lnE.get("mrqId") + "\",\"planId\":\"" + lnE.get("planId") + "\",\"salesOrder\":\"" + lnE.get("salesOrder").toString().replaceAll("\"","'") + "\",\"planItemId\":\"" + lnE.get("planItemId") + "\",\"item\":\"" + lnE.get("item") + "\",\"isRemake\":" + lnE.get("isRemake") + ",\"supervisorId\":\"" + lnE.get("supervisorId") + "\",\"required\":" + lnE.get("required") + ",\"issued\":" + lnE.get("issued") + ",\"reqPieces\":" + lnE.get("reqPieces") + ",\"issPieces\":" + lnE.get("issPieces") + ",\"cutW\":" + ifnull(lnE.get("cutW"),0) + ",\"cutL\":" + ifnull(lnE.get("cutL"),0) + ",\"issuedLot\":\"" + ifnull(lnE.get("issuedLot"),"").toString() + "\",\"issuedLotNo\":\"" + ifnull(lotNameById.get(ifnull(lnE.get("issuedLot"),"").toString().trim()),"").toString() + "\",\"reason\":\"" + lnE.get("reason") + "\"}";
 			}
 
 			exsJson = "";
@@ -1420,7 +1492,8 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 					}
 				}
 
-				matsJson = matsJson + ",\"unwashedStock\":" + mEnt.get("unwashedStock") + ",\"inWashStock\":" + ifnull(mEnt.get("inWashStock"),0) + ",\"cutWidth\":" + mEnt.get("cutWidth") + ",\"cutLength\":" + mEnt.get("cutLength") + ",\"fabricWidthCm\":" + mEnt.get("fabricWidthCm") + ",\"requiredPieces\":" + mEnt.get("requiredPieces") + ",\"issuedPieces\":" + mEnt.get("issuedPieces") + ",\"wasteIssuedPieces\":" + mEnt.get("wasteIssuedPieces") + ",\"outstandingPieces\":" + mEnt.get("outstandingPieces") + ",\"wastePicks\":[" + picksJson + "],\"wasteStock\":[" + stockJson + "],\"freshMeters\":" + mEnt.get("freshMeters") + ",\"piecesCoveredByWaste\":" + mEnt.get("piecesCoveredByWaste") + ",\"freshPieces\":" + mEnt.get("freshPieces") + ",\"requiredTotal\":" + mEnt.get("requiredTotal") + ",\"lots\":[" + ifnull(mEnt.get("lotsJson"),"").toString() + "],\"printBase\":\"" + ifnull(mEnt.get("printBase"),"").toString() + "\",\"printBaseName\":\"" + ifnull(mEnt.get("printBaseName"),"").toString() + "\",\"printBaseLots\":[" + ifnull(mEnt.get("printBaseLotsJson"),"").toString() + "]";
+				matsJson = matsJson + ",\"unwashedStock\":" + mEnt.get("unwashedStock") + ",\"inWashStock\":" + ifnull(mEnt.get("inWashStock"),0) + ",\"cuts\":" + ifnull(mEnt.get("cutsJson"),"[]").toString() + ",\"fabricWidthCm\":" + mEnt.get("fabricWidthCm") + ",\"requiredPieces\":" + mEnt.get("requiredPieces") + ",\"issuedPieces\":" + mEnt.get("issuedPieces") + ",\"wasteIssuedPieces\":" + mEnt.get("wasteIssuedPieces") + ",\"outstandingPieces\":" + mEnt.get("outstandingPieces");
+				matsJson = matsJson + ",\"wastePicks\":[" + picksJson + "],\"wasteStock\":[" + stockJson + "],\"freshMeters\":" + mEnt.get("freshMeters") + ",\"piecesCoveredByWaste\":" + mEnt.get("piecesCoveredByWaste") + ",\"freshPieces\":" + mEnt.get("freshPieces") + ",\"requiredTotal\":" + mEnt.get("requiredTotal") + ",\"lots\":[" + ifnull(mEnt.get("lotsJson"),"").toString() + "],\"printBase\":\"" + ifnull(mEnt.get("printBase"),"").toString() + "\",\"printBaseName\":\"" + ifnull(mEnt.get("printBaseName"),"").toString() + "\",\"printBaseLots\":[" + ifnull(mEnt.get("printBaseLotsJson"),"").toString() + "]";
 			}
 
 			matsJson = matsJson + "}";
