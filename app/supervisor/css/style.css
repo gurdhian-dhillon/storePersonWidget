@@ -2256,6 +2256,12 @@ th.col-num {
    A Faire order is ~110 Plan_Item rows. The list is paged 10 at a time on the
    server; the search box narrows it and the pager walks it. */
 
+.item-search-group {
+    display: flex;
+    align-items: stretch;
+    gap: 0.25rem;
+}
+
 .item-search {
     font-family: inherit;
     font-size: 0.8125rem;
@@ -2264,8 +2270,8 @@ th.col-num {
     border-radius: 4px;
     background: #fff;
     color: var(--text);
-    width: 15rem;
-    max-width: 15rem;
+    width: 13rem;
+    max-width: 13rem;
 }
 
 .item-search::placeholder {
@@ -2276,6 +2282,26 @@ th.col-num {
     outline: none;
     border-color: var(--primary);
     box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+/* Commits the term — the box also commits on blur and Enter, so this is the
+   explicit affordance rather than the only way in. */
+.item-search-go {
+    font-family: inherit;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    padding: 0.35rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #fff;
+    color: var(--text);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.item-search-go:hover {
+    border-color: var(--primary);
+    color: var(--primary);
 }
 
 /* Its own footer strip under the last item card — not inside a card, where it
@@ -3828,9 +3854,19 @@ th.col-num {
         border-radius: 8px !important;
     }
 
-    .plan-header-controls .item-search {
+    .plan-header-controls .item-search-group {
         width: 100% !important;
+    }
+
+    .plan-header-controls .item-search {
+        flex: 1 1 auto !important;
+        width: auto !important;
         max-width: none !important;
+        height: 40px !important;
+        border-radius: 8px !important;
+    }
+
+    .plan-header-controls .item-search-go {
         height: 40px !important;
         border-radius: 8px !important;
     }

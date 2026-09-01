@@ -795,43 +795,40 @@ function fillExpectedWaste(itemId, fabrics) {
 // ---- The item search box, in the plan header ----
 //
 // Re-wired after every render because the whole panel is rebuilt on each fetch.
-// The caret is restored so typing does not lose its place when the debounced
-// fetch re-renders underneath him.
-let itemSearchTimer = null;
+//
+// The search runs on BLUR, on Enter, or on the button beside it — NOT on every
+// keystroke. A per-keystroke fetch re-renders the whole panel under the cursor
+// (losing the caret, needing a re-focus dance) and fires a server call per
+// letter; committing the term once he is done typing is both simpler and
+// cheaper. Escape clears it.
 function wireItemSearch() {
 	const box = document.getElementById("item-search");
+	const btn = document.getElementById("item-search-go");
 	if (!box) return;
 
-	box.addEventListener("input", () => {
-		const v = box.value;
-		if (itemSearchTimer) clearTimeout(itemSearchTimer);
-		itemSearchTimer = setTimeout(() => {
-			const next = v.trim();
-			if (next === itemSearch) return;
-			itemSearch = next;
-			// A new filter starts at its first page — page 6 of a search that
-			// only has two is not where he means to be.
-			itemPage = 0;
-			openItemId = undefined;
-			showLoading();
-			fetchAllData(restoreSearchFocus);
-		}, 300);
-	});
-}
+	const commit = () => {
+		const next = box.value.trim();
+		if (next === itemSearch) return;
+		itemSearch = next;
+		// A new filter starts at its first page — page 6 of a search that only
+		// has two is not where he means to be.
+		itemPage = 0;
+		openItemId = undefined;
+		showLoading();
+		fetchAllData();
+	};
 
-// After the re-render, put the cursor back in the search box where it was.
-function restoreSearchFocus() {
-	requestAnimationFrame(() => {
-		const box = document.getElementById("item-search");
-		if (!box) return;
-		box.focus();
-		const end = box.value.length;
-		try {
-			box.setSelectionRange(end, end);
-		} catch (e) {
-			// Some input types reject setSelectionRange — focus alone is fine.
+	box.addEventListener("blur", commit);
+	box.addEventListener("keydown", (e) => {
+		if (e.key === "Enter") {
+			e.preventDefault();
+			commit();
+		} else if (e.key === "Escape") {
+			box.value = "";
+			commit();
 		}
 	});
+	if (btn) btn.addEventListener("click", commit);
 }
 
 // ---- Item pager ----
@@ -973,10 +970,13 @@ function renderPlanHeader(plan) {
 										}</div>
                 </div>
                 <div class="plan-header-controls">
-                    <input type="search" id="item-search" class="item-search"
-                        placeholder="Find an item in this order…"
-                        value="${escapeHtml(itemSearch)}"
-                        autocomplete="off">
+                    <div class="item-search-group">
+                        <input type="search" id="item-search" class="item-search"
+                            placeholder="Find an item in this order…"
+                            value="${escapeHtml(itemSearch)}"
+                            autocomplete="off">
+                        <button type="button" id="item-search-go" class="item-search-go">Search</button>
+                    </div>
                     <div id="plan-slot"></div>
                     <span class="plan-status-pill">${plan.orderStatus || "—"}</span>
                 </div>
