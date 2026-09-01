@@ -314,8 +314,12 @@ function renderPipeline() {
             PIPELINE_STATUS = tab.getAttribute('data-status');
             renderPipeline();
             // Lazy-load the pending list the first time that card is opened.
-            if (PIPELINE_STATUS === 'Pending' && PENDING_ORDERS === null && !PENDING_ERROR) {
-                loadPendingOrders();
+            if (PIPELINE_STATUS === 'Pending') {
+                if (PENDING_ORDERS === null && !PENDING_ERROR) {
+                    loadPendingOrders();
+                }
+            } else {
+                loadSalesOrderProgress(PIPELINE_STATUS);
             }
         });
     });
@@ -332,57 +336,68 @@ function renderInProgressOrders() {
     var h = '<section class="progress-section"><div class="pipeline-header">' +
         '<h2>' + esc(PIPELINE_STATUS) + ' orders</h2>';
 
-    if (PIPELINE_STATUS !== 'In Progress') {
-        return h + '</div><p class="progress-empty">Select <strong>In Progress</strong> above to see live production stage, quantities and the next step for each order, or <strong>Pending</strong> to convert orders into plans.</p></section>';
-    }
-
     if (orders === null) {
         return h + '</div><p class="progress-empty">Loading live order progress…</p></section>';
     }
     if (!orders.length) {
-        return h + '</div><p class="progress-empty">No sales orders are currently in progress.</p></section>';
+        return h + '</div><p class="progress-empty">No sales orders are currently in ' + esc(PIPELINE_STATUS) + ' status.</p></section>';
     }
 
-    h += '<span class="pipe-total">' + orders.length + ' live order' + (orders.length === 1 ? '' : 's') + '</span></div>' +
-        '<div class="table-wrapper"><table class="progress-table"><thead><tr>' +
-        '<th>Sales order</th><th>Plan</th><th>Supervisor</th><th>Current stage</th>' +
-        '<th class="r">Produced / ordered</th><th>Next step</th></tr></thead><tbody>';
+    h += '<span class="pipe-total">' + orders.length + ' order' + (orders.length === 1 ? '' : 's') + '</span></div>' +
+        '<div class="table-wrapper"><table class="progress-table"><thead><tr>';
 
-    orders.forEach(function (order) {
-        // WHAT THE STAGE HAS PUT OUT, beside the stage it belongs to.
-        //
-        // Produced / ordered reads 0 for almost the whole life of an order:
-        // Plan_Item.Qty_Produced is written only when the LAST stage closes, so
-        // the column sits at zero through every stage and then jumps to the
-        // full figure. An order showing "Machine Quilting · Completed" next to
-        // "0 / 6" looks stalled when six pieces have just come off that stage.
-        //
-        // Not merged into the produced column — those are two different
-        // questions and a column has to mean the same thing on every row. This
-        // is one stage's output; produced is the finished garment count.
-        var out = Number(order.stageOut) || 0;
-        var stage = order.currentStage
-            ? esc(order.currentStage) +
-              (order.currentStageStatus ? ' <span class="pill pill-running">' + esc(order.currentStageStatus) + '</span>' : '') +
-              (out > 0 ? '<span class="stage-out">' + n(out) + ' out</span>' : '')
-            : '<span class="muted">Not started</span>';
+    if (PIPELINE_STATUS === 'Dispatched') {
+        h += '<th>Sales order</th><th>Customer</th><th>Plan</th><th>Order date</th><th class="r">Dispatched / ordered</th><th>Next step</th></tr></thead><tbody>';
+        orders.forEach(function (order) {
+            h += '<tr><td><strong>' + esc(order.salesOrder || '—') + '</strong></td>' +
+                '<td>' + esc(order.customer || '—') + '</td>' +
+                '<td>' + esc(order.planNo || '—') + '</td>' +
+                '<td>' + esc(order.orderDate || '—') + '</td>' +
+                '<td class="r">' + n(order.producedQty) + ' / ' + n(order.orderedQty) + '</td>' +
+                '<td>' + esc(order.nextStep || 'Order Fulfilled & Shipped') + '</td></tr>';
+        });
+    } else {
+        var stageHeader = 'Current stage';
+        if (PIPELINE_STATUS === 'Production Complete') stageHeader = 'Status';
+        else if (PIPELINE_STATUS === 'Checking Passed') stageHeader = 'QC Status';
+        else if (PIPELINE_STATUS === 'Finishing Complete') stageHeader = 'Finishing Status';
+        else if (PIPELINE_STATUS === 'Packed') stageHeader = 'Packing Status';
 
-        // Rework is not demand, so it is not in the quantities — but "this order
-        // has been made twice" is exactly what a dashboard is for, so it is said
-        // where it cannot be mistaken for a count of pieces.
-        var rem = Number(order.remakeItems) || 0;
-        var remTxt = rem > 0
-            ? ' <span class="pill pill-remake" title="Rework: replaces a rejected or damaged piece, so it is not counted as extra demand">' +
-              rem + ' remake' + (rem === 1 ? '' : 's') + '</span>'
-            : '';
+        var qtyHeader = 'Produced / ordered';
+        if (PIPELINE_STATUS === 'Checking Passed') qtyHeader = 'Passed / ordered';
+        else if (PIPELINE_STATUS === 'Finishing Complete') qtyHeader = 'Finished / ordered';
+        else if (PIPELINE_STATUS === 'Packed') qtyHeader = 'Packed / ordered';
 
-        h += '<tr><td><strong>' + esc(order.salesOrder || '—') + '</strong>' + remTxt + '</td>' +
-            '<td>' + esc(order.planNo || '—') + '</td>' +
-            '<td>' + esc(order.supervisor || '—') + '</td>' +
-            '<td>' + stage + '</td>' +
-            '<td class="r">' + n(order.producedQty) + ' / ' + n(order.orderedQty) + '</td>' +
-            '<td>' + esc(order.nextStep || '—') + '</td></tr>';
-    });
+        h += '<th>Sales order</th><th>Plan</th><th>Supervisor</th><th>' + stageHeader + '</th>' +
+            '<th class="r">' + qtyHeader + '</th><th>Next step</th></tr></thead><tbody>';
+
+        orders.forEach(function (order) {
+            var out = Number(order.stageOut) || 0;
+            var stStatus = String(order.currentStageStatus || '').trim();
+            var pillCls = 'pill-running';
+            if (stStatus === 'Passed' || stStatus === 'Completed' || stStatus === 'Packed' || stStatus === 'Shipped' || stStatus === 'Done') {
+                pillCls = 'pill-done';
+            }
+            var stage = order.currentStage
+                ? esc(order.currentStage) +
+                  (stStatus ? ' <span class="pill ' + pillCls + '">' + esc(stStatus) + '</span>' : '') +
+                  (out > 0 ? '<span class="stage-out">' + n(out) + ' out</span>' : '')
+                : '<span class="muted">' + esc(PIPELINE_STATUS) + '</span>';
+
+            var rem = Number(order.remakeItems) || 0;
+            var remTxt = rem > 0
+                ? ' <span class="pill pill-remake" title="Rework: replaces a rejected or damaged piece, so it is not counted as extra demand">' +
+                  rem + ' remake' + (rem === 1 ? '' : 's') + '</span>'
+                : '';
+
+            h += '<tr><td><strong>' + esc(order.salesOrder || '—') + '</strong>' + remTxt + '</td>' +
+                '<td>' + esc(order.planNo || '—') + '</td>' +
+                '<td>' + esc(order.supervisor || '—') + '</td>' +
+                '<td>' + stage + '</td>' +
+                '<td class="r">' + n(order.producedQty) + ' / ' + n(order.orderedQty) + '</td>' +
+                '<td>' + esc(order.nextStep || '—') + '</td></tr>';
+        });
+    }
     return h + '</tbody></table></div></section>';
 }
 
@@ -669,13 +684,17 @@ function loadPipelineFromOrderAudit(originalError) {
     });
 }
 
-function loadSalesOrderProgress() {
+function loadSalesOrderProgress(statusFilter) {
+    var targetStatus = statusFilter || PIPELINE_STATUS || 'In Progress';
+    DATA = DATA || {};
+    DATA.progressOrders = null;
+
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getSalesOrderProgress',
         workspace_name: 'livelinenstore',
         http_method: 'POST',
         content_type: 'application/json',
-        payload: { salesOrderId: '' }
+        payload: { salesOrderId: '', statusFilter: targetStatus }
     }).then(function (response) {
         try {
             var result = response && response.result !== undefined ? response.result : response;

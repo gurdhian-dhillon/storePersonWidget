@@ -1,11 +1,19 @@
-// Employee Report -> Sales Order Pipeline
-// Returns live progress for every Sales_Order that is currently In Progress.
-// An optional salesOrderId limits the result to one order.
-map Admin_Space.getSalesOrderProgress(string salesOrderId)
+map Admin_Space.getSalesOrderProgress(string salesOrderId, string statusFilter)
 {
+	// Employee Report -> Sales Order Pipeline
+	// Returns live progress for Sales_Orders matching the requested status (or all live orders).
+	// An optional salesOrderId limits the result to one order.
+	// An optional statusFilter filters by status ("In Progress", "Production Complete", "Checking Passed", "Finishing Complete", "Packed", "Dispatched").
 	response = Map();
 	ordersOut = List();
-	orders = Sales_Order[Order_Status == "In Progress"] sort by Added_Time desc;
+
+	targetStatus = ifnull(statusFilter,"").toString().trim();
+	if(targetStatus == "")
+	{
+		targetStatus = "In Progress";
+	}
+
+	orders = Sales_Order[Order_Status == targetStatus] sort by Added_Time desc;
 
 	for each so in orders
 	{
@@ -17,7 +25,26 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId)
 		orderRow = Map();
 		orderRow.put("id",so.ID.toString());
 		orderRow.put("salesOrder",ifnull(so.Sales_Order,"").toString());
-		orderRow.put("status",ifnull(so.Order_Status,"").toString());
+		odTxt = "";
+		if(so.Sales_Order_Date != null)
+		{
+			odTxt = so.Sales_Order_Date.toString("yyyy-MM-dd");
+		}
+		else if(so.Added_Time != null)
+		{
+			odTxt = so.Added_Time.toString("yyyy-MM-dd");
+		}
+		orderRow.put("orderDate",odTxt);
+
+		custName = "";
+		if(so.Customer != null)
+		{
+			for each cust in Customer[ID == so.Customer]
+			{
+				custName = ifnull(cust.Customer_Name, ifnull(cust.Name,"")).toString();
+			}
+		}
+		orderRow.put("customer",custName);
 
 		planNo = "";
 		supervisor = "";
@@ -29,14 +56,7 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId)
 		totalProduced = 0;
 		itemCount = 0;
 		completeItems = 0;
-		// Rework items on this order. Counted, never added to the quantities -
-		// see the Plan_Item loop below.
 		remakeItems = 0;
-		// What the stage on screen has actually put out so far. Qty_Produced is
-		// only written when the LAST stage closes, so the produced column reads
-		// zero for the whole life of an order and then jumps - the current
-		// stage's Qty_Out is the live figure and it belongs next to the stage
-		// name, not merged into a column that means something else.
 		stageOut = 0;
 		stageRows = List();
 
@@ -51,26 +71,6 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId)
 				}
 			}
 
-			//--------------------------------------------------------
-			// REWORK IS NOT DEMAND, so a remake does not add to what was
-			// ordered.
-			//
-			// A QC rejection or a ruined panel creates a NEW Plan_Item on the
-			// same plan with Is_Remake set - saveItemCheck and
-			// saveMaterialDamage both do it. Summing Qty_Ordered across every
-			// item therefore reported a five-piece order as SIX the moment one
-			// piece had to be made again, and as seven if it happened twice.
-			// The customer ordered five either way.
-			//
-			// Both totals move together. Counting the remake's output while
-			// refusing its demand would read 6 / 5, and counting neither reads
-			// 5 / 5 - which is the truth, because the remake exists to REPLACE a
-			// piece the root item already counted, not to add one.
-			//
-			// The count is still carried, because "this order needed rework
-			// twice" is exactly the sort of thing an admin dashboard is for -
-			// it is just not a quantity.
-			//--------------------------------------------------------
 			for each item in Plan_Item[Plan == plan.ID]
 			{
 				if(ifnull(item.Is_Remake,false) == true)
@@ -89,28 +89,6 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId)
 				}
 			}
 
-			//--------------------------------------------------------
-			// THE FURTHEST-ALONG STAGE, NOT THE MOST RECENTLY STARTED ONE.
-			//
-			// A Stage_Log row is created when a stage is STARTED, so Added_Time
-			// is a start time and sorting by it answers "what did somebody touch
-			// last", which is a different question and often a misleading one:
-			//
-			//   - a plan with several items has several stages open at once. Item
-			//     one is at Stitching from Monday, item two at Cutting from
-			//     Tuesday - and the order reported CUTTING while half of it was
-			//     two stages further on.
-			//   - a remake is worse. It is a new Plan_Item that starts again at
-			//     the first stage, so its log is the newest row on the plan and
-			//     the whole order appears to walk BACKWARDS to Cutting while the
-			//     root items are being finished.
-			//
-			// Sequence_No is the stage's own position and is set on every insert
-			// - saveProductionPhase is the only thing that creates these rows, so
-			// there is no path that leaves it blank.
-			//
-			// Stage_Status is In_Progress while a supervisor has an open stage.
-			//--------------------------------------------------------
 			openLogs = Stage_Log[Plan == plan.ID && Stage_Status == "In_Progress"] sort by Sequence_No desc;
 			hasOpenLog = false;
 			for each openLog in openLogs
@@ -133,10 +111,6 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId)
 
 			if(currentStage == "")
 			{
-				// Same key, same reason: the LAST stage completed is the one
-				// furthest through the sequence, not the one most recently
-				// started. Two stages finished minutes apart in either order
-				// still have one correct answer.
 				doneLogs = Stage_Log[Plan == plan.ID && Stage_Status == "Done"] sort by Sequence_No desc;
 				hasDoneLog = false;
 				for each doneLog in doneLogs
@@ -163,11 +137,50 @@ map Admin_Space.getSalesOrderProgress(string salesOrderId)
 			}
 		}
 
-		if(itemCount > 0 && completeItems == itemCount)
+		if(targetStatus == "Production Complete")
 		{
-			currentStage = "QC";
-			currentStageStatus = "Waiting";
-			nextStep = "Complete quality check";
+			currentStage = "QC Inspection";
+			currentStageStatus = "Pending";
+			nextStep = "Awaiting Quality Check (QC)";
+		}
+		else if(targetStatus == "Checking Passed")
+		{
+			currentStage = "Quality Check";
+			currentStageStatus = "Passed";
+			nextStep = "Ready for Finishing";
+		}
+		else if(targetStatus == "Finishing Complete")
+		{
+			currentStage = "Finishing";
+			currentStageStatus = "Completed";
+			nextStep = "Awaiting Packing";
+		}
+		else if(targetStatus == "Packed")
+		{
+			currentStage = "Packing";
+			currentStageStatus = "Packed";
+			nextStep = "Ready for Dispatch";
+		}
+		else if(targetStatus == "Dispatched")
+		{
+			currentStage = "Dispatch";
+			currentStageStatus = "Shipped";
+			nextStep = "Order Fulfilled & Shipped";
+		}
+		else if(targetStatus == "Pending")
+		{
+			currentStage = "Plan Creation";
+			currentStageStatus = "Pending";
+			nextStep = "Convert order to plan";
+		}
+		else
+		{
+			if(itemCount > 0 && completeItems == itemCount)
+			{
+				currentStage = "QC";
+				currentStageStatus = "Waiting";
+				nextStep = "Complete quality check";
+			}
 		}
 
 		orderRow.put("planNo",planNo);
