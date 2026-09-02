@@ -3136,19 +3136,43 @@ function confirmWaste() {
 		return;
 	}
 
-	const pieces = wasteDraft
+	// COMBINE IDENTICAL PIECES before sending. Cutting throws off the same
+	// remnant several times over — the side strip down a marker, three tails one
+	// length — and a hand-added or edited row that lands on the same
+	// sku+size+lot+keep as another is the same physical stack. saveWasteFromCutting
+	// merges these server-side too (it is the authority — a Custom API is
+	// callable from anywhere), but folding here keeps the payload matching what
+	// ends up on the Waste returns tab. Same key the server uses.
+	const pieceMerge = {};
+	const pieces = [];
+	wasteDraft
 		.filter((r) => r.width > 0 && r.length > 0 && r.count > 0)
-		.map((r) => ({
-			sku: r.materialId,
-			width: r.width,
-			length: r.length,
-			count: r.count,
-			lotId: r.lotId || "",
-			// false lands as Scrapped rather than Pending_Receipt, so thrown-away
-			// cloth stays reportable instead of vanishing.
-			keep: r.keep,
-			remarks: "",
-		}));
+		.forEach((r) => {
+			const key = [
+				r.materialId,
+				r.width,
+				r.length,
+				r.lotId || "",
+				r.keep ? "1" : "0",
+			].join("|");
+			if (pieceMerge[key]) {
+				pieceMerge[key].count += r.count;
+				return;
+			}
+			const p = {
+				sku: r.materialId,
+				width: r.width,
+				length: r.length,
+				count: r.count,
+				lotId: r.lotId || "",
+				// false lands as Scrapped rather than Pending_Receipt, so
+				// thrown-away cloth stays reportable instead of vanishing.
+				keep: r.keep,
+				remarks: "",
+			};
+			pieceMerge[key] = p;
+			pieces.push(p);
+		});
 
 	const btn = document.getElementById("waste-confirm");
 	btn.disabled = true;

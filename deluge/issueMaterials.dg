@@ -83,6 +83,10 @@ string issueMaterials(string supervisorId, string issuesJson, string voucherIn)
 	errJson = "";
 	okJson = "";
 	voucherOut = "";
+	// The batch key for this press - chunk 1's SIV, echoed on every chunk. The
+	// widget threads it into the next chunk's voucherIn so all of one press's
+	// Material_Issue rows carry the same Batch_Voucher.
+	batchVoucherOut = "";
 	// DEBUG WRAPPER: Creator reports every runtime failure as a generic
 	// "code 9430 - There is an error while executing Custom API." Catching it
 	// here surfaces the real Deluge message in the widget console instead.
@@ -671,12 +675,45 @@ string issueMaterials(string supervisorId, string issuesJson, string voucherIn)
 				// reported against the "try" a thousand lines above, with no hint
 				// that an insert is involved at all.
 				voucherOut = voucherNo;
+
+				//------------------------------------------------------------
+				// BATCH GROUPING. One press of Issue on a big backlog is split
+				// into chunks by the widget and each chunk is its own
+				// Material_Issue with its own SIV-NNNNN (see the header note -
+				// the split is what keeps every Issue_Lines subform small enough
+				// to walk). The store person pressed the button ONCE though, so
+				// History shows the chunks as ONE handover card.
+				//
+				// voucherIn is how the widget threads them: chunk 1 sends "" and
+				// gets its SIV back, every later chunk sends that same number in.
+				//   Batch_Voucher - chunk 1's SIV, on every chunk. Readers group
+				//                   on this. A single-chunk press has
+				//                   Batch_Voucher == Voucher_No.
+				//   Batch_Head    - true on chunk 1 only. getStoreIssueHistory
+				//                   pages on head rows and pulls each head's
+				//                   siblings by Batch_Voucher, so the paged loop
+				//                   stays bounded exactly as it is today.
+				// A Creator criteria drops an empty field in BOTH directions
+				// (the postTransferOrders lesson), so Batch_Head is written
+				// explicitly false on siblings, never left blank.
+				//------------------------------------------------------------
+				batchVoucherTxt = ifnull(voucherIn,"").toString().trim();
+				isBatchHead = false;
+				if(batchVoucherTxt == "")
+				{
+					batchVoucherTxt = voucherNo;
+					isBatchHead = true;
+				}
+				batchVoucherOut = batchVoucherTxt;
+
 				newIssueId = insert into Material_Issue
 				[
 					Voucher_No=voucherNo
 					Issue_Date=zoho.currentdate
 					Issue_Status="Issued"
 					Transfer_Status="Pending"
+					Batch_Voucher=batchVoucherTxt
+					Batch_Head=isBatchHead
 					Added_User=zoho.loginuser
 				];
 				for each  mi in Material_Issue[ID == newIssueId.toLong()]
@@ -843,11 +880,12 @@ string issueMaterials(string supervisorId, string issuesJson, string voucherIn)
 	}	catch (e)
 	{
 		// Surfaces as an alert in the widget via the existing errors[] handling.
-		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"issued\":[],\"voucher\":\"" + voucherOut + "\"}";
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"issued\":[],\"voucher\":\"" + voucherOut + "\",\"batchVoucher\":\"" + batchVoucherOut + "\"}";
 	}
 	// Built by hand - List.toString() does not reliably wrap in [].
-	// "voucher" is the SIV number this chunk created or appended to; the widget
-	// threads it into the next chunk's voucherIn so a split handover stays one
-	// Material_Issue.
-	return "{\"errors\":[" + errJson + "],\"issued\":[" + okJson + "],\"voucher\":\"" + voucherOut + "\"}";
+	// "voucher" is the SIV this chunk minted. "batchVoucher" is chunk 1's SIV -
+	// the widget sends it back as voucherIn on every later chunk so all of one
+	// press's Material_Issue rows share a Batch_Voucher and History shows them
+	// as a single handover.
+	return "{\"errors\":[" + errJson + "],\"issued\":[" + okJson + "],\"voucher\":\"" + voucherOut + "\",\"batchVoucher\":\"" + batchVoucherOut + "\"}";
 }

@@ -379,8 +379,14 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 	// Newest first, on Added_Time for the same reason as the stage logs: every
 	// handover on a one-day view shares an Issue_Date, so only the insert stamp
 	// can order them.
-	issues = Material_Issue[Issued_To == supId && Issue_Date == dDay] sort by Added_Time desc;
-	info "handovers on day: " + issues.count();
+	//
+	// ONE PRESS = ONE ROW. A big issue is chunked by the widget into several
+	// Material_Issue records (each its own SIV), all sharing Batch_Voucher, and
+	// chunk 1 carries Batch_Head == true. This walks HEAD rows only and merges
+	// each head's siblings' Issue_Lines - the supervisor pressed nothing, the
+	// store did, and he saw one handover arrive.
+	issues = Material_Issue[Issued_To == supId && Issue_Date == dDay && Batch_Head == true] sort by Added_Time desc;
+	info "handover batches on day: " + issues.count();
 
 	// The material catalogue, fetched ONCE, rather than a Raw_Material query per
 	// received line. Issue_Lines.Material is a LOOKUP whose display column is the
@@ -405,54 +411,91 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 
 	for each  mi in issues
 	{
-		rLines = "";
-		for each  rln in mi.Issue_Lines
+		// This press's chunks - head plus siblings, oldest first. The head's
+		// Batch_Voucher is its own SIV even for a one-chunk press, so this query
+		// returns the head too.
+		batchKey = ifnull(mi.Batch_Voucher,"").toString().trim();
+		if(batchKey == "")
 		{
-			// Creator fields that were never written are EMPTY, not null, and
-			// toDecimal() throws on empty - normalise to string first.
-			rqStr = ifnull(rln.Qty,"0").toString().trim();
-			if(rqStr == "")
+			batchKey = ifnull(mi.Voucher_No,"").toString().trim();
+		}
+		batchChunks = Material_Issue[Batch_Voucher == batchKey] sort by Added_Time;
+
+		rLines = "";
+		rSiv = "";
+		earliestDate = null;
+		earliestTime = "";
+		earliestAdded = null;
+
+		for each  bc in batchChunks
+		{
+			bcSiv = ifnull(bc.Voucher_No,"").toString().trim().replaceAll("\"","'");
+			if(bcSiv != "")
 			{
-				rqStr = "0";
+				if(rSiv != "")
+				{
+					rSiv = rSiv + ",";
+				}
+				rSiv = rSiv + "\"" + bcSiv + "\"";
 			}
 
-			rKey = "";
-			if(rln.Material != null)
+			bcAdded = bc.Added_Time;
+			if(earliestAdded == null || (bcAdded != null && bcAdded < earliestAdded))
 			{
-				rKey = rln.Material.toString();
-			}
-			rName = ifnull(matNameMap.get(rKey),"").toString();
-
-			// Falls back to whatever the line itself recorded. Handovers written
-			// before issueMaterials was fixed have the SKU sitting in
-			// Material_Name, and a material later removed from the catalogue
-			// misses the map entirely - in both cases the line's own text beats
-			// an empty cell.
-			if(rName == "")
-			{
-				rName = ifnull(rln.Material_Name,"").toString().trim().replaceAll("\"","'");
+				earliestAdded = bcAdded;
+				earliestDate = bc.Issue_Date;
+				earliestTime = ifnull(bc.Issue_Time,"").toString();
 			}
 
-			if(rLines != "")
+			for each  rln in bc.Issue_Lines
 			{
-				rLines = rLines + ",";
+				// Creator fields that were never written are EMPTY, not null, and
+				// toDecimal() throws on empty - normalise to string first.
+				rqStr = ifnull(rln.Qty,"0").toString().trim();
+				if(rqStr == "")
+				{
+					rqStr = "0";
+				}
+
+				rKey = "";
+				if(rln.Material != null)
+				{
+					rKey = rln.Material.toString();
+				}
+				rName = ifnull(matNameMap.get(rKey),"").toString();
+
+				// Falls back to whatever the line itself recorded. Handovers written
+				// before issueMaterials was fixed have the SKU sitting in
+				// Material_Name, and a material later removed from the catalogue
+				// misses the map entirely - in both cases the line's own text beats
+				// an empty cell.
+				if(rName == "")
+				{
+					rName = ifnull(rln.Material_Name,"").toString().trim().replaceAll("\"","'");
+				}
+
+				if(rLines != "")
+				{
+					rLines = rLines + ",";
+				}
+				rLines = rLines + "{\"material\":\"" + rName + "\",\"qty\":" + rqStr.toDecimal() + ",\"unit\":\"" + ifnull(rln.Unit,"").toString() + "\"}";
+				totalRecvLines = totalRecvLines + 1;
 			}
-			rLines = rLines + "{\"material\":\"" + rName + "\",\"qty\":" + rqStr.toDecimal() + ",\"unit\":\"" + ifnull(rln.Unit,"").toString() + "\"}";
-			totalRecvLines = totalRecvLines + 1;
 		}
 
 		rDate = "";
-		if(mi.Issue_Date != null)
+		if(earliestDate != null)
 		{
-			rDate = mi.Issue_Date.toString("dd-MMM-yyyy");
+			rDate = earliestDate.toString("dd-MMM-yyyy");
 		}
 
 		if(recvJson != "")
 		{
 			recvJson = recvJson + ",";
 		}
-		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-		recvJson = recvJson + "{\"id\":\"" + mi.ID + "\",\"date\":\"" + rDate + "\",\"time\":\"" + ifnull(mi.Issue_Time,"").toString() + "\",\"status\":\"" + ifnull(mi.Issue_Status,"").toString() + "\",\"lines\":[" + rLines + "]}";
+		// id / voucher are the HEAD's; sivNumbers lists every chunk. IDs forced
+		// to string - 18-digit ids break JSON.parse otherwise.
+		recvJson = recvJson + "{\"id\":\"" + mi.ID + "\",\"voucher\":\"" + ifnull(mi.Voucher_No,"").toString() + "\",\"sivNumbers\":[" + rSiv + "],\"date\":\"" + rDate + "\",\"time\":\"" + earliestTime + "\",\"status\":\"" + ifnull(mi.Issue_Status,"").toString() + "\",\"lines\":[" + rLines + "]}";
 	}
 	}
 	catch (e)

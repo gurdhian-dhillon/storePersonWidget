@@ -1,0 +1,121 @@
+string getSupervisorOrderOverview(string supervisorId)
+{
+	// The supervisor's open orders, for the "Order Overview" tab - one row per
+	// order so he can decide which to produce next. POST, one argument.
+	//
+	// DELIBERATELY CHEAP. This is ONE call for the WHOLE list (no paging - he
+	// needs every order on screen to choose), so it must not scan Plan_Item
+	// fields. Per plan it does exactly:
+	//   - one Sales_Order point lookup (customer, delivery date, status)
+	//   - one Plan_Item[Plan == x].count()  - a COUNT, reads no rows
+	// Nothing per item. Progress ("3 of 8 done") would need every item's status
+	// and is left to the lazy per-order call getOrderItemList, fired only when
+	// he opens an order's accordion.
+	//
+	// The 4-status "open" set is the SUPERVISOR set (includes "Material Ready"),
+	// same as getProductionWidgetData / getSupervisorMaterials - not the
+	// 3-status store-issue set.
+	//
+	// Sorted by Priority_Key so the order is stable and meaningful; the widget
+	// re-sorts client-side (delivery date / customer / status) since it holds
+	// the whole list.
+
+	ordersJson = "";
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+		supTxt = ifnull(supervisorId,"").toString().trim();
+		if(supTxt == "" || supTxt.isNumber() == false)
+		{
+			// No supervisor picked is not an error - the widget guards it too,
+			// and an empty list is the right answer.
+			return "{\"errors\":[],\"orders\":[]}";
+		}
+		supId = supTxt.toLong();
+
+		// sort by on its own assignment, never inline in a for-each header.
+		openPlans = Production_Planning[Assigned_To == supId && (Order_Status == "Pending" || Order_Status == "Material Ready" || Order_Status == "Partially Received" || Order_Status == "In Progress")] sort by Priority_Key;
+
+		// One Sales_Order lookup per DISTINCT order id. One plan per order is the
+		// invariant, so this is 1:1 in practice - the cache only guards a data
+		// glitch where two plans share an order.
+		soCache = Map();
+
+		for each  plan in openPlans
+		{
+			soKey = ifnull(plan.Sales_Order,"").toString().trim();
+
+			soNo = "";
+			custPerson = "";
+			delivTxt = "";
+			ordStatus = "";
+			ordSource = "";
+
+			soHit = soCache.get(soKey);
+			if(soHit == null)
+			{
+				if(soKey != "")
+				{
+					for each  so in Sales_Order[ID == plan.Sales_Order]
+					{
+						soNo = ifnull(so.Sales_Order,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+						custPerson = ifnull(so.Customer_Person_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
+						// A Date field never written is NULL - toString("...") on
+						// null throws, so it is guarded rather than ifnull'd.
+						if(so.Expected_Delivery_Date != null)
+						{
+							delivTxt = so.Expected_Delivery_Date.toString("dd-MMM-yyyy");
+						}
+
+						// Order_Status here is the SALES ORDER's status, spaces,
+						// printed straight to the screen (widget maps it to a pill).
+						ordStatus = ifnull(so.Order_Status,"").toString();
+						ordSource = ifnull(so.Order_Source,"").toString();
+					}
+				}
+
+				// Cache all five as one "|"-joined string. "" segments are fine -
+				// toList("|") keeps empty trailing/leading parts here because the
+				// join always writes 4 separators.
+				soCache.put(soKey,soNo + "|" + custPerson + "|" + delivTxt + "|" + ordStatus + "|" + ordSource);
+			}
+			else
+			{
+				soParts = soHit.toString().toList("|");
+				soNo = soParts.get(0);
+				custPerson = soParts.get(1);
+				delivTxt = soParts.get(2);
+				ordStatus = soParts.get(3);
+				ordSource = soParts.get(4);
+			}
+
+			// A COUNT - reads no rows. Same primitive getOpenPlanCount uses.
+			itemCount = Plan_Item[Plan == plan.ID].count();
+
+			// Priority_Key can be empty on a plan created before backfillPriorityKey
+			// ran. Normalise to a big number so it sorts LAST rather than throwing.
+			pkS = ifnull(plan.Priority_Key,"").toString().trim();
+			if(pkS == "" || pkS.isNumber() == false)
+			{
+				pkS = "999999999";
+			}
+
+			if(ordersJson != "")
+			{
+				ordersJson = ordersJson + ",";
+			}
+			// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+			ordersJson = ordersJson + "{\"planId\":\"" + plan.ID + "\",\"planNo\":\"" + ifnull(plan.Plan_No,"").toString() + "\",\"salesOrder\":\"" + soNo + "\",\"customerPerson\":\"" + custPerson + "\",\"deliveryDate\":\"" + delivTxt + "\",\"orderStatus\":\"" + ordStatus + "\",\"orderSource\":\"" + ordSource + "\",\"priorityKey\":" + pkS.toLong() + ",\"itemCount\":" + itemCount + "}";
+		}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"orders\":[]}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[],\"orders\":[" + ordersJson + "]}";
+}

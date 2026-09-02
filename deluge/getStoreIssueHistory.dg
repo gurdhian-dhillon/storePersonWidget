@@ -42,6 +42,25 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	// A handover is a CARD, not a row - the newest is expanded and the rest are
 	// collapsed - so ten fills the screen where twenty would need scrolling past
 	// the pager to reach it.
+	//--------------------------------------------------------------------------
+	// A HANDOVER IS A BATCH, NOT A Material_Issue ROW.
+	//
+	// One press of Issue on a big backlog is chunked by the widget into several
+	// Material_Issue records (each with its own SIV-NNNNN, so no Issue_Lines
+	// subform grows past what its readers can walk - see issueMaterials). The
+	// store person pressed the button ONCE, so History shows the chunks as one
+	// card.
+	//
+	// Every chunk carries Batch_Voucher = chunk 1's SIV; chunk 1 also carries
+	// Batch_Head = true. This function PAGES ON HEAD ROWS - the query stays
+	// bounded exactly as before, `range from A to B` over head rows only - and
+	// for each head pulls its siblings by Batch_Voucher (a press is a handful of
+	// chunks) and merges their Issue_Lines into the one card. The card names the
+	// head's SIV plus the full list of chunk SIVs, so a transfer-order check in
+	// Zoho Inventory reconciles.
+	//
+	// A single-chunk press is a head with no siblings - the common case looks
+	// exactly as it did.
 	total = 0;
 	offset = 0;
 	limit = 10;
@@ -122,7 +141,12 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	// ONE statement, and it is the honest figure for THIS range - counting 400
 	// handovers costs what counting 4 does. It is what lets the pager say "of
 	// 137" without fetching anything it will not show.
-	total = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo].count();
+	//
+	// COUNTS HEAD ROWS - one per press, so the pager total is presses, not
+	// chunks. Batch_Head is written explicitly true/false by issueMaterials
+	// (never left empty, because a Creator criteria drops an empty field in both
+	// directions), so this == true is safe.
+	total = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo && Batch_Head == true].count();
 
 	// range is 1-BASED and INCLUSIVE at both ends, so page 1 of 10 is 1 to 10
 	// and page 2 is 11 to 20 - not 10 to 20, which repeats a handover on every
@@ -130,7 +154,10 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	rFrom = offset + 1;
 	rTo = offset + limit;
 
-	issues = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo] sort by Added_Time desc range from rFrom to rTo;
+	// HEAD ROWS ONLY, so the paged loop runs at most `limit` times whatever the
+	// range holds - the same bound the record-paged version had. Siblings are
+	// fetched per head below, unpaged, because a press is only ever a few chunks.
+	issues = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo && Batch_Head == true] sort by Added_Time desc range from rFrom to rTo;
 
 	//--------------------------------------------------------------------------
 	// The material catalogue, fetched ONCE, as two id-keyed maps.
@@ -213,8 +240,8 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	// person's name is a fact about them now, not about the day they collected.
 	supCache = Map();
 
-	// No cap guard here any more. The query returned the page, so every record
-	// this loop sees is one that is going on screen.
+	// No cap guard here any more. The query returned the page, so every HEAD
+	// record this loop sees is one card that is going on screen.
 	for each  mi in issues
 	{
 		supKey = ifnull(mi.Issued_To,"").toString();
@@ -228,6 +255,26 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 			}
 			supCache.put(supKey,supName);
 		}
+
+		//----------------------------------------------------------------------
+		// THE CHUNKS OF THIS PRESS. The head plus its siblings, oldest first so
+		// the SIV list on the card reads in the order they were minted. A press
+		// is a few chunks at most, so this is unpaged - and Batch_Voucher is an
+		// exact string match, not a scan.
+		//
+		// The head's own Batch_Voucher is its own SIV (issueMaterials sets it
+		// even for a single-chunk press), so this query returns the head too and
+		// there is no separate "add the head" step.
+		//----------------------------------------------------------------------
+		batchKey = ifnull(mi.Batch_Voucher,"").toString().trim();
+		if(batchKey == "")
+		{
+			// Defensive: a row that somehow missed Batch_Voucher is its own
+			// one-chunk batch rather than being dropped from History.
+			batchKey = ifnull(mi.Voucher_No,"").toString().trim();
+		}
+
+		batchChunks = Material_Issue[Batch_Voucher == batchKey] sort by Added_Time;
 
 		// No plan or sales order resolved here any more.
 		//
@@ -245,84 +292,117 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 		// Issue_Lines carries Requirement and Plan_Item on every row, so a line
 		// can name its real plan. The HEADER simply has no single right answer.
 
+		// Walked across EVERY chunk of the press. sivJson is the list of SIV
+		// numbers on the card header; earliest* hold the earliest chunk's stamp,
+		// which is when the store person actually pressed Issue (chunks post
+		// seconds apart and can straddle midnight). Status is the head's - all
+		// chunks of one press share it.
 		linesJson = "";
-		for each  ln in mi.Issue_Lines
+		sivJson = "";
+		earliestDate = null;
+		earliestTime = "";
+		earliestAdded = null;
+
+		for each  bc in batchChunks
 		{
-			// Creator fields that were never written are EMPTY, not null, and
-			// toDecimal() throws on empty - normalise to string first.
-			qStr = ifnull(ln.Qty,"0").toString().trim();
-			if(qStr == "")
+			bcSiv = ifnull(bc.Voucher_No,"").toString().trim().replaceAll("\"","'");
+			if(bcSiv != "")
 			{
-				qStr = "0";
-			}
-
-			// Both columns come out of the maps built once above - no query in
-			// this loop at all. The key is the lookup's RECORD ID, which is what
-			// ln.Material actually holds.
-			lnKey = "";
-			if(ln.Material != null)
-			{
-				lnKey = ln.Material.toString();
-			}
-
-			lnName = ifnull(matNameMap.get(lnKey),"").toString();
-			lnSku = ifnull(matSkuMap.get(lnKey),"").toString();
-
-			// Falls back to whatever the line itself recorded. Handovers written
-			// before issueMaterials was fixed have the SKU sitting in
-			// Material_Name, and a material later removed from the catalogue
-			// misses the map entirely - in both cases the line's own text is
-			// better than an empty cell.
-			if(lnName == "")
-			{
-				lnName = ifnull(ln.Material_Name,"").toString().trim().replaceAll("\"","'");
-			}
-
-			// Empty on a pre-lot handover and on every non-fabric line, because
-			// lots exist for fabric alone. Sent as an empty string rather than
-			// omitted, so the widget renders one shape for every row.
-			lnLotKey = ifnull(ln.Lot,"").toString().trim();
-			lnLot = "";
-			if(lnLotKey != "")
-			{
-				// Read once per distinct lot on this page, then cached. The
-				// miss is cached too, as an empty string - a lot that cannot
-				// be read must not be re-queried on every line that names it.
-				if(lotNumMap.get(lnLotKey) == null)
+				if(sivJson != "")
 				{
-					lotNumMap.put(lnLotKey,"");
+					sivJson = sivJson + ",";
+				}
+				sivJson = sivJson + "\"" + bcSiv + "\"";
+			}
 
-					for each  ltC in Raw_Material_Lot[ID == lnLotKey.toLong()]
-					{
-						lotNumMap.put(lnLotKey,ifnull(ltC.Lot_Number,"").toString().trim().replaceAll("\"","'"));
-					}
+			// Earliest by Added_Time (the true insert order - Issue_Date is a
+			// date and cannot separate chunks minted in the same minute).
+			bcAdded = bc.Added_Time;
+			if(earliestAdded == null || (bcAdded != null && bcAdded < earliestAdded))
+			{
+				earliestAdded = bcAdded;
+				earliestDate = bc.Issue_Date;
+				earliestTime = ifnull(bc.Issue_Time,"").toString();
+			}
+
+			for each  ln in bc.Issue_Lines
+			{
+				// Creator fields that were never written are EMPTY, not null, and
+				// toDecimal() throws on empty - normalise to string first.
+				qStr = ifnull(ln.Qty,"0").toString().trim();
+				if(qStr == "")
+				{
+					qStr = "0";
 				}
 
-				lnLot = ifnull(lotNumMap.get(lnLotKey),"").toString();
-			}
+				// Both columns come out of the maps built once above - no query in
+				// this loop at all. The key is the lookup's RECORD ID, which is what
+				// ln.Material actually holds.
+				lnKey = "";
+				if(ln.Material != null)
+				{
+					lnKey = ln.Material.toString();
+				}
 
-			if(linesJson != "")
-			{
-				linesJson = linesJson + ",";
+				lnName = ifnull(matNameMap.get(lnKey),"").toString();
+				lnSku = ifnull(matSkuMap.get(lnKey),"").toString();
+
+				// Falls back to whatever the line itself recorded. Handovers written
+				// before issueMaterials was fixed have the SKU sitting in
+				// Material_Name, and a material later removed from the catalogue
+				// misses the map entirely - in both cases the line's own text is
+				// better than an empty cell.
+				if(lnName == "")
+				{
+					lnName = ifnull(ln.Material_Name,"").toString().trim().replaceAll("\"","'");
+				}
+
+				// Empty on a pre-lot handover and on every non-fabric line, because
+				// lots exist for fabric alone. Sent as an empty string rather than
+				// omitted, so the widget renders one shape for every row.
+				lnLotKey = ifnull(ln.Lot,"").toString().trim();
+				lnLot = "";
+				if(lnLotKey != "")
+				{
+					// Read once per distinct lot on this page, then cached. The
+					// miss is cached too, as an empty string - a lot that cannot
+					// be read must not be re-queried on every line that names it.
+					if(lotNumMap.get(lnLotKey) == null)
+					{
+						lotNumMap.put(lnLotKey,"");
+
+						for each  ltC in Raw_Material_Lot[ID == lnLotKey.toLong()]
+						{
+							lotNumMap.put(lnLotKey,ifnull(ltC.Lot_Number,"").toString().trim().replaceAll("\"","'"));
+						}
+					}
+
+					lnLot = ifnull(lotNumMap.get(lnLotKey),"").toString();
+				}
+
+				if(linesJson != "")
+				{
+					linesJson = linesJson + ",";
+				}
+				linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"lot\":\"" + lnLot + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + "}";
+				totalLines = totalLines + 1;
 			}
-			linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"lot\":\"" + lnLot + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + "}";
-			totalLines = totalLines + 1;
 		}
 
-		issueTime = ifnull(mi.Issue_Time,"").toString();
-
 		issueDateTxt = "";
-		if(mi.Issue_Date != null)
+		if(earliestDate != null)
 		{
-			issueDateTxt = mi.Issue_Date.toString("dd-MMM-yyyy");
+			issueDateTxt = earliestDate.toString("dd-MMM-yyyy");
 		}
 
 		if(rowsJson != "")
 		{
 			rowsJson = rowsJson + ",";
 		}
-		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-		rowsJson = rowsJson + "{\"id\":\"" + mi.ID + "\",\"date\":\"" + issueDateTxt + "\",\"time\":\"" + issueTime + "\",\"supervisor\":\"" + supName + "\",\"status\":\"" + ifnull(mi.Issue_Status,"").toString() + "\",\"lines\":[" + linesJson + "]}";
+		// id / voucher are the HEAD's - a stable handle for the card. sivNumbers
+		// is every chunk's SIV so a transfer-order check in Zoho Inventory lines
+		// up. IDs forced to string - 18-digit ids break JSON.parse otherwise.
+		rowsJson = rowsJson + "{\"id\":\"" + mi.ID + "\",\"voucher\":\"" + ifnull(mi.Voucher_No,"").toString() + "\",\"sivNumbers\":[" + sivJson + "],\"date\":\"" + issueDateTxt + "\",\"time\":\"" + earliestTime + "\",\"supervisor\":\"" + supName + "\",\"status\":\"" + ifnull(mi.Issue_Status,"").toString() + "\",\"lines\":[" + linesJson + "]}";
 	}
 	}
 	catch (e)

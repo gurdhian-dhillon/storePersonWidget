@@ -155,6 +155,30 @@ string saveWasteFromCutting(string planId, string planItemId, string phaseName, 
 
 	if(wasDuplicate == false)
 	{
+	// WITHIN ONE DECLARATION, IDENTICAL PIECES ARE ONE ROW.
+	//
+	// Cutting routinely throws off several remnants of the same size off the
+	// same lot - the side strip repeated down a marker, three tails the same
+	// length. The predicted list already merges those in the widget; a
+	// hand-added row or a post-edit collision did not, and neither did anything
+	// server-side, so three identical offcuts became three Waste_Master rows of
+	// Piece_Count 1. That is three picks for the allocator, three green lines on
+	// the issue screen, three rows on the pending-receipt list and a dispute per
+	// row if the store is short.
+	//
+	// Merged on SKU + width + length + lot + status. Lot is in the key so a
+	// remnant only ever folds into another off the SAME dye lot - two blank-lot
+	// pieces (issue split across lots, provenance unknowable) fold together, and
+	// never into a lotted one. Status is in the key so a kept piece never lands
+	// in a Scrapped row.
+	//
+	// ONLY within this call. The wasDuplicate guard above means no row from a
+	// previous declaration of this stage can exist, so there is nothing older to
+	// merge into and no risk of one supervisor's cut inflating another's. A hit
+	// adds the count to the existing Waste_Master AND to its one movement -
+	// getWastePendingReceipt and getOrderConsumption read Piece_Count off the
+	// movement, so the two must stay in step.
+	seenKey = Map();
 	rowNo = 0;
 	for each  pcRaw in pieces
 	{
@@ -224,83 +248,155 @@ string saveWasteFromCutting(string planId, string planItemId, string phaseName, 
 				moveType = "Declared";
 			}
 
-			// Remarks carries only what the supervisor typed. Source tracking
-			// lives on the Waste_Movement row below, not smuggled into text.
-			newWasteId = insert into Waste_Master
-			[
-				SKU=skuId.toLong()
-				Piece_Width=pw
-				Piece_Length=pl
-				Piece_Count=pc
-				Status=newStatus
-				Remarks=remarks
-			];
+			// The merge key. pieceLot is already resolved above ("" when the
+			// item's cloth came off two lots and nothing can say which). Decimals
+			// stringify stably here - 62.56 is "62.56" every time.
+			mergeKey = skuId + "|" + pw + "|" + pl + "|" + pieceLot + "|" + newStatus;
 
-			// Confirm the id resolves before linking to it. If it does not, the
-			// movement is still written - losing the link is bad, losing the
-			// whole event is worse.
-			wpId = 0;
-			for each  wchk in Waste_Master[ID == newWasteId.toLong()]
+			priorRaw = seenKey.get(mergeKey);
+
+			if(priorRaw != null)
 			{
-				wpId = wchk.ID;
+				// SAME PIECE, ALREADY WRITTEN THIS CALL. Add to the row and its
+				// movement rather than making a second of each. No `continue` -
+				// Deluge has no reliable loop skip, so this is an else, same as
+				// the `break`-becomes-`if` rule.
+				priorParts = priorRaw.toString().toList("|");
+				priorWasteId = priorParts.get(0);
+				priorMoveId = priorParts.get(1);
 
-				// Lookup set after the insert - a null cannot go in the block,
-				// and an unresolvable lot is a legitimate outcome here.
-				if(pieceLot != "")
+				for each  wAdd in Waste_Master[ID == priorWasteId.toLong()]
 				{
-					wchk.Lot = pieceLot.toLong();
-				}
-			}
+					wpcS = ifnull(wAdd.Piece_Count,"0").toString().trim();
+					if(wpcS == "")
+					{
+						wpcS = "0";
+					}
+					wAdd.Piece_Count = wpcS.toDecimal().toLong() + pc;
 
-			if(pieceLot == "")
-			{
-				unlottedCount = unlottedCount + 1;
-			}
+					// Keep the note readable rather than replaced. " | " for the
+					// same reason receiveFromThirdParty appends that way - several
+					// notes run into one sentence otherwise.
+					if(remarks.trim() != "")
+					{
+						exR = ifnull(wAdd.Remarks,"").toString().trim();
+						if(exR == "")
+						{
+							wAdd.Remarks = remarks;
+						}
+						else if(exR.contains(remarks.trim()) == false)
+						{
+							wAdd.Remarks = exR + " | " + remarks;
+						}
+					}
+				}
 
-			newMoveId = insert into Waste_Movement
-			[
-				Movement_Type=moveType
-				Piece_Width=pw
-				Piece_Length=pl
-				Piece_Count=pc
-				Moved_On=zoho.currentdate
-				Remarks=remarks
-				Added_User=zoho.loginuser
-			];
+				for each  mAdd in Waste_Movement[ID == priorMoveId.toLong()]
+				{
+					mpcS = ifnull(mAdd.Piece_Count,"0").toString().trim();
+					if(mpcS == "")
+					{
+						mpcS = "0";
+					}
+					mAdd.Piece_Count = mpcS.toDecimal().toLong() + pc;
+				}
 
-			// Lookups set after the insert - a null cannot go in the insert
-			// block, and any of these four can legitimately be missing.
-			for each  mv in Waste_Movement[ID == newMoveId.toLong()]
-			{
-				if(wpId != 0)
+				// Counts track PIECES, not rows - the widget reports these back
+				// and "1 kept" over three folded pieces would read as a loss.
+				if(newStatus == "Pending_Receipt")
 				{
-					mv.Waste_Piece = wpId;
+					keptCount = keptCount + pc;
 				}
-				if(planId.toString().trim() != "")
+				else
 				{
-					mv.Plan = planId.toString().trim().toLong();
+					scrapCount = scrapCount + pc;
 				}
-				if(itemIdStr != "")
-				{
-					mv.Plan_Item = itemIdStr.toLong();
-				}
-				if(stageId != 0)
-				{
-					mv.Stage_Log = stageId;
-				}
-				if(stageOperator != null)
-				{
-					mv.Moved_By = stageOperator;
-				}
-			}
-
-			if(newStatus == "Pending_Receipt")
-			{
-				keptCount = keptCount + 1;
 			}
 			else
 			{
-				scrapCount = scrapCount + 1;
+				// Remarks carries only what the supervisor typed. Source tracking
+				// lives on the Waste_Movement row below, not smuggled into text.
+				newWasteId = insert into Waste_Master
+				[
+					SKU=skuId.toLong()
+					Piece_Width=pw
+					Piece_Length=pl
+					Piece_Count=pc
+					Status=newStatus
+					Remarks=remarks
+				];
+
+				// Confirm the id resolves before linking to it. If it does not, the
+				// movement is still written - losing the link is bad, losing the
+				// whole event is worse.
+				wpId = 0;
+				for each  wchk in Waste_Master[ID == newWasteId.toLong()]
+				{
+					wpId = wchk.ID;
+
+					// Lookup set after the insert - a null cannot go in the block,
+					// and an unresolvable lot is a legitimate outcome here.
+					if(pieceLot != "")
+					{
+						wchk.Lot = pieceLot.toLong();
+					}
+				}
+
+				if(pieceLot == "")
+				{
+					unlottedCount = unlottedCount + 1;
+				}
+
+				newMoveId = insert into Waste_Movement
+				[
+					Movement_Type=moveType
+					Piece_Width=pw
+					Piece_Length=pl
+					Piece_Count=pc
+					Moved_On=zoho.currentdate
+					Remarks=remarks
+					Added_User=zoho.loginuser
+				];
+
+				// Lookups set after the insert - a null cannot go in the insert
+				// block, and any of these four can legitimately be missing.
+				for each  mv in Waste_Movement[ID == newMoveId.toLong()]
+				{
+					if(wpId != 0)
+					{
+						mv.Waste_Piece = wpId;
+					}
+					if(planId.toString().trim() != "")
+					{
+						mv.Plan = planId.toString().trim().toLong();
+					}
+					if(itemIdStr != "")
+					{
+						mv.Plan_Item = itemIdStr.toLong();
+					}
+					if(stageId != 0)
+					{
+						mv.Stage_Log = stageId;
+					}
+					if(stageOperator != null)
+					{
+						mv.Moved_By = stageOperator;
+					}
+				}
+
+				// Record the key so a later identical row this call folds into
+				// this one. Both ids kept - the movement count has to move with
+				// the master count.
+				seenKey.put(mergeKey,newWasteId + "|" + newMoveId);
+
+				if(newStatus == "Pending_Receipt")
+				{
+					keptCount = keptCount + pc;
+				}
+				else
+				{
+					scrapCount = scrapCount + pc;
+				}
 			}
 		}
 	}

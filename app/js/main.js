@@ -436,6 +436,9 @@ function wasteRowsFor(sup) {
 // A piece booked in before the carton field existed has none, and says so rather
 // than showing a blank: "not recorded" is a fact he can act on, an empty space
 // looks like a rendering fault.
+//
+// The piece SIZE is shown in the "To be issued" column, on the same sub-line as
+// this pick — not here. This line stays the where: which lot, which carton.
 function wasteWhereHtml(p) {
     var bits = [];
     if (p.lot) bits.push('Lot <b>' + escapeHtml(p.lot) + '</b>');
@@ -2073,7 +2076,16 @@ function renderFabricRows(m, supIdx, matIdx) {
     // needs none, so it gets no lot strip — there is no fresh fabric to source.
     var byLot = !done && wantsFresh;
 
-    // ---- "To be issued": the SKU total metres, one figure. ----
+    // ---- "To be issued" ----
+    //
+    // The SKU total fresh metres on the head line, then ONE GREEN SUB-LINE PER
+    // WASTE PICK carrying that remnant's size — aligned with the same pick's row
+    // in LOT / TOTAL STOCK / ISSUE NOW. A remnant is a specific piece he has to
+    // find, its size is how he identifies it, and green is the offcut colour
+    // used on every screen. Blank spacers stand in for the fresh lot lines above
+    // the picks so pick N lines up with pick N across all four columns.
+    // Length × Width, the order used everywhere in these widgets; a piece with
+    // no size recorded falls back to its pcs count.
     var toIssue = '';
     if (wantsFresh) {
         toIssue =
@@ -2082,6 +2094,23 @@ function renderFabricRows(m, supIdx, matIdx) {
     }
     if (!toIssue) {
         toIssue = '<span class="is-zero">&mdash;</span>';
+    }
+    if (!done && picks.length > 0) {
+        var freshLineCount = fabricLotLineList(m).length;
+        var tbi = '<div class="tbi-head">' + toIssue + '</div>';
+        for (var si = 0; si < freshLineCount; si++) {
+            tbi += '<div class="tbi-spacer"></div>';
+        }
+        picks.forEach(function (p) {
+            var pw = Number(p.width) || 0;
+            var pl = Number(p.length) || 0;
+            var pn = Number(p.pieces) || 0;
+            var sizeTxt = (pw > 0 && pl > 0)
+                ? fmt(pl) + ' &times; ' + fmt(pw) + '<span class="unit">cm</span>'
+                : pn + '<span class="unit">pcs</span>';
+            tbi += '<div class="tbi-waste-size">&#9851; ' + sizeTxt + '</div>';
+        });
+        toIssue = tbi;
     }
 
     // Three stacked columns: LOT (roll · recommended), TOTAL STOCK (lot washed),
@@ -2644,7 +2673,7 @@ function renderSupervisorCard(sup, idx, arr) {
         '<th>Material</th>' +
         '<th class="col-num">To be issued</th>' +
         '<th class="col-lot-issue">Lot</th>' +
-        '<th class="col-num col-lot-stock">Total stock</th>';
+        '<th class="col-num col-lot-stock">Total wash stock</th>';
 
     var otherHead =
         '<th>Material</th>' +
@@ -3345,6 +3374,13 @@ function issueForSupervisor(supIdx) {
     var allErrors = [];
     var chunkIndex = 0;
 
+    // The batch key for this whole press. Chunk 0 sends voucherIn:"" and
+    // issueMaterials replies with batchVoucher = its own SIV; every later chunk
+    // sends that back so all of this press's Material_Issue rows share one
+    // Batch_Voucher and History renders them as a single handover card. Empty
+    // until chunk 0 lands — chunks are sequential, so it is always set by then.
+    var batchVoucher = '';
+
     // RATE-LIMIT RECOVERY. Zoho caps API calls per minute. A big handover is
     // many sequential chunks and can trip that cap partway through — which used
     // to abort the whole run and leave a partial voucher. Now a throttled chunk
@@ -3352,10 +3388,9 @@ function issueForSupervisor(supIdx) {
     // waits, and picks up exactly where it left off (same chunkIndex). Only a
     // non-retryable error, or too many retries, aborts.
     //
-    // Each chunk is now its OWN Material_Issue (SIV-NNNNN) — no shared voucher
-    // threaded across chunks — so a partial run is just fewer vouchers, not a
-    // broken one. issueMaterials still takes a 3rd arg (Creator can't drop it);
-    // we send "".
+    // Each chunk is its OWN Material_Issue (SIV-NNNNN); the 3rd arg carries the
+    // BATCH key (chunk 0's SIV) so the chunks group as one handover downstream.
+    // A partial run is just fewer chunks in the batch, not a broken voucher.
     //
     // isRateLimited: Zoho surfaces throttling inconsistently — an HTTP 429, a
     // body code (4834 / "too many requests" / "rate limit"), or a plain
@@ -3432,9 +3467,10 @@ function issueForSupervisor(supIdx) {
             payload: {
                 supervisorId: sup.supervisorId,
                 issuesJson: JSON.stringify(issueChunks[chunkIndex]),
-                // Vestigial 3rd arg — issueMaterials mints a fresh SIV-NNNNN per
-                // chunk now. Creator Custom API args can't be removed, so send "".
-                voucherIn: ''
+                // The batch key. Empty on chunk 0 (issueMaterials mints it and
+                // returns it as batchVoucher); every later chunk sends it back
+                // so the whole press shares one Batch_Voucher.
+                voucherIn: batchVoucher
             }
         }).then(function (response) {
             console.log('issue response chunk ' + chunkIndex + ':', response);
@@ -3453,6 +3489,13 @@ function issueForSupervisor(supIdx) {
 
             if (parsed && parsed.errors && parsed.errors.length > 0) {
                 allErrors = allErrors.concat(parsed.errors);
+            }
+
+            // Capture the batch key off chunk 0's landed reply, then carry it
+            // forward on every later chunk. Fallback to parsed.voucher so an
+            // older server that predates batchVoucher still threads something.
+            if (parsed && !batchVoucher) {
+                batchVoucher = parsed.batchVoucher || parsed.voucher || '';
             }
 
             retryCount = 0;      // this chunk landed — reset for the next one
@@ -5247,11 +5290,29 @@ function renderHistory(handovers, lineCount) {
         var nLines = (h.lines || []).length;
         when += ' · ' + nLines + ' line' + (nLines === 1 ? '' : 's');
 
+        // ONE PRESS OF ISSUE = ONE CARD, even when the store person's backlog
+        // was big enough that the widget chunked it into several Material_Issue
+        // records. The SIV list is shown so a transfer-order check in Zoho
+        // Inventory (one order per chunk) reconciles against the card. A single
+        // -chunk press shows just its one number, as before.
+        var sivs = (h.sivNumbers && h.sivNumbers.length)
+            ? h.sivNumbers
+            : (h.voucher ? [h.voucher] : []);
+        var sivLine = '';
+        if (sivs.length === 1) {
+            sivLine = '<div class="hist-siv">' + escapeHtml(sivs[0]) + '</div>';
+        } else if (sivs.length > 1) {
+            sivLine = '<div class="hist-siv">' + escapeHtml(sivs[0]) +
+                ' <span class="hist-siv-more">+ ' + (sivs.length - 1) +
+                ' more: ' + escapeHtml(sivs.slice(1).join(', ')) + '</span></div>';
+        }
+
         return '' +
             '<div class="item-card' + (idx === 0 ? ' open' : '') + '" id="hist-card-' + idx + '">' +
             '<div class="item-header" onclick="toggleHistory(' + idx + ')">' +
             '<div class="item-header-info">' +
             '<h2>' + escapeHtml(h.supervisor || 'Unknown') + '</h2>' +
+            sivLine +
             '<div class="item-meta-line"><span>' + when + '</span></div>' +
             '</div>' +
             '<div class="item-header-right">' +

@@ -1436,11 +1436,12 @@ th.col-num {
 /* TOTAL STOCK column — that lot's washed metres, one figure per sub-line,
    stacked to line up with the LOT and ISSUE NOW sub-lines beside it. */
 .col-lot-stock {
-    width: 7rem;
-    min-width: 6rem;
+    width: 10rem;
+    min-width: 9rem;
     vertical-align: top;
     padding-top: 0.75rem;
     text-align: right;
+    white-space: nowrap;
 }
 .col-issue {
     vertical-align: top;
@@ -2331,6 +2332,37 @@ th.col-num {
     color: var(--text-main);
 }
 
+/* "To be issued" is a stacked column when the row carries waste: the fresh
+   metres on top, blank spacers for each fresh lot line, then one green size per
+   waste pick — each spacer/size the same 2.4rem as a .lot-line-cell so pick N
+   lines up with pick N in LOT / TOTAL STOCK / ISSUE NOW. */
+.tbi-head,
+.tbi-spacer,
+.tbi-waste-size {
+    min-height: 2.4rem;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+}
+
+.tbi-waste-size {
+    gap: 0.25rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #047857;
+    background: var(--status-success-bg);
+    border-radius: 4px 0 0 4px;
+    padding: 0 0.5rem;
+    white-space: nowrap;
+}
+
+.tbi-waste-size .unit {
+    font-weight: 500;
+    opacity: 0.75;
+    margin-left: 0.15rem;
+}
+
 /* The lot on a HISTORY line. Quiet: the history table is read to find out what
    went out, and the lot is the qualifier on that — it must not compete with the
    material name or the quantity either side of it. Same accent as .lot-from so
@@ -2346,6 +2378,21 @@ th.col-num {
     padding: 0.1rem 0.4rem;
     border-radius: 0 3px 3px 0;
     white-space: nowrap;
+}
+
+/* The SIV number(s) of a handover card. One press of Issue can be several
+   Material_Issue chunks; the list lets a transfer-order check reconcile. */
+.hist-siv {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--primary);
+    letter-spacing: 0.01em;
+    margin: 0.15rem 0 0.1rem;
+}
+
+.hist-siv-more {
+    font-weight: 500;
+    color: var(--text-muted);
 }
 
 /* Which physical pieces to fetch, under the lot line that names them. Only ever

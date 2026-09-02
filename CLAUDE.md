@@ -246,12 +246,36 @@ receipt settles it. A shortfall goes to `Disputed_Qty` and raises a `Stock_Dispu
 > `reason` so the document says which handover it is. Nothing moves warehouse when cloth leaves the
 > counter — at that moment it is in transit and belongs to neither side.
 >
-> **`Material_Issue` IS the store issue voucher**, one record per press of Issue, numbered
-> `SIV-00001` upward by `issueMaterials` at the insert. The number is built in Deluge, **not** by an
-> "on add" form workflow — `input.Voucher_No` fires only when a human opens the Creator form, and
-> nothing ever does. It is generated off `sort by ID desc range from 1 to 10`, keeping the largest
-> parsed number: sorting on `Voucher_No` is a *text* sort and would issue `SIV-100000` twice once
-> the width changed.
+> **`Material_Issue` IS the store issue voucher**, numbered `SIV-00001` upward by `issueMaterials`
+> at the insert. The number is built in Deluge, **not** by an "on add" form workflow —
+> `input.Voucher_No` fires only when a human opens the Creator form, and nothing ever does. It is
+> generated off `sort by ID desc range from 1 to 10`, keeping the largest parsed number: sorting on
+> `Voucher_No` is a *text* sort and would issue `SIV-100000` twice once the width changed.
+>
+> **ONE PRESS OF ISSUE = ONE HANDOVER, BUT SEVERAL `Material_Issue` ROWS.** A big backlog is chunked
+> by the widget (~100 allocations/chunk) and each chunk is its own `Material_Issue` with its own
+> `SIV-NNNNN` — the split is what keeps every `Issue_Lines` subform small enough for its readers to
+> walk. To show the chunks as one card, every chunk carries **`Batch_Voucher`** (chunk 1's SIV; a
+> single-chunk press has `Batch_Voucher == Voucher_No`) and chunk 1 alone carries **`Batch_Head` =
+> true** (written explicitly true/false, never blank — a Creator criteria drops an empty field in
+> both directions). The widget threads the batch key through `issueMaterials`' 3rd arg `voucherIn`:
+> chunk 0 sends `""` and gets `batchVoucher` back, later chunks send it in.
+>
+> **`getStoreIssueHistory` and `getSupervisorProductionHistory` page/scan on `Batch_Head == true`
+> rows only**, then pull each head's siblings by `Batch_Voucher` (a press is a few chunks, unpaged)
+> and merge their `Issue_Lines` into one card — so the paged loop stays bounded exactly as before.
+> The card shows the head's SIV plus a `sivNumbers` list of every chunk's SIV (transfer-order
+> reconciliation), and the **earliest** chunk's date/time (chunks post ~400ms apart and can straddle
+> midnight; the head's stamp is when Issue was actually pressed — a batch whose head falls outside
+> the date range won't show, which is the acceptable edge). `getSupervisorMaterials` and
+> `receiveMaterials` are unchanged — both already key by line/material across all of a supervisor's
+> vouchers, voucher-identity-agnostic.
+>
+> **`postTransferOrders` stays per-chunk** — one transfer order per `Material_Issue` row, each
+> numbered by its own distinct `Voucher_No` (no suffix — they're already distinct). Combining a
+> batch into one order means walking every sibling's `Issue_Lines` in one execution, which is the
+> exact subform-walk the chunking exists to avoid. `Batch_Voucher` could go in the order's `reason`
+> for human reconciliation later; not done.
 >
 > **THE TRIGGER IS `Issue_Lines.Settled_Qty`, NEVER `Issue_Status`.** `receiveMaterials` flips
 > `Issue_Status` for *every* open handover on the plan rather than the one being received
