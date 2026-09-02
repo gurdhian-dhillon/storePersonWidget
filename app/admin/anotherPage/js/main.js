@@ -21,7 +21,11 @@
 // the machine release and the QC-ready flag.
 
 var DATA = null;
-var PIPELINE_STATUS = 'In Progress';
+var PIPELINE_STATUS = 'In Production';
+var IN_PRODUCTION_SUB_FILTER = 'All';
+var OPEN_ITEM_DRAWERS = {};
+var DRAWER_STAGE_FILTERS = {};
+var OPEN_ITEM_BATCH_DRAWERS = {};
 
 // Sales orders still at "Pending" — the ones the CreateProductionPlan batch
 // workflow has not turned into a plan yet. Loaded alongside the pipeline counts,
@@ -266,6 +270,249 @@ function soStatusPill(status) {
     return '<span class="pill pill-so-status ' + cls + '">' + esc(status) + '</span>';
 }
 
+function getEffectiveBreakdown(order) {
+    if (order && order.itemBreakdown && (order.itemBreakdown.inProgress || order.itemBreakdown.prodComplete || order.itemBreakdown.checkingPassed || order.itemBreakdown.finishingComplete || order.itemBreakdown.alteration)) {
+        return order.itemBreakdown;
+    }
+    var prod = Number(order.producedQty) || 0;
+    var ord = Number(order.orderedQty) || 0;
+    var rem = Number(order.remakeItems) || 0;
+    var st = String(order.currentStage || '').toLowerCase();
+    var stStatus = String(order.currentStageStatus || '').toLowerCase();
+
+    var bd = { inProgress: 0, prodComplete: 0, checkingPassed: 0, finishingComplete: 0, alteration: rem };
+
+    if (stStatus === 'passed' || st.indexOf('qc') !== -1 || st.indexOf('checking') !== -1 || st.indexOf('quality') !== -1) {
+        bd.checkingPassed = prod;
+        bd.inProgress = Math.max(0, ord - prod);
+    } else if (stStatus === 'completed' || st.indexOf('finishing') !== -1) {
+        bd.finishingComplete = prod;
+        bd.inProgress = Math.max(0, ord - prod);
+    } else if (st.indexOf('complete') !== -1 || (prod >= ord && ord > 0)) {
+        bd.prodComplete = prod;
+    } else {
+        bd.inProgress = Math.max(prod, ord);
+    }
+    return bd;
+}
+
+function renderItemProgressBar(order) {
+    if (!order) return '';
+    var bd = getEffectiveBreakdown(order);
+
+    var inProd = Number(bd.inProgress) || 0;
+    var prodComp = Number(bd.prodComplete) || 0;
+    var qcPass = Number(bd.checkingPassed) || 0;
+    var finComp = Number(bd.finishingComplete) || 0;
+    var alt = Number(bd.alteration) || 0;
+
+    var badges = [];
+    if (inProd > 0) badges.push('<span class="pill pill-running">' + inProd + ' In Progress</span>');
+    if (prodComp > 0) badges.push('<span class="pill pill-qc">' + prodComp + ' QC Queue</span>');
+    if (qcPass > 0) badges.push('<span class="pill pill-done">' + qcPass + ' Checking Passed</span>');
+    if (finComp > 0) badges.push('<span class="pill pill-ok">' + finComp + ' Finishing Complete</span>');
+    if (alt > 0) badges.push('<span class="pill pill-remake">' + alt + ' Rejected / Remake</span>');
+
+    if (!badges.length) return '<span class="muted">No stage data</span>';
+
+    return '<div class="item-legend" style="gap:4px; flex-wrap:wrap;">' + badges.join('') + '</div>';
+}
+
+function renderItemDrawer(order) {
+    var items = Array.isArray(order.items) && order.items.length ? order.items : null;
+    var soId = String(order.id || order.salesOrder);
+    var activeSub = DRAWER_STAGE_FILTERS[soId] || 'All';
+
+    if (!items) {
+        var ord = Number(order.orderedQty) || 0;
+        var prod = Number(order.producedQty) || 0;
+        var st = String(order.currentStage || '').trim() || 'In Production';
+        var stStatus = String(order.currentStageStatus || '').trim();
+        var pill = '<span class="pill pill-running">' + esc(st + (stStatus ? ' (' + stStatus + ')' : '')) + '</span>';
+        if (stStatus === 'Passed' || stStatus === 'Completed') pill = '<span class="pill pill-done">' + esc(st + ' Passed') + '</span>';
+
+        var displayName = order.itemName || order.firstItemName || (order.salesOrder ? ('Item for ' + order.salesOrder) : 'Main Line Item');
+
+        return '<div class="item-drawer-wrap">' +
+            '<div class="item-drawer-title">Order Item Summary (1 item line)</div>' +
+            '<div class="item-drawer-scroll">' +
+            '<table class="item-drawer-table"><thead><tr>' +
+            '<th>Item Name</th><th class="r">Ordered</th><th class="r">Produced</th><th>Current Stage</th>' +
+            '</tr></thead><tbody>' +
+            '<tr><td><strong>' + esc(displayName) + '</strong></td>' +
+            '<td class="r">' + ord + '</td>' +
+            '<td class="r">' + prod + '</td>' +
+            '<td>' + pill + '</td></tr>' +
+            '</tbody></table></div></div>';
+    }
+
+    // Count items per stage (Alteration/Remake re-enters In Progress)
+    var cAll = items.length;
+    var cInProg = 0, cProdComp = 0, cQcPass = 0, cFinComp = 0;
+
+    items.forEach(function (it) {
+        var st = String(it.status || '').trim();
+        var stgState = String(it.currentStageStatus || '').trim();
+        var isAlt = (it.isRemake || Number(it.qtyRejected) > 0);
+
+        if (!isAlt && (stgState === 'Passed' || stgState === 'Completed' || st === 'Complete')) {
+            cQcPass++;
+            if (order.currentStage === 'Finishing') cFinComp++;
+        } else if (!isAlt && st === 'Awaiting_Check') {
+            cProdComp++;
+        } else {
+            cInProg++; // Includes active stitching + alteration/remake re-entering in progress
+        }
+    });
+
+    var stageOptions = [
+        { id: 'All', label: 'All In Production (' + cAll + ')' },
+        { id: 'In Progress', label: 'In Progress (' + cInProg + ')' },
+        { id: 'Prod Complete', label: 'Prod Complete (QC Queue) (' + cProdComp + ')' },
+        { id: 'Checking Passed', label: 'Checking Passed (' + cQcPass + ')' },
+        { id: 'Finishing Complete', label: 'Finishing Complete (' + cFinComp + ')' }
+    ];
+
+    var toolbarHtml = '<div class="sub-stage-toolbar drawer-stage-toolbar" style="margin: 8px 0 12px; background: #ffffff;">' +
+        '<span class="sub-toolbar-title">PRODUCTION STAGES:</span>' +
+        '<div class="sub-chip-group">' +
+        stageOptions.map(function(s) {
+            var active = (activeSub === s.id);
+            return '<button type="button" class="sub-chip' + (active ? ' is-active' : '') + '" data-drawer-so="' + esc(soId) + '" data-drawer-sub="' + esc(s.id) + '">' +
+                esc(s.label) + '</button>';
+        }).join('') +
+        '</div></div>';
+
+    // Filter items based on activeSub inside this drawer
+    var filteredItems = items.filter(function (it) {
+        if (activeSub === 'All') return true;
+        var st = String(it.status || '').trim();
+        var stgState = String(it.currentStageStatus || '').trim();
+        var ordSt = String(order.status || order.orderStatus || order.currentStage || '').trim();
+
+        var isFinComplete = (ordSt === 'Finishing Complete' || ordSt === 'Packed' || ordSt === 'Dispatched' || st === 'Finishing Complete' || st === 'Packed' || st === 'Dispatched');
+        var isQc = (st === 'Awaiting_Check' || it.remakeStatus === 'Awaiting_Check');
+        var isPass = (stgState === 'Passed' || stgState === 'Completed' || st === 'Complete');
+        var isInP = (st === 'In_Progress' || it.remakeStatus === 'In_Progress' || stgState === 'Running' || it.hasRemake);
+
+        if (activeSub === 'Finishing Complete') return isFinComplete || (isPass && ordSt.indexOf('Finishing') !== -1);
+        if (activeSub === 'Checking Passed') return isPass && !isFinComplete;
+        if (activeSub === 'Prod Complete') return isQc && !isFinComplete;
+        if (activeSub === 'In Progress') return isInP && !isQc && !isFinComplete;
+        return true;
+    });
+
+    var showStageCol = (activeSub === 'All' || activeSub === 'In Progress');
+    var colSpanVal = showStageCol ? 7 : 6;
+
+    var rows = filteredItems.map(function (it) {
+        var st = String(it.status || '').trim();
+        var stgName = String(it.currentStage || '').trim();
+        var stgState = String(it.currentStageStatus || '').trim();
+        var qAltered = Number(it.qtyAltered) || 0;
+        var isAlt = (it.isRemake || qAltered > 0 || !!it.hasRemake);
+
+        var stageLabel = stgName ? (stgName + (stgState ? ' ' + stgState : '')) : (st === 'Complete' ? 'Checking Passed' : (st === 'Awaiting_Check' ? 'Prod Complete (QC Queue)' : 'In Production'));
+
+        var pillCls = 'pill-running';
+        if (st === 'Awaiting_Check' || it.remakeStatus === 'Awaiting_Check') {
+            pillCls = 'pill-qc';
+            stageLabel = 'Prod Complete (QC Queue)';
+        } else if (stgState === 'Passed' || stgState === 'Completed' || st === 'Complete') {
+            pillCls = 'pill-done';
+        } else if (isAlt) {
+            pillCls = 'pill-remake';
+            stageLabel = (it.remakeStage || stgName || 'Production') + ' (Remake Running)';
+        }
+
+        var pill = '<span class="pill ' + pillCls + '">' + esc(stageLabel) + '</span>';
+        var nameStr = it.itemName || it.name || it.item || ('Item #' + it.id);
+        var itemKey = soId + '_' + nameStr;
+        var hasBatches = Number(it.qtyRejected) > 0 || qAltered > 0 || (Array.isArray(it.batches) && it.batches.length > 1);
+        var isBatchOpen = !!OPEN_ITEM_BATCH_DRAWERS[itemKey];
+
+        var batchBtn = hasBatches
+            ? ' <button type="button" class="sub-chip btn-toggle-batch' + (isBatchOpen ? ' is-active' : '') + '" data-batch-key="' + esc(itemKey) + '" style="font-size:11px; padding:2px 8px; margin-left:6px; cursor:pointer;">' +
+              (isBatchOpen ? '▼ Hide Details' : '▶ Rejection / Alteration Details') + '</button>'
+            : '';
+
+        var tdStage = showStageCol ? ('<td>' + pill + '</td>') : '';
+
+        var rowHtml = '<tr>' +
+            '<td><strong>' + esc(nameStr) + '</strong>' + batchBtn + '</td>' +
+            '<td class="r">' + n(it.qtyOrdered) + '</td>' +
+            '<td class="r">' + n(it.qtyProduced) + '</td>' +
+            '<td class="r">' + n(it.qtyAccepted) + '</td>' +
+            '<td class="r">' + (it.qtyRejected > 0 ? '<span class="lost-some">' + n(it.qtyRejected) + '</span>' : '0') + '</td>' +
+            '<td class="r">' + (qAltered > 0 ? '<span class="lost-some">' + qAltered + '</span>' : '0') + '</td>' +
+            tdStage +
+            '</tr>';
+
+        if (isBatchOpen && hasBatches) {
+            var totalRej = Number(it.qtyRejected) || 0;
+            var totalAlt = Number(it.qtyAltered) || 0;
+            var totalRmk = Number(it.qtyRemake) || 0;
+            var rmkStageInfo = it.remakeStatus === 'Awaiting_Check' ? 'Waiting in QC Queue' : (it.remakeStage ? ('Remake in ' + it.remakeStage) : 'Remake Production');
+
+            if (Array.isArray(it.batches)) {
+                it.batches.forEach(function (b) {
+                    if (Number(b.qtyRejected) > 0) {
+                        totalRej = Math.max(totalRej, Number(b.qtyRejected));
+                    }
+                    if (b.isRemake) {
+                        totalRmk = Math.max(totalRmk, Number(b.qtyOrdered) || Number(b.qtyRemake) || 0);
+                        if (b.currentStage) rmkStageInfo = b.currentStage + (b.status === 'Awaiting_Check' ? ' (QC Queue)' : ' (Running)');
+                    }
+                    if (Number(b.qtyAltered) > 0) {
+                        totalAlt = Math.max(totalAlt, Number(b.qtyAltered));
+                    }
+                });
+            }
+
+            var cardDetails = '';
+            var rejCount = Math.max(totalRej, totalRmk);
+            if (rejCount > 0) {
+                cardDetails += '<div style="display:flex; align-items:center; gap:8px;">' +
+                    '<span style="font-size:12px; font-weight:600; color:#64748b;">Rejected / Remake:</span>' +
+                    '<span class="pill pill-remake" style="font-size:12px; font-weight:700;">' + rejCount + ' Pcs</span>' +
+                    '<span style="font-size:11px; color:#94a3b8;">(' + esc(rmkStageInfo) + ')</span>' +
+                    '</div>';
+            }
+
+            if (totalAlt > 0) {
+                cardDetails += '<div style="display:flex; align-items:center; gap:8px;">' +
+                    '<span style="font-size:12px; font-weight:600; color:#64748b;">Alteration:</span>' +
+                    '<span class="pill pill-running" style="font-size:12px; font-weight:700;">' + totalAlt + ' Pcs</span>' +
+                    '</div>';
+            }
+
+            if (!cardDetails) {
+                cardDetails = '<span style="font-size:12px; color:#64748b;">No rejected or altered pieces recorded.</span>';
+            }
+
+            rowHtml += '<tr class="item-batch-drawer-row"><td colspan="' + colSpanVal + '" style="background:#f8fafc; padding:12px 16px; border-left:3px solid #3b82f6;">' +
+                '<div style="font-size:11px; font-weight:700; color:#475569; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px;">REJECTION & ALTERATION SUMMARY FOR ' + esc(nameStr) + '</div>' +
+                '<div style="display:flex; align-items:center; gap:32px; flex-wrap:wrap;">' + cardDetails + '</div></td></tr>';
+        }
+
+        return rowHtml;
+    }).join('');
+
+    if (!rows) {
+        rows = '<tr><td colspan="' + colSpanVal + '" class="muted" style="text-align:center; padding:16px;">No items match the selected stage filter (' + esc(activeSub) + ').</td></tr>';
+    }
+
+    var thStage = showStageCol ? '<th>Current Stage</th>' : '';
+
+    return '<div class="item-drawer-wrap">' +
+        '<div class="item-drawer-title">Item-Level Tracking Breakdown (' + items.length + ' item types)</div>' +
+        toolbarHtml +
+        '<div class="item-drawer-scroll">' +
+        '<table class="item-drawer-table"><thead><tr>' +
+        '<th>Item Name</th><th class="r">Ordered</th><th class="r">Produced</th><th class="r">Accepted</th><th class="r">Rejected</th><th class="r">Altered</th>' + thStage +
+        '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+}
+
 function renderPipeline() {
     var el = document.getElementById('pipeline-section');
     if (!el) return;
@@ -275,32 +522,32 @@ function renderPipeline() {
         p.completed !== undefined || p.qcPassed !== undefined ||
         p.finishingComplete !== undefined ||
         p.packed !== undefined || p.dispatched !== undefined;
-    // One card per Order_Status the picklist offers, in workflow order. A status
-    // missing from this list does not show as zero - its orders vanish from the
-    // pipeline and the total silently stops matching the number of orders.
-    var items = [
+
+    // Macro Cards: 1. Pending, 2. In Production, 3. Packed, 4. Dispatched
+    var inProdCount = n(p.inProgress) + n(p.completed) + n(p.qcPassed) + n(p.finishingComplete);
+    var macroItems = [
         { label: 'Pending', count: p.pending, cls: 'so-pending' },
-        { label: 'In Progress', count: p.inProgress, cls: 'so-progress' },
-        { label: 'Prod Complete', count: p.completed, cls: 'so-complete' },
-        { label: 'Checking Passed', count: p.qcPassed, cls: 'so-qc' },
-        { label: 'Finishing Complete', count: p.finishingComplete, cls: 'so-finishing' },
+        { label: 'In Production', count: inProdCount, cls: 'so-progress' },
         { label: 'Packed', count: p.packed, cls: 'so-packed' },
         { label: 'Dispatched', count: p.dispatched, cls: 'so-dispatched' }
     ];
-    var totalOrders = 0;
-    for (var i = 0; i < items.length; i++) {
-        totalOrders += n(items[i].count);
-    }
 
-    var cardsHtml = items.map(function(x) {
-        return '<button type="button" class="pipe-card ' + x.cls + (x.label === PIPELINE_STATUS ? ' is-selected' : '') + '" data-status="' + esc(x.label) + '">' +
+    var isProdActive = PIPELINE_STATUS === 'In Production' || PIPELINE_STATUS === 'In Progress' ||
+        PIPELINE_STATUS === 'Prod Complete' || PIPELINE_STATUS === 'Checking Passed' ||
+        PIPELINE_STATUS === 'Finishing Complete';
+
+    var totalOrders = n(p.pending) + inProdCount + n(p.packed) + n(p.dispatched);
+
+    var cardsHtml = macroItems.map(function(x) {
+        var isSelected = (x.label === PIPELINE_STATUS) || (x.label === 'In Production' && isProdActive);
+        return '<button type="button" class="pipe-card ' + x.cls + (isSelected ? ' is-selected' : '') + '" data-status="' + esc(x.label) + '">' +
             '<span class="pipe-count">' + (hasLiveCounts ? n(x.count) : '—') + '</span>' +
             '<span class="pipe-label">' + esc(x.label) + '</span>' +
             '</button>';
     }).join('');
 
     el.innerHTML = '<div class="pipeline-header pipeline-toolbar">' +
-        '<div><h2>Sales Order Pipeline</h2><span class="pipeline-help">Follow each sales order through the workflow.</span></div>' +
+        '<div><h2>Sales Order Pipeline</h2><span class="pipeline-help">Follow each sales order and item breakdown through the workflow.</span></div>' +
         '<span class="pipe-total">' + (hasLiveCounts ? totalOrders + ' total sales orders' : 'Loading live counts…') + '</span>' +
         '</div>' +
         '<div class="pipeline-grid">' + cardsHtml + '</div>' +
@@ -309,18 +556,55 @@ function renderPipeline() {
             : '') +
         renderInProgressOrders();
 
+    // Bind macro cards
     Array.prototype.forEach.call(el.querySelectorAll('.pipe-card'), function (tab) {
-        tab.addEventListener('click', function () {
-            PIPELINE_STATUS = tab.getAttribute('data-status');
+        tab.addEventListener('click', function (e) {
+            e.preventDefault();
+            var st = tab.getAttribute('data-status');
+            PIPELINE_STATUS = st;
+            if (st === 'In Production') IN_PRODUCTION_SUB_FILTER = 'All';
             renderPipeline();
-            // Lazy-load the pending list the first time that card is opened.
             if (PIPELINE_STATUS === 'Pending') {
                 if (PENDING_ORDERS === null && !PENDING_ERROR) {
                     loadPendingOrders();
                 }
             } else {
-                loadSalesOrderProgress(PIPELINE_STATUS);
+                loadSalesOrderProgress(PIPELINE_STATUS === 'In Production' ? 'In Progress' : PIPELINE_STATUS);
             }
+        });
+    });
+
+    // Bind drawer stage filter chips inside expanded order drawers
+    Array.prototype.forEach.call(el.querySelectorAll('.drawer-stage-toolbar .sub-chip'), function (chip) {
+        chip.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var soId = chip.getAttribute('data-drawer-so');
+            var sub = chip.getAttribute('data-drawer-sub');
+            DRAWER_STAGE_FILTERS[soId] = sub;
+            renderPipeline();
+        });
+    });
+
+    // Bind batch toggle buttons inside drawers
+    Array.prototype.forEach.call(el.querySelectorAll('.btn-toggle-batch'), function (btn) {
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var bKey = btn.getAttribute('data-batch-key');
+            OPEN_ITEM_BATCH_DRAWERS[bKey] = !OPEN_ITEM_BATCH_DRAWERS[bKey];
+            renderPipeline();
+        });
+    });
+
+    // Bind drawer toggles cleanly without popups or triggering convertOrderToPlan
+    Array.prototype.forEach.call(el.querySelectorAll('.btn-toggle-drawer'), function (btn) {
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var soId = btn.getAttribute('data-so-id');
+            OPEN_ITEM_DRAWERS[soId] = !OPEN_ITEM_DRAWERS[soId];
+            renderPipeline();
         });
     });
 
@@ -333,14 +617,28 @@ function renderInProgressOrders() {
     }
 
     var orders = DATA && Array.isArray(DATA.progressOrders) ? DATA.progressOrders : null;
+
+    if (orders && PIPELINE_STATUS === 'In Production' && IN_PRODUCTION_SUB_FILTER !== 'All') {
+        orders = orders.filter(function (o) {
+            var bd = getEffectiveBreakdown(o);
+            if (IN_PRODUCTION_SUB_FILTER === 'In Progress') return bd.inProgress > 0;
+            if (IN_PRODUCTION_SUB_FILTER === 'Prod Complete') return bd.prodComplete > 0;
+            if (IN_PRODUCTION_SUB_FILTER === 'Checking Passed') return bd.checkingPassed > 0;
+            if (IN_PRODUCTION_SUB_FILTER === 'Finishing Complete') return bd.finishingComplete > 0;
+            if (IN_PRODUCTION_SUB_FILTER === 'In Alteration') return (bd.alteration > 0 || Number(o.remakeItems) > 0);
+            return true;
+        });
+    }
+
+    var displayStatus = (PIPELINE_STATUS === 'In Production' && IN_PRODUCTION_SUB_FILTER !== 'All') ? IN_PRODUCTION_SUB_FILTER : PIPELINE_STATUS;
     var h = '<section class="progress-section"><div class="pipeline-header">' +
-        '<h2>' + esc(PIPELINE_STATUS) + ' orders</h2>';
+        '<h2>' + esc(displayStatus) + ' orders</h2>';
 
     if (orders === null) {
         return h + '</div><p class="progress-empty">Loading live order progress…</p></section>';
     }
     if (!orders.length) {
-        return h + '</div><p class="progress-empty">No sales orders are currently in ' + esc(PIPELINE_STATUS) + ' status.</p></section>';
+        return h + '</div><p class="progress-empty">No sales orders are currently in ' + esc(displayStatus) + ' status.</p></section>';
     }
 
     h += '<span class="pipe-total">' + orders.length + ' order' + (orders.length === 1 ? '' : 's') + '</span></div>' +
@@ -357,45 +655,35 @@ function renderInProgressOrders() {
                 '<td>' + esc(order.nextStep || 'Order Fulfilled & Shipped') + '</td></tr>';
         });
     } else {
-        var stageHeader = 'Current stage';
-        if (PIPELINE_STATUS === 'Production Complete') stageHeader = 'Status';
-        else if (PIPELINE_STATUS === 'Checking Passed') stageHeader = 'QC Status';
-        else if (PIPELINE_STATUS === 'Finishing Complete') stageHeader = 'Finishing Status';
-        else if (PIPELINE_STATUS === 'Packed') stageHeader = 'Packing Status';
-
-        var qtyHeader = 'Produced / ordered';
-        if (PIPELINE_STATUS === 'Checking Passed') qtyHeader = 'Passed / ordered';
-        else if (PIPELINE_STATUS === 'Finishing Complete') qtyHeader = 'Finished / ordered';
-        else if (PIPELINE_STATUS === 'Packed') qtyHeader = 'Packed / ordered';
-
-        h += '<th>Sales order</th><th>Plan</th><th>Supervisor</th><th>' + stageHeader + '</th>' +
-            '<th class="r">' + qtyHeader + '</th><th>Next step</th></tr></thead><tbody>';
+        h += '<th>Sales order</th><th>Plan</th><th>Supervisor</th><th>Item Level Progress</th>' +
+            '<th class="r">Produced / ordered</th><th>Items</th></tr></thead><tbody>';
 
         orders.forEach(function (order) {
-            var out = Number(order.stageOut) || 0;
-            var stStatus = String(order.currentStageStatus || '').trim();
-            var pillCls = 'pill-running';
-            if (stStatus === 'Passed' || stStatus === 'Completed' || stStatus === 'Packed' || stStatus === 'Shipped' || stStatus === 'Done') {
-                pillCls = 'pill-done';
-            }
-            var stage = order.currentStage
-                ? esc(order.currentStage) +
-                  (stStatus ? ' <span class="pill ' + pillCls + '">' + esc(stStatus) + '</span>' : '') +
-                  (out > 0 ? '<span class="stage-out">' + n(out) + ' out</span>' : '')
-                : '<span class="muted">' + esc(PIPELINE_STATUS) + '</span>';
-
+            var soId = String(order.id || order.salesOrder);
+            var isOpen = !!OPEN_ITEM_DRAWERS[soId];
             var rem = Number(order.remakeItems) || 0;
             var remTxt = rem > 0
-                ? ' <span class="pill pill-remake" title="Rework: replaces a rejected or damaged piece, so it is not counted as extra demand">' +
+                ? ' <span class="pill pill-remake" title="Rework: replaces a rejected or damaged piece">' +
                   rem + ' remake' + (rem === 1 ? '' : 's') + '</span>'
                 : '';
 
-            h += '<tr><td><strong>' + esc(order.salesOrder || '—') + '</strong>' + remTxt + '</td>' +
+            var itemProgHtml = renderItemProgressBar(order);
+
+            var itemCount = Array.isArray(order.items) ? order.items.length : (order.itemCount || 0);
+
+            var itemSub = (order.itemName || order.firstItemName) ? '<div class="emp-sub">' + esc(order.itemName || order.firstItemName) + '</div>' : '';
+
+            h += '<tr><td><strong>' + esc(order.salesOrder || '—') + '</strong>' + itemSub + remTxt + '</td>' +
                 '<td>' + esc(order.planNo || '—') + '</td>' +
                 '<td>' + esc(order.supervisor || '—') + '</td>' +
-                '<td>' + stage + '</td>' +
+                '<td>' + itemProgHtml + '</td>' +
                 '<td class="r">' + n(order.producedQty) + ' / ' + n(order.orderedQty) + '</td>' +
-                '<td>' + esc(order.nextStep || '—') + '</td></tr>';
+                '<td><button type="button" class="ghost-btn btn-toggle-drawer" data-so-id="' + esc(soId) + '">' +
+                (isOpen ? 'Hide Items ▲' : 'Inspect Items (' + itemCount + ') ▼') + '</button></td></tr>';
+
+            if (isOpen) {
+                h += '<tr class="item-drawer-row"><td colspan="6">' + renderItemDrawer(order) + '</td></tr>';
+            }
         });
     }
     return h + '</tbody></table></div></section>';
@@ -443,7 +731,7 @@ function renderPendingOrders() {
         }
 
         var busy = CONVERTING[String(o.id)];
-        var btn = '<button type="button" class="convert-btn" data-so-id="' + esc(String(o.id)) + '"' +
+        var btn = '<button type="button" class="btn-convert-plan convert-btn" data-so-id="' + esc(String(o.id)) + '"' +
             (busy ? ' disabled' : '') + '>' +
             (busy ? 'Converting…' : 'Convert to plan') + '</button>';
 
@@ -465,8 +753,10 @@ function renderPendingOrders() {
 function bindPendingButtons() {
     var el = document.getElementById('pipeline-section');
     if (!el) return;
-    Array.prototype.forEach.call(el.querySelectorAll('.convert-btn'), function (b) {
-        b.addEventListener('click', function () {
+    Array.prototype.forEach.call(el.querySelectorAll('.btn-convert-plan'), function (b) {
+        b.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
             var id = b.getAttribute('data-so-id');
             if (id) convertOrderToPlan(id);
         });
