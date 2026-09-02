@@ -285,7 +285,10 @@ function getEffectiveBreakdown(order) {
     if (stStatus === 'passed' || st.indexOf('qc') !== -1 || st.indexOf('checking') !== -1 || st.indexOf('quality') !== -1) {
         bd.checkingPassed = prod;
         bd.inProgress = Math.max(0, ord - prod);
-    } else if (stStatus === 'completed' || st.indexOf('finishing') !== -1) {
+    } else if (st.indexOf('finishing') !== -1) {
+        // Only the finishing stage itself routes to finishingComplete \u2014
+        // stStatus=completed alone means a production stage finished, not that
+        // finishing is done.
         bd.finishingComplete = prod;
         bd.inProgress = Math.max(0, ord - prod);
     } else if (st.indexOf('complete') !== -1 || (prod >= ord && ord > 0)) {
@@ -305,13 +308,26 @@ function renderItemProgressBar(order) {
     var qcPass = Number(bd.checkingPassed) || 0;
     var finComp = Number(bd.finishingComplete) || 0;
     var alt = Number(bd.alteration) || 0;
+    var rej = Number(bd.rejected || order.totalRejected) || 0;
+
+    if (Array.isArray(order.items) && order.items.length) {
+        var altSum = 0;
+        var rejSum = 0;
+        order.items.forEach(function (it) {
+            altSum += (Number(it.qtyAltered) || 0);
+            rejSum += (Number(it.qtyRejected) || Number(it.qtyRemake) || 0);
+        });
+        if (altSum > alt) alt = altSum;
+        if (rejSum > rej) rej = rejSum;
+    }
 
     var badges = [];
     if (inProd > 0) badges.push('<span class="pill pill-running">' + inProd + ' In Progress</span>');
     if (prodComp > 0) badges.push('<span class="pill pill-qc">' + prodComp + ' QC Queue</span>');
     if (qcPass > 0) badges.push('<span class="pill pill-done">' + qcPass + ' Checking Passed</span>');
     if (finComp > 0) badges.push('<span class="pill pill-ok">' + finComp + ' Finishing Complete</span>');
-    if (alt > 0) badges.push('<span class="pill pill-remake">' + alt + ' Rejected / Remake</span>');
+    if (alt > 0) badges.push('<span class="pill pill-running" style="background:#f3e8ff; color:#6b21a8; font-weight:600;">' + alt + ' Altered</span>');
+    if (rej > 0) badges.push('<span class="pill pill-remake">' + rej + ' Rejected / Remake</span>');
 
     if (!badges.length) return '<span class="muted">No stage data</span>';
 
@@ -346,23 +362,37 @@ function renderItemDrawer(order) {
             '</tbody></table></div></div>';
     }
 
-    // Count items per stage (Alteration/Remake re-enters In Progress)
+    function getItemCategory(it) {
+        var st = String(it.status || '').trim();
+        var stgState = String(it.currentStageStatus || '').trim();
+        var ordSt = String(order.status || order.orderStatus || order.currentStage || '').trim();
+
+        var isFinComplete = (
+            ordSt === 'Finishing Complete' || ordSt === 'Packed' || ordSt === 'Dispatched' ||
+            st === 'Finishing Complete' || st === 'Packed' || st === 'Dispatched' ||
+            it.isFinishingComplete === true || it.finishingStatus === 'Completed'
+        );
+        if (isFinComplete) return 'Finishing Complete';
+
+        var isQc = (st === 'Awaiting_Check' || it.remakeStatus === 'Awaiting_Check');
+        if (isQc) return 'Prod Complete';
+
+        var isPass = (stgState === 'Passed' || st === 'Complete');
+        if (isPass) return 'Checking Passed';
+
+        return 'In Progress';
+    }
+
+    // Count items per stage
     var cAll = items.length;
     var cInProg = 0, cProdComp = 0, cQcPass = 0, cFinComp = 0;
 
     items.forEach(function (it) {
-        var st = String(it.status || '').trim();
-        var stgState = String(it.currentStageStatus || '').trim();
-        var isAlt = (it.isRemake || Number(it.qtyRejected) > 0);
-
-        if (!isAlt && (stgState === 'Passed' || stgState === 'Completed' || st === 'Complete')) {
-            cQcPass++;
-            if (order.currentStage === 'Finishing') cFinComp++;
-        } else if (!isAlt && st === 'Awaiting_Check') {
-            cProdComp++;
-        } else {
-            cInProg++; // Includes active stitching + alteration/remake re-entering in progress
-        }
+        var cat = getItemCategory(it);
+        if (cat === 'Finishing Complete') cFinComp++;
+        else if (cat === 'Checking Passed') cQcPass++;
+        else if (cat === 'Prod Complete') cProdComp++;
+        else cInProg++;
     });
 
     var stageOptions = [
@@ -386,29 +416,18 @@ function renderItemDrawer(order) {
     // Filter items based on activeSub inside this drawer
     var filteredItems = items.filter(function (it) {
         if (activeSub === 'All') return true;
-        var st = String(it.status || '').trim();
-        var stgState = String(it.currentStageStatus || '').trim();
-        var ordSt = String(order.status || order.orderStatus || order.currentStage || '').trim();
-
-        var isFinComplete = (ordSt === 'Finishing Complete' || ordSt === 'Packed' || ordSt === 'Dispatched' || st === 'Finishing Complete' || st === 'Packed' || st === 'Dispatched');
-        var isQc = (st === 'Awaiting_Check' || it.remakeStatus === 'Awaiting_Check');
-        var isPass = (stgState === 'Passed' || stgState === 'Completed' || st === 'Complete');
-        var isInP = (st === 'In_Progress' || it.remakeStatus === 'In_Progress' || stgState === 'Running' || it.hasRemake);
-
-        if (activeSub === 'Finishing Complete') return isFinComplete || (isPass && ordSt.indexOf('Finishing') !== -1);
-        if (activeSub === 'Checking Passed') return isPass && !isFinComplete;
-        if (activeSub === 'Prod Complete') return isQc && !isFinComplete;
-        if (activeSub === 'In Progress') return isInP && !isQc && !isFinComplete;
-        return true;
+        return getItemCategory(it) === activeSub;
     });
 
-    var showStageCol = (activeSub === 'All' || activeSub === 'In Progress');
+    var showStageCol = (activeSub === 'All' || activeSub === 'In Progress' || activeSub === 'Finishing Complete' || activeSub === 'Checking Passed');
     var colSpanVal = showStageCol ? 7 : 6;
 
     var rows = filteredItems.map(function (it) {
         var st = String(it.status || '').trim();
         var stgName = String(it.currentStage || '').trim();
         var stgState = String(it.currentStageStatus || '').trim();
+        var ordSt = String(order.status || order.orderStatus || order.currentStage || '').trim();
+        var isItemFinComplete = (ordSt === 'Finishing Complete' || ordSt === 'Packed' || ordSt === 'Dispatched' || st === 'Finishing Complete' || st === 'Packed' || st === 'Dispatched' || it.isFinishingComplete === true || it.finishingStatus === 'Completed');
         var qAltered = Number(it.qtyAltered) || 0;
         var isAlt = (it.isRemake || qAltered > 0 || !!it.hasRemake);
 
@@ -418,6 +437,9 @@ function renderItemDrawer(order) {
         if (st === 'Awaiting_Check' || it.remakeStatus === 'Awaiting_Check') {
             pillCls = 'pill-qc';
             stageLabel = 'Prod Complete (QC Queue)';
+        } else if (isItemFinComplete) {
+            pillCls = 'pill-ok';
+            stageLabel = (st === 'Finishing Complete' || stgName === 'Finishing Complete' || stgName === 'Finishing Complete (Awaiting Packing)') ? 'Finishing Complete (Awaiting Packing)' : (stgName ? stgName + ' (Awaiting Packing)' : 'Finishing Complete (Awaiting Packing)');
         } else if (stgState === 'Passed' || stgState === 'Completed' || st === 'Complete') {
             pillCls = 'pill-done';
         } else if (isAlt) {
@@ -450,26 +472,58 @@ function renderItemDrawer(order) {
 
         if (isBatchOpen && hasBatches) {
             var totalRej = Number(it.qtyRejected) || 0;
+            // qtyAltered on the grouped item comes from the deluge Alteration batch.
             var totalAlt = Number(it.qtyAltered) || 0;
             var totalRmk = Number(it.qtyRemake) || 0;
-            var rmkStageInfo = it.remakeStatus === 'Awaiting_Check' ? 'Waiting in QC Queue' : (it.remakeStage ? ('Remake in ' + it.remakeStage) : 'Remake Production');
 
+            // Stage info for each type — shown separately in the detail card.
+            var rmkStageInfo = it.remakeStatus === 'Awaiting_Check'
+                ? 'Waiting in QC Queue'
+                : (it.remakeStage
+                    ? (it.remakeStage + (it.remakeStageStatus === 'Completed' ? ' (Completed)' : ' (Running)'))
+                    : 'Remake Production');
+            var altStageInfo = it.altStatus === 'Awaiting_Check'
+                ? 'Waiting in QC Queue'
+                : (it.altStage
+                    ? (it.altStage + (it.altStageStatus === 'Completed' ? ' (Completed)' : ' (Running)'))
+                    : 'Alteration Production');
+
+            // Walk the raw batches list for any extra detail the group-level
+            // fields don't yet carry (e.g. multiple remake batches on one item).
             if (Array.isArray(it.batches)) {
                 it.batches.forEach(function (b) {
-                    if (Number(b.qtyRejected) > 0) {
-                        totalRej = Math.max(totalRej, Number(b.qtyRejected));
-                    }
-                    if (b.isRemake) {
-                        totalRmk = Math.max(totalRmk, Number(b.qtyOrdered) || Number(b.qtyRemake) || 0);
-                        if (b.currentStage) rmkStageInfo = b.currentStage + (b.status === 'Awaiting_Check' ? ' (QC Queue)' : ' (Running)');
-                    }
-                    if (Number(b.qtyAltered) > 0) {
-                        totalAlt = Math.max(totalAlt, Number(b.qtyAltered));
+                    var bReason = String(b.remakeReason || '').trim();
+                    if (bReason === 'Alteration') {
+                        // Alteration batch — garments sent back to fix a stage.
+                        var bAltQty = Number(b.qtyOrdered) || Number(b.qtyAltered) || 0;
+                        if (bAltQty > totalAlt) totalAlt = bAltQty;
+                        if (b.currentStage) {
+                            var bAltSuffix = b.status === 'Awaiting_Check'
+                                ? ' (QC Queue)'
+                                : (b.currentStageStatus === 'Completed' ? ' (Completed)' : ' (Running)');
+                            altStageInfo = b.currentStage + bAltSuffix;
+                        }
+                    } else if (b.isRemake) {
+                        // Check_Reject batch — needs fresh cloth.
+                        var bRmkQty = Number(b.qtyOrdered) || Number(b.qtyRemake) || 0;
+                        if (bRmkQty > totalRmk) totalRmk = bRmkQty;
+                        if (Number(b.qtyRejected) > totalRej) totalRej = Number(b.qtyRejected);
+                        if (b.currentStage) {
+                            var bSuffix = b.status === 'Awaiting_Check'
+                                ? ' (QC Queue)'
+                                : (b.currentStageStatus === 'Completed' ? ' (Completed)' : ' (Running)');
+                            rmkStageInfo = b.currentStage + bSuffix;
+                        }
+                    } else {
+                        // Original (non-remake) batch — read its rejection count.
+                        if (Number(b.qtyRejected) > totalRej) totalRej = Number(b.qtyRejected);
                     }
                 });
             }
 
             var cardDetails = '';
+
+            // Rejected / Remake row — only when there were actual rejections.
             var rejCount = Math.max(totalRej, totalRmk);
             if (rejCount > 0) {
                 cardDetails += '<div style="display:flex; align-items:center; gap:8px;">' +
@@ -479,10 +533,12 @@ function renderItemDrawer(order) {
                     '</div>';
             }
 
+            // Alteration row — separate from rejection; shows the stage the garments went back to.
             if (totalAlt > 0) {
                 cardDetails += '<div style="display:flex; align-items:center; gap:8px;">' +
-                    '<span style="font-size:12px; font-weight:600; color:#64748b;">Alteration:</span>' +
+                    '<span style="font-size:12px; font-weight:600; color:#64748b;">Altered:</span>' +
                     '<span class="pill pill-running" style="font-size:12px; font-weight:700;">' + totalAlt + ' Pcs</span>' +
+                    '<span style="font-size:11px; color:#94a3b8;">(' + esc(altStageInfo) + ')</span>' +
                     '</div>';
             }
 
@@ -491,7 +547,7 @@ function renderItemDrawer(order) {
             }
 
             rowHtml += '<tr class="item-batch-drawer-row"><td colspan="' + colSpanVal + '" style="background:#f8fafc; padding:12px 16px; border-left:3px solid #3b82f6;">' +
-                '<div style="font-size:11px; font-weight:700; color:#475569; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px;">REJECTION & ALTERATION SUMMARY FOR ' + esc(nameStr) + '</div>' +
+                '<div style="font-size:11px; font-weight:700; color:#475569; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px;">REJECTION &amp; ALTERATION SUMMARY FOR ' + esc(nameStr) + '</div>' +
                 '<div style="display:flex; align-items:center; gap:32px; flex-wrap:wrap;">' + cardDetails + '</div></td></tr>';
         }
 
@@ -513,9 +569,15 @@ function renderItemDrawer(order) {
         '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
 }
 
-function renderPipeline() {
+function renderPipeline(targetSoId) {
     var el = document.getElementById('pipeline-section');
     if (!el) return;
+
+    var currentScroll = window.scrollY || document.documentElement.scrollTop;
+    var currentHeight = el.offsetHeight;
+    if (currentHeight > 0) {
+        el.style.minHeight = currentHeight + 'px';
+    }
 
     var p = (DATA && DATA.pipeline) ? DATA.pipeline : {};
     var hasLiveCounts = p.pending !== undefined || p.inProgress !== undefined ||
@@ -582,7 +644,7 @@ function renderPipeline() {
             var soId = chip.getAttribute('data-drawer-so');
             var sub = chip.getAttribute('data-drawer-sub');
             DRAWER_STAGE_FILTERS[soId] = sub;
-            renderPipeline();
+            renderPipeline(soId);
         });
     });
 
@@ -593,7 +655,8 @@ function renderPipeline() {
             e.stopPropagation();
             var bKey = btn.getAttribute('data-batch-key');
             OPEN_ITEM_BATCH_DRAWERS[bKey] = !OPEN_ITEM_BATCH_DRAWERS[bKey];
-            renderPipeline();
+            var parts = String(bKey || '').split('_');
+            renderPipeline(parts[0]);
         });
     });
 
@@ -604,11 +667,127 @@ function renderPipeline() {
             e.stopPropagation();
             var soId = btn.getAttribute('data-so-id');
             OPEN_ITEM_DRAWERS[soId] = !OPEN_ITEM_DRAWERS[soId];
-            renderPipeline();
+            renderPipeline(soId);
+        });
+    });
+
+    // Bind progress modal popup buttons
+    Array.prototype.forEach.call(el.querySelectorAll('.btn-open-progress-modal'), function (btn) {
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var soId = btn.getAttribute('data-so-id');
+            openProgressModal(soId);
         });
     });
 
     bindPendingButtons();
+
+    // Restore viewport scroll position or keep target drawer anchored
+    if (targetSoId) {
+        var targetChip = el.querySelector('.sub-chip[data-drawer-so="' + esc(targetSoId) + '"]') ||
+                         el.querySelector('.btn-toggle-drawer[data-so-id="' + esc(targetSoId) + '"]');
+        if (targetChip && targetChip.scrollIntoView) {
+            targetChip.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        } else {
+            window.scrollTo(0, currentScroll);
+        }
+    } else {
+        window.scrollTo(0, currentScroll);
+    }
+
+    setTimeout(function () {
+        if (el) el.style.minHeight = '';
+    }, 200);
+}
+
+function openProgressModal(soId) {
+    var orders = (DATA && Array.isArray(DATA.progressOrders)) ? DATA.progressOrders : [];
+    var order = null;
+    for (var i = 0; i < orders.length; i++) {
+        if (String(orders[i].id || orders[i].salesOrder) === String(soId)) {
+            order = orders[i];
+            break;
+        }
+    }
+    if (!order) return;
+
+    var bd = getEffectiveBreakdown(order);
+    var inProd = Number(bd.inProgress) || 0;
+    var prodComp = Number(bd.prodComplete) || 0;
+    var qcPass = Number(bd.checkingPassed) || 0;
+    var finComp = Number(bd.finishingComplete) || 0;
+    var alt = Number(bd.alteration) || 0;
+    var rej = Number(bd.rejected || order.totalRejected || order.remakeItems) || 0;
+
+    if (Array.isArray(order.items) && order.items.length) {
+        var altSum = 0;
+        var rejSum = 0;
+        order.items.forEach(function (it) {
+            altSum += (Number(it.qtyAltered) || 0);
+            rejSum += (Number(it.qtyRejected) || Number(it.qtyRemake) || 0);
+        });
+        if (altSum > alt) alt = altSum;
+        if (rejSum > rej) rej = rejSum;
+    }
+
+    var badgesHtml = renderItemProgressBar(order);
+
+    var existingModal = document.getElementById('progress-modal-overlay');
+    if (existingModal) existingModal.remove();
+
+    var modalHtml = '<div id="progress-modal-overlay" style="position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(15,23,42,0.65); backdrop-filter:blur(3px); z-index:9999; display:flex; align-items:center; justify-content:center; padding:16px;">' +
+        '<div style="background:#ffffff; border-radius:12px; max-width:560px; width:100%; box-shadow:0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04); overflow:hidden; border:1px solid #e2e8f0; font-family:Inter, sans-serif;">' +
+        '<div style="padding:16px 20px; background:#f8fafc; border-bottom:1px solid #e2e8f0; display:flex; align-items:center; justify-content:space-between;">' +
+        '<div>' +
+        '<h3 style="margin:0; font-size:16px; font-weight:700; color:#0f172a;">Item-Level Progress Breakdown</h3>' +
+        '<span style="font-size:12px; color:#64748b;">Sales Order: <strong>' + esc(order.salesOrder || '—') + '</strong> · Plan: <strong>' + esc(order.planNo || '—') + '</strong></span>' +
+        '</div>' +
+        '<button type="button" id="close-progress-modal" style="background:none; border:none; font-size:20px; font-weight:700; color:#64748b; cursor:pointer; line-height:1;">&times;</button>' +
+        '</div>' +
+        '<div style="padding:20px; display:flex; flex-direction:column; gap:16px;">' +
+        '<div>' +
+        '<div style="font-size:11px; font-weight:700; text-transform:uppercase; color:#64748b; letter-spacing:0.5px; margin-bottom:8px;">STAGE PROGRESS BADGES:</div>' +
+        badgesHtml +
+        '</div>' +
+        '<div style="background:#f1f5f9; border-radius:8px; padding:14px; display:grid; grid-template-columns:1fr 1fr; gap:12px; font-size:13px;">' +
+        '<div><span style="color:#64748b;">Total Ordered:</span> <strong style="color:#0f172a;">' + n(order.orderedQty) + ' Pcs</strong></div>' +
+        '<div><span style="color:#64748b;">Total Produced:</span> <strong style="color:#0f172a;">' + n(order.producedQty) + ' Pcs</strong></div>' +
+        '<div><span style="color:#64748b;">Finishing Complete:</span> <strong style="color:#16a34a;">' + finComp + ' Pcs</strong></div>' +
+        '<div><span style="color:#64748b;">Checking Passed:</span> <strong style="color:#2563eb;">' + qcPass + ' Pcs</strong></div>' +
+        '<div><span style="color:#64748b;">QC Queue:</span> <strong style="color:#d97706;">' + prodComp + ' Pcs</strong></div>' +
+        '<div><span style="color:#64748b;">In Progress:</span> <strong style="color:#0284c7;">' + inProd + ' Pcs</strong></div>' +
+        '<div><span style="color:#64748b;">Altered:</span> <strong style="color:#7c3aed;">' + alt + ' Pcs</strong></div>' +
+        '<div><span style="color:#64748b;">Rejected / Remake:</span> <strong style="color:#dc2626;">' + rej + ' Pcs</strong></div>' +
+        '</div>' +
+        '<p style="margin:0; font-size:11px; color:#94a3b8; font-style:italic;">* Piece counts update in real time as remake and alteration batches finish through QC and Finishing.</p>' +
+        '</div>' +
+        '<div style="padding:12px 20px; background:#f8fafc; border-top:1px solid #e2e8f0; text-align:right;">' +
+        '<button type="button" id="close-progress-modal-btn" class="ghost-btn" style="padding:6px 16px; font-size:13px; font-weight:600;">Close</button>' +
+        '</div>' +
+        '</div></div>';
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    var closeFn = function () {
+        var modalEl = document.getElementById('progress-modal-overlay');
+        if (modalEl) modalEl.remove();
+        document.removeEventListener('keydown', keyFn);
+    };
+    var keyFn = function (e) {
+        if (e.key === 'Escape') closeFn();
+    };
+    document.addEventListener('keydown', keyFn);
+
+    var cBtn1 = document.getElementById('close-progress-modal');
+    var cBtn2 = document.getElementById('close-progress-modal-btn');
+    var overlay = document.getElementById('progress-modal-overlay');
+
+    if (cBtn1) cBtn1.addEventListener('click', closeFn);
+    if (cBtn2) cBtn2.addEventListener('click', closeFn);
+    if (overlay) overlay.addEventListener('click', function (e) {
+        if (e.target.id === 'progress-modal-overlay') closeFn();
+    });
 }
 
 function renderInProgressOrders() {
@@ -667,7 +846,8 @@ function renderInProgressOrders() {
                   rem + ' remake' + (rem === 1 ? '' : 's') + '</span>'
                 : '';
 
-            var itemProgHtml = renderItemProgressBar(order);
+            var itemProgHtml = '<button type="button" class="sub-chip btn-open-progress-modal" data-so-id="' + esc(soId) + '" style="font-size:12px; font-weight:600; padding:4px 12px; cursor:pointer; background:#f8fafc; border:1px solid #cbd5e1; border-radius:6px; color:#334155; display:inline-flex; align-items:center; gap:6px;">' +
+                '<span>📊 View Progress</span></button>';
 
             var itemCount = Array.isArray(order.items) ? order.items.length : (order.itemCount || 0);
 

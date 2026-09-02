@@ -432,9 +432,9 @@ function checkFormHtml(item, produced) {
         return '' +
             '<tr>' +
             '<td class="chk-label">' + escapeHtml(t) + '</td>' +
-            '<td class="col-num"><input type="number" min="0" step="1" class="chk-failed" ' +
+            '<td class="col-num"><input type="number" min="0" max="' + produced + '" step="1" class="chk-failed" ' +
             'data-i="' + i + '" value="0"></td>' +
-            '<td class="col-num"><input type="number" min="0" step="1" class="chk-passed" ' +
+            '<td class="col-num"><input type="number" min="0" max="' + produced + '" step="1" class="chk-passed" ' +
             'data-i="' + i + '" value="' + produced + '"></td>' +
             '<td><input type="text" class="chk-note" data-i="' + i + '" placeholder="optional"></td>' +
             '</tr>';
@@ -530,8 +530,50 @@ function wireCheckForm(card, item, produced) {
         inp.addEventListener('input', function () {
             var i = inp.getAttribute('data-i');
             var pass = card.querySelector('.chk-passed[data-i="' + i + '"]');
-            var left = produced - num(inp.value);
+            var f = num(inp.value);
+            if (f > produced) {
+                f = produced;
+                inp.value = f;
+            }
+            if (f < 0) {
+                f = 0;
+                inp.value = f;
+            }
+            var left = produced - f;
             pass.value = left < 0 ? 0 : left;
+        });
+    });
+
+    card.querySelectorAll('.chk-passed').forEach(function (inp) {
+        inp.addEventListener('input', function () {
+            var i = inp.getAttribute('data-i');
+            var fail = card.querySelector('.chk-failed[data-i="' + i + '"]');
+            var p = num(inp.value);
+            if (p > produced) {
+                p = produced;
+                inp.value = p;
+            }
+            if (p < 0) {
+                p = 0;
+                inp.value = p;
+            }
+            var left = produced - p;
+            fail.value = left < 0 ? 0 : left;
+        });
+    });
+
+    card.querySelectorAll('.alt-qty').forEach(function (inp) {
+        inp.addEventListener('input', function () {
+            var x = num(el('disp-alteration').value);
+            var q = num(inp.value);
+            if (q > x) {
+                q = x;
+                inp.value = q;
+            }
+            if (q < 0) {
+                q = 0;
+                inp.value = q;
+            }
         });
     });
 
@@ -544,6 +586,15 @@ function wireCheckForm(card, item, produced) {
         var r = num(el('disp-rejected').value);
         var x = num(el('disp-alteration').value);
         var sum = a + r + x;
+
+        // Clamp any stage piece counts that exceed the new alteration count
+        card.querySelectorAll('.alt-qty').forEach(function (inp) {
+            inp.max = x;
+            var q = num(inp.value);
+            if (q > x) {
+                inp.value = x;
+            }
+        });
 
         var t = el('disp-total');
         if (sum === produced) {

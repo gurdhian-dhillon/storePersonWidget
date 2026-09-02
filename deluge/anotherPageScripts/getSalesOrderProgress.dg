@@ -74,6 +74,7 @@
 			qtyCheckingPassed = 0;
 			qtyFinishingComplete = 0;
 			qtyInAlteration = 0;
+			qtyTotalRejected = 0;
 
 			firstItemName = "";
 			groupedMap = Map();
@@ -93,9 +94,38 @@
 				openLogs = Stage_Log[Plan == plan.ID && Stage_Status == "In_Progress"] sort by Sequence_No desc;
 				doneLogs = Stage_Log[Plan == plan.ID && Stage_Status == "Done"] sort by Sequence_No desc;
 
+				// Pre-fetch finishing completion and alteration quantities for each inspected Plan_Item in this plan
+				finishedItemIds = Map();
+				altQtyByItem = Map();
+				for each chkRec in Item_Check[Plan == plan.ID]
+				{
+					if(chkRec.Plan_Item != null)
+					{
+						pItemIdStr = chkRec.Plan_Item.toString();
+						if(ifnull(chkRec.Qty_Approved,0) > 0)
+						{
+							for each fdRec in Finishing_Data[Item_Check == chkRec.ID]
+							{
+								if(ifnull(fdRec.Finishing_Status,"").toString().trim() == "Done")
+								{
+									finishedItemIds.put(pItemIdStr, "true");
+								}
+							}
+						}
+						if(ifnull(chkRec.Qty_Alteration,0) > 0)
+						{
+							altQtyByItem.put(pItemIdStr, ifnull(chkRec.Qty_Alteration,0).toLong());
+						}
+					}
+				}
+
 				for each item in Plan_Item[Plan == plan.ID]
 				{
 					isRm = ifnull(item.Is_Remake,false);
+					rmReason = ifnull(item.Remake_Reason,"").toString().trim();
+					// Alteration batches (garments sent back to fix a stage) are
+					// a different thing to remake batches (fresh cloth needed).
+					isAlt = (isRm == true && rmReason == "Alteration");
 					itStatus = ifnull(item.Item_Status,"").toString();
 					itName = ifnull(item.Item_Name,"").toString();
 					if(itName == "")
@@ -110,26 +140,62 @@
 					qProd = ifnull(item.Qty_Produced,0);
 					qAcc = ifnull(item.Qty_Accepted,0);
 					qRej = ifnull(item.Qty_Rejected,0);
+					qAlt = ifnull(altQtyByItem.get(item.ID.toString()), 0);
 
 					itemCount = itemCount + 1;
-					totalOrdered = totalOrdered + qOrd;
-					totalProduced = totalProduced + qProd;
+					// Remake batches are replacements for rejected pieces, not new
+					// ordered items. Adding their qty to the totals would double-count
+					// them (the original item already carries the ordered quantity).
+					if(isRm == false)
+					{
+						totalOrdered = totalOrdered + qOrd;
+						totalProduced = totalProduced + qProd;
+						if(qRej > 0 && Item_Check[Plan_Item == item.ID].count() > 0)
+						{
+							qtyTotalRejected = qtyTotalRejected + qRej;
+						}
+					}
+
+					// An item's finishing is done if the order as a whole is at Finishing Complete/Packed/Dispatched,
+					// OR if Finishing_Data for this item is Done.
+					isItemFinDone = false;
+					if(so.Order_Status == "Finishing Complete" || so.Order_Status == "Packed" || so.Order_Status == "Dispatched")
+					{
+						isItemFinDone = true;
+					}
+					else if(finishedItemIds.get(item.ID.toString()) == "true")
+					{
+						isItemFinDone = true;
+					}
 
 					if(isRm == true)
 					{
-						remakeItems = remakeItems + 1;
+						// Only count as active remake/alteration if the batch is still running
+						if(itStatus != "Complete" && isItemFinDone == false && qAcc < qOrd)
+						{
+							remakeItems = remakeItems + 1;
+							remLeft = qOrd - qAcc;
+							if(isAlt == true)
+							{
+								qtyInAlteration = qtyInAlteration + remLeft;
+							}
+							else
+							{
+								qtyTotalRejected = qtyTotalRejected + remLeft;
+							}
+						}
+					}
+					else if(qAlt > 0 && itStatus != "Complete" && isItemFinDone == false)
+					{
+						qtyInAlteration = qtyInAlteration + qAlt;
 					}
 
-					qAlt = 0;
 					qRmk = if(isRm == true, qOrd, 0);
-					if(isRm == true)
-					{
-						qtyInAlteration = qtyInAlteration + qOrd;
-					}
 
 					if(qAcc > 0)
 					{
-						if(so.Order_Status == "Finishing Complete" || so.Order_Status == "Packed" || so.Order_Status == "Dispatched")
+						// Any accepted pieces (original or finished remake/alteration) count toward checking-passed / finishing-complete.
+						if(isItemFinDone == true)
 						{
 							qtyFinishingComplete = qtyFinishingComplete + qAcc;
 						}
@@ -139,14 +205,15 @@
 						}
 					}
 
-					awaitingQty = qProd - qAcc - qRej;
+					// QC Queue is remaining produced pieces that have NOT been accepted, rejected, or altered yet
+					awaitingQty = qProd - qAcc - qRej - qAlt;
 					if(awaitingQty > 0)
 					{
 						qtyAwaitingCheck = qtyAwaitingCheck + awaitingQty;
 					}
 
 					inProgQty = qOrd - qProd;
-					if(inProgQty > 0)
+					if(inProgQty > 0 && isRm == false)
 					{
 						qtyInProgress = qtyInProgress + inProgQty;
 					}
@@ -182,7 +249,12 @@
 
 					if(itemStage == "")
 					{
-						if(itStatus == "Complete")
+						if(isItemFinDone == true)
+						{
+							itemStage = "Finishing Complete (Awaiting Packing)";
+							itemStageStatus = "Completed";
+						}
+						else if(itStatus == "Complete")
 						{
 							itemStage = "QC Passed";
 							itemStageStatus = "Passed";
@@ -194,6 +266,16 @@
 						}
 					}
 
+					if(isItemFinDone == true && (itStatus == "Complete" || itStatus == ""))
+					{
+						itStatus = "Finishing Complete";
+						if(itemStage == "QC Passed" || itemStage == "" || itemStage == "Finishing Complete")
+						{
+							itemStage = "Finishing Complete (Awaiting Packing)";
+							itemStageStatus = "Completed";
+						}
+					}
+
 					batchObj = Map();
 					batchObj.put("id",item.ID.toString());
 					batchObj.put("itemName",itName);
@@ -201,12 +283,16 @@
 					batchObj.put("qtyProduced",qProd);
 					batchObj.put("qtyAccepted",qAcc);
 					batchObj.put("qtyRejected",qRej);
-					batchObj.put("qtyAltered",0);
-					batchObj.put("qtyRemake",if(isRm, qOrd, 0));
+					// qtyAltered is non-zero for Alteration batches or original items with qAlt > 0.
+					batchObj.put("qtyAltered",if(isAlt, qOrd, qAlt));
+					// qtyRemake is non-zero only for Check_Reject batches.
+					batchObj.put("qtyRemake",if(isRm && !isAlt, qOrd, 0));
 					batchObj.put("status",itStatus);
 					batchObj.put("currentStage",itemStage);
 					batchObj.put("currentStageStatus",itemStageStatus);
 					batchObj.put("isRemake",isRm);
+					batchObj.put("remakeReason",rmReason);
+					batchObj.put("isFinishingComplete",isItemFinDone);
 
 					if(groupedMap.containKey(itName))
 					{
@@ -214,10 +300,22 @@
 						if(isRm == true)
 						{
 							grp.put("hasRemake",true);
-							grp.put("qtyRemake",qOrd);
-							grp.put("remakeStatus",itStatus);
-							grp.put("remakeStage",itemStage);
-							grp.put("remakeStageStatus",itemStageStatus);
+							if(isAlt == true)
+							{
+								// Alteration batch: fix existing garments at a stage.
+								grp.put("qtyAltered",qOrd);
+								grp.put("altStage",itemStage);
+								grp.put("altStageStatus",itemStageStatus);
+								grp.put("altStatus",itStatus);
+							}
+							else
+							{
+								// Check_Reject batch: new cloth needed.
+								grp.put("qtyRemake",qOrd);
+								grp.put("remakeStatus",itStatus);
+								grp.put("remakeStage",itemStage);
+								grp.put("remakeStageStatus",itemStageStatus);
+							}
 
 							if(itemStageStatus == "Running" || itStatus == "In_Progress")
 							{
@@ -238,7 +336,10 @@
 							grp.put("qtyProduced",qProd);
 							grp.put("qtyAccepted",qAcc);
 							grp.put("qtyRejected",qRej);
-							grp.put("qtyAltered",0);
+							if(qAlt > 0)
+							{
+								grp.put("qtyAltered",qAlt);
+							}
 							if(grp.get("hasRemake") != true)
 							{
 								grp.put("currentStage",itemStage);
@@ -259,17 +360,29 @@
 						grp.put("qtyProduced",qProd);
 						grp.put("qtyAccepted",qAcc);
 						grp.put("qtyRejected",qRej);
-						grp.put("qtyAltered",0);
-						grp.put("qtyRemake",if(isRm, qOrd, 0));
+						// For a batch that IS itself a remake/alteration, seed both
+						// qty fields from its own type so the grouping block above
+						// does not have to handle a missing key later.
+						grp.put("qtyAltered",if(isAlt, qOrd, 0));
+						grp.put("qtyRemake",if(isRm && !isAlt, qOrd, 0));
 						grp.put("hasRemake",isRm);
 						grp.put("status",itStatus);
 						grp.put("currentStage",itemStage);
 						grp.put("currentStageStatus",itemStageStatus);
 						if(isRm == true)
 						{
-							grp.put("remakeStatus",itStatus);
-							grp.put("remakeStage",itemStage);
-							grp.put("remakeStageStatus",itemStageStatus);
+							if(isAlt == true)
+							{
+								grp.put("altStage",itemStage);
+								grp.put("altStageStatus",itemStageStatus);
+								grp.put("altStatus",itStatus);
+							}
+							else
+							{
+								grp.put("remakeStatus",itStatus);
+								grp.put("remakeStage",itemStage);
+								grp.put("remakeStageStatus",itemStageStatus);
+							}
 						}
 						bList = List();
 						bList.add(batchObj);
@@ -376,17 +489,19 @@
 			}
 
 			breakdown = Map();
-			breakdown.put("inProgress",qtyInProgress + qtyInAlteration);
+			breakdown.put("inProgress",qtyInProgress);
 			breakdown.put("prodComplete",qtyAwaitingCheck);
 			breakdown.put("checkingPassed",qtyCheckingPassed);
 			breakdown.put("finishingComplete",qtyFinishingComplete);
 			breakdown.put("alteration",qtyInAlteration);
+			breakdown.put("rejected",qtyTotalRejected);
 
 			orderRow.put("itemName",firstItemName);
 			orderRow.put("planNo",planNo);
 			orderRow.put("supervisor",supervisor);
 			orderRow.put("orderedQty",totalOrdered);
 			orderRow.put("producedQty",totalProduced);
+			orderRow.put("totalRejected",qtyTotalRejected);
 			orderRow.put("itemCount",itemCount);
 			orderRow.put("completedItems",completeItems);
 			orderRow.put("remakeItems",remakeItems);
