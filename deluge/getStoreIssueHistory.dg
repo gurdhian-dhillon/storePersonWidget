@@ -240,23 +240,6 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	// person's name is a fact about them now, not about the day they collected.
 	supCache = Map();
 
-	// WHICH ITEM EACH ISSUE LINE WAS FOR - the "how this handover was divided"
-	// detail the History card expands to. Issue_Lines.Plan_Item is stamped by
-	// issueMaterials on every line it can resolve one for, so the item id is
-	// read straight off the line. This is HONEST per line - unlike
-	// Material_Issue.Plan on the header, which holds only the first plan the
-	// fan-out touched (see the note above). A LINE has exactly one Plan_Item.
-	//
-	// Two id-keyed maps (name, status) filled together in one indexed query per
-	// DISTINCT item on the page, read for free after. TWO maps rather than one
-	// "name|status" string because Item_Name is flattened with " | " and a
-	// delimiter split would break on a name that contains a pipe. itemSeenMap
-	// remembers a queried id so a real item with an empty status is not
-	// re-queried. Same shape as lotNumMap above.
-	itemNameMap = Map();
-	itemStatMap = Map();
-	itemSeenMap = Map();
-
 	// No cap guard here any more. The query returned the page, so every HEAD
 	// record this loop sees is one card that is going on screen.
 	for each  mi in issues
@@ -397,41 +380,11 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 					lnLot = ifnull(lotNumMap.get(lnLotKey),"").toString();
 				}
 
-				// The item this line's quantity was cut for. Plan_Item is a
-				// LOOKUP - toString() gives the record id, the map key. Empty on
-				// a pre-Plan_Item handover or a line issued without one; the ""
-				// key misses the maps and the line carries blank item fields,
-				// which the widget folds into an "unassigned" bucket.
-				lnItemKey = "";
-				if(ln.Plan_Item != null)
-				{
-					lnItemKey = ln.Plan_Item.toString().trim();
-				}
-				lnItemName = "";
-				lnItemStat = "";
-				if(lnItemKey != "" && lnItemKey.isNumber() == true)
-				{
-					if(ifnull(itemSeenMap.get(lnItemKey),"").toString() == "")
-					{
-						itemSeenMap.put(lnItemKey,"1");
-						itemNameMap.put(lnItemKey,"");
-						itemStatMap.put(lnItemKey,"");
-						for each  piC in Plan_Item[ID == lnItemKey.toLong()]
-						{
-							piName = ifnull(piC.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
-							itemNameMap.put(lnItemKey,piName);
-							itemStatMap.put(lnItemKey,ifnull(piC.Item_Status,"").toString().trim());
-						}
-					}
-					lnItemName = ifnull(itemNameMap.get(lnItemKey),"").toString();
-					lnItemStat = ifnull(itemStatMap.get(lnItemKey),"").toString();
-				}
-
 				if(linesJson != "")
 				{
 					linesJson = linesJson + ",";
 				}
-				linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"lot\":\"" + lnLot + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + ",\"itemId\":\"" + lnItemKey + "\",\"itemName\":\"" + lnItemName + "\",\"itemStatus\":\"" + lnItemStat + "\"}";
+				linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"lot\":\"" + lnLot + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + "}";
 				totalLines = totalLines + 1;
 			}
 		}

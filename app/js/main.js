@@ -3968,6 +3968,25 @@ function loadWasteReceipt() {
             return;
         }
         wastePending = parsed.pieces || [];
+
+        // Sort so the same fabric's remnants sit together — the store person
+        // checks one fabric onto the rack, then the next. The server returns
+        // them oldest-first; a STABLE sort by fabric keeps that order within
+        // each fabric. Grouping key is materialId (the Raw_Material id), with
+        // the display name as a tiebreak so a piece that somehow has no id
+        // still lands beside its namesakes. wastePending is reordered in place,
+        // so every input's flat index still matches the row it is drawn on.
+        wastePending = wastePending
+            .map(function (p, i) { return { p: p, i: i }; })
+            .sort(function (a, b) {
+                var ka = String(a.p.materialId || '') + ' ' + String(a.p.material || '');
+                var kb = String(b.p.materialId || '') + ' ' + String(b.p.material || '');
+                if (ka < kb) return -1;
+                if (ka > kb) return 1;
+                return a.i - b.i;
+            })
+            .map(function (x) { return x.p; });
+
         renderWasteReceipt();
         // AFTER the first render, never before — loadWasteHistory draws into
         // #waste-hist-block, which does not exist until the panel has been built
@@ -4013,14 +4032,19 @@ function wasteRecvCarton(i) {
     return box ? String(box.value).trim() : '';
 }
 
-// Typing a carton fills the EMPTY ones below it. A rack of returns usually goes
-// into one or two boxes, so typing it once and having the rest follow is the
-// common case — and it only ever touches blanks, so nothing he has already
-// written is overwritten.
+// Typing a carton fills the EMPTY ones below it WITHIN THE SAME FABRIC. One
+// fabric's remnants go on the rack together, so typing the box once and having
+// that fabric's rows follow is the common case — but the next fabric is a
+// separate decision and a separate box, so the fill stops at the group boundary.
+// It only ever touches blanks, so nothing already written is overwritten.
 function onWasteCartonInput(i) {
     var val = wasteRecvCarton(i);
     if (val === '') return;
+    var here = wastePending[i];
+    var matKey = here ? String(here.materialId || here.material || '') : '';
     for (var j = i + 1; j < wastePending.length; j++) {
+        var q = wastePending[j];
+        if (String(q.materialId || q.material || '') !== matKey) break;
         var box = document.getElementById(wasteRecvCartonId(j));
         if (box && String(box.value).trim() === '') box.value = val;
     }
@@ -4077,6 +4101,11 @@ function wastePendingHtml() {
             '</div>';
     }
 
+    // SORTED so the same fabric's remnants sit next to each other — the store
+    // person checks one fabric onto the rack, then the next. It is only a sort:
+    // no group headers, no accordion. wastePending itself is re-ordered on load
+    // (see loadWasteReceipt) so every input's flat index still lines up with the
+    // row it is drawn against.
     var rows = wastePending.map(function (p, i) {
         var actionCell;
         if (wasteRecvEdit) {
@@ -4100,10 +4129,10 @@ function wastePendingHtml() {
             '<tr>' +
             '<td class="material-name-cell">' +
             '<div class="mat-name">&#9851; ' + escapeHtml(p.material || '—') + '</div>' +
-            '<div class="mat-sku">' + escapeHtml(p.salesOrder || '') +
-            (p.planNo ? ' · ' + escapeHtml(p.planNo) : '') +
-            ' · from ' + escapeHtml(p.supervisor || '—') +
-            ' · ' + escapeHtml(p.declaredOn || '') + '</div>' +
+            // Just who declared it and when — the order / plan number is not part
+            // of checking a remnant onto the rack.
+            '<div class="mat-sku">from ' + escapeHtml(p.supervisor || '—') +
+            (p.declaredOn ? ' · ' + escapeHtml(p.declaredOn) : '') + '</div>' +
             '</td>' +
             '<td class="col-num col-strong">' +
             '<span class="qty-big">' + p.count + '<span class="unit">pcs</span></span>' +
@@ -5254,13 +5283,6 @@ function renderHistory(handovers, lineCount) {
                 '<div class="mat-name">' + escapeHtml(l.material || '—') + '</div>' +
                 (l.sku ? '<div class="mat-sku">' + escapeHtml(l.sku) + '</div>' : '') +
                 '</td>' +
-                // WHICH ITEM this line was cut for. Issue_Lines carries Plan_Item
-                // on every row, so unlike the header (which latches one plan out
-                // of the fan-out) this is honest. A dash on a handover issued
-                // before the field existed or a trim line issued without one.
-                '<td>' + (l.itemName
-                    ? '<span class="hist-for-item">' + escapeHtml(l.itemName) + '</span>'
-                    : '<span class="is-muted">&mdash;</span>') + '</td>' +
                 '<td>' + (hasCut
                     ? '<span class="cut-size">' + fmt(l.cutLength) + ' &times; ' + fmt(l.cutWidth) + '<span class="unit">cm</span></span>'
                     : '<span class="is-muted">&mdash;</span>') + '</td>' +
@@ -5337,7 +5359,7 @@ function renderHistory(handovers, lineCount) {
             '<div class="tables-container">' +
             '<div class="table-wrapper">' +
             '<table><thead><tr>' +
-            '<th>Material</th><th>For item</th><th>Cut piece size</th><th>Lot</th><th class="col-num">Qty issued</th>' +
+            '<th>Material</th><th>Cut piece size</th><th>Lot</th><th class="col-num">Qty issued</th>' +
             '</tr></thead><tbody>' + lines + '</tbody></table>' +
             '</div>' +
             '</div>' +

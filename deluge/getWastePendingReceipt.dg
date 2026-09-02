@@ -20,6 +20,12 @@ string getWastePendingReceipt()
 	{
 	// Oldest first. A remnant that has been unconfirmed for a week is the one
 	// worth chasing, and it should not sit below this morning's.
+	//
+	// The widget GROUPS these by fabric (materialId, emitted below) so the store
+	// person checks one fabric's remnants in together before the next - but the
+	// grouping is done client-side, walking this list in order, so each fabric's
+	// rows keep this oldest-first sequence. Deluge sort by takes a single field,
+	// so a "SKU then Added_Time" server sort is not available anyway.
 	pending = Waste_Master[Status == "Pending_Receipt"] sort by Added_Time;
 	info "pending receipt rows: " + pending.count();
 
@@ -42,6 +48,10 @@ string getWastePendingReceipt()
 		{
 			pcStr = "0";
 		}
+
+		// materialId is the Raw_Material id (Waste_Master.SKU is a lookup) - the
+		// widget groups rows by it so all of one fabric's remnants sit together.
+		matId = ifnull(wp.SKU,"").toString().trim();
 
 		matName = "";
 		for each  rm in Raw_Material[ID == wp.SKU]
@@ -66,10 +76,12 @@ string getWastePendingReceipt()
 			}
 		}
 
-		// The declaration says which order and which stage produced it. Read
-		// from the movement, not the piece - the piece does not know.
-		soNo = "";
-		planNo = "";
+		// WHO declared it and WHEN, read off the Declared movement - the piece
+		// itself does not know. The order / plan number is deliberately NOT
+		// resolved: the store person checks a remnant onto the rack by fabric,
+		// size and lot, and which order it was cut for is not part of that
+		// decision. Dropping it also takes a Production_Planning and a
+		// Sales_Order query off every row.
 		supName = "";
 		declaredOn = "";
 
@@ -81,11 +93,6 @@ string getWastePendingReceipt()
 			}
 			for each  pl in Production_Planning[ID == mv.Plan]
 			{
-				planNo = ifnull(pl.Plan_No,"").toString();
-				for each  so in Sales_Order[ID == pl.Sales_Order]
-				{
-					soNo = ifnull(so.Sales_Order,"").toString();
-				}
 				for each  emp in Employee[ID == pl.Assigned_To]
 				{
 					supName = ifnull(emp.Employee_Name,"").toString().replaceAll("\"","'");
@@ -98,7 +105,7 @@ string getWastePendingReceipt()
 			rowsJson = rowsJson + ",";
 		}
 		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-		rowsJson = rowsJson + "{\"id\":\"" + wp.ID + "\",\"material\":\"" + matName + "\",\"width\":" + pwStr.toDecimal() + ",\"length\":" + plStr.toDecimal() + ",\"count\":" + pcStr.toDecimal().toLong() + ",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"supervisor\":\"" + supName + "\",\"declaredOn\":\"" + declaredOn + "\",\"lot\":\"" + lotNo + "\"}";
+		rowsJson = rowsJson + "{\"id\":\"" + wp.ID + "\",\"materialId\":\"" + matId + "\",\"material\":\"" + matName + "\",\"width\":" + pwStr.toDecimal() + ",\"length\":" + plStr.toDecimal() + ",\"count\":" + pcStr.toDecimal().toLong() + ",\"supervisor\":\"" + supName + "\",\"declaredOn\":\"" + declaredOn + "\",\"lot\":\"" + lotNo + "\"}";
 	}
 	}
 	catch (e)

@@ -2395,15 +2395,6 @@ th.col-num {
     color: var(--text-muted);
 }
 
-/* Which item a handover line's cloth was cut for. Honest per line
-   (Issue_Lines.Plan_Item), unlike the card header which names no order. */
-.hist-for-item {
-    display: inline-block;
-    font-size: 0.8rem;
-    color: var(--text-main);
-    white-space: nowrap;
-}
-
 /* Which physical pieces to fetch, under the lot line that names them. Only ever
    on a Pieces lot — printed cloth is a stack, not a roll he can measure off, so
    "9 Mtr off P1" is not an instruction anyone can follow. Indented under its lot

@@ -880,10 +880,11 @@ function supReceiptRows(receipts) {
             g.qty += Number(l.qty) || 0;
 
             var iName = l.itemName || '';
+            var iSku = l.itemSku || '';
             var iStat = l.itemStatus || '';
-            var iKey = JSON.stringify([iName, iStat]);
+            var iKey = JSON.stringify([iName, iSku, iStat]);
             if (!g.itemsByKey[iKey]) {
-                g.itemsByKey[iKey] = { name: iName, status: iStat, qty: 0 };
+                g.itemsByKey[iKey] = { name: iName, sku: iSku, status: iStat, qty: 0 };
                 g.itemOrder.push(iKey);
             }
             g.itemsByKey[iKey].qty += Number(l.qty) || 0;
@@ -945,7 +946,9 @@ function renderSupReceipts(receipts) {
             return '<tr class="recv-split-row">' +
                 '<td></td>' +
                 '<td class="recv-split-item">&rarr; ' +
-                    escapeHtml(it.name || 'Unassigned') + '</td>' +
+                    escapeHtml(it.name || 'Unassigned') +
+                    (it.sku ? ' <span class="recv-split-sku">' +
+                        escapeHtml(it.sku) + '</span>' : '') + '</td>' +
                 '<td class="col-num">' + fmt(it.qty) +
                     '<span class="unit">' + escapeHtml(r.unit) + '</span></td>' +
                 '<td>' + (lbl ? '<span class="recv-split-status">' +

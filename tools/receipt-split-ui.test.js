@@ -65,10 +65,10 @@ function receiptsFixture() {
   return [{
     time: '09:15', status: 'Issued',
     lines: [
-      { material: 'DMC Thread', unit: 'Cone', qty: 3, itemName: 'Napkins', itemStatus: 'In_Production' },
-      { material: 'DMC Thread', unit: 'Cone', qty: 2, itemName: 'Runners', itemStatus: 'Complete' },
-      { material: 'DMC Thread', unit: 'Cone', qty: 1, itemName: 'Napkins', itemStatus: 'In_Production' },
-      { material: 'Cotton 60in', unit: 'Mtr', qty: 40, itemName: '', itemStatus: '' },
+      { material: 'DMC Thread', unit: 'Cone', qty: 3, itemName: 'Napkins', itemSku: 'NAP-01', itemStatus: 'In_Production' },
+      { material: 'DMC Thread', unit: 'Cone', qty: 2, itemName: 'Runners', itemSku: 'RUN-01', itemStatus: 'Complete' },
+      { material: 'DMC Thread', unit: 'Cone', qty: 1, itemName: 'Napkins', itemSku: 'NAP-01', itemStatus: 'In_Production' },
+      { material: 'Cotton 60in', unit: 'Mtr', qty: 40, itemName: '', itemSku: '', itemStatus: '' },
     ],
   }];
 }
@@ -90,6 +90,7 @@ test('split: thread groups by item, same item merged', () => {
   const nap = thread.forItems.find((x) => x.name === 'Napkins');
   assert.strictEqual(nap.qty, 4, 'Napkins 3+1 merged');
   assert.strictEqual(nap.status, 'In_Production');
+  assert.strictEqual(nap.sku, 'NAP-01', 'item SKU carried onto the group');
   const run = thread.forItems.find((x) => x.name === 'Runners');
   assert.strictEqual(run.qty, 2);
 });
@@ -118,6 +119,7 @@ test('render: split sub-rows appear under the material, labelled', () => {
   assert.ok(/recv-split-row/.test(html), 'a split row is rendered');
   assert.ok(/&rarr; Napkins/.test(html), 'Napkins sub-row');
   assert.ok(/&rarr; Runners/.test(html), 'Runners sub-row');
+  assert.ok(/recv-split-sku[^>]*>NAP-01/.test(html), 'item SKU shown on the sub-row');
   assert.ok(/In production/.test(html), 'status label mapped, not the raw code');
   // The blank-bucket material must NOT get a "-> Unassigned" row (suppressed).
   assert.ok(!/Unassigned/.test(html), 'no Unassigned row for the suppressed bucket');
