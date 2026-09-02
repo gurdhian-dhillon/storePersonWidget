@@ -1503,6 +1503,19 @@
     height: 100%;
     object-fit: cover;
     display: block;
+    cursor: zoom-in;
+}
+
+.hist-photo.is-broken {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hist-photo.is-broken::after {
+    content: "!";
+    font-weight: 700;
+    color: var(--text-muted);
 }
 
 .hist-photos-note {
