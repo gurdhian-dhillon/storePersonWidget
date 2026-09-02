@@ -3254,6 +3254,23 @@ function confirmWaste() {
 		});
 }
 
+// Called from the Order Overview tab's "Open in Production" button. Same effect
+// as picking the plan in the dropdown — refetch that one order — but reachable
+// from another tab. Guarded on the plan existing in the picker: the Overview
+// list uses the same 4-status open set, so it always should, but a plan that
+// completed between the two screens loading would not.
+function productionSelectPlan(planId) {
+	const pid = String(planId || "");
+	if (!pid) return;
+	selectedPlanId = pid;
+	openItemId = undefined;
+	itemPage = 0;
+	itemSearch = "";
+	if (elPlanSelect) elPlanSelect.value = pid;
+	showLoading();
+	fetchAllData();
+}
+
 // Initial setup
 // Picker changes are handled by the shell, which reloads whichever tab is
 // open. selectedSupId is read from the shared control at fetch time.
@@ -3287,6 +3304,17 @@ elPlanSelect.addEventListener("change", (e) => {
 // NOT loaded on boot. Production is a lazy tab: the shell calls this the first
 // time it is opened, so arriving at Receive does not pay for it.
 TAB_LOADERS.production = function () {
+	// The Order Overview tab may have asked to open a specific plan. Consumed
+	// once, here — set selectedPlanId before fetchAllData so its auto-select
+	// (first workable plan) is pre-empted and the fetch pulls this plan's items.
+	// productionSelectPlan covers the case where this tab was already loaded.
+	if (window.__ovJumpPlanId) {
+		selectedPlanId = String(window.__ovJumpPlanId);
+		openItemId = undefined;
+		itemPage = 0;
+		itemSearch = "";
+		delete window.__ovJumpPlanId;
+	}
 	showLoading();
 	fetchAllData();
 };

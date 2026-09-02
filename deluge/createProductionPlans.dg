@@ -509,10 +509,26 @@ string createProductionPlans()
 		// needed so the store screen can badge the card. Without it the top card
 		// is at the top for a reason nobody on screen can see, and the first
 		// person to disagree with the order has nothing to point at.
+		//
+		// Sales_Order_No / Customer_Person_Name are the same kind of snapshot -
+		// so the supervisor Order Overview tab reads Production_Planning alone,
+		// no per-plan Sales_Order hop. Plan_End_Date (from Expected_Delivery_Date)
+		// is set after the insert because a null cannot go in the field list.
+		// Legacy path - createPlanForOneOrder does the same; kept in step.
+		soDeliv = null;
+		if(so.Expected_Delivery_Date != null)
+		{
+			soDeliv = so.Expected_Delivery_Date;
+		}
+		soCustPerson = ifnull(so.Customer_Person_Name,"").toString();
+		soNoTxt = ifnull(so.Sales_Order,"").toString();
+
 		newPlan = insert into Production_Planning
 		[
 			Plan_No=planNo
 			Sales_Order=soId
+			Sales_Order_No=soNoTxt
+			Customer_Person_Name=soCustPerson
 			Assigned_To=assignedEmpId
 			Order_Status="Pending"
 			Plan_Start_Date=zoho.currentdate
@@ -529,6 +545,10 @@ string createProductionPlans()
 			if(firstCreatedPlanId == "")
 			{
 				firstCreatedPlanId = currentPlanId;
+			}
+			if(soDeliv != null)
+			{
+				planRec.Plan_End_Date = soDeliv;
 			}
 			// Plan_Item first, then its requirements - a Material_Requirement
 			// cannot be written until the item it belongs to has an id.

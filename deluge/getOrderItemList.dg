@@ -1,0 +1,106 @@
+string getOrderItemList(string planId)
+{
+	// The items on ONE order's plan, for the Order Overview tab's accordion.
+	// POST, one argument. Fired lazily when the supervisor opens an order - so
+	// the overview list itself pays nothing for item detail.
+	//
+	// BOUNDED: Plan_Item[Plan == planId] - one plan, ~110 rows at the outside,
+	// ONE query, walked twice in memory. No child queries.
+	//
+	// ONE ROW PER ORIGINAL ORDER LINE. Is_Remake rows (QC remakes, alteration
+	// batches) are NOT listed - but they are NOT ignored either. A rejected or
+	// altered batch is spun off as its own Plan_Item at check time and the
+	// original is marked Complete; that Complete is true of the BATCH, not of
+	// the order line, which is not finished until the remake finishes too.
+	//
+	// So the status shown for an original is ROLLED UP: if the original OR any
+	// of its remake/alteration children (Remake_Of == original.ID) is not yet
+	// Complete, the row reads "In_Production". Only when the original and every
+	// child are Complete does it read "Complete". Same idea as "if anything
+	// related to this line is still on the production screen, it is in
+	// production".
+	//
+	// remakeCount is still returned for the "+ N remake batches in progress"
+	// note under the table.
+
+	itemsJson = "";
+	remakeCount = 0;
+
+	// Same debug wrapper as the other functions - Creator collapses every
+	// runtime failure into a generic "code 9430", so catch the real message.
+	try
+	{
+		pTxt = ifnull(planId,"").toString().trim();
+		if(pTxt == "" || pTxt.isNumber() == false)
+		{
+			return "{\"errors\":[\"planId is required\"],\"items\":[],\"remakeCount\":0}";
+		}
+		pId = pTxt.toLong();
+
+		// sort by on its own assignment, never inline in a for-each header.
+		plItems = Plan_Item[Plan == pId] sort by Line_No;
+
+		//------------------------------------------------------------------
+		// PASS 1 - which ORIGINAL lines have an unfinished remake/alteration
+		// child. Remake_Of always points at the ROOT (the original line's id),
+		// never at a previous remake, so this is one flat pass. rootId as a
+		// string key, "1" meaning "has a child that is not Complete".
+		//------------------------------------------------------------------
+		remakeOpenByRoot = Map();
+
+		for each  chk in plItems
+		{
+			if(ifnull(chk.Is_Remake,false) == true)
+			{
+				remakeCount = remakeCount + 1;
+
+				if(chk.Remake_Of != null)
+				{
+					rootKey = chk.Remake_Of.toString();
+					chkStat = ifnull(chk.Item_Status,"").toString().trim();
+					if(chkStat != "Complete")
+					{
+						remakeOpenByRoot.put(rootKey,"1");
+					}
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// PASS 2 - emit one row per ORIGINAL, status rolled up.
+		//------------------------------------------------------------------
+		for each  itm in plItems
+		{
+			if(ifnull(itm.Is_Remake,false) == false)
+			{
+				// Item_Name is free text from the order line - flatten newlines
+				// for JSON. No Item_Master hop: the overview does not show SKU.
+				nameTxt = ifnull(itm.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
+				ownStat = ifnull(itm.Item_Status,"").toString().trim();
+
+				// Rolled up: the original is only "done" if it is Complete AND
+				// no child is still open. Anything else reads as in production.
+				rollStat = ownStat;
+				if(ownStat == "Complete" && remakeOpenByRoot.get(itm.ID.toString()) == "1")
+				{
+					rollStat = "In_Production";
+				}
+
+				if(itemsJson != "")
+				{
+					itemsJson = itemsJson + ",";
+				}
+				// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+				itemsJson = itemsJson + "{\"itemId\":\"" + itm.ID + "\",\"name\":\"" + nameTxt + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"status\":\"" + rollStat + "\"}";
+			}
+		}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"items\":[],\"remakeCount\":0}";
+	}
+
+	// Built by hand - List.toString() does not reliably wrap in [].
+	return "{\"errors\":[],\"items\":[" + itemsJson + "],\"remakeCount\":" + remakeCount + "}";
+}

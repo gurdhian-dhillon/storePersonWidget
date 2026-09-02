@@ -73,7 +73,7 @@ document.querySelectorAll('.tab-btn').forEach(function (btn) {
 function loadSupCounts() {
     var supId = currentSupervisorId();
     if (!supId) {
-        ['count-receive', 'count-production', 'count-disputes', 'count-waste', 'count-reissue']
+        ['count-receive', 'count-production', 'count-order-overview', 'count-disputes', 'count-waste', 'count-reissue']
             .forEach(function (id) { setTabCount(id, 0); });
         return;
     }
@@ -103,6 +103,12 @@ function loadSupCounts() {
             setTabCount('count-receive', parsed.pendingReceive || 0);
         }
         setTabCount('count-production', parsed.activePlans || 0);
+        // Order Overview lists the same open plans, so activePlans is the exact
+        // count. Its own render overrides with orders.length once loaded (which
+        // is the same number) — the proxy just fills in before first open.
+        if (!tabsLoaded['order-overview']) {
+            setTabCount('count-order-overview', parsed.activePlans || 0);
+        }
         setTabCount('count-disputes', parsed.openDisputes || 0);
         setTabCount('count-waste', parsed.wasteWaiting || 0);
         // Counted from open Material_Damage headers, while the tab's own render

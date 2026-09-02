@@ -258,10 +258,39 @@ string createPlanForOneOrder(int soId)
 				}
 				priorityKey = (srcRank * 1000000) + maxNum;
 
+				// SNAPSHOT FROM THE ORDER onto the plan, so the supervisor's
+				// Order Overview tab (getSupervisorOrderOverview) can read one
+				// Production_Planning query and nothing else - no per-plan
+				// Sales_Order hop for ~100 open plans.
+				//   Plan_End_Date        <- Expected_Delivery_Date (the field
+				//                           already existed on the plan, empty)
+				//   Customer_Person_Name <- so.Customer_Person_Name
+				//   Sales_Order_No       <- so.Sales_Order (text; Sales_Order
+				//                           itself is the lookup)
+				// These are a snapshot, not a live mirror: the ORDER status is
+				// NOT copied because it changes constantly (the overview uses the
+				// plan's own Order_Status). A delivery date edited on the order
+				// after planning would need re-syncing the plan, which is
+				// acceptable - the date rarely moves and the overview is
+				// decision support, not a contract.
+				//
+				// NO COMMENTS INSIDE THE insert BLOCK BELOW - a "//" line in a
+				// Deluge insert field list is a syntax error reported against the
+				// function's opening try, nowhere near here.
+				soDeliv = null;
+				if(so.Expected_Delivery_Date != null)
+				{
+					soDeliv = so.Expected_Delivery_Date;
+				}
+				soCustPerson = ifnull(so.Customer_Person_Name,"").toString();
+				soNoTxt = ifnull(so.Sales_Order,"").toString();
+
 				newPlan = insert into Production_Planning
 				[
 					Plan_No=planNo
 					Sales_Order=soId2
+					Sales_Order_No=soNoTxt
+					Customer_Person_Name=soCustPerson
 					Assigned_To=assignedEmpId
 					Order_Status="Pending"
 					Plan_Start_Date=zoho.currentdate
@@ -273,6 +302,14 @@ string createPlanForOneOrder(int soId)
 
 				for each  planRec in Production_Planning[Plan_No == planNo]
 				{
+					// Plan_End_Date is set here, not in the insert block above -
+					// a null cannot go in an insert field list, and a plan whose
+					// order carried no delivery date legitimately has none.
+					if(soDeliv != null)
+					{
+						planRec.Plan_End_Date = soDeliv;
+					}
+
 					lineNo = 0;
 					for each  piMap2 in planItems
 					{

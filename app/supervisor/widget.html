@@ -30,6 +30,12 @@
             <button type="button" class="tab-btn is-active" data-tab="receive">
                 Receive<span class="tab-count hidden" id="count-receive"></span>
             </button>
+            <!-- Read-only decision view: his open orders with customer, delivery
+                 date and status, so he can pick what to produce next before
+                 opening the Production tab. -->
+            <button type="button" class="tab-btn" data-tab="order-overview">
+                Order Overview<span class="tab-count hidden" id="count-order-overview"></span>
+            </button>
             <button type="button" class="tab-btn" data-tab="production">
                 Production<span class="tab-count hidden" id="count-production"></span>
             </button>
@@ -81,6 +87,7 @@
                 </div>
             </section>
 
+            <section class="tab-panel" id="panel-order-overview"></section>
             <section class="tab-panel" id="panel-reissue"></section>
             <section class="tab-panel" id="panel-history"></section>
             <section class="tab-panel" id="panel-disputes"></section>
@@ -103,6 +110,10 @@
     <script src="js/receive.js"></script>
     <script src="js/production.js"></script>
     <script src="js/tabs.js"></script>
+    <!-- After production.js: "Open in Production" calls productionSelectPlan by
+         name. Needs shell.js (TAB_LOADERS, showTab, setTabCount) and receive.js
+         (escapeHtml, fmt) already loaded. -->
+    <script src="js/order-overview.js"></script>
     <!-- After production.js: the item card looks up openDamageDialog by name
          when it wires the Report damage button. -->
     <script src="js/reissue.js"></script>

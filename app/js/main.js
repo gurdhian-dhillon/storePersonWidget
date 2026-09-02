@@ -5254,6 +5254,13 @@ function renderHistory(handovers, lineCount) {
                 '<div class="mat-name">' + escapeHtml(l.material || '—') + '</div>' +
                 (l.sku ? '<div class="mat-sku">' + escapeHtml(l.sku) + '</div>' : '') +
                 '</td>' +
+                // WHICH ITEM this line was cut for. Issue_Lines carries Plan_Item
+                // on every row, so unlike the header (which latches one plan out
+                // of the fan-out) this is honest. A dash on a handover issued
+                // before the field existed or a trim line issued without one.
+                '<td>' + (l.itemName
+                    ? '<span class="hist-for-item">' + escapeHtml(l.itemName) + '</span>'
+                    : '<span class="is-muted">&mdash;</span>') + '</td>' +
                 '<td>' + (hasCut
                     ? '<span class="cut-size">' + fmt(l.cutLength) + ' &times; ' + fmt(l.cutWidth) + '<span class="unit">cm</span></span>'
                     : '<span class="is-muted">&mdash;</span>') + '</td>' +
@@ -5330,7 +5337,7 @@ function renderHistory(handovers, lineCount) {
             '<div class="tables-container">' +
             '<div class="table-wrapper">' +
             '<table><thead><tr>' +
-            '<th>Material</th><th>Cut piece size</th><th>Lot</th><th class="col-num">Qty issued</th>' +
+            '<th>Material</th><th>For item</th><th>Cut piece size</th><th>Lot</th><th class="col-num">Qty issued</th>' +
             '</tr></thead><tbody>' + lines + '</tbody></table>' +
             '</div>' +
             '</div>' +

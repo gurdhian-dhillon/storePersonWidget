@@ -409,6 +409,26 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 		}
 	}
 
+	// WHICH ITEM EACH ISSUE LINE WAS FOR - the "how this handover was divided"
+	// detail the card expands to. Issue_Lines.Plan_Item is stamped by
+	// issueMaterials on every line it can resolve one for, so the item id is
+	// read straight off the line and no Material_Requirement hop is needed.
+	//
+	// This is HONEST per line, unlike Material_Issue.Plan on the header - that
+	// holds only the first plan the fan-out touched, which is why the header
+	// carries no order. A LINE has exactly one Plan_Item, so it can name it.
+	//
+	// Two id-keyed maps (name, status) filled together in one indexed query per
+	// DISTINCT item on the page, read for free after that - a handover of a
+	// common trim names the same few items on many lines. TWO maps rather than
+	// one "name|status" string because Item_Name is flattened with " | " and a
+	// delimiter split would break on a name that contains a pipe. A seen item
+	// with an empty status is remembered in itemSeenMap so it is not re-queried.
+	// Same shape as planOwner / empCache / matNameMap above.
+	itemNameMap = Map();
+	itemStatMap = Map();
+	itemSeenMap = Map();
+
 	for each  mi in issues
 	{
 		// This press's chunks - head plus siblings, oldest first. The head's
@@ -474,11 +494,43 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 					rName = ifnull(rln.Material_Name,"").toString().trim().replaceAll("\"","'");
 				}
 
+				// The item this line's quantity was cut for. Plan_Item is a
+				// LOOKUP - toString() gives the record id, which is the map key.
+				// Empty on a pre-Plan_Item handover or a line issued without one;
+				// the "" key just misses the map and the line carries blank item
+				// fields, which the widget folds into an "unassigned" bucket.
+				rItemKey = "";
+				if(rln.Plan_Item != null)
+				{
+					rItemKey = rln.Plan_Item.toString().trim();
+				}
+				rItemName = "";
+				rItemStat = "";
+				if(rItemKey != "" && rItemKey.isNumber() == true)
+				{
+					if(ifnull(itemSeenMap.get(rItemKey),"").toString() == "")
+					{
+						// Cache the miss first, so an unreadable id is not
+						// re-queried on every line that names it.
+						itemSeenMap.put(rItemKey,"1");
+						itemNameMap.put(rItemKey,"");
+						itemStatMap.put(rItemKey,"");
+						for each  piC in Plan_Item[ID == rItemKey.toLong()]
+						{
+							piName = ifnull(piC.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+							itemNameMap.put(rItemKey,piName);
+							itemStatMap.put(rItemKey,ifnull(piC.Item_Status,"").toString().trim());
+						}
+					}
+					rItemName = ifnull(itemNameMap.get(rItemKey),"").toString();
+					rItemStat = ifnull(itemStatMap.get(rItemKey),"").toString();
+				}
+
 				if(rLines != "")
 				{
 					rLines = rLines + ",";
 				}
-				rLines = rLines + "{\"material\":\"" + rName + "\",\"qty\":" + rqStr.toDecimal() + ",\"unit\":\"" + ifnull(rln.Unit,"").toString() + "\"}";
+				rLines = rLines + "{\"material\":\"" + rName + "\",\"qty\":" + rqStr.toDecimal() + ",\"unit\":\"" + ifnull(rln.Unit,"").toString() + "\",\"itemId\":\"" + rItemKey + "\",\"itemName\":\"" + rItemName + "\",\"itemStatus\":\"" + rItemStat + "\"}";
 				totalRecvLines = totalRecvLines + 1;
 			}
 		}

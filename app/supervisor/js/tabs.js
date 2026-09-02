@@ -846,6 +846,14 @@ function histBar(items, stageCount, producedTotal) {
 // He carried that thread once. His own Receive tab already states the rule —
 // "one line per physical thing, not per order" — so this follows it rather than
 // inventing a third way to lay out the same event.
+//
+// EACH MATERIAL ROW KEEPS ITS PER-ITEM SPLIT as forItems[], rolled up from the
+// same lines by (itemName, itemStatus). This is the "how was this handover
+// divided" detail — the store fanned one press of Issue across several of his
+// items, and this is which line went where. It is honest per line: Issue_Lines
+// carries Plan_Item on every row (getSupervisorProductionHistory now emits it),
+// unlike Material_Issue.Plan on the header, which is why the row itself still
+// names no single order. Lines with no item fold into one blank-name bucket.
 function supReceiptRows(receipts) {
     var rows = [];
 
@@ -862,19 +870,40 @@ function supReceiptRows(receipts) {
             // inside it.
             var key = JSON.stringify([l.material || '', l.unit || '']);
             if (!byMat[key]) {
-                byMat[key] = { material: l.material || '—', unit: l.unit || '', qty: 0 };
+                byMat[key] = {
+                    material: l.material || '—', unit: l.unit || '', qty: 0,
+                    itemsByKey: {}, itemOrder: []
+                };
                 order.push(key);
             }
-            byMat[key].qty += Number(l.qty) || 0;
+            var g = byMat[key];
+            g.qty += Number(l.qty) || 0;
+
+            var iName = l.itemName || '';
+            var iStat = l.itemStatus || '';
+            var iKey = JSON.stringify([iName, iStat]);
+            if (!g.itemsByKey[iKey]) {
+                g.itemsByKey[iKey] = { name: iName, status: iStat, qty: 0 };
+                g.itemOrder.push(iKey);
+            }
+            g.itemsByKey[iKey].qty += Number(l.qty) || 0;
         });
 
         order.forEach(function (k) {
+            var g = byMat[k];
+            var forItems = g.itemOrder.map(function (ik) { return g.itemsByKey[ik]; });
+            // Nothing to show if the whole material went to a single unnamed
+            // bucket — that is the old pre-Plan_Item handover, and a one-row
+            // breakdown repeating the material name earns nothing.
+            var hasSplit = forItems.length > 1 ||
+                (forItems.length === 1 && forItems[0].name !== '');
             rows.push({
                 time: r.time || '—',
                 settled: r.status === 'Received',
-                material: byMat[k].material,
-                unit: byMat[k].unit,
-                qty: byMat[k].qty
+                material: g.material,
+                unit: g.unit,
+                qty: g.qty,
+                forItems: hasSplit ? forItems : []
             });
         });
     });
@@ -890,12 +919,14 @@ function renderSupReceipts(receipts) {
     // that repeats one value is a column that earns nothing. Time stays: two
     // handovers in a morning are worth telling apart.
     //
-    // No order column either. A handover is one press of Issue against a
-    // SUPERVISOR, and the store fans that quantity across every open plan he
-    // has — so naming one order claimed "this material went to that order" when
-    // it routinely went to three. Same reason the store's own History dropped it.
+    // No order column in the MAIN row — a handover is one press of Issue against
+    // a SUPERVISOR, and the store fans that quantity across several of his open
+    // plans, so the header has no single right answer. But the per-line split
+    // IS honest (Issue_Lines.Plan_Item), so it hangs under the material as
+    // sub-rows: "→ Napkins  40 Mtr  In production". Shown only when the material
+    // actually went to a named item (forItems set by supReceiptRows).
     var html = rows.map(function (r) {
-        return '<tr>' +
+        var mainRow = '<tr>' +
             '<td>' + escapeHtml(r.time) + '</td>' +
             '<td class="material-name-cell">' +
                 '<div class="mat-name">' + escapeHtml(r.material) + '</div>' +
@@ -908,6 +939,21 @@ function renderSupReceipts(receipts) {
                 (r.settled ? 'Received' : 'Awaiting your check') +
             '</span></td>' +
         '</tr>';
+
+        var splitRows = (r.forItems || []).map(function (it) {
+            var lbl = itemStatusLabel(it.status);
+            return '<tr class="recv-split-row">' +
+                '<td></td>' +
+                '<td class="recv-split-item">&rarr; ' +
+                    escapeHtml(it.name || 'Unassigned') + '</td>' +
+                '<td class="col-num">' + fmt(it.qty) +
+                    '<span class="unit">' + escapeHtml(r.unit) + '</span></td>' +
+                '<td>' + (lbl ? '<span class="recv-split-status">' +
+                    escapeHtml(lbl) + '</span>' : '') + '</td>' +
+            '</tr>';
+        }).join('');
+
+        return mainRow + splitRows;
     }).join('');
 
     var handovers = (receipts || []).length;
