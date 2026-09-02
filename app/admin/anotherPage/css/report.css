@@ -579,3 +579,195 @@
     transform: rotate(90deg);
 }
 
+/* ---- Sub-stage Toolbar & Chips ---- */
+.sub-stage-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 14px 0 8px;
+    padding: 10px 14px;
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    flex-wrap: wrap;
+}
+
+.sub-toolbar-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+}
+
+.sub-chip-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.sub-chip {
+    padding: 4px 10px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    color: #475569;
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.sub-chip:hover {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+}
+
+.sub-chip.is-active {
+    background: #1e40af;
+    color: #ffffff;
+    border-color: #1e40af;
+    box-shadow: 0 1px 3px rgba(30, 64, 175, 0.25);
+}
+
+/* ---- Multi-Segment Item Progress Bar ---- */
+.item-progress-bar {
+    display: flex;
+    height: 8px;
+    width: 100%;
+    min-width: 140px;
+    max-width: 280px;
+    background: #e2e8f0;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 4px;
+}
+
+.bar-seg {
+    height: 100%;
+    transition: width 0.3s ease;
+}
+
+.seg-in-prod { background: #3b82f6; }   /* Blue - Stitching */
+.seg-prod-comp { background: #f59e0b; } /* Amber - QC Queue */
+.seg-qc-pass { background: #10b981; }   /* Emerald - QC Passed */
+.seg-fin-comp { background: #8b5cf6; }  /* Purple - Finishing */
+.seg-alt { background: #ef4444; }       /* Red - Alteration */
+
+.item-legend {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: #64748b;
+}
+
+.leg-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-weight: 500;
+}
+
+.leg-item i {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+}
+
+.leg-in-prod i { background: #3b82f6; }
+.leg-prod-comp i { background: #f59e0b; }
+.leg-qc-pass i { background: #10b981; }
+.leg-fin-comp i { background: #8b5cf6; }
+.leg-alt i { background: #ef4444; }
+
+/* ---- Item Breakdown Drawer ---- */
+.item-drawer-row {
+    background: #f8fafc !important;
+}
+
+.item-drawer-wrap {
+    padding: 12px 16px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    margin: 6px 0;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.02);
+}
+
+.item-drawer-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #334155;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.item-drawer-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px !important;
+}
+
+.item-drawer-table th {
+    background: #f1f5f9 !important;
+    color: #475569 !important;
+    padding: 6px 10px !important;
+    font-size: 11px !important;
+    font-weight: 700 !important;
+}
+
+.item-drawer-table td {
+    padding: 6px 10px !important;
+    border-bottom: 1px solid #e2e8f0 !important;
+    color: #1e293b !important;
+}
+
+.pill-qc { background: #fef3c7; color: #92400e; }
+.pill-remake { background: #ffe4e6; color: #be123c; font-weight: 700; }
+
+/* Scrollable drawer table for 100+ items with sticky headers */
+.item-drawer-scroll {
+    max-height: 380px;
+    overflow-y: auto;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    margin-top: 6px;
+}
+
+.item-drawer-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+
+.item-search-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.item-search-input {
+    padding: 6px 12px;
+    font-size: 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    width: 240px;
+    outline: none;
+}
+
+.item-search-input:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+
