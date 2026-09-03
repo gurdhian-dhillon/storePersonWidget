@@ -3761,7 +3761,6 @@ function loadRequirements() {
     var refreshBtn = document.getElementById('refresh-btn');
     emptyState.classList.add('hidden');
     refreshBtn.disabled = true;
-    // Kick off indeterminate until getOpenPlanCount tells us the page count.
     LoadProgress.start(content, 'Counting open orders…', 0);
 
     function done(merged) {
@@ -3782,6 +3781,27 @@ function loadRequirements() {
         content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Failed to load requirements</h2><p>Check the browser console for details.</p></div>';
     }
 
+    // ============================ EXPERIMENT ==============================
+    // The custom-API path (getOpenPlanCount + parallel getStoreMaterialRequirements
+    // pages) is COMMENTED OUT below. Requirements are fetched with the Creator JS
+    // Data API instead, via ApiExperiment.run(). This is a temporary swap for
+    // measuring the JS-API approach — restore the block below to go back.
+    //
+    // KNOWN GAP: ApiExperiment does NOT run the fabric allocator, so fabric rows
+    // arrive without wastePicks / freshMeters / the outstanding-pieces split.
+    // The screen will render aggregate required/issued but fabric issue rows
+    // will be incomplete until the allocator is ported too.
+    LoadProgress.start(content, 'Loading requirements (JS Data API)…', 0);
+    if (typeof ApiExperiment === 'undefined' || !ApiExperiment.run) {
+        return fail(new Error('ApiExperiment not loaded — check js/api-experiment.js'));
+    }
+    ApiExperiment.run().then(function (out) {
+        done(out.plans || []);
+    }).catch(fail);
+    return;
+    // ====================================================================
+
+    /* CUSTOM-API PATH — restore to revert the experiment.
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getOpenPlanCount',
         http_method: 'POST',
@@ -3791,8 +3811,6 @@ function loadRequirements() {
         try { count = (JSON.parse(response.result) || {}).count || 0; } catch (e) { count = 0; }
 
         if (!count || count < 0) {
-            // Nothing open, or the count call gave us nothing usable — the
-            // sequential walk handles both (it returns [] fast when empty).
             LoadProgress.setTitle('Loading material requirements…');
             return loadRequirementsSequential(content, done, fail);
         }
@@ -3802,9 +3820,8 @@ function loadRequirements() {
         var pending = pages;
         var failed = false;
 
-        // Total units of work = the count call (already done) + one per page.
         LoadProgress.start(content, 'Loading ' + count + ' order' + (count === 1 ? '' : 's') + '…', pages + 1);
-        LoadProgress.tick(); // the getOpenPlanCount call that just returned
+        LoadProgress.tick();
         LoadProgress.setSub(pages === 1
             ? 'One page to fetch.'
             : pages + ' pages to fetch, in parallel.');
@@ -3828,8 +3845,6 @@ function loadRequirements() {
                 }).catch(function (err) {
                     if (failed) return;
                     failed = true;
-                    // One window failed — fall back to the sequential walk from
-                    // scratch rather than render a half-loaded screen.
                     console.warn('parallel page at skip ' + skip + ' failed, falling back to sequential', err);
                     LoadProgress.start(content, 'Loading material requirements…', 0);
                     loadRequirementsSequential(content, done, fail);
@@ -3841,6 +3856,7 @@ function loadRequirements() {
         LoadProgress.start(content, 'Loading material requirements…', 0);
         loadRequirementsSequential(content, done, fail);
     });
+    */
 }
 
 // THE ORIGINAL CHAINED WALK, kept as the fallback path. Each call's cursor is

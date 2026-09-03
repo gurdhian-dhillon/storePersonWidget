@@ -3,12 +3,13 @@ string seedSalesOrders()
 	res = "{\"errors\":[\"Nothing ran\"]}";
 	try
 	{
-		// 1. Get the single customer
+		// 1. Get the single customer. No break - Deluge for each has no reliable
+		// one, so the body just keeps the last id it sees; with one customer in
+		// the table that is the only id anyway.
 		custId = 0;
-		for each  cust in Customer[ID != 0]
+		for each  cust in Customer_Master[ID != 0]
 		{
 			custId = cust.ID;
-			break;
 		}
 
 		if(custId == 0)
@@ -28,7 +29,7 @@ string seedSalesOrders()
 				
 				// TODO: Replace 'Item_Name' and 'Rate' with your actual Item_Master field link names!
 				itemNames.put(sku,ifnull(itm.Item_Name,"").toString());
-				itemRates.put(sku,ifnull(itm.Rate,0.0).toDecimal());
+				itemRates.put(sku,ifnull(itm.Sales_Price,0.0).toDecimal());
 			}
 		}
 
@@ -39,6 +40,14 @@ string seedSalesOrders()
 
 		createdCount = 0;
 		timestampTxt = zoho.currenttime.toString("MMddHHmmss");
+
+		// A pool of contact names, picked at RANDOM per order so the seeded set
+		// spreads unevenly across ~14 people the way real orders do - the
+		// Overview tab's Customer sort and search have something to bite on.
+		// Only Customer_Person_Name and Expected_Delivery_Date are seeded here -
+		// NOT Reference or anything else.
+		personPool = {"Aarav Shah","Priya Menon","Rahul Nair","Sana Kapoor","Vikram Rao","Neha Iyer","Karan Malhotra","Divya Reddy","Ishaan Gupta","Ananya Bose","Rohan Verma","Meera Joshi","Aditya Kulkarni","Tara D'Souza"};
+		personCount = personPool.size();
 
 		// 3. Create 100 Sales Orders (Nested loop 10x10 = 100)
 		tens = {0,1,2,3,4,5,6,7,8,9};
@@ -70,18 +79,51 @@ string seedSalesOrders()
 				// Generate SO Number from SO-01000 to SO-01099
 				soNumber = "SO-0" + (999 + createdCount);
 
+				// PSEUDO-RANDOM from the order index. No built-in RNG is relied
+				// on - two linear-congruential style hashes off createdCount,
+				// each with a different multiplier, give a well-mixed spread that
+				// is also repeatable (handy when re-running the seed). A large
+				// prime multiplier and mod keep successive orders unrelated.
+				hashA = (createdCount * 2654435761) % 1000003;
+				hashB = (createdCount * 40503 + 12345) % 999983;
+
+				// Contact name: pick from the pool. Deluge list.get is 0-indexed,
+				// so the modulo result (0 .. personCount-1) is the index as-is.
+				personName = personPool.get(hashA % personCount);
+
+				// Expected delivery: offset -10..+45 days, so the Overview tab's
+				// delivery sort has a real spread and a handful land in the past
+				// for the "Overdue" flag. Roughly 1 in 7 gets NO date so the
+				// "undated last" sort path is covered too.
+				delivDate = null;
+				if(hashB % 7 != 0)
+				{
+					delivDate = zoho.currentdate.addDay((hashB % 56) - 10);
+				}
+
 				insertResult = insert into Sales_Order
 				[
 					Sales_Order_Date=zoho.currentdate
 					Customer=custId
 					Sales_Order=soNumber
-					Total=0.0
-					Grand_Total=0.0
+					Sub_Total1=10.0
+					Grand_Total=10.0
 					Order_Status="Pending"
-					Order_Source="Test Script"
+					Order_Source="Shopify"
+					Customer_Person_Name=personName
 					Item_Table=rowCollection
 					Added_User=zoho.loginuser
 				];
+
+				// A null cannot go in the insert block, so the date - which is
+				// deliberately null for ~1 in 8 orders - is set afterwards.
+				if(delivDate != null)
+				{
+					for each  soNew in Sales_Order[ID == insertResult]
+					{
+						soNew.Expected_Delivery_Date = delivDate;
+					}
+				}
 			}
 		}
 
