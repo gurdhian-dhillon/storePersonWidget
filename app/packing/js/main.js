@@ -1719,6 +1719,9 @@ var PackingScreen = (function () {
                 ' &middot; ' + plural(n(p.boxCount), 'box') +
                 ' &middot; ' + plural(n(p.pieces), 'piece');
 
+            var texus = texusBlock(p);
+            var gadInv = gadInvoiceBlock(p);
+
             return '<div class="item-card' + (open ? ' open' : '') + '">' +
                 '<div class="item-header" onclick="PackingScreen.toggleHistory(\'' + esc(p.id) + '\')">' +
                 '<div class="item-header-info">' +
@@ -1753,6 +1756,8 @@ var PackingScreen = (function () {
                 '<span>Inner cartons <b>' + n(p.innerBoxCount) + ' of ' + n(p.boxCount) + '</b></span>' +
                 (p.source ? '<span>Source <b>' + esc(p.source) + '</b></span>' : '') +
                 '</div>' +
+                texus +
+                gadInv +
                 (n(p.imageCount) > 0
                     ? '<div class="hist-photos-wrap"><div class="hist-photos-head">Photos</div>' +
                       '<div class="hist-photos" id="hist-photos-' + esc(p.id) + '">' +
@@ -1762,6 +1767,165 @@ var PackingScreen = (function () {
                 '</div>' +
                 '</div>';
         }).join('');
+    }
+
+    // ---- Texus Inventory push status --------------------------------------
+    //
+    // savePackingRecord calls pushPackingToTexus, which creates a Package on the
+    // Texus sales order and stamps the outcome on the Packing row. This shows
+    // that outcome under the weights, and gives a Retry button when it FAILED or
+    // was SKIPPED (skipped == the sales order had no Reference number; a retry
+    // is worth offering because someone may have filled it in since).
+    function texusBlock(p) {
+        var st = String(p.texusStatus || '');
+        var cls = 'is-pending';
+        var label = 'Not sent to Texus';
+        var showRetry = false;
+
+        if (st === 'Sent') {
+            cls = 'is-sent';
+            label = 'Sent to Texus' + (p.texusPackageNo ? ' &middot; ' + esc(p.texusPackageNo) : '');
+        } else if (st === 'Failed') {
+            cls = 'is-failed';
+            label = 'Texus push failed';
+            showRetry = true;
+        } else if (st === 'Skipped') {
+            cls = 'is-skipped';
+            label = 'Skipped &mdash; no order reference';
+            showRetry = true;
+        } else if (st === 'Pending') {
+            cls = 'is-pending';
+            label = 'Texus push in progress&hellip;';
+        }
+
+        var errLine = (p.texusError && (st === 'Failed' || st === 'Skipped'))
+            ? '<div class="texus-err">' + esc(p.texusError) + '</div>'
+            : '';
+
+        var retryBtn = showRetry
+            ? '<button type="button" class="raise-btn texus-retry" id="texus-retry-' + esc(p.id) + '" ' +
+              'onclick="PackingScreen.retryTexus(\'' + esc(p.id) + '\')">Retry Texus sync</button>'
+            : '';
+
+        return '<div class="texus-row">' +
+            '<span class="texus-pill ' + cls + '">' + label + '</span>' +
+            retryBtn +
+            errLine +
+            '</div>';
+    }
+
+    function retryTexus(id) {
+        // The retry button id in the markup is not pack-prefixed, so el() (which
+        // prepends "pack-") would miss it.
+        var btn = document.getElementById('texus-retry-' + id);
+        if (btn) { btn.disabled = true; btn.innerText = 'Syncing…'; }
+
+        if (!isRunningInCreator()) {
+            alert('Texus sync only runs inside Creator.');
+            if (btn) { btn.disabled = false; btn.innerText = 'Retry Texus sync'; }
+            return;
+        }
+
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'pushPackingToTexus',
+            http_method: 'POST',
+            payload: { packingIdTxt: String(id) }
+        }).then(function (response) {
+            var parsed;
+            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+            if (parsed && parsed.success) {
+                alert(parsed.adopted
+                    ? 'Already had a package in Texus — linked it.'
+                    : 'Sent to Texus as ' + (parsed.packageNo || 'a package') + '.');
+            } else if (parsed && parsed.skipped) {
+                alert('Still skipped — the sales order has no Reference number.');
+            } else {
+                alert('Texus sync failed:\n\n' + ((parsed && parsed.error) || 'unknown error'));
+            }
+            loadHistory();
+        }).catch(function (err) {
+            console.error('pushPackingToTexus retry failed:', err);
+            alert('Could not reach the server for the Texus sync.');
+            if (btn) { btn.disabled = false; btn.innerText = 'Retry Texus sync'; }
+        });
+    }
+
+    // ---- Gad Inventory invoice status -----------------------------------
+    //
+    // savePackingRecord also calls pushInvoiceToGad, which raises the invoice for
+    // the ORIGINAL sales order in Gad's own Inventory (a full invoice is what
+    // closes the SO - there is no close endpoint). Same pill + retry pattern as
+    // Texus. Skipped == the Creator sales order has no Inventory sales-order id.
+    function gadInvoiceBlock(p) {
+        var st = String(p.gadInvoiceStatus || '');
+        var cls = 'is-pending';
+        var label = 'Not invoiced in Gad';
+        var showRetry = false;
+
+        if (st === 'Sent') {
+            cls = 'is-sent';
+            label = 'Invoiced in Gad' + (p.gadInvoiceNo ? ' &middot; ' + esc(p.gadInvoiceNo) : '');
+        } else if (st === 'Failed') {
+            cls = 'is-failed';
+            label = 'Gad invoice failed';
+            showRetry = true;
+        } else if (st === 'Skipped') {
+            cls = 'is-skipped';
+            label = 'Skipped &mdash; no Inventory order';
+            showRetry = true;
+        } else if (st === 'Pending') {
+            cls = 'is-pending';
+            label = 'Gad invoice in progress&hellip;';
+        }
+
+        var errLine = (p.gadInvoiceError && (st === 'Failed' || st === 'Skipped'))
+            ? '<div class="texus-err">' + esc(p.gadInvoiceError) + '</div>'
+            : '';
+
+        var retryBtn = showRetry
+            ? '<button type="button" class="raise-btn texus-retry" id="gadinv-retry-' + esc(p.id) + '" ' +
+              'onclick="PackingScreen.retryGadInvoice(\'' + esc(p.id) + '\')">Retry Gad invoice</button>'
+            : '';
+
+        return '<div class="texus-row">' +
+            '<span class="texus-pill ' + cls + '">' + label + '</span>' +
+            retryBtn +
+            errLine +
+            '</div>';
+    }
+
+    function retryGadInvoice(id) {
+        var btn = document.getElementById('gadinv-retry-' + id);
+        if (btn) { btn.disabled = true; btn.innerText = 'Invoicing…'; }
+
+        if (!isRunningInCreator()) {
+            alert('Gad invoicing only runs inside Creator.');
+            if (btn) { btn.disabled = false; btn.innerText = 'Retry Gad invoice'; }
+            return;
+        }
+
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'pushInvoiceToGad',
+            http_method: 'POST',
+            payload: { packingIdTxt: String(id) }
+        }).then(function (response) {
+            var parsed;
+            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+            if (parsed && parsed.success) {
+                alert(parsed.alreadyInvoiced
+                    ? 'The sales order was already fully invoiced in Gad.'
+                    : 'Invoiced in Gad as ' + (parsed.invoiceNo || 'an invoice') + '.');
+            } else if (parsed && parsed.skipped) {
+                alert('Still skipped — the sales order has no Inventory sales-order id.');
+            } else {
+                alert('Gad invoicing failed:\n\n' + ((parsed && parsed.error) || 'unknown error'));
+            }
+            loadHistory();
+        }).catch(function (err) {
+            console.error('pushInvoiceToGad retry failed:', err);
+            alert('Could not reach the server for the Gad invoice.');
+            if (btn) { btn.disabled = false; btn.innerText = 'Retry Gad invoice'; }
+        });
     }
 
     // Refresh reloads whichever tabs have been opened - the same rule the store
@@ -1781,6 +1945,8 @@ var PackingScreen = (function () {
         refresh: refreshAll,
         showTab: showTab,
         toggleHistory: toggleHistory,
+        retryTexus: retryTexus,
+        retryGadInvoice: retryGadInvoice,
         viewPhoto: viewPhoto,
         selectOrder: selectOrder,
         setStaff: setStaff,

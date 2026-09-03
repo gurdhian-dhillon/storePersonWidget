@@ -1,0 +1,394 @@
+string pushInvoiceToGad(string packingIdTxt)
+{
+	// On a completed Creator Packing record, raises an INVOICE for the ORIGINAL
+	// sales order in GAD's own Zoho Inventory - the SO that Inventory pushed into
+	// Creator in the first place - and marks it sent. POST, one argument:
+	// packingIdTxt.
+	//
+	// THE CHAIN:
+	//   1. GET  /salesorders/<invSoId>          -> customer, lines, rates, taxes,
+	//                                              quantity_invoiced per line
+	//   2. POST /invoices                        -> create the invoice, one line
+	//        per SO line, quantity = quantity - quantity_invoiced, each carrying
+	//        salesorder_item_id so Inventory links it back to the SO.
+	//   3. POST /invoices/<id>/status/sent       -> out of draft.
+	//
+	// NO explicit "close the sales order" call - Inventory v1 has none. An SO
+	// CLOSES ITSELF once it is fully invoiced (a closed SO can still have a
+	// pending shipment - shipment is not required for closure, confirmed by
+	// hand). So a full-quantity invoice IS the close.
+	//
+	// invSoId is Creator's Sales_Order.Inventory_sales_order_Id (written by
+	// syncSingleSalesOrder from the Inventory SO's id). EMPTY -> Skipped, not an
+	// error - same shape as pushPackingToTexus' no-Reference skip; the retry
+	// button re-runs this if the id is filled in later.
+	//
+	// AUTH is the GAD org's Deluge Connection "inventory_connection", the same
+	// one syncSingleSalesOrder / postInventoryQueue use. No hardcoded token.
+	//
+	// IDEMPOTENT. Gad_Invoice_Id already set -> return without calling. A run
+	// that finds every line already invoiced records "Sent" and returns success
+	// (the invoice exists, just not from us).
+	//
+	// FAILURE IS RECORDED, NEVER THROWN. failMsg carries the first problem; once
+	// non-empty every later step is skipped and ONE block writes
+	// Gad_Invoice_Status = "Failed" + the message. savePackingRecord calls this
+	// inside its own try/catch, so a failure here can never fail the pack.
+
+	GAD_ORG_ID = "60076905558";
+	GAD_API_BASE = "https://www.zohoapis.in/inventory/v1";
+
+	res = "{\"success\":false,\"error\":\"Nothing ran\"}";
+
+	// Creator collapses every runtime failure to a generic code 9430, so the real
+	// message travels inside the payload.
+	try
+	{
+		pIdTxt = ifnull(packingIdTxt,"").toString().trim();
+		if(pIdTxt == "" || pIdTxt.isNumber() == false)
+		{
+			return "{\"success\":false,\"error\":\"Missing or invalid packingIdTxt\"}";
+		}
+		pId = pIdTxt.toLong();
+
+		packFound = false;
+		soRefId = "";
+		alreadyInvId = "";
+		invStatusNow = "";
+
+		for each  pk in Packing[ID == pId]
+		{
+			packFound = true;
+			soRefId = ifnull(pk.Sales_Order,"").toString().trim();
+			alreadyInvId = ifnull(pk.Gad_Invoice_Id,"").toString().trim();
+			invStatusNow = ifnull(pk.Gad_Invoice_Status,"").toString().trim();
+		}
+
+		if(packFound == false)
+		{
+			return "{\"success\":false,\"error\":\"No Packing " + pId + "\"}";
+		}
+
+		// IDEMPOTENCY - the invoice is fully done (created AND sent). A row that
+		// carries an id but is still "Failed" is a DRAFT whose send did not land;
+		// that must fall through so the retry can send the existing draft rather
+		// than short-circuiting or making a second invoice.
+		if(alreadyInvId != "" && invStatusNow == "Sent")
+		{
+			return "{\"success\":true,\"already\":true,\"invoiceId\":\"" + alreadyInvId + "\"}";
+		}
+
+		// The GAD Inventory SO id, off Creator Sales_Order.Inventory_sales_order_Id.
+		invSoId = "";
+		if(soRefId != "" && soRefId.isNumber() == true)
+		{
+			for each  so in Sales_Order[ID == soRefId.toLong()]
+			{
+				invSoId = ifnull(so.Inventory_sales_order_Id,"").toString().trim();
+			}
+		}
+
+		nowStamp = zoho.currenttime;
+
+		// NO INVENTORY SO ID -> SKIP. Recorded, retryable.
+		if(invSoId == "")
+		{
+			for each  pkSkip in Packing[ID == pId]
+			{
+				pkSkip.Gad_Invoice_Status = "Skipped";
+				pkSkip.Gad_Invoice_Error = "The sales order has no Inventory sales-order id, so there is nothing to invoice in Gad Inventory.";
+				pkSkip.Gad_Invoice_At = nowStamp;
+			}
+			return "{\"success\":false,\"skipped\":true,\"reason\":\"no-inventory-so-id\"}";
+		}
+
+		// Attempt bookkeeping - bumped before the network so a hang still leaves a
+		// trace, and the status reads Pending while it runs.
+		for each  pkAtt in Packing[ID == pId]
+		{
+			atS = ifnull(pkAtt.Gad_Invoice_Attempts,"0").toString().trim();
+			if(atS == "")
+			{
+				atS = "0";
+			}
+			pkAtt.Gad_Invoice_Attempts = atS.toLong() + 1;
+			pkAtt.Gad_Invoice_At = nowStamp;
+			pkAtt.Gad_Invoice_Status = "Pending";
+		}
+
+		failMsg = "";
+		custId = "";
+		soNumber = "";
+		linesJson = "";
+		lineCount = 0;
+		newInvId = "";
+		newInvNo = "";
+		sendWarn = "";
+
+		// A prior run created the invoice but its send failed - the row carries
+		// the draft's id and "Failed". Skip straight to STEP 3 and just send it;
+		// re-creating would make a duplicate.
+		resendOnly = false;
+		if(alreadyInvId != "")
+		{
+			resendOnly = true;
+			newInvId = alreadyInvId;
+			for each  pkNo in Packing[ID == pId]
+			{
+				newInvNo = ifnull(pkNo.Gad_Invoice_No,"").toString().trim();
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// STEP 1 - the SO detail.
+		//--------------------------------------------------------------------
+		if(failMsg == "" && resendOnly == false)
+		{
+			soResp = Map();
+			soErr = "";
+			try
+			{
+				soResp = invokeurl
+				[
+					url :GAD_API_BASE + "/salesorders/" + invSoId + "?organization_id=" + GAD_ORG_ID
+					type :GET
+					connection:"inventory_connection"
+				];
+			}
+			catch (eSo)
+			{
+				soErr = eSo.toString();
+			}
+
+			if(soErr != "")
+			{
+				failMsg = "Gad sales-order lookup failed - " + soErr;
+			}
+			else if(ifnull(soResp.get("code"),"0").toString().trim() != "0")
+			{
+				failMsg = "Gad sales-order lookup returned an error - " + ifnull(soResp.get("message"),"").toString();
+			}
+			else
+			{
+				soDetail = soResp.get("salesorder");
+				if(soDetail == null)
+				{
+					failMsg = "Gad sales order " + invSoId + " was not found in Inventory.";
+				}
+				else
+				{
+					soStatus = ifnull(soDetail.get("status"),"").toString().trim().toLowerCase();
+					if(soStatus == "void")
+					{
+						failMsg = "Gad sales order is void - it cannot be invoiced.";
+					}
+					else
+					{
+						custId = ifnull(soDetail.get("customer_id"),"").toString().trim();
+						soNumber = ifnull(soDetail.get("salesorder_number"),"").toString().trim();
+						if(custId == "")
+						{
+							failMsg = "Gad sales order has no customer_id.";
+						}
+						else
+						{
+							soLines = soDetail.get("line_items");
+							if(soLines != null)
+							{
+								for each  soLine in soLines
+								{
+									liId = ifnull(soLine.get("line_item_id"),"").toString().trim();
+									itmId = ifnull(soLine.get("item_id"),"").toString().trim();
+
+									qOrdS = ifnull(soLine.get("quantity"),"0").toString().trim();
+									if(qOrdS == "")
+									{
+										qOrdS = "0";
+									}
+									qInvS = ifnull(soLine.get("quantity_invoiced"),"0").toString().trim();
+									if(qInvS == "")
+									{
+										qInvS = "0";
+									}
+									toInv = qOrdS.toDecimal() - qInvS.toDecimal();
+
+									rateS = ifnull(soLine.get("rate"),"0").toString().trim();
+									if(rateS == "")
+									{
+										rateS = "0";
+									}
+									taxId = ifnull(soLine.get("tax_id"),"").toString().trim();
+
+									if(liId != "" && itmId != "" && toInv > 0)
+									{
+										if(linesJson != "")
+										{
+											linesJson = linesJson + ",";
+										}
+										// tax_id only when the SO line carried one - an empty
+										// tax_id node makes Inventory reject the line.
+										lineOne = "{\"item_id\":\"" + itmId + "\",\"salesorder_item_id\":\"" + liId + "\",\"quantity\":" + toInv + ",\"rate\":" + rateS.toDecimal();
+										if(taxId != "")
+										{
+											lineOne = lineOne + ",\"tax_id\":\"" + taxId + "\"";
+										}
+										lineOne = lineOne + "}";
+										linesJson = linesJson + lineOne;
+										lineCount = lineCount + 1;
+									}
+								}
+							}
+
+							// Every line already fully invoiced - the SO is done.
+							// Not a failure; there is simply nothing for us to
+							// create, and the SO has closed itself.
+							if(lineCount == 0)
+							{
+								for each  pkDone in Packing[ID == pId]
+								{
+									pkDone.Gad_Invoice_Status = "Sent";
+									pkDone.Gad_Invoice_Error = "The sales order was already fully invoiced in Gad Inventory - nothing to raise.";
+								}
+								return "{\"success\":true,\"alreadyInvoiced\":true}";
+							}
+						}
+					}
+				}
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// STEP 2 - create the invoice. Hand-built JSON string passed as
+		// parameters with a JSON content-type - the shape this repo's other
+		// Inventory POSTs use (postInventoryQueue). reference_number carries the
+		// SO number so the invoice reads against it in Inventory.
+		//--------------------------------------------------------------------
+		if(failMsg == "" && resendOnly == false)
+		{
+			invBody = "{\"customer_id\":\"" + custId + "\",\"reference_number\":\"" + soNumber.replaceAll("\"","'") + "\",\"line_items\":[" + linesJson + "]}";
+
+			hdrMap = Map();
+			hdrMap.put("content-type","application/json");
+
+			invResp = Map();
+			invErr = "";
+			try
+			{
+				invResp = invokeurl
+				[
+					url :GAD_API_BASE + "/invoices?organization_id=" + GAD_ORG_ID
+					type :POST
+					parameters:invBody
+					headers:hdrMap
+					connection:"inventory_connection"
+				];
+			}
+			catch (eInv)
+			{
+				invErr = eInv.toString();
+			}
+
+			if(invErr != "")
+			{
+				failMsg = "Gad invoice create failed - " + invErr;
+			}
+			else if(ifnull(invResp.get("code"),"-1").toString().trim() != "0")
+			{
+				failMsg = "Gad rejected the invoice - " + ifnull(invResp.get("message"),"unknown").toString();
+			}
+			else
+			{
+				newInv = invResp.get("invoice");
+				newInvId = ifnull(newInv.get("invoice_id"),"").toString().trim();
+				newInvNo = ifnull(newInv.get("invoice_number"),"").toString().trim();
+				if(newInvId == "")
+				{
+					failMsg = "Gad returned no invoice_id.";
+				}
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// STEP 3 - mark it sent. A failure here does NOT lose the invoice - it
+		// exists as a draft - so the id is still stored and the message says to
+		// retry, which will find the draft and try sending again.
+		//--------------------------------------------------------------------
+		if(failMsg == "" && newInvId != "")
+		{
+			sentResp = Map();
+			sentErr = "";
+			try
+			{
+				sentResp = invokeurl
+				[
+					url :GAD_API_BASE + "/invoices/" + newInvId + "/status/sent?organization_id=" + GAD_ORG_ID
+					type :POST
+					connection:"inventory_connection"
+				];
+			}
+			catch (eSent)
+			{
+				sentErr = eSent.toString();
+			}
+
+			if(sentErr != "")
+			{
+				sendWarn = "Invoice " + newInvNo + " was created as a DRAFT but could not be marked sent - " + sentErr + ". Retry to send it.";
+			}
+			else if(ifnull(sentResp.get("code"),"-1").toString().trim() != "0")
+			{
+				sendWarn = "Invoice " + newInvNo + " was created as a DRAFT but Gad would not mark it sent - " + ifnull(sentResp.get("message"),"unknown").toString() + ". Retry to send it.";
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// OUTCOME.
+		//--------------------------------------------------------------------
+		if(failMsg != "")
+		{
+			for each  pkFail in Packing[ID == pId]
+			{
+				pkFail.Gad_Invoice_Status = "Failed";
+				pkFail.Gad_Invoice_Error = failMsg;
+				// Keep the draft id if we got one - a retry adopts it.
+				if(newInvId != "")
+				{
+					pkFail.Gad_Invoice_Id = newInvId;
+					pkFail.Gad_Invoice_No = newInvNo;
+				}
+			}
+			res = "{\"success\":false,\"error\":\"" + failMsg.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
+		}
+		else if(sendWarn != "")
+		{
+			// The invoice exists but is still a draft. Failed status so the retry
+			// button shows, but the id is stored so the retry sends the draft
+			// rather than making a second invoice.
+			for each  pkDraft in Packing[ID == pId]
+			{
+				pkDraft.Gad_Invoice_Id = newInvId;
+				pkDraft.Gad_Invoice_No = newInvNo;
+				pkDraft.Gad_Invoice_Status = "Failed";
+				pkDraft.Gad_Invoice_Error = sendWarn;
+			}
+			res = "{\"success\":false,\"error\":\"" + sendWarn.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\",\"invoiceId\":\"" + newInvId + "\",\"invoiceNo\":\"" + newInvNo + "\"}";
+		}
+		else
+		{
+			for each  pkOk in Packing[ID == pId]
+			{
+				pkOk.Gad_Invoice_Id = newInvId;
+				pkOk.Gad_Invoice_No = newInvNo;
+				pkOk.Gad_Invoice_Status = "Sent";
+				pkOk.Gad_Invoice_Error = "";
+			}
+			res = "{\"success\":true,\"invoiceId\":\"" + newInvId + "\",\"invoiceNo\":\"" + newInvNo + "\"}";
+		}
+	}
+	catch (e)
+	{
+		return "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

@@ -570,6 +570,44 @@ string savePackingRecord(string payloadJson)
 			}
 		}
 
+		//------------------------------------------------------------------
+		// PUSH THE PACKING TO TEXUS INVENTORY - creates a Package on their
+		// Sales Order (matched by Sales_Order.Reference). pushPackingToTexus
+		// records its own Texus_Push_Status / Texus_Push_Error on this Packing
+		// row and never throws its own failure out; this try/catch is the last
+		// guard so a Texus problem - or the cross-function call itself - can
+		// NEVER fail a pack that has already been written. A no-Reference order
+		// is marked "Skipped" in there, not pushed. The packing screen's
+		// History tab shows the outcome and offers a retry.
+		//------------------------------------------------------------------
+		try
+		{
+			thisapp.pushPackingToTexus(packId.toString());
+		}
+		catch (exTexus)
+		{
+			// Swallowed on purpose - see above.
+		}
+
+		//------------------------------------------------------------------
+		// RAISE THE INVOICE IN GAD'S OWN INVENTORY for the original sales
+		// order and let Inventory close it (a full invoice IS the close - there
+		// is no close endpoint). pushInvoiceToGad records its own
+		// Gad_Invoice_Status / Gad_Invoice_Error on this Packing row. Separate
+		// try/catch, same rule: a Gad invoicing problem - or the cross-call
+		// itself - must NEVER fail a pack that is already written. A no-
+		// Inventory-id order is marked "Skipped". The History tab shows it and
+		// offers a retry.
+		//------------------------------------------------------------------
+		try
+		{
+			thisapp.pushInvoiceToGad(packId.toString());
+		}
+		catch (exGadInv)
+		{
+			// Swallowed on purpose - see above.
+		}
+
 		// Chargeable weight is the greater of the two - what the courier bills.
 		chargeable = totalGross;
 		if(totalVolumetric > totalGross)

@@ -1,0 +1,516 @@
+string pushPackingToTexus(string packingIdTxt)
+{
+	// Pushes a completed Creator Packing record to Texus Inc's Zoho Inventory as
+	// a PACKAGE on their Sales Order. POST, one argument: packingIdTxt.
+	//
+	// THE CHAIN (every step proven by hand against the live Texus org):
+	//   1. refresh-token -> access token   (accounts.zoho.in)
+	//   2. GET  /salesorders?salesorder_number=<Creator Sales_Order.Reference>
+	//        -> salesorder_id            (Reference IS Texus's SO number)
+	//   3. GET  /salesorders/<id>        -> its line_items (line_item_id, qty,
+	//                                       quantity_packed)
+	//   4. GET  /packages?salesorder_id=<id>   -> duplicate check
+	//   5. POST /packages?salesorder_id=<id>   -> creates the package
+	//
+	// WHAT WE SEND is a box-level shipment summary, NOT a per-item pack:
+	//   dimensions   = the Creator box with the largest L*W*H (one carton's worth)
+	//   weight       = Total_Gross_Weight_Kg  (net_weight set the same - Texus has
+	//                  no separate net figure for us)
+	//   cf_no_of_boxes        = Total_Outer_Boxes
+	//   cf_volumetric_weight  = Total_Volumetric_Weight_Kg
+	//   line_items   = the Texus SO's OWN lines, qty = quantity - quantity_packed.
+	//                  The Packages API rejects a package with no line_items
+	//                  ("Invalid value passed for line_items"), so we echo the SO
+	//                  back rather than mapping Creator SKUs - Creator's pack is
+	//                  the whole order in one sitting, so "pack everything still
+	//                  unpacked" is always right.
+	//
+	// NO Reference on the Creator sales order  -> Skipped (not an error). Nothing
+	// to push to; the retry button re-runs this if the Reference is filled later.
+	//
+	// IDEMPOTENT. Texus_Package_Id already set -> return without calling. The dup
+	// check in step 4 is the second guard, for the case where the first attempt
+	// created the package but the widget never saw the reply.
+	//
+	// FAILURE IS RECORDED, NEVER THROWN. failMsg carries the first problem hit;
+	// once it is non-empty every remaining step is skipped and ONE block at the
+	// end writes Texus_Push_Status = "Failed" + the message onto the Packing row.
+	// savePackingRecord calls this inside its own try/catch, so a Texus failure
+	// can never fail the pack.
+	//
+	// SECRETS ARE HARDCODED, deliberately - same pattern as the Books->Gad
+	// workflow. The refresh token does not expire and these do not rotate. If
+	// they ever do, they change here and nowhere else.
+
+	TEXUS_CLIENT_ID = "1000.48SYGORXWF96C73E6H2J9VKJ9AJ0RY";
+	TEXUS_CLIENT_SECRET = "c3670f57a213b4642de3040d3070cda16b015686f8";
+	TEXUS_REFRESH_TOKEN = "1000.c541de11d75f7dab41d3a226690f1d5b.3a7809e15c4c6ad910c82be8438f6bf9";
+	TEXUS_ORG_ID = "60045783868";
+	TEXUS_API_BASE = "https://www.zohoapis.in/inventory/v1";
+	TEXUS_TOKEN_URL = "https://accounts.zoho.in/oauth/v2/token";
+
+	res = "{\"success\":false,\"error\":\"Nothing ran\"}";
+
+	// Creator collapses every runtime failure to a generic code 9430, so the real
+	// message has to travel inside the payload.
+	try
+	{
+		pIdTxt = ifnull(packingIdTxt,"").toString().trim();
+		if(pIdTxt == "" || pIdTxt.isNumber() == false)
+		{
+			return "{\"success\":false,\"error\":\"Missing or invalid packingIdTxt\"}";
+		}
+		pId = pIdTxt.toLong();
+
+		packFound = false;
+		grossKg = 0.0;
+		volKg = 0.0;
+		outerBoxes = 0;
+		soRefId = "";
+		alreadyPkgId = "";
+		bestVol = -1.0;
+		bestL = 0.0;
+		bestW = 0.0;
+		bestH = 0.0;
+
+		for each  pk in Packing[ID == pId]
+		{
+			packFound = true;
+
+			// EMPTY, not null, on a field never written - normalise before decimal.
+			gS = ifnull(pk.Total_Gross_Weight_Kg,"0").toString().trim();
+			if(gS == "")
+			{
+				gS = "0";
+			}
+			grossKg = gS.toDecimal();
+
+			vS = ifnull(pk.Total_Volumetric_Weight_Kg,"0").toString().trim();
+			if(vS == "")
+			{
+				vS = "0";
+			}
+			volKg = vS.toDecimal();
+
+			bS = ifnull(pk.Total_Outer_Boxes,"0").toString().trim();
+			if(bS == "")
+			{
+				bS = "0";
+			}
+			outerBoxes = bS.toDecimal().toLong();
+
+			soRefId = ifnull(pk.Sales_Order,"").toString().trim();
+			alreadyPkgId = ifnull(pk.Texus_Package_Id,"").toString().trim();
+
+			// LARGEST BOX BY VOLUME. Its three outer dimensions represent the
+			// shipment's carton size; the rest are only the box count. A legacy
+			// box that stored no dimensions has L*W*H = 0 and loses the compare,
+			// which is correct - it carries no size to send.
+			for each  bx in pk.Packed_Boxes
+			{
+				lS = ifnull(bx.Outer_Length_Cm,"0").toString().trim();
+				if(lS == "")
+				{
+					lS = "0";
+				}
+				wS = ifnull(bx.Outer_Width_Cm,"0").toString().trim();
+				if(wS == "")
+				{
+					wS = "0";
+				}
+				hS = ifnull(bx.Outer_Height_Cm,"0").toString().trim();
+				if(hS == "")
+				{
+					hS = "0";
+				}
+				lv = lS.toDecimal();
+				wv = wS.toDecimal();
+				hv = hS.toDecimal();
+				vv = lv * wv * hv;
+				if(vv > bestVol)
+				{
+					bestVol = vv;
+					bestL = lv;
+					bestW = wv;
+					bestH = hv;
+				}
+			}
+		}
+
+		if(packFound == false)
+		{
+			return "{\"success\":false,\"error\":\"No Packing " + pId + "\"}";
+		}
+
+		// IDEMPOTENCY - already pushed.
+		if(alreadyPkgId != "")
+		{
+			return "{\"success\":true,\"already\":true,\"packageId\":\"" + alreadyPkgId + "\"}";
+		}
+
+		// THE TEXUS SO NUMBER lives on Creator Sales_Order.Reference (written by
+		// syncSingleSalesOrder from the Inventory SO's reference_number).
+		soNumber = "";
+		if(soRefId != "" && soRefId.isNumber() == true)
+		{
+			for each  so in Sales_Order[ID == soRefId.toLong()]
+			{
+				soNumber = ifnull(so.Reference,"").toString().trim();
+			}
+		}
+
+		nowStamp = zoho.currenttime;
+
+		// NO REFERENCE -> SKIP. Not a failure. Recorded so the widget can show it
+		// and offer a retry once the Reference is filled in.
+		if(soNumber == "")
+		{
+			for each  pkSkip in Packing[ID == pId]
+			{
+				pkSkip.Texus_Push_Status = "Skipped";
+				pkSkip.Texus_Push_Error = "The sales order has no Reference number, so there is no Texus order to push to.";
+				pkSkip.Texus_Push_At = nowStamp;
+			}
+			return "{\"success\":false,\"skipped\":true,\"reason\":\"no-reference\"}";
+		}
+
+		// Attempt bookkeeping - bumped before the network so a hang still leaves a
+		// trace, and the status reads Pending while it runs.
+		for each  pkAtt in Packing[ID == pId]
+		{
+			atS = ifnull(pkAtt.Texus_Push_Attempts,"0").toString().trim();
+			if(atS == "")
+			{
+				atS = "0";
+			}
+			pkAtt.Texus_Push_Attempts = atS.toLong() + 1;
+			pkAtt.Texus_Push_At = nowStamp;
+			pkAtt.Texus_Push_Status = "Pending";
+		}
+
+		// failMsg == "" means "still on the happy path". The first non-empty value
+		// wins and every guarded step below is skipped from there.
+		failMsg = "";
+		accessToken = "";
+		salesorderId = "";
+		lineItemsPayload = List();
+		newPkgId = "";
+		newPkgNo = "";
+		adopted = false;
+
+		//--------------------------------------------------------------------
+		// STEP 1 - access token from the refresh token.
+		//--------------------------------------------------------------------
+		if(failMsg == "")
+		{
+			tokenParams = Map();
+			tokenParams.put("refresh_token",TEXUS_REFRESH_TOKEN);
+			tokenParams.put("client_id",TEXUS_CLIENT_ID);
+			tokenParams.put("client_secret",TEXUS_CLIENT_SECRET);
+			tokenParams.put("grant_type","refresh_token");
+
+			tokenResp = Map();
+			tokenErr = "";
+			try
+			{
+				tokenResp = invokeurl
+				[
+					url :TEXUS_TOKEN_URL
+					type :POST
+					parameters:tokenParams
+				];
+			}
+			catch (eTok)
+			{
+				tokenErr = eTok.toString();
+			}
+
+			accessToken = ifnull(tokenResp.get("access_token"),"").toString().trim();
+			if(accessToken == "")
+			{
+				if(tokenErr != "")
+				{
+					failMsg = "Could not get a Texus access token - " + tokenErr;
+				}
+				else
+				{
+					failMsg = "Could not get a Texus access token - " + ifnull(tokenResp.get("error"),"unknown").toString();
+				}
+			}
+		}
+
+		authHeaders = Map();
+		authHeaders.put("Authorization","Zoho-oauthtoken " + accessToken);
+
+		//--------------------------------------------------------------------
+		// STEP 2 - find the Sales Order by its number. The filter is an EXACT
+		// match (search_criteria comparator "equal"), but Zoho has returned
+		// fuzzy matches on other filters, so the number is re-checked in code.
+		//--------------------------------------------------------------------
+		if(failMsg == "")
+		{
+			soListResp = Map();
+			soListErr = "";
+			try
+			{
+				soListResp = invokeurl
+				[
+					url :TEXUS_API_BASE + "/salesorders?organization_id=" + TEXUS_ORG_ID + "&salesorder_number=" + soNumber
+					type :GET
+					headers:authHeaders
+				];
+			}
+			catch (eSo)
+			{
+				soListErr = eSo.toString();
+			}
+
+			if(soListErr != "")
+			{
+				failMsg = "Texus sales-order lookup failed - " + soListErr;
+			}
+			else if(ifnull(soListResp.get("code"),"0").toString().trim() != "0")
+			{
+				failMsg = "Texus sales-order lookup returned an error - " + ifnull(soListResp.get("message"),"").toString();
+			}
+			else
+			{
+				soRows = soListResp.get("salesorders");
+				if(soRows != null)
+				{
+					for each  soRow in soRows
+					{
+						if(salesorderId == "" && ifnull(soRow.get("salesorder_number"),"").toString().trim() == soNumber)
+						{
+							salesorderId = ifnull(soRow.get("salesorder_id"),"").toString().trim();
+						}
+					}
+				}
+				if(salesorderId == "")
+				{
+					failMsg = "Sales order '" + soNumber + "' was not found in Texus Inventory.";
+				}
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// STEP 3 - the SO detail, for its line items. quantity - quantity_packed
+		// is what is still to pack; a line already fully packed contributes
+		// nothing.
+		//--------------------------------------------------------------------
+		if(failMsg == "")
+		{
+			soDetailResp = Map();
+			soDetailErr = "";
+			try
+			{
+				soDetailResp = invokeurl
+				[
+					url :TEXUS_API_BASE + "/salesorders/" + salesorderId + "?organization_id=" + TEXUS_ORG_ID
+					type :GET
+					headers:authHeaders
+				];
+			}
+			catch (eDet)
+			{
+				soDetailErr = eDet.toString();
+			}
+
+			if(soDetailErr != "")
+			{
+				failMsg = "Texus sales-order detail failed - " + soDetailErr;
+			}
+			else if(ifnull(soDetailResp.get("code"),"0").toString().trim() != "0")
+			{
+				failMsg = "Texus sales-order detail returned an error - " + ifnull(soDetailResp.get("message"),"").toString();
+			}
+			else
+			{
+				soDetail = soDetailResp.get("salesorder");
+				if(soDetail != null)
+				{
+					soLines = soDetail.get("line_items");
+					if(soLines != null)
+					{
+						for each  soLine in soLines
+						{
+							liId = ifnull(soLine.get("line_item_id"),"").toString().trim();
+
+							qOrdS = ifnull(soLine.get("quantity"),"0").toString().trim();
+							if(qOrdS == "")
+							{
+								qOrdS = "0";
+							}
+							qPackS = ifnull(soLine.get("quantity_packed"),"0").toString().trim();
+							if(qPackS == "")
+							{
+								qPackS = "0";
+							}
+							toPack = qOrdS.toDecimal() - qPackS.toDecimal();
+
+							if(liId != "" && toPack > 0)
+							{
+								liRow = Map();
+								liRow.put("so_line_item_id",liId);
+								liRow.put("quantity",toPack);
+								lineItemsPayload.add(liRow);
+							}
+						}
+					}
+				}
+				if(lineItemsPayload.size() == 0)
+				{
+					failMsg = "Nothing left to pack on Texus SO '" + soNumber + "' - every line is already fully packed there.";
+				}
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// STEP 4 - duplicate check. A package already on this SO means a prior
+		// attempt got through even if the reply was lost. Adopt it rather than
+		// creating a second.
+		//--------------------------------------------------------------------
+		if(failMsg == "")
+		{
+			pkgListResp = Map();
+			try
+			{
+				pkgListResp = invokeurl
+				[
+					url :TEXUS_API_BASE + "/packages?organization_id=" + TEXUS_ORG_ID + "&salesorder_id=" + salesorderId
+					type :GET
+					headers:authHeaders
+				];
+			}
+			catch (ePl)
+			{
+				pkgListResp = Map();
+			}
+
+			if(ifnull(pkgListResp.get("code"),"0").toString().trim() == "0")
+			{
+				existingPkgs = pkgListResp.get("packages");
+				if(existingPkgs != null && existingPkgs.size() > 0)
+				{
+					newPkgId = ifnull(existingPkgs.get(0).get("package_id"),"").toString().trim();
+					newPkgNo = ifnull(existingPkgs.get(0).get("package_number"),"").toString().trim();
+					if(newPkgId != "")
+					{
+						adopted = true;
+					}
+				}
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// STEP 5 - create the package. Built by hand as nested Maps/Lists then
+		// .toString() - the shape Zoho Inventory takes as JSONString, same as
+		// syncSingleSalesOrder builds its create payload. Skipped when step 4
+		// adopted an existing package.
+		//--------------------------------------------------------------------
+		if(failMsg == "" && adopted == false)
+		{
+			dims = Map();
+			dims.put("length",bestL);
+			dims.put("width",bestW);
+			dims.put("height",bestH);
+			dims.put("unit","cm");
+
+			wt = Map();
+			wt.put("gross_weight",grossKg);
+			wt.put("net_weight",grossKg);
+			wt.put("unit","kg");
+
+			cfBoxes = Map();
+			cfBoxes.put("api_name","cf_no_of_boxes");
+			cfBoxes.put("value",outerBoxes);
+
+			cfVol = Map();
+			cfVol.put("api_name","cf_volumetric_weight");
+			cfVol.put("value",volKg);
+
+			cfList = List();
+			cfList.add(cfBoxes);
+			cfList.add(cfVol);
+
+			pkgBody = Map();
+			pkgBody.put("package_number","PKG-" + pId);
+			pkgBody.put("date",zoho.currentdate.toString("yyyy-MM-dd"));
+			pkgBody.put("notes","Packed via Gad Creator");
+			pkgBody.put("dimensions",dims);
+			pkgBody.put("weight",wt);
+			pkgBody.put("custom_fields",cfList);
+			pkgBody.put("line_items",lineItemsPayload);
+
+			createParams = Map();
+			createParams.put("JSONString",pkgBody.toString());
+
+			createResp = Map();
+			createErr = "";
+			try
+			{
+				createResp = invokeurl
+				[
+					url :TEXUS_API_BASE + "/packages?salesorder_id=" + salesorderId + "&organization_id=" + TEXUS_ORG_ID
+					type :POST
+					parameters:createParams
+					headers:authHeaders
+				];
+			}
+			catch (eCr)
+			{
+				createErr = eCr.toString();
+			}
+
+			if(createErr != "")
+			{
+				failMsg = "Texus package create failed - " + createErr;
+			}
+			else if(ifnull(createResp.get("code"),"-1").toString().trim() != "0")
+			{
+				failMsg = "Texus rejected the package - " + ifnull(createResp.get("message"),"unknown").toString();
+			}
+			else
+			{
+				newPkg = createResp.get("package");
+				newPkgId = ifnull(newPkg.get("package_id"),"").toString().trim();
+				newPkgNo = ifnull(newPkg.get("package_number"),"").toString().trim();
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// OUTCOME - one write, either way.
+		//--------------------------------------------------------------------
+		if(failMsg != "")
+		{
+			for each  pkFail in Packing[ID == pId]
+			{
+				pkFail.Texus_Push_Status = "Failed";
+				pkFail.Texus_Push_Error = failMsg;
+			}
+			res = "{\"success\":false,\"error\":\"" + failMsg.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
+		}
+		else
+		{
+			for each  pkOk in Packing[ID == pId]
+			{
+				pkOk.Texus_Package_Id = newPkgId;
+				pkOk.Texus_Package_No = newPkgNo;
+				pkOk.Texus_Push_Status = "Sent";
+				pkOk.Texus_Push_Error = "";
+			}
+			adoptedTxt = "false";
+			if(adopted == true)
+			{
+				adoptedTxt = "true";
+			}
+			res = "{\"success\":true,\"adopted\":" + adoptedTxt + ",\"packageId\":\"" + newPkgId + "\",\"packageNo\":\"" + newPkgNo + "\"}";
+		}
+	}
+	catch (e)
+	{
+		return "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}
