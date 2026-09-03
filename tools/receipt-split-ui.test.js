@@ -125,6 +125,27 @@ test('render: split sub-rows appear under the material, labelled', () => {
   assert.ok(!/Unassigned/.test(html), 'no Unassigned row for the suppressed bucket');
 });
 
+test('render: accordion — split material is expandable, sub-rows start hidden', () => {
+  const html = ctx.renderSupReceipts(receiptsFixture());
+  // The thread row (has a split) is clickable and shows a chevron + "2 items".
+  assert.ok(/recv-mat-row is-expandable[^>]*onclick="toggleRecvGroup\('recv-grp-\d+'/.test(html),
+    'expandable main row with toggle handler');
+  assert.ok(/recv-chevron/.test(html), 'chevron on the expandable material');
+  assert.ok(/recv-item-count[^>]*>2 items/.test(html), '"2 items" hint');
+  // Sub-rows carry the group id and start hidden.
+  assert.ok(/recv-split-row hidden" data-recv-grp="recv-grp-\d+"/.test(html),
+    'sub-rows hidden by default, tagged with their group id');
+});
+
+test('render: a material with NO split is a plain row (no chevron, no handler)', () => {
+  // Cotton went to a blank bucket only -> forItems suppressed -> plain row.
+  const html = ctx.renderSupReceipts(receiptsFixture());
+  const cottonRow = html.split('<tr').find((chunk) => chunk.indexOf('Cotton 60in') !== -1);
+  assert.ok(cottonRow, 'cotton row present');
+  assert.ok(cottonRow.indexOf('is-expandable') === -1, 'not expandable');
+  assert.ok(cottonRow.indexOf('toggleRecvGroup') === -1, 'no toggle handler');
+});
+
 test('render: main per-material row is unchanged (qty + unit + status pill)', () => {
   const html = ctx.renderSupReceipts(receiptsFixture());
   assert.ok(/DMC Thread/.test(html));

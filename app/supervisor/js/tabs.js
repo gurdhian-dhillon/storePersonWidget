@@ -920,17 +920,31 @@ function renderSupReceipts(receipts) {
     // that repeats one value is a column that earns nothing. Time stays: two
     // handovers in a morning are worth telling apart.
     //
-    // No order column in the MAIN row — a handover is one press of Issue against
-    // a SUPERVISOR, and the store fans that quantity across several of his open
-    // plans, so the header has no single right answer. But the per-line split
-    // IS honest (Issue_Lines.Plan_Item), so it hangs under the material as
-    // sub-rows: "→ Napkins  40 Mtr  In production". Shown only when the material
-    // actually went to a named item (forItems set by supReceiptRows).
-    var html = rows.map(function (r) {
-        var mainRow = '<tr>' +
+    // ACCORDION: a material with a per-item split (Issue_Lines.Plan_Item) is
+    // click-to-expand. The main row carries a chevron and toggles the sibling
+    // "→ item" rows, which start hidden. A material that went to a single named
+    // item (or no named item) has no split and is a plain row. One material at a
+    // time is not enforced — he may want two open to compare.
+    var html = rows.map(function (r, ri) {
+        var hasSplit = (r.forItems || []).length > 0;
+        var gid = 'recv-grp-' + ri;
+
+        var mainRow = '<tr class="recv-mat-row' + (hasSplit ? ' is-expandable' : '') + '"' +
+            (hasSplit ? ' onclick="toggleRecvGroup(\'' + gid + '\', this)"' : '') + '>' +
             '<td>' + escapeHtml(r.time) + '</td>' +
             '<td class="material-name-cell">' +
-                '<div class="mat-name">' + escapeHtml(r.material) + '</div>' +
+                '<div class="mat-name">' +
+                    (hasSplit
+                        ? '<span class="recv-chevron" aria-hidden="true">' +
+                          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
+                          'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg></span>'
+                        : '') +
+                    escapeHtml(r.material) +
+                    (hasSplit
+                        ? ' <span class="recv-item-count">' + r.forItems.length + ' item' +
+                          (r.forItems.length === 1 ? '' : 's') + '</span>'
+                        : '') +
+                '</div>' +
             '</td>' +
             '<td class="col-num col-strong">' + fmt(r.qty) +
                 '<span class="unit">' + escapeHtml(r.unit) + '</span></td>' +
@@ -943,7 +957,7 @@ function renderSupReceipts(receipts) {
 
         var splitRows = (r.forItems || []).map(function (it) {
             var lbl = itemStatusLabel(it.status);
-            return '<tr class="recv-split-row">' +
+            return '<tr class="recv-split-row hidden" data-recv-grp="' + gid + '">' +
                 '<td></td>' +
                 '<td class="recv-split-item">&rarr; ' +
                     escapeHtml(it.name || 'Unassigned') +
@@ -997,6 +1011,17 @@ function renderSupReceipts(receipts) {
 function toggleSupReceipts() {
     var card = document.getElementById('sup-recv-card');
     if (card) card.classList.toggle('open');
+}
+
+// Expand / collapse one material's per-item rows in "Material you received".
+function toggleRecvGroup(gid, rowEl) {
+    var subs = document.querySelectorAll('tr[data-recv-grp="' + gid + '"]');
+    var open = false;
+    for (var i = 0; i < subs.length; i++) {
+        subs[i].classList.toggle('hidden');
+        if (!subs[i].classList.contains('hidden')) open = true;
+    }
+    if (rowEl) rowEl.classList.toggle('is-open', open);
 }
 
 function renderSupHistory(items, stageCount, producedTotal, receipts) {

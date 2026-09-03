@@ -5247,6 +5247,105 @@ function histBar(handovers, lineCount) {
         '</div>';
 }
 
+// ONE ROW PER MATERIAL in a handover card, laid out like the Issue screen:
+// column 1 the SKU + name (never repeated), column 2 a stack of where it came
+// from — a line per lot for fresh cloth, then a green line per offcut with its
+// size, lot and carton — column 3 the total that went out.
+//
+// h.lines is one entry per Issue_Line (fresh cloth, fanned per plan-item);
+// h.waste is one entry per Waste_Movement "Issued" row (offcuts). Both are
+// grouped here by SKU. Fresh entries sharing a (sku, lot) sum together.
+function histMaterialGroups(h) {
+    var byKey = {};
+    var order = [];
+
+    function grp(sku, name, unit) {
+        var k = sku || name || '—';
+        if (!byKey[k]) {
+            byKey[k] = { key: k, sku: sku || '', name: name || '—', unit: unit || '',
+                         freshByLot: {}, freshOrder: [], waste: [], total: 0 };
+            order.push(k);
+        }
+        return byKey[k];
+    }
+
+    (h.lines || []).forEach(function (l) {
+        var g = grp(l.sku, l.material, l.unit);
+        if (!g.unit && l.unit) g.unit = l.unit;
+        var lot = l.lot || '';
+        var lk = lot || '(no lot)';
+        if (!g.freshByLot[lk]) {
+            g.freshByLot[lk] = { lot: lot, qty: 0 };
+            g.freshOrder.push(lk);
+        }
+        g.freshByLot[lk].qty += Number(l.qty) || 0;
+        g.total += Number(l.qty) || 0;
+    });
+
+    (h.waste || []).forEach(function (w) {
+        var g = grp(w.sku, w.material, w.unit);
+        var pcs = Number(w.pieces) || 0;
+        g.waste.push({
+            lot: w.lot || '', carton: w.carton || '', pieces: pcs,
+            cutWidth: Number(w.cutWidth) || 0, cutLength: Number(w.cutLength) || 0
+        });
+    });
+
+    return order.map(function (k) { return byKey[k]; });
+}
+
+function histDistinctMaterialCount(h) {
+    return histMaterialGroups(h).length;
+}
+
+function histMaterialRows(h) {
+    var groups = histMaterialGroups(h);
+    if (groups.length === 0) {
+        return '<tr><td colspan="3"><span class="is-muted">No lines on this handover.</span></td></tr>';
+    }
+    return groups.map(function (g) {
+        // Column 2 — the stack. Fresh lots first, then offcuts (green).
+        var stack = g.freshOrder.map(function (lk) {
+            var f = g.freshByLot[lk];
+            // Lot only qualifies fabric — thread and labels are issued by count
+            // off no roll, so their line is just the quantity, no "no lot" tag.
+            return '<div class="hist-src-line">' +
+                (f.lot ? '<span class="hist-lot">' + escapeHtml(f.lot) + '</span> ' : '') +
+                '<span class="hist-src-qty">' + fmt(f.qty) +
+                '<span class="unit">' + escapeHtml(g.unit || '') + '</span></span>' +
+                '</div>';
+        });
+        g.waste.forEach(function (w) {
+            var size = (w.cutWidth > 0 && w.cutLength > 0)
+                ? fmt(w.cutLength) + ' &times; ' + fmt(w.cutWidth) + '<span class="unit">cm</span>'
+                : w.pieces + '<span class="unit">pcs</span>';
+            var tail = [];
+            if (w.lot) tail.push(escapeHtml(w.lot));
+            if (w.carton) tail.push('Carton ' + escapeHtml(w.carton));
+            stack.push('<div class="hist-src-line hist-src-waste">' +
+                '&#9851; <span class="hist-waste-size">' + size + '</span>' +
+                (tail.length ? ' <span class="hist-waste-where">' + tail.join(' &middot; ') + '</span>' : '') +
+                (w.pieces ? ' <span class="hist-src-qty">' + w.pieces + '<span class="unit">pcs</span></span>' : '') +
+                '</div>');
+        });
+
+        var totalTxt = g.total > 0
+            ? fmt(g.total) + '<span class="unit">' + escapeHtml(g.unit || '') + '</span>'
+            : (g.waste.length
+                ? g.waste.reduce(function (n, w) { return n + w.pieces; }, 0) + '<span class="unit">pcs</span>'
+                : '<span class="is-muted">&mdash;</span>');
+
+        return '<tr>' +
+            '<td class="material-name-cell">' +
+            '<div class="mat-name">' + escapeHtml(g.name) + '</div>' +
+            (g.sku ? '<div class="mat-sku">' + escapeHtml(g.sku) + '</div>' : '') +
+            '</td>' +
+            '<td class="hist-src-cell">' + (stack.join('') || '<span class="is-muted">&mdash;</span>') + '</td>' +
+            '<td class="col-num col-strong">' + totalTxt + '</td>' +
+            '</tr>';
+    }).join('');
+}
+
 function renderHistory(handovers, lineCount) {
     var panel = document.getElementById('panel-history');
     var bar = histBar(handovers, lineCount);
@@ -5276,33 +5375,7 @@ function renderHistory(handovers, lineCount) {
     // The newest is expanded because "what just went out" is the question this
     // tab is nearly always asked, and it should not cost a click.
     var cards = handovers.map(function (h, idx) {
-        var lines = (h.lines || []).map(function (l) {
-            var hasCut = Number(l.cutWidth) > 0 && Number(l.cutLength) > 0;
-            return '<tr>' +
-                '<td class="material-name-cell">' +
-                '<div class="mat-name">' + escapeHtml(l.material || '—') + '</div>' +
-                (l.sku ? '<div class="mat-sku">' + escapeHtml(l.sku) + '</div>' : '') +
-                '</td>' +
-                '<td>' + (hasCut
-                    ? '<span class="cut-size">' + fmt(l.cutLength) + ' &times; ' + fmt(l.cutWidth) + '<span class="unit">cm</span></span>'
-                    : '<span class="is-muted">&mdash;</span>') + '</td>' +
-                // WHICH SHADE WENT OUT. Stamped on Issue_Lines as the cloth
-                // crossed the counter — the requirement row holds metres and has
-                // never held a lot, so this line is the only record of it.
-                //
-                // Beside the quantity, the same place the issue screen puts it,
-                // because it qualifies the metres rather than the material.
-                //
-                // A dash on every non-fabric row and on any handover written
-                // before lots existed. Lots exist for fabric alone, so an empty
-                // cell here is the ordinary case for thread and labels, not a
-                // gap — which is why it reads as a dash and not as blank.
-                '<td>' + (l.lot
-                    ? '<span class="hist-lot">' + escapeHtml(l.lot) + '</span>'
-                    : '<span class="is-muted">&mdash;</span>') + '</td>' +
-                '<td class="col-num col-strong">' + fmt(l.qty) + '<span class="unit">' + escapeHtml(l.unit || '') + '</span></td>' +
-                '</tr>';
-        }).join('');
+        var lines = histMaterialRows(h);
 
         // Date on every card now — over a range, "18:05" alone does not say
         // which day it was.
@@ -5316,8 +5389,11 @@ function renderHistory(handovers, lineCount) {
         var when = escapeHtml(h.date || '');
         if (h.time) when += (when ? ' · ' : '') + escapeHtml(h.time);
 
-        var nLines = (h.lines || []).length;
-        when += ' · ' + nLines + ' line' + (nLines === 1 ? '' : 's');
+        // "N materials" — one row per SKU now, not per Issue_Line, so this
+        // counts distinct materials in the handover the way the merged table
+        // reads.
+        var nMats = histDistinctMaterialCount(h);
+        when += ' · ' + nMats + ' material' + (nMats === 1 ? '' : 's');
 
         // ONE PRESS OF ISSUE = ONE CARD, even when the store person's backlog
         // was big enough that the widget chunked it into several Material_Issue
@@ -5359,7 +5435,7 @@ function renderHistory(handovers, lineCount) {
             '<div class="tables-container">' +
             '<div class="table-wrapper">' +
             '<table><thead><tr>' +
-            '<th>Material</th><th>Cut piece size</th><th>Lot</th><th class="col-num">Qty issued</th>' +
+            '<th>Material</th><th>Issued from</th><th class="col-num">Qty issued</th>' +
             '</tr></thead><tbody>' + lines + '</tbody></table>' +
             '</div>' +
             '</div>' +

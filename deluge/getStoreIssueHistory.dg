@@ -220,6 +220,24 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	// outside - so that one stays a single fetch.
 	lotNumMap = Map();
 
+	// THE OFFCUT SIDE OF A HANDOVER.
+	//
+	// A waste piece issued as material is NOT an Issue_Line - issueMaterials
+	// records it only as Waste_Movement[Movement_Type == "Issued"], stamped with
+	// the chunk's SIV (Voucher) and the carton it was racked in (Carton_Number).
+	// So the fresh cloth of a handover comes from Issue_Lines (above) and the
+	// offcuts from Waste_Movement, keyed together by SIV.
+	//
+	// Two caches, filled one indexed query per DISTINCT waste piece on the page:
+	//   wpSkuMap  - waste piece id -> its Raw_Material id (to bucket the remnant
+	//               under the right SKU row on screen)
+	//   wpLotMap  - waste piece id -> its lot's readable number
+	// A piece appearing on several movements is read once. The Raw_Material and
+	// Raw_Material_Lot names still come from matNameMap / matSkuMap / lotNumMap.
+	wpSkuMap = Map();
+	wpLotMap = Map();
+	wpSeenMap = Map();
+
 	for each  rmC in Raw_Material[ID != 0]
 	{
 		rmKey = rmC.ID.toString();
@@ -298,6 +316,7 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 		// seconds apart and can straddle midnight). Status is the head's - all
 		// chunks of one press share it.
 		linesJson = "";
+		wasteJson = "";
 		sivJson = "";
 		earliestDate = null;
 		earliestTime = "";
@@ -305,7 +324,8 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 
 		for each  bc in batchChunks
 		{
-			bcSiv = ifnull(bc.Voucher_No,"").toString().trim().replaceAll("\"","'");
+			bcSivRaw = ifnull(bc.Voucher_No,"").toString().trim();
+			bcSiv = bcSivRaw.replaceAll("\"","'");
 			if(bcSiv != "")
 			{
 				if(sivJson != "")
@@ -387,6 +407,65 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 				linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"lot\":\"" + lnLot + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + "}";
 				totalLines = totalLines + 1;
 			}
+
+			//----------------------------------------------------------------
+			// THE OFFCUTS OF THIS CHUNK - Waste_Movement "Issued" rows stamped
+			// with this SIV. Empty on a handover of fresh cloth only, and on
+			// every handover issued before the Voucher field existed (those
+			// remnants simply do not show - the fresh side is unaffected).
+			//----------------------------------------------------------------
+			if(bcSivRaw != "")
+			{
+				for each  wm in Waste_Movement[Voucher == bcSivRaw && Movement_Type == "Issued"]
+				{
+					wpKey = "";
+					if(wm.Waste_Piece != null)
+					{
+						wpKey = wm.Waste_Piece.toString().trim();
+					}
+
+					wmSku = "";
+					wmName = "";
+					wmLot = "";
+					if(wpKey != "" && wpKey.isNumber() == true)
+					{
+						if(ifnull(wpSeenMap.get(wpKey),"").toString() == "")
+						{
+							wpSeenMap.put(wpKey,"1");
+							wpSkuMap.put(wpKey,"");
+							wpLotMap.put(wpKey,"");
+							for each  wpC in Waste_Master[ID == wpKey.toLong()]
+							{
+								wpSkuMap.put(wpKey,ifnull(wpC.SKU,"").toString().trim());
+								wpLotRef = ifnull(wpC.Lot,"").toString().trim();
+								if(wpLotRef != "" && wpLotRef.isNumber() == true)
+								{
+									for each  wpLotC in Raw_Material_Lot[ID == wpLotRef.toLong()]
+									{
+										wpLotMap.put(wpKey,ifnull(wpLotC.Lot_Number,"").toString().trim().replaceAll("\"","'"));
+									}
+								}
+							}
+						}
+						wmMatId = ifnull(wpSkuMap.get(wpKey),"").toString();
+						wmSku = ifnull(matSkuMap.get(wmMatId),"").toString();
+						wmName = ifnull(matNameMap.get(wmMatId),"").toString();
+						wmLot = ifnull(wpLotMap.get(wpKey),"").toString();
+					}
+
+					wpcS = ifnull(wm.Piece_Count,"0").toString().trim();
+					if(wpcS == "")
+					{
+						wpcS = "0";
+					}
+
+					if(wasteJson != "")
+					{
+						wasteJson = wasteJson + ",";
+					}
+					wasteJson = wasteJson + "{\"material\":\"" + wmName + "\",\"sku\":\"" + wmSku + "\",\"lot\":\"" + wmLot + "\",\"carton\":\"" + ifnull(wm.Carton_Number,"").toString().trim().replaceAll("\"","'") + "\",\"pieces\":" + wpcS.toLong() + ",\"cutWidth\":" + ifnull(wm.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(wm.Cut_Size_Length,0) + "}";
+				}
+			}
 		}
 
 		issueDateTxt = "";
@@ -402,7 +481,7 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 		// id / voucher are the HEAD's - a stable handle for the card. sivNumbers
 		// is every chunk's SIV so a transfer-order check in Zoho Inventory lines
 		// up. IDs forced to string - 18-digit ids break JSON.parse otherwise.
-		rowsJson = rowsJson + "{\"id\":\"" + mi.ID + "\",\"voucher\":\"" + ifnull(mi.Voucher_No,"").toString() + "\",\"sivNumbers\":[" + sivJson + "],\"date\":\"" + issueDateTxt + "\",\"time\":\"" + earliestTime + "\",\"supervisor\":\"" + supName + "\",\"status\":\"" + ifnull(mi.Issue_Status,"").toString() + "\",\"lines\":[" + linesJson + "]}";
+		rowsJson = rowsJson + "{\"id\":\"" + mi.ID + "\",\"voucher\":\"" + ifnull(mi.Voucher_No,"").toString() + "\",\"sivNumbers\":[" + sivJson + "],\"date\":\"" + issueDateTxt + "\",\"time\":\"" + earliestTime + "\",\"supervisor\":\"" + supName + "\",\"status\":\"" + ifnull(mi.Issue_Status,"").toString() + "\",\"lines\":[" + linesJson + "],\"waste\":[" + wasteJson + "]}";
 	}
 	}
 	catch (e)

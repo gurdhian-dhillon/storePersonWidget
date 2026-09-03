@@ -2728,6 +2728,46 @@ th.col-num {
 
 /* ---- "Material you received" per-item split ---- */
 
+/* A material with a per-item breakdown is click-to-expand. The main row shows a
+   chevron and an "N items" hint; its sub-rows start hidden. */
+.recv-mat-row.is-expandable {
+    cursor: pointer;
+}
+
+.recv-mat-row.is-expandable:hover .mat-name {
+    color: var(--primary);
+}
+
+.recv-chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 0.9rem;
+    height: 0.9rem;
+    margin-right: 0.4rem;
+    vertical-align: -0.1rem;
+    color: var(--text-muted);
+    transition: transform 0.12s ease;
+}
+
+.recv-chevron svg {
+    width: 0.6rem;
+    height: 0.6rem;
+    display: block;
+}
+
+.recv-mat-row.is-open .recv-chevron {
+    transform: rotate(90deg);
+    color: var(--primary);
+}
+
+.recv-item-count {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-left: 0.4rem;
+}
+
 /* The store fanned one press of Issue across several of his items. Each of
    those sub-rows sits under its material line, lightly recessed so it reads as
    a breakdown of the row above and not as another material. */
@@ -4349,6 +4389,15 @@ th.col-num {
     font-weight: 500;
     color: var(--text-muted);
     font-size: 0.85em;
+}
+
+/* Space between order cards - they are separate decisions, not a dense list. */
+.ov-order-card {
+    margin-bottom: 0.75rem;
+}
+
+.ov-order-card:last-child {
+    margin-bottom: 0;
 }
 
 /* Meta line - one row: small grey caps label, value, thin rule between the
