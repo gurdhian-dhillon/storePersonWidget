@@ -1,20 +1,18 @@
 # Lot → Rolls model — the store person is told which roll to cut
 
-> **Status: DESIGN. Nothing here is built.** This is the core stock mechanism.
-> Every step ships only after a parity test proves each number that moves,
-> moved for a reason we wrote down first.
+> **Status: IN BUILD.** The allocator port (Step 3) is landing in pieces —
+> Pieces 1–3 (`lotFill`, `spend()` ledger, `applyFabricOverride`,
+> `shortReasonFor`) are done and on `main`, parity 31/31 vs a frozen baseline.
+> See **BUILD LOG** below the build-order table for what actually landed and how
+> it differs from the design. The Deluge side (Steps 4–9) is not started.
 >
-> **Revision 5.** Rev 2 fixed three self-review errors. Rev 3–5 fold in three
-> external gap-analysis passes, each finding verified line-by-line against the
-> code before applying. Rev 5's pass added 8 findings, all valid: the
-> `Fabric_Piece` backfill must expand `Piece_Count` into that many rolls (a
-> silent stock-loss bug otherwise); `Issue_Lines.Roll_Label` and
-> `Print_Job.Source_Roll` were missing from the Step 0 schema;
-> `issueMaterialsHandover` — not `issueMaterialsApply` — is what stamps the
-> label; `spend()` needs an in-memory roll ledger or sequential orders
-> double-claim; `applyFabricOverride`, `getProductionWidgetData`'s inline waste
-> copy, and `shortReasonFor` all need roll-awareness; and the writer/reader
-> counts were off. All revision tables are at the end.
+> **Revision 6.** Revs 2–5 were self-review + three external gap-analysis passes,
+> each finding verified against the code. Rev 6 records the decisions made
+> *during* the build (Pieces 1–3): the `applyFabricOverride` rule is editable
+> multi-roll, not read-only; OQ1 (fixed SKU width) and OQ5 (no split tool) are
+> resolved; the width field is `Width1`; no standalone `Lot_Rolls_Report`; the
+> parity harness uses a frozen `git show` baseline. Full table at the end
+> ("Rev 5 → Rev 6").
 
 ---
 
@@ -248,80 +246,94 @@ joined by lot id, the pattern `Fabric_Piece_Report` already uses). Expose
 *Parity:* `api-experiment-parity.test.js` extended — assembled `rolls[]` matches
 the Deluge read path.
 
-**3. `app/js/lot-allocator.js`** — **one path.** `lotFill` works off
-`lot.rolls[]` with check-1 capacity; `lotIsPieces` / `lotPieces` /
-`lotGreigePieces` and the `metres = 0` special case are deleted (every lot is
-rolls now). `chooseLotForOrder` applies the decision table and **names the
-rolls**. `lotLines[]` gains `rolls: [{label, metres}]`. The remnant scorer is
-untouched — `wasteStock` stays separate from rolls. Four sub-points:
+**3. `app/js/lot-allocator.js` — one path. `lotFill` per-roll rewrite BUILT in
+Piece 1.** `lotFill` works off a shortest-first sorted working copy of
+`lot.rolls[]`. The fresh-cloth loop drains each roll in whole marker rows —
+`rowsAvail = min(rowsThisRoll, rowsWashGateAllows)` — then the next-shortest.
+The **wash gate bounds the loop as a budget** (`gateBudget`, starting at the
+lot's washed metres, or wash+greige+in-wash when `greige` is true), so a lot
+with 50 m of rolls but 0 m washed places nothing today and `covers` is false —
+it never cuts cloth it cannot wash. `lotFill` returns `rollLinesPer` (per demand,
+`[{rollId, label, metres}]`) and `rollsAfter`. The `if (pcs.length) {…} else
+{…}` Pieces-vs-continuous branch is gone — printed cloth is short rolls, same
+loop. `chooseLotForOrder`'s tier logic is unchanged (per-roll `lotFill.covers`
+does the work). `lotLines[]` gains `rolls: [{rollId, label, metres}]`. The
+remnant scorer is untouched — `wasteStock` stays separate from rolls.
+`lotIsPieces` / `lotPieces` / `lotGreigePieces` are still in the file (Piece 4
+deletes them) but no longer called from `lotFill` / `spend()`. Four sub-points:
 
-- **`spend()` must carry a roll ledger.** This is the load-bearing one.
-  `spend()` (`lot-allocator.js:~890`) decrements in-memory ledgers after each
-  order so the *next* order on the card measures against what's left — its own
-  comment: *"two orders each took 5.50 m from a 6.00 m lot… the double-promise
-  this whole design exists to prevent."* Today it maintains `lotLeft`,
-  `lot.wash`, `lot.unwash`, `greigeLeft`, `wasteLeft`, `pieceLeft`, `lot.pieces`.
-  Under rolls it **must also deduct the allocated metres from the specific
-  `roll.Roll_Length`** (on the in-memory `lot.rolls` objects) and carry a
-  `rollLeft` map across cards — exactly the treatment `lot.pieces` / `pieceLeft`
-  get now. Without it, Order 2 sees Order 1's roll at full length and allocates
-  cloth already promised. `chooseLotForOrder` / `lotFill` then read the
-  spent-down `lot.rolls`.
-- **`perRowFor` and width.** Today `allocateMaterial` builds one `fab =
-  { fabricWidthCm: m0.fabricWidthCm }` per **material** (`lot-allocator.js:573`)
-  and `perRowFor` reads it for every lot. That is fine **only if `Width` stays
-  lot-level AND every lot of a material shares it**. If OQ1 resolves that
-  printed lots have a narrower print-table width, `Width` moves onto the roll
-  and `perRowFor` must take it per roll — `check 1`'s `perRow` is already
-  written `floor(lot.Width / cutW)`, so the allocator would read `lot.Width` (or
-  `roll.width`) rather than `fab.fabricWidthCm`. **This is why OQ1 blocks Step 3,
-  not just Step 1.**
-- **`chooseLotForOrder` ranking.** It filters to lots where `lotFill(...).covers`
-  (so a lot of pure unusable scrap is already excluded), then picks the
-  *smallest* by `wash + unwash` to protect big lots for big orders. Under rolls
-  that total counts short rolls that add zero capacity — a lot with 19 m + 1 m
-  ranks as "bigger" (less protected) than a clean 19 m lot of equal usable
-  capacity. It is a heuristic, not a correctness bug (`covers` is the gate), but
-  the ranking metric should change to `Σ usable roll capacity`
-  (`Σ Roll_Length where Roll_Length >= cutL`, or the check-1 `capacity` figure).
-  Decide in Step 3.
-- **`shortReasonFor` `nofit` message.** `lot-allocator.js:~1620` reports
-  `kind:'nofit', have: round2(Number(l.wash) || 0)` — the lot's total washed
-  metres. Under rolls a lot with 20 m across two 10 m rolls, against a 12 m
-  order, would say *"L2 has 20 m, need 12 m"*, which reads as a bug. Change
-  `have` to the **longest roll's length** — *"L2 longest roll 10 m, need 12 m"*.
+- **`spend()` roll ledger — BUILT in Piece 2.** `spend()` decrements in-memory
+  ledgers after each order so the *next* order on the card measures against
+  what's left — its own comment: *"two orders each took 5.50 m from a 6.00 m
+  lot… the double-promise this whole design exists to prevent."* It now also
+  carries **`rollLeft`**, keyed `materialId|lotId|rollId`, seeded in
+  `applyLotAllocation` alongside `pieceLeft`. After each fill, `spend()` sums the
+  per-roll metres `lotFill` placed (`fill.rollLinesPer`) and drains BOTH
+  `rollLeft` and the working `lot.rolls[]` objects. On a *commitment* (`emit`
+  false — an after-wash order) the rolls drain too: the order has spoken for
+  that physical cloth. `lotFill` returns `rollLinesPer` (per-demand
+  `[{rollId, label, metres}]`) and `rollsAfter` (the drained working copy).
+  **The input payload `m.lots[]` is never mutated** — the allocator works on
+  copies + ledgers, exactly as it never wrote spent `wash` back to `m.lots`.
+- **`perRowFor` and width — RESOLVED, no change needed.** OQ1 answered: fabric
+  width is **fixed per SKU** — every lot and every roll of a material shares one
+  width; a width difference is a different `Raw_Material`. So `allocateMaterial`'s
+  one `fab = { fabricWidthCm: m0.fabricWidthCm }` per material is correct, and
+  `perRowFor` is unchanged. The "different-width two-lot" parity case is dropped.
+- **`shortReasonFor` `nofit` message — DONE in Piece 3.** Was
+  `have: round2(Number(l.wash))` — the lot's total washed metres. Now `have` is
+  the **longest single Available roll** of the lot with the longest roll:
+  *"L2 longest roll 10 m, need 12 m"* over two 10 m rolls, not *"L2 has 20 m"*.
+- **`chooseLotForOrder` — SHORTEST-first, and its ranking.** Roll choice within
+  a lot is **shortest-roll-first, drain it, then next-shortest** (see "Which
+  roll gets named" — this reverses the earlier longest-first draft). Tie on
+  length broken by `Roll_Label`. The lot-level ranking still filters to
+  `lotFill(...).covers` (a lot of pure unusable scrap is excluded automatically,
+  since the per-roll `lotFill` returns `covers:false`) then picks the smallest
+  covering lot to protect big lots for big orders. The metric could sharpen from
+  `wash + unwash` to `Σ usable roll capacity`; it is a heuristic, not a
+  correctness issue (`covers` is the gate), left as-is for now.
 
-*Parity:* the whole existing `allocator.test.js` set re-run with one roll per lot
-= **byte-identical**; then the 750+8 continuity case; a lot covered only across
-three rolls; two orders on one card racing a single roll (the `spend()` ledger
-test); the printed cases restated as short rolls; a same-material two-lot case
-where the lots have different widths (guards the `perRowFor` decision).
+*Parity:* the whole existing `allocator.test.js` set, re-run with each lot given
+ONE seed roll = its old scalar, is **byte-identical** to the pre-rewrite
+allocator (verified via a FROZEN `git show e000519:` baseline, not a live second
+copy). 31/31 including the end-to-end `applyLotAllocation` cases and a 400-iter
+random sweep. Multi-roll: the 750+8 continuity case, shortest-first drain across
+three rolls, two orders racing one roll (the `spend()` ledger), printed cloth as
+short rolls — all hand-verified.
 
 **3b. `applyFabricOverride` (in `lot-allocator.js`) — the store-screen manual
-override.** Today it **refuses** a hand-typed metres edit on a lot whose lines
-carry a per-piece cut list (`lot-allocator.js:1391-1403`) — *"a hand-sized
-metres figure cannot be mapped onto discrete pieces."* Under rolls the same
-problem is universal: a typed metres figure cannot say **which roll(s)** the
-metres come off or how much off each. So the guard must widen: **refuse a
-hand-edit on any multi-roll lot** (the single-roll case is unambiguous and stays
-editable), OR the override dialog carries a per-roll breakdown the store person
-fills in. Refuse-if-multi-roll is the smaller change and matches the existing
-Pieces guard exactly — the box renders read-only, same as a Pieces lot does
-today.
+override. BUILT in Piece 3; the rule is NOT the earlier "refuse multi-roll"
+draft.** The store person can hand-edit **every** lot's metres box, single-roll
+or multi-roll — there is no read-only case. The box is per lot (a SKU row can
+have several lot sub-lines, each independently editable), and the edit re-spreads
+across that lot's rolls in **drain order** (shortest-first, as the allocator
+placed them):
 
-**And the single-roll case that stays editable must keep `ln.rolls` in step.**
-`applyFabricOverride` rebuilds `lines` from a JSON clone of `thisLotBase` and
-scales `ln.qty` (`lot-allocator.js:~1446`) — it never touches `ln.rolls`. So a
-single-roll line carrying `rolls: [{label:'L1-R1', metres:10}]`, edited 10 → 12,
-ends with `ln.qty = 12` but `ln.rolls[0].metres = 10`, and the handover payload
-carries two disagreeing figures → a mismatched issue or an under-decremented
-roll. The override must, for the single-roll case, also set
-`ln.rolls[0].metres = ln.qty` **and** clamp `ln.qty` to that roll's
-`Roll_Length` (a hand-typed figure above the roll's length is refused, same as
-`maxIssuable` caps the box today).
-*Parity:* single-roll lots stay editable and `qty` == `rolls[0].metres` after
-every edit; multi-roll lots render read-only; no metres edit ever produces an
-ambiguous or over-length roll decrement.
+- **Edit DOWN** — unwind the drain **newest-roll-first**. The rolls drained
+  earliest keep their auto figure; the shortfall comes off the last roll used,
+  then the second-last. `[R1:4.95, R2:3.30]` edited to 6.0 → `[R1:4.95,
+  R2:1.05]`; edited to 3.0 → `[R1:3.00]` (R2 drops out).
+- **Edit UP** — extend **only the last roll used**, clamped at its physical
+  `Roll_Length`. **No spill onto a fresh, previously-unused roll** — a hand-edit
+  never opens a new roll. `[R1:4.95, R2:3.30]`, R2 cap 8 → edit to 10.0 gives
+  `[R1:4.95, R2:5.05]`; edit to 20.0 clamps at `[R1:4.95, R2:8.00]` (total
+  12.95).
+- **`ln.rolls` and `ln.qty` stay in step** — every line of the lot carries the
+  same re-spread roll breakdown, so the handover payload's `qty` and `rolls[]`
+  cannot disagree.
+- **`fromRaw` (Pieces_From_Raw) is re-derived from the edited total** in whole
+  cut rows — `floor(totalMetres / cutLength) × perRow`, capped at the row's
+  outstanding pieces after offcuts. A short edit leaves the requirement OPEN for
+  the rows not cut; an over-edit's surplus is an offcut. Unchanged from before.
+- **`cutSummary`** on a multi-roll line reads `"Rolls: L2-R1 5m, L2-R2 1.05m"`.
+
+*Live UI* — the store screen showing which roll's metres are decreasing as the
+box is typed — is a **follow-up `main.js` change**, not in the allocator work.
+
+*Parity:* seed-roll (one roll = the old scalar) override output is byte-identical
+to the old allocator for every `allocator.test.js` override case. Multi-roll
+edit-down / edit-up hand-verified against the four cases above.
 
 **4. `app/js/main.js`** — the issue row shows the named roll(s):
 `L2-R2 · 8 m`. `buildShortfallSummary` is **unaffected** — it already drives off
@@ -493,10 +505,10 @@ last.
 
 | Step | What | Ships when |
 |---|---|---|
-| **0** | Creator, manual, additive: `Lot_Rolls` subform; `Raw_Material_Lot.Width` (Decimal cm); **`Material_Issue.Issue_Lines.Roll_Label` (Single Line)**; **`Print_Job.Source_Roll` (Single Line)** (or wherever `sendToPrint` records its send lines); `Lot_Rolls_Report` (a Creator **Report** on the subform, the `Fabric_Piece_Report` pattern); `Waste_Master.Source_Roll` (Single Line). **Delete `resolveStockDispute` and its Creator workflow** — gone before Step 5. **Answer Open Q 5** (who splits a seed roll) — Step 1 cannot start without it. | all fields + report exist, `resolveStockDispute` deleted, OQ5 answered |
-| **1** | **Backfill + LABELLING.** Script, per lot with no `Lot_Rolls`: set `Width = Fabric_Width_Inches × 2.54` from the material; create one seed roll `Roll_Length = Wash + Unwash + In_Wash`, `Roll_Label = "<Lot_Number>-R1"`, `Origin = "Purchased"`, `Source_Receipt = "BACKFILL"`. **Each `Fabric_Piece` row → `Piece_Count` `Lot_Rolls` rows** of `Piece_Length_Cm / 100` each (`Origin="Printed"`) — see the F1 note in Group D. **Then the store physically labels the rack** and, via the OQ5 mechanism, splits any seed row that is really several rolls. | `verifyLotSync` roll check green on every lot; `Width` set on every lot; `Σ Roll_Length` matches after the `Piece_Count` expansion; the rack matches the rows |
+| **0** | **DONE.** Creator, additive: `Lot_Rolls` subform (`Roll_Label`, `Roll_Length`, `Roll_Status`, `Origin`, `Source_Receipt`); `Raw_Material_Lot.Width` — Creator named it **`Width1`**. **No standalone `Lot_Rolls_Report`** — the subform comes back nested in `All_Material_Lots` records. Still owed for later steps: `Issue_Lines.Roll_Label`, `Print_Job.Source_Roll`, `Waste_Master.Source_Roll`; delete `resolveStockDispute` before Step 5. | fields exist |
+| **1** | **DONE (dummy data).** `deluge/seedLotRolls.dg`, run in Execute: per lot with no `Lot_Rolls`, sets `Width1 = Fabric_Width_Inches × 2.54`, creates one seed roll `Roll_Length = Wash + Unwash + In_Wash`, `Roll_Label = "<Lot>-R1"`, `Origin="Purchased"`, `Source_Receipt="BACKFILL"`. Idempotent, dry-run flag, self-checks `Σ Roll_Length == Wash+Unwash+In_Wash`. **No rack labelling / seed-roll splitting** — OQ5 resolved (dummy data). `Fabric_Piece` migration deferred with the printed-fabric project. | `seedLotRolls` invariant check clean on every lot |
 | **2** | Read path exposes `rolls[]` (`getStoreMaterialRequirements`, `api-experiment.js`). No behaviour change. | one-roll parity identical |
-| **3** | `lot-allocator.js` single path + roll naming + **`spend()` roll ledger**; `applyFabricOverride` guard widened to multi-roll **and single-roll `ln.rolls` sync**; `chooseLotForOrder` ranking + `shortReasonFor` `nofit` message; issue screen + admin audit show the roll. **Needs OQ1 answered** (width lot vs roll → whether `perRowFor` changes). | allocator parity: one-roll byte-identical; continuity, different-width, and two-orders-race-one-roll cases verified; admin totals unchanged; single-roll override keeps `qty == rolls[0].metres` |
+| **3** | `lot-allocator.js` — **DONE (Pieces 1–3), see BUILD LOG.** `lotFill` per-roll shortest-first drain + wash-gate budget (P1); `spend()` roll ledger + `lotLines[].rolls` + `allocateMaterial` forwards rolls (P2); `applyFabricOverride` multi-roll edit-down/edit-up, `shortReasonFor` longest-roll (P3). Still to do: Piece 4 delete dead `lotIsPieces`/`lotPieces`/`lotGreigePieces`; Piece 5 `api-experiment.js` + `getStoreMaterialRequirements` read path + `main.js`/admin roll display. | allocator parity: 31/31 byte-identical vs frozen `e000519` baseline; continuity + two-orders-race + multi-roll override hand-verified |
 | **4** | `getExpectedWaste.dg` **and `getProductionWidgetData.dg`'s inline copy** per-roll tails, same pass; `saveWasteFromCutting.dg` roll stamp. | waste parity: one-roll identical for both; multi-roll hand-worked; `getProductionWidgetData` inline == `getExpectedWaste` no-lot path (8 cases) |
 | **5** | **`issueMaterialsApply.dg`** decrements the named roll (re-read length inside the execution, cap-and-error); **`issueMaterialsHandover.dg`** stamps `Issue_Lines.Roll_Label` from the handover payload. **First write — both, same pass.** | full lifecycle test, conservation invariants after every step; concurrent-issue race test; `Issue_Lines` carries the label |
 | **6** | `saveStockInward`, `receiveFromPrint` create roll rows on receipt (`receiveFromPrint`: one row per printed run). | roll sum holds after each receipt |
@@ -504,15 +516,81 @@ last.
 | **8** | `reconcileRawMaterial` swaps its `Fabric_Piece` scan for `Lot_Rolls` and adds the roll sum to its report; `verifyLotSync` third check. (`syncPurchaseInflow` needs nothing — material-level only.) | drift report clean |
 | **9** | Retire `Fabric_Piece` — move the 5 readers, delete the 3 writers' piece code, update the 5 comment-only files. | no reader references it |
 
-**Step 1 is the real risk** and it is not a code risk — it is a stocktake. Until
-the rack is labelled and split, every lot is one seed roll and the system
-behaves **exactly as today**. That is deliberate: steps 2–4 can ship against
-seed rolls and prove parity before any physical work is done. **Step 0's hard
-gates** — every schema field + the report created, `resolveStockDispute` deleted,
-OQ5 answered — none optional. Missing `Issue_Lines.Roll_Label` or
-`Print_Job.Source_Roll` at Step 0 means Steps 5/7 have nowhere to write the roll.
-**OQ1 (width lot vs roll) additionally blocks Step 3**, because `perRowFor` reads
-width and the allocator builds one width per material today.
+**On dummy data, every lot is one seed roll = its old scalar, so the whole port
+behaves exactly as today** and parity is the guard the whole way. In a real
+deployment Step 1 would be a stocktake (label the rack, split seed rolls into
+the real physical rolls); here there is no rack, so the multi-roll paths are
+built and unit-tested but not exercised by production data until
+receipt-creates-rolls lands. Steps 5/7 still need `Issue_Lines.Roll_Label` and
+`Print_Job.Source_Roll` added in Creator, and `resolveStockDispute` deleted,
+before they run.
+
+---
+
+## BUILD LOG — the allocator port, done in pieces
+
+Actual work, as landed. Commits on `main`: `4e9bae4` (Piece 1),
+Piece 2 and Piece 3 committed after.
+
+**Data prep (before the code):**
+- Creator: `Raw_Material_Lot.Width` added — Creator suffixed it **`Width1`**
+  (a `Width` link name was taken). `Lot_Rolls` subform: `Roll_Label`,
+  `Roll_Length`, `Roll_Status` (`Available`/`Consumed`/`Blocked`), `Origin`
+  (`Purchased`/`Printed`/`Remnant`/`Returned`), `Source_Receipt`.
+- **No standalone `Lot_Rolls_Report`.** The subform comes back nested inside
+  `All_Material_Lots` records as `l.Lot_Rolls` (array) when fetched with
+  `field_config: 'all'`. `api-experiment.js` reads it from there.
+- **`deluge/seedLotRolls.dg`** — the backfill. Per lot with no `Lot_Rolls`:
+  sets `Width1 = Fabric_Width_Inches × 2.54`, creates one seed roll
+  `Roll_Length = Wash + Unwash + In_Wash`, `Roll_Label = "<Lot>-R1"`. Idempotent,
+  dry-run flag, invariant self-check (`Σ Roll_Length == Wash+Unwash+In_Wash`).
+  Run in Creator's Execute.
+
+**Piece 1 — `lotFill` per-roll (`4e9bae4`).** Replaced the scalar-metres pool
+and the whole `if (pcs.length)` Pieces branch with one shortest-first roll-drain
+loop. `rollWork` = sorted working copy of `lot.rolls`; each demand drains each
+roll in whole marker rows, bounded by `min(rowsThisRoll, rowsWashGateAllows)`;
+the wash gate is a running `gateBudget` (washed metres, or wash+greige+in-wash
+when `greige`). Returns `rollLinesPer` + `rollsAfter`. **Parity: C/D/E 14/14
+byte-identical.** F-tests failed at this point — expected, they run the
+end-to-end `applyLotAllocation` which needs Piece 2.
+
+**Piece 2 — ledger + wiring.** `applyLotAllocation` seeds a **`rollLeft`** map
+(`materialId|lotId|rollId → metres`) beside `pieceLeft`. `allocateMaterial`
+takes `rollLeft`, forwards each lot's `rolls[]` into its working copy with the
+ledger's remaining length, drops `Consumed`/zero rolls. `spend()` sums
+`fill.rollLinesPer` per fill and drains BOTH `rollLeft` and the working
+`lot.rolls[]` — on commitments too. The line-build attaches
+`rolls: [{rollId, label, metres}]` to each `lotLines` entry (the old
+`lnPieces`/`fill.piecesPer` block deleted). **Parity: 31/31** — every F-test and
+the 400-iter G sweep byte-identical, via a FROZEN `git show e000519:` baseline
+(the harness now loads that, not a live second copy).
+
+**Piece 3 — `applyFabricOverride` + `shortReasonFor`.** Override rewritten per
+the rule in item 3b: every lot editable, edit-down unwinds newest-roll-first,
+edit-up extends only the last roll clamped at its cap, `ln.rolls`/`ln.qty` kept
+in step, `fromRaw` re-derived from the edited total. `shortReasonFor` `nofit`
+now reports the longest single roll, not the lot's washed sum. **Parity: 31/31.**
+Multi-roll override hand-verified against four cases (down-to-6, down-to-3,
+up-to-10, up-over-cap).
+
+**Still open (`tools/allocator-rolls.test.js` — the new multi-roll suite):**
+5 of 9 cases fail on **test-suite bugs, not code**:
+- B2/B3/B4: `assertInvariants` **C3** reads `.status` off plain fixture objects
+  (→ garbled math) and asserts `m.lots[]` payload mutation the allocator has
+  never done for any field. Its **C1** (`Σ ln.rolls[].metres == freshMeters`) is
+  the right check and passes.
+- B5: asserts `lot.rolls[0].length` on the payload drains to 0.5 — same
+  "allocator doesn't mutate the input" issue. Behaviour (order 2 skipped) is
+  correct.
+- B8: asserts multi-roll override is *refused* — contradicts the built rule
+  (editable). `got 8` is correct (edit-up to cap).
+Fix these in the test suite: drop the C3 `m.lots`-mutation assertion, assert the
+ledger via `orderOutcomes`, flip B8's expectation to editable.
+
+**Next: Piece 4** — delete `lotIsPieces` / `lotPieces` / `lotGreigePieces` /
+`hasOwnStock`'s pieces branch (dead, not called). **Piece 5** — `api-experiment.js`
++ `getStoreMaterialRequirements.dg` roll read, `main.js` + admin roll display.
 
 ---
 
@@ -536,40 +614,26 @@ width and the allocator builds one width per material today.
 
 ## Open questions
 
-**Blocking Step 0 (Step 0 will not close until answered):**
+**RESOLVED:**
 
-- **OQ5 — who splits a seed roll.** After backfill every lot has one roll. When
-  the store finds it is really three, what do they edit — a Creator subform
-  view on `Raw_Material_Lot`, or a screen in the store widget? A Creator
-  subform is zero build but every split is a raw record edit with no validation
-  (`Σ Roll_Length == Wash+Unwash+In_Wash` not enforced). A widget screen is
-  build but can enforce the invariant on save. **Step 1 physically cannot start
-  without this** — it is the tool the labelling uses.
+- **OQ1 — roll width.** Fabric width is **fixed per SKU** — every lot and roll
+  of a `Raw_Material` shares one width; a width difference is a different SKU.
+  Width lives on the lot (`Width1`), `perRowFor` unchanged.
+- **OQ2 — multi-cut-size order across rolls.** Shortest-roll-first (see "Which
+  roll gets named"), one cut size at a time, in demand order. The allocator
+  does this.
+- **OQ5 — splitting a seed roll.** No tool. Dummy data, no physical rack.
+  Receipt-creates-rolls (store enters "N rolls × lengths" when new cloth is
+  allocated to a lot) is a **later add-on**, not blocking.
 
-**Blocking Step 1:**
+**Still open:**
 
-- **OQ1 — printed roll width.** `Fabric_Piece` carries `Piece_Width_Cm`;
-  `Lot_Rolls` puts width on the lot. **Query the real `Fabric_Piece` data
-  first:** if every piece of a lot shares a width (expected — the print table is
-  a fixed width), lot-level `Width` is right and the migration is lossless. If
-  widths vary within a lot, `Width` moves onto the roll and check-1's `perRow`
-  reads it per roll.
-- **OQ4 — roll label scheme.** `<Lot_Number>-R<n>` proposed. Must survive a lot
-  split/merge, be short enough to write on a roll end, and not collide when a
-  seed roll `L2-R1` is split into `L2-R1`..`L2-R3`.
-
-**Blocking Step 3:**
-
-- **OQ2 — multi-cut-size order across rolls.** RESOLVED: shortest-roll-first
-  (see "Which roll gets named"), one cut size at a time, in demand order. The
-  allocator does this. Revisit if it strands too much.
-
-**Blocking Step 4:**
-
-- **OQ3 — remnant threshold.** A usable tail long enough for a marker row of its
-  own becomes a `Lot_Rolls` row (`Origin = "Remnant"`); anything smaller stays
-  `Waste_Master`. `saveWasteFromCutting` makes this call. Pin the exact number
-  when Step 4 lands.
+- **OQ3 — remnant threshold (blocks Step 4).** A usable tail long enough for a
+  marker row of its own becomes a `Lot_Rolls` row (`Origin = "Remnant"`);
+  anything smaller stays `Waste_Master`. `saveWasteFromCutting` makes this call.
+  Pin the number when Step 4 lands.
+- **OQ4 — roll label scheme (cosmetic).** `<Lot_Number>-R<n>` in use. Fine for
+  now; revisit if lots ever split/merge for real.
 
 ---
 
@@ -638,6 +702,18 @@ width and the allocator builds one width per material today.
 | `getProductionWidgetData.dg` inline waste copy missing from Step 4 | **valid** — inline `ewPerRowR = (ewFabWcm/ewCutW).floor()` (`:~925-1070`), the "ARITHMETIC ONLY" fold-in | Group A item 5 + Step 4: upgrade both in the same pass; cross-check parity |
 | Group B said "1 read-only", table had 2; `reconcileRawMaterial` mislabelled writer | **valid** — `verifyLotSync` + `reconcileRawMaterial` both read-only reports; `reconcileRawMaterial` never writes `Fabric_Piece` (`:53`); `syncPurchaseInflow` never touches a lot (0 refs) | Group B regrouped into "roll decision (10+1 dead) / read-only reports (2) / no change (5)"; Group D → 3 writers, 5 readers |
 | `shortReasonFor` `nofit` message reports lot total not longest roll | **valid** — `have: round2(Number(l.wash) || 0)` (`:~1620`); would say "L2 has 20 m, need 12 m" over two 10 m rolls | Group A item 3 sub-point: `have` = longest roll's length |
+
+### Rev 5 → Rev 6 (decisions made DURING the build, Pieces 1–3)
+
+| What the doc said | What was actually built | Why |
+|---|---|---|
+| `applyFabricOverride`: **refuse** hand-edit on any multi-roll lot (Group A 3b) | **Every** lot's box is editable — no read-only case. Multi-roll: edit-down unwinds newest-roll-first, edit-up extends only the last roll clamped at its cap. | User decision: "make the lot inbox editable… in multiple rolls if store person edit that then reduce from the most recent one." Refuse-if-multi-roll would block a real, needed action. |
+| OQ1 (width lot vs roll) blocks Step 3; parity needs a different-width two-lot case | OQ1 **resolved** — width is fixed per SKU, `perRowFor` unchanged, that parity case dropped. | User: "no fabric width won't vary even in lots… within one SKU width is same throughout." |
+| OQ5 (who splits a seed roll) is a Step 0 gate | OQ5 **resolved** — no split tool. Dummy data, no physical rack. Receipt-creates-rolls is a later add-on. | User: "we have dummy data the split don't matter." |
+| `Raw_Material_Lot.Width` field | Creator named it **`Width1`** (link name collision). `seedLotRolls.dg` and `api-experiment.js` use `Width1`. | Creator auto-suffix. |
+| Standalone `Lot_Rolls_Report` in Step 0 | Not created. `All_Material_Lots` returns `Lot_Rolls` nested in each record (`field_config: 'all'`). | Subforms come back inside the parent — no separate report needed. |
+| Parity guard = "one-roll = today's output" | Guard is enforced against a **frozen `git show e000519:` baseline** loaded into the harness, not a live re-read of the working file. | A live second copy runs the new code both sides and proves nothing. |
+| `spend()` roll ledger + wash gate as a note | Both built. Wash gate is a running **`gateBudget`** that bounds the drain loop, not just a post-check. | Piece 1/2 implementation detail worth recording. |
 
 ---
 

@@ -562,7 +562,9 @@ function applyLotAllocation(data) {
                 // the shortened roll. Same treatment pieceLeft gets, and for the
                 // same double-promise reason.
                 (l.rolls || []).forEach(function (rr) {
-                    var rk = String(m.materialId) + '|' + l.lotId + '|' + rr.rollId;
+                    if (String(rr.status || 'Available') === 'Consumed') return;
+                    if ((Number(rr.length) || 0) <= 0) return;
+                    var rk = String(m.materialId) + '|' + String(l.lotId) + '|' + String(rr.rollId);
                     if (rollLeft[rk] === undefined) {
                         rollLeft[rk] = round2(Number(rr.length) || 0);
                     }
@@ -928,18 +930,20 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
         //
         // On a COMMITMENT (`emit` false) the rolls still drain: the order has
         // spoken for that physical cloth even though nothing goes out today.
+        // Rolls drain even on commitment — the order has spoken for that cloth.
         var rollTook = {};
         (fill.rollLinesPer || []).forEach(function (perDemand) {
             (perDemand || []).forEach(function (rl) {
-                rollTook[rl.rollId] = round2((rollTook[rl.rollId] || 0) + (Number(rl.metres) || 0));
+                var fk = String(materialId) + '|' + String(lot.lotId) + '|' + String(rl.rollId);
+                rollTook[fk] = round2((rollTook[fk] || 0) + (Number(rl.metres) || 0));
             });
         });
-        Object.keys(rollTook).forEach(function (rid) {
-            var rk = materialId + '|' + lot.lotId + '|' + rid;
-            rollLeft[rk] = round2(Math.max(0, (rollLeft[rk] !== undefined ? rollLeft[rk] : 0) - rollTook[rid]));
+        Object.keys(rollTook).forEach(function (fk) {
+            rollLeft[fk] = round2(Math.max(0, (rollLeft[fk] !== undefined ? rollLeft[fk] : 0) - rollTook[fk]));
+            var rid = fk.split('|').pop();
             (lot.rolls || []).forEach(function (rr) {
                 if (String(rr.rollId) === String(rid)) {
-                    rr.length = round2(Math.max(0, (Number(rr.length) || 0) - rollTook[rid]));
+                    rr.length = round2(Math.max(0, (Number(rr.length) || 0) - rollTook[fk]));
                 }
             });
         });
@@ -1413,27 +1417,19 @@ function applyFabricOverride(m, lotId, editedMetres) {
     if (base.length === 0) return;
     var lotKey = String(lotId);
 
-    // A Pieces lot line carries a per-piece cut list the server needs to
-    // decrement Fabric_Piece. A hand-sized metres figure cannot be mapped onto
-    // discrete pieces, so an override of THIS lot is refused when any of its
-    // lines is one — the box is rendered read-only for the same reason.
     var thisLotBase = base.filter(function (ln) { return String(ln.lotId) === lotKey; });
     if (thisLotBase.length === 0) return;
-    if (thisLotBase.some(function (ln) { return ln.pieces && ln.pieces.length; })) return;
 
-    var autoThisLot = round2(thisLotBase.reduce(function (t, ln) {
-        return t + (Number(ln.qty) || 0);
-    }, 0));
-    var want = Math.max(0, Number(editedMetres) || 0);
-
-    // Rebuild m.lotLines: other lots' lines straight from auto, this lot's lines
-    // re-derived. Start from whatever is currently on m.lotLines for the other
-    // lots (they may carry earlier per-lot edits) but re-seed this lot from auto.
     var otherLines = (m.lotLines || []).filter(function (ln) {
         return String(ln.lotId) !== lotKey;
     });
 
+    var autoThisLot = round2(thisLotBase.reduce(function (t, ln) {
+        return t + (Number(ln.qty) || 0);
+    }, 0));
+
     // Back to exactly what the allocator decided for this lot.
+    var want = Math.max(0, Number(editedMetres) || 0);
     if (Math.abs(want - autoThisLot) < 0.005) {
         var restored = JSON.parse(JSON.stringify(thisLotBase));
         m.lotLines = otherLines.concat(restored);
@@ -1442,16 +1438,92 @@ function applyFabricOverride(m, lotId, editedMetres) {
         return;
     }
 
-    // mrqId -> pieces still owed (ceiling on fromRaw), from the server lines.
-    // Keyed on the requirement ROW, not the item: one Plan_Item can have two
-    // rows for this fabric (two cut sizes), each with its own owed count, and
-    // capping both against the first row's count would strand the second.
-    // Offcut credit per row comes from ALL of that row's auto lines, not just
-    // this lot's, so a short edit here cannot silently re-charge waste-covered
-    // pieces to fresh cloth.
+    // ---- THE ROLL BREAKDOWN THE ALLOCATOR PRODUCED, in DRAIN ORDER ----
+    //
+    // The allocation drained shortest-roll-first. `autoRolls` is that sequence
+    // for this lot — { rollId, label, autoMetres (what the fill took),
+    // cap (the roll's physical length from the payload) } — first entry is the
+    // roll drained first, last is the most recently used.
+    var capById = {};
+    (m.lots || []).forEach(function (l) {
+        if (String(l.lotId) !== lotKey) return;
+        (l.rolls || []).forEach(function (rr) {
+            capById[String(rr.rollId)] = round2(Number(rr.length) || 0);
+        });
+    });
+    var autoRolls = [];
+    var seenRoll = {};
+    thisLotBase.forEach(function (ln) {
+        (ln.rolls || []).forEach(function (rl) {
+            var rid = String(rl.rollId);
+            if (seenRoll[rid]) {
+                seenRoll[rid].autoMetres = round2(seenRoll[rid].autoMetres + (Number(rl.metres) || 0));
+            } else {
+                var e = { rollId: rid, label: String(rl.label || ''),
+                          autoMetres: round2(Number(rl.metres) || 0),
+                          cap: capById[rid] !== undefined ? capById[rid] : round2(Number(rl.metres) || 0) };
+                seenRoll[rid] = e;
+                autoRolls.push(e);
+            }
+        });
+    });
+
+    // ---- RE-SPREAD `want` ACROSS THE ROLLS ----
+    //
+    // EDIT DOWN: unwind the drain newest-roll-first. Keep the earlier rolls at
+    //   their auto figure and take the shortfall off the last, then the
+    //   second-last, and so on. A roll driven to 0 drops out of the breakdown.
+    // EDIT UP: extend ONLY the last used roll, clamped at its physical cap. No
+    //   spill onto a fresh, previously-unused roll — a hand-edit does not open a
+    //   new roll.
+    var rollAlloc = [];   // { rollId, label, metres } in drain order, >0 only
+    if (autoRolls.length === 0) {
+        // No roll breakdown on the auto lines (shouldn't happen post-migration).
+        // Fall back to a single synthetic line carrying just the metres.
+        rollAlloc = [];
+    } else if (want >= autoThisLot) {
+        // extend the last roll only
+        var extra = round2(want - autoThisLot);
+        autoRolls.forEach(function (e, i) {
+            var mtr = e.autoMetres;
+            if (i === autoRolls.length - 1) {
+                mtr = round2(Math.min(e.cap, e.autoMetres + extra));
+            }
+            if (mtr > 0) rollAlloc.push({ rollId: e.rollId, label: e.label, metres: mtr });
+        });
+    } else {
+        // EDIT DOWN — unwind the drain NEWEST-roll-first. The rolls drained
+        // earliest keep their auto figure; the shortfall comes off the LAST
+        // roll used, then the second-last. So fill FORWARD through drain order,
+        // each roll taking min(its auto, what is left of `want`) — the early
+        // rolls fill up first and the last roll absorbs the reduction. A roll
+        // that ends at 0 drops out of the breakdown.
+        var need = round2(want);
+        autoRolls.forEach(function (e) {
+            if (need <= 0.0001) return;
+            var g = round2(Math.min(e.autoMetres, need));
+            need = round2(need - g);
+            if (g > 0) rollAlloc.push({ rollId: e.rollId, label: e.label, metres: g });
+        });
+    }
+
+    var placedMetres = round2(rollAlloc.reduce(function (t, r) { return t + r.metres; }, 0));
+    // Excess beyond last roll's cap is intentionally not issued — no spill to fresh roll.
+
+    // ---- REBUILD THIS LOT'S LINES ----
+    //
+    // Spread `placedMetres` across the lot's auto lines weighted by their auto
+    // qty (a SKU row can have two cut sizes off one lot). Then re-derive fromRaw
+    // per line in whole cut rows, capped at the row's outstanding pieces after
+    // offcuts. Every line of this lot shares the same roll breakdown — the
+    // store person edits the LOT's metres, and the rolls under it are the lot's.
+    // Weighted by metres (qty) not pieces — for multi-cut SKUs with different
+    // cut sizes this gives different piece distribution than piece-weighting
+    // would, but intent per doc: "Spread placedMetres across the lot's auto
+    // lines weighted by their auto qty".
     var owedBy = {}, wasteBy = {};
     (m.lines || []).forEach(function (ln) {
-        var q = String(ln.mrqId || '');
+        var q = String(ln.mrqId || ln.planItemId || '');
         if (q && owedBy[q] === undefined) {
             owedBy[q] = Math.max(0, (Number(ln.reqPieces) || 0) - (Number(ln.issPieces) || 0));
         }
@@ -1461,37 +1533,28 @@ function applyFabricOverride(m, lotId, editedMetres) {
         wasteBy[q] = (wasteBy[q] || 0) + (Number(ln.fromWaste) || 0);
     });
 
-    // Spread the edited total across this lot's lines, weighted by their auto qty.
     var lines = JSON.parse(JSON.stringify(thisLotBase));
     var autoSum = lines.reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0);
     if (autoSum <= 0) { autoSum = lines.length; lines.forEach(function (ln) { ln.qty = 1; }); }
 
     var biggest = 0;
     lines.forEach(function (ln, i) {
-        ln.qty = round2(want * ((Number(ln.qty) || 0) / autoSum));
+        ln.qty = round2(placedMetres * ((Number(ln.qty) || 0) / autoSum));
         if ((Number(lines[i].qty) || 0) > (Number(lines[biggest].qty) || 0)) biggest = i;
     });
     var spread = lines.reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0);
-    lines[biggest].qty = round2((Number(lines[biggest].qty) || 0) + (want - spread));
+    lines[biggest].qty = round2((Number(lines[biggest].qty) || 0) + (placedMetres - spread));
     if ((Number(lines[biggest].qty) || 0) < 0) lines[biggest].qty = 0;
 
-    // fromRaw per line: whole rows using THIS LINE'S cut, capped at what the
-    // requirement row still owes after its offcuts and after any credit already
-    // taken on another line for the same row (a row's cut can be split across
-    // two lots).
     var rawTaken = {};
-    // Seed rawTaken from the OTHER lots' lines for the same row, so the cap is
-    // against the row's total outstanding, not just this lot's slice.
     otherLines.forEach(function (ln) {
         var q = String(ln.mrqId || ln.planItemId || '');
         rawTaken[q] = (rawTaken[q] || 0) + (Number(ln.fromRaw) || 0);
     });
     lines.forEach(function (ln) {
         var q = String(ln.mrqId || ln.planItemId || '');
-        var lineCutL = Number(ln.cutL) || 0;
-        var lineCutLcm = lineCutL * 100;
         var perRow = perRowFor({ fabricWidthCm: m.fabricWidthCm }, Number(ln.cutW) || 0);
-        var rows = (lineCutLcm > 0) ? Math.floor(((Number(ln.qty) || 0) * 100 + 0.5) / lineCutLcm) : 0;
+        var rows = (Number(ln.cutL) || 0) > 0 ? Math.floor((Number(ln.qty) * 100 + 0.0001) / Number(ln.cutL)) : 0;
         var gross = rows * perRow;
         var owed = owedBy[q] === undefined ? gross : owedBy[q];
         var wasteCredit = wasteBy[q] || 0;
@@ -1500,8 +1563,17 @@ function applyFabricOverride(m, lotId, editedMetres) {
         var give = Math.min(gross, room);
         rawTaken[q] = already + give;
         ln.fromRaw = give;
-        // fromWaste is the physical-pick credit and is not a function of metres —
-        // leave it exactly as the allocator set it.
+        // fromWaste is the physical-pick credit and is not a function of metres.
+        // The roll breakdown is the LOT's — every line of this lot carries it,
+        // so the handover payload's qty and rolls[] cannot disagree.
+        ln.rolls = rollAlloc.map(function (r) {
+            return { rollId: r.rollId, label: r.label, metres: r.metres };
+        });
+        ln.cutSummary = rollAlloc.length > 1
+            ? 'Rolls: ' + rollAlloc.map(function (r) {
+                  return r.label + ' ' + round2(r.metres) + 'm';
+              }).join(', ')
+            : '';
     });
 
     m.lotLines = otherLines.concat(lines);
@@ -1633,15 +1705,22 @@ function shortReasonFor(m, r, lots) {
 
     // Cloth on the rack that no single job fits inside. SAY THE NUMBERS: he is
     // looking at a rack with cloth on it, and "no lot holds enough" is true and
-    // unusable. The biggest lot and the smallest job end the argument in a
-    // glance, and neither of them is a marker row.
+    // unusable. What he can act on is the LONGEST SINGLE ROLL — a lot with two
+    // 10 m rolls holds 20 m but cannot cut a 12 m marker, and "L2 has 20 m"
+    // reads as a bug. Report the longest roll of the lot with the longest roll,
+    // against the smallest job.
     if (r.noFitSmallest > 0) {
         var big = null;
         lots.forEach(function (l) {
             if (l.blocked) return;
-            var have = round2(Number(l.wash) || 0);
-            if (have > 0 && (big === null || have > big.qty)) {
-                big = { lotNumber: l.lotNumber, qty: have };
+            var longest = 0;
+            (l.rolls || []).forEach(function (rr) {
+                if (String(rr.status || 'Available') === 'Consumed') return;
+                var len = round2(Number(rr.length) || 0);
+                if (len > longest) longest = len;
+            });
+            if (longest > 0 && (big === null || longest > big.qty)) {
+                big = { lotNumber: l.lotNumber, qty: longest };
             }
         });
         if (big) {
