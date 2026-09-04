@@ -530,6 +530,11 @@ function applyLotAllocation(data) {
         // no continuous cloth, so lotLeft alone cannot stop two orders on one
         // card being offered the same physical piece.
         var pieceLeft = {};
+        // materialId|lotId|rollId -> metres left on that physical roll, this
+        // card. lotLeft is the WASH-STATE budget; rollLeft is the PHYSICAL
+        // length. Both bound a fill — a lot can be washed enough yet have no
+        // single roll long enough, or have the roll but not the wash.
+        var rollLeft = {};
 
         // The server sends the true rack figure to EVERY card — it does not
         // divide stock between them — so seeding from the card in hand is the
@@ -551,6 +556,17 @@ function applyLotAllocation(data) {
                         pieceLeft[p.pieceId] = Number(p.count) || 0;
                     }
                 });
+                // ROLL LEDGER — the remaining length of each physical roll,
+                // keyed material|lot|rollId. Drained by spend() as orders are
+                // served so the next order on the card (and the next card) sees
+                // the shortened roll. Same treatment pieceLeft gets, and for the
+                // same double-promise reason.
+                (l.rolls || []).forEach(function (rr) {
+                    var rk = String(m.materialId) + '|' + l.lotId + '|' + rr.rollId;
+                    if (rollLeft[rk] === undefined) {
+                        rollLeft[rk] = round2(Number(rr.length) || 0);
+                    }
+                });
             });
         });
 
@@ -560,14 +576,15 @@ function applyLotAllocation(data) {
             var key = String(m.materialId);
             if (done[key]) return;
             done[key] = true;
-            allocateMaterial(sup, key, wasteLeft, lotLeft, greigeLeft, pieceLeft);
+            allocateMaterial(sup, key, wasteLeft, lotLeft, greigeLeft, pieceLeft, rollLeft);
         });
     });
 }
 
 // One supervisor, one material: every cut size and both Plan and Reissue rows,
 // allocated together so two rows cannot promise the same cloth.
-function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, pieceLeft) {
+function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, pieceLeft, rollLeft) {
+    rollLeft = rollLeft || {};
     var rows = [];
     (sup.materials || []).forEach(function (m, i) {
         if (m.isFabric && String(m.materialId) === materialId) rows.push({ m: m, idx: i });
@@ -593,22 +610,28 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
             blocked: !!l.blocked,
             wash: lotLeft[lk] !== undefined ? lotLeft[lk] : round2(Number(l.wash) || 0),
             unwash: greigeLeft[lk] !== undefined ? greigeLeft[lk] : round2(Number(l.unwash) || 0),
-            // ROLL UNLESS IT SAYS OTHERWISE. Every lot that existed before
-            // printing has Form blank, and reading blank as Pieces would send
-            // the whole rack down the piece path with no pieces to pick.
+            // ROLL UNLESS IT SAYS OTHERWISE. Legacy Form value, no longer used
+            // to branch — every lot is rolls now — kept only so nothing
+            // downstream that still reads `.form` gets undefined.
             form: l.form === 'Pieces' ? 'Pieces' : 'Roll',
-            // Copied into fresh objects, with the card's remaining count — the
-            // same treatment `waste` gets one field down, and for the same
-            // reason: the allocator spends these down as it walks the card's
-            // orders, and mutating the server's payload would leak one
-            // supervisor's spending into the next card.
-            pieces: (l.pieces || []).filter(function (p) {
-                return (pieceLeft[p.pieceId] || 0) > 0;
-            }).map(function (p) {
-                return { pieceId: String(p.pieceId), lengthCm: p.lengthCm,
-                         widthCm: p.widthCm, count: pieceLeft[p.pieceId],
-                         state: p.state, carton: p.carton };
+            // THE PHYSICAL ROLLS, with the card's remaining length per roll —
+            // the same treatment `waste` and `pieces` get, and for the same
+            // reason: spend() drains rollLeft as the card's orders are served,
+            // and mutating the server's payload would leak one supervisor's
+            // spending into the next card. A roll drained to <= 0 is dropped.
+            rolls: (l.rolls || []).map(function (rr) {
+                var rk = materialId + '|' + l.lotId + '|' + rr.rollId;
+                var left = rollLeft[rk] !== undefined
+                    ? rollLeft[rk] : round2(Number(rr.length) || 0);
+                return { rollId: String(rr.rollId), label: String(rr.label || ''),
+                         length: left, status: rr.status || 'Available',
+                         origin: rr.origin || 'Purchased' };
+            }).filter(function (rr) {
+                return String(rr.status) !== 'Consumed' && rr.length > 0;
             }),
+            // Legacy Fabric_Piece copy — no lot has these any more (printed
+            // cloth is short rolls), kept empty so old readers don't throw.
+            pieces: [],
             // Carried but never allocatable. Cloth at the wash house cannot be
             // issued today, yet the lot is plainly NOT finished — it comes back
             // washed, in this tone. A pin must survive it.
@@ -791,42 +814,21 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
             r.fromFresh += fill.fromFresh[i];
             r.freshMetres = round2(r.freshMetres + fill.metresPer[i]);
             if (fill.metresPer[i] > 0) {
-                // WHICH PHYSICAL PIECES THIS LINE IS, for a Pieces lot. The
-                // server must not re-derive them from the metres: three 3.00 m
-                // pieces are 9.00 m, and 9.00 m divided by a 55 cm cut reads as
-                // 16 rows where the pieces only yield 15. Naming them is what
-                // stops a row nobody can cut being credited.
-                //
-                // Empty on a Roll lot, so the line is the same shape either way
-                // and an older server simply ignores the field.
-                var lnPieces = [];
-                Object.keys(fill.piecesPer[i] || {}).forEach(function (pid) {
-                    var cuts = fill.piecesPer[i][pid]; // Array of cut lengths
-                    var srcP = (lot.pieces || []).filter(function (x) {
-                        return String(x.pieceId) === String(pid);
-                    })[0] || {};
-                    
-                    var cutCounts = {};
-                    cuts.forEach(function(c) {
-                        cutCounts[c] = (cutCounts[c] || 0) + 1;
-                    });
-                    
-                    Object.keys(cutCounts).forEach(function(cutLen) {
-                        lnPieces.push({ pieceId: pid, count: cutCounts[cutLen],
-                                        cutLengthCm: Number(cutLen),
-                                        lengthCm: srcP.lengthCm, carton: srcP.carton });
-                    });
+                // WHICH PHYSICAL ROLLS THIS LINE CUT, and how many metres off
+                // each. The server must not re-derive these from the total: a
+                // lot's metres are spread across rolls of different length, and
+                // the fan has to decrement the exact roll the cutter used. Empty
+                // when this fill placed no fresh cloth on this demand.
+                var lnRolls = (fill.rollLinesPer[i] || []).map(function (rl) {
+                    return { rollId: String(rl.rollId), label: String(rl.label || ''),
+                             metres: round2(Number(rl.metres) || 0) };
                 });
 
                 var cSumm = '';
-                if (lnPieces.length > 0) {
-                    var parts = [];
-                    lnPieces.forEach(function(pc) {
-                        var cStr = round2(pc.cutLengthCm / 100) + 'm';
-                        if (pc.count > 1) cStr += 'x' + pc.count;
-                        parts.push(cStr);
-                    });
-                    cSumm = 'Cuts: ' + parts.join(', ');
+                if (lnRolls.length > 1) {
+                    cSumm = 'Rolls: ' + lnRolls.map(function (rl) {
+                        return rl.label + ' ' + round2(rl.metres) + 'm';
+                    }).join(', ');
                 }
 
                 // fromRaw / fromWaste ARE THE CREDIT, carried so the payload
@@ -853,7 +855,10 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                                   // no single cut any more, so every consumer of
                                   // a lot line reads it from here.
                                   cutW: Number(d.cutW) || 0, cutL: Number(d.cutL) || 0,
-                                  pieces: lnPieces, cutSummary: cSumm,
+                                  // Which rolls this line cut, metres off each —
+                                  // the fan decrements these. `pieces` kept as an
+                                  // empty array so older readers don't throw.
+                                  rolls: lnRolls, pieces: [], cutSummary: cSumm,
                                   fromRaw: fill.fromFresh[i], fromWaste: fill.fromWaste[i],
                                   note: noteOn, overrideFrom: fromOn });
             }
@@ -913,19 +918,28 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
             });
         });
 
-        // THE PIECES COME OFF THE RACK TOO, in both places, for exactly the
-        // reason the metres and the remnants do: `lot.pieces` is what the NEXT
-        // order on this card is measured against, and without this two orders
-        // would each be offered the same physical piece.
+        // THE ROLLS COME OFF THE RACK TOO, in BOTH the ledger and the working
+        // `lot.rolls`, for exactly the reason the metres and remnants do: the
+        // working lot is what the NEXT order on this card is measured against.
+        // Without this, two orders both see a roll at full length and each is
+        // offered its metres — the double-promise. The per-roll metres are what
+        // THIS fill placed (`rollLinesPer`), summed across every demand it
+        // served.
         //
-        // The metres above already moved — a Pieces lot's `wash` is the
-        // maintained sum of its washed pieces, so taking N pieces lowers it by
-        // exactly their metres and the two stay in step.
-        Object.keys(fill.pieceTaken || {}).forEach(function (pid) {
-            pieceLeft[pid] = Math.max(0, (pieceLeft[pid] || 0) - fill.pieceTaken[pid]);
-            (lot.pieces || []).forEach(function (p) {
-                if (String(p.pieceId) === String(pid)) {
-                    p.count = Math.max(0, (Number(p.count) || 0) - fill.pieceTaken[pid]);
+        // On a COMMITMENT (`emit` false) the rolls still drain: the order has
+        // spoken for that physical cloth even though nothing goes out today.
+        var rollTook = {};
+        (fill.rollLinesPer || []).forEach(function (perDemand) {
+            (perDemand || []).forEach(function (rl) {
+                rollTook[rl.rollId] = round2((rollTook[rl.rollId] || 0) + (Number(rl.metres) || 0));
+            });
+        });
+        Object.keys(rollTook).forEach(function (rid) {
+            var rk = materialId + '|' + lot.lotId + '|' + rid;
+            rollLeft[rk] = round2(Math.max(0, (rollLeft[rk] !== undefined ? rollLeft[rk] : 0) - rollTook[rid]));
+            (lot.rolls || []).forEach(function (rr) {
+                if (String(rr.rollId) === String(rid)) {
+                    rr.length = round2(Math.max(0, (Number(rr.length) || 0) - rollTook[rid]));
                 }
             });
         });
