@@ -402,15 +402,49 @@ test('F8 two orders one card: second sees what is LEFT; never split, never steal
   assertParity('F8', snapshotMaterial(d_s[0].materials[0]), snapshotMaterial(d_r[0].materials[0]));
 });
 
-test('F9 two SUPERVISORS both offered the rack - no reservation ledger', () => {
-  const mk = (id, fnRoll) => ({ supervisorId: id, supervisorName: 'x', materials: [material('M1', {
+// F9 IS NO LONGER A PARITY CASE, and that is the point.
+//
+// It used to assert the opposite rule — "two supervisors are both offered the
+// whole rack, there is no reservation ledger" — and it was right about the code
+// as it then stood. Phase B of the lot-rolls migration deliberately reversed
+// that: the ledgers are now shared across cards and walked in priority order,
+// so the first supervisor's allocation really does take cloth off the second.
+//
+// Comparing this against the frozen pre-Phase-B baseline can therefore only
+// fail. What is checked instead is the NEW rule, directly: S1 (first in the
+// array, so higher priority) is served; S2 is measured against what is left.
+//
+// The rest of this file stays a genuine parity suite — everything else in it is
+// within-one-card behaviour, which Phase B did not touch.
+test('F9 two SUPERVISORS: the rack is RESERVED down priority order', () => {
+  const mk = (id) => ({ supervisorId: id, supervisorName: 'x', materials: [material('M1', {
     requiredPieces: 20, issuedPieces: 0, freshMeters: 5.50,
-    lines: [line('IT1', 20, 0)], lots: [fnRoll('L1', 6.00)],
+    lines: [line('IT1', 20, 0)], lots: [seedRollLot('L1', 6.00)],
   })] });
-  const d_s = [mk('S1', scalarRoll), mk('S2', scalarRoll)]; A_scalar.applyLotAllocation(d_s);
-  const d_r = [mk('S1', seedRollLot), mk('S2', seedRollLot)]; A_rolls.applyLotAllocation(d_r);
-  assertParity('F9 S1', snapshotMaterial(d_s[0].materials[0]), snapshotMaterial(d_r[0].materials[0]));
-  assertParity('F9 S2', snapshotMaterial(d_s[1].materials[0]), snapshotMaterial(d_r[1].materials[0]));
+  // One 6.00 m lot. Each supervisor wants 20 pieces = 10 rows = 5.50 m, so it
+  // can serve exactly one of them.
+  const d = [mk('S1'), mk('S2')];
+  A_rolls.applyLotAllocation(d);
+
+  const s1 = snapshotMaterial(d[0].materials[0]);
+  const s2 = snapshotMaterial(d[1].materials[0]);
+
+  // S1 is first -> served in full off L1.
+  assert.strictEqual(s1.lotLines.length, 1, 'S1 must be served');
+  approx(s1.lotLines[0].qty, 5.50, 0.01);
+  assert.strictEqual(s1.orderOutcomes[0].why, 'ready');
+
+  // S2 is second -> only 0.50 m is left, which cannot seat a 20-piece order,
+  // so the order is skipped. Under the OLD rule this read 5.50 m and 'ready',
+  // offering the same cloth twice.
+  assert.strictEqual(s2.lotLines.length, 0,
+    'S2 must NOT be offered cloth S1 has already taken');
+  assert.strictEqual(s2.orderOutcomes[0].why, 'skipped');
+
+  // And the reservation is a view, not a mutation: the payload's own lot is
+  // untouched, so a re-run from the same raw data gives the same answer.
+  assert.strictEqual(Number(d[0].materials[0].lots[0].rolls[0].length), 6.00,
+    'the raw payload roll must not be mutated');
 });
 
 test('F10 within ONE card two orders cannot promise the same metres twice', () => {

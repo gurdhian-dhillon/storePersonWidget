@@ -189,7 +189,12 @@ test('4 Two orders same card same lot same roll: rollLeft drain', () => {
   approx(out.lotLines[0].qty, 5);
 });
 
-test('5 Two supervisors same roll: no cross-card reservation', () => {
+// INVERTED BY PHASE B. This asserted "no cross-card reservation" — both
+// supervisors offered the same 8 m off one 10 m roll — and was correct for the
+// code as it then stood. The ledgers are now shared across cards and walked in
+// priority order, so the first supervisor's 8 m really is gone before the
+// second is measured. Asserting the NEW rule:
+test('5 Two supervisors same roll: the roll is RESERVED down priority order', () => {
   function makeMat() {
     return material('M1', {
       fabricWidthCm: 55, cutWidth: 55, cutLength: 50,
@@ -197,18 +202,32 @@ test('5 Two supervisors same roll: no cross-card reservation', () => {
       lots: [rollLot('L1', [{ rollId: 'R1', length: 10, label: 'L1-R1' }], { wash: 10 })]
     });
   }
+  // One 10 m roll, perRow 1, cut 0.5 m. Each supervisor wants 16 pieces = 16
+  // rows = 8 m. The roll can serve one of them and leave 2 m.
   const data = [sup('S1', [makeMat()]), sup('S2', [makeMat()])];
   A.applyLotAllocation(data);
   const m1 = data[0].materials[0];
   const m2 = data[1].materials[0];
-  assert.strictEqual(m1.lotLines.length, 1);
-  assert.strictEqual(m2.lotLines.length, 1);
+
+  // S1 first: served in full.
+  assert.strictEqual(m1.lotLines.length, 1, 'S1 must be served');
   approx(m1.lotLines[0].qty, 8);
-  approx(m2.lotLines[0].qty, 8);
   const o1 = m1.orderOutcomes.find(function (o) { return o.planId === 'PLAN1'; });
-  const o2 = m2.orderOutcomes.find(function (o) { return o.planId === 'PLAN1'; });
   assert.strictEqual(o1.why, 'ready');
-  assert.strictEqual(o2.why, 'ready');
+
+  // S2 second: 2 m left = 4 rows = 4 pieces, short of the 16 it needs, and an
+  // order is served whole or not at all — so it is skipped, not part-served.
+  assert.strictEqual(m2.lotLines.length, 0,
+    'S2 must not be offered cloth S1 has taken');
+  const o2 = m2.orderOutcomes.find(function (o) { return o.planId === 'PLAN1'; });
+  assert.strictEqual(o2.why, 'skipped');
+
+  // CONSERVATION: the two cards together never promise more than the roll
+  // holds. This is the invariant the whole reservation exists to guarantee.
+  const promised = (m1.lotLines || []).concat(m2.lotLines || [])
+    .reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0);
+  assert.ok(promised <= 10 + 0.0001,
+    'promised ' + promised + ' m off a 10 m roll — over-promise');
 });
 
 test('6 AfterWash commitment drains rolls but emits no lotLines', () => {

@@ -454,52 +454,72 @@ function lotOverrideFor(supId, materialId, orderId) {
 // because whether a remnant is usable depends on which lot the fresh cloth is
 // coming off, and only this side knows that.
 function applyLotAllocation(data) {
-    (data || []).forEach(function (sup) {
-        // ONE LEDGER PER SUPERVISOR — NEVER ONE SHARED BETWEEN THEM.
-        //
-        // Shared, these three stopped being a working total and became a
-        // RESERVATION. Cards are walked in priority order, so the first
-        // supervisor spent the rack and the last was measured against what he
-        // left: his rows read "no lot holds enough" while twenty metres sat on
-        // the shelf with nobody's name on it, under a header still saying "All
-        // in stock". The store person could not issue to him at all.
-        //
-        // Priority is the order to SERVE people in. It is not permission to be
-        // served, and the screen must never refuse a handover the store person
-        // wants to make — he can see the rack and we cannot. A hard reservation
-        // ledger was considered for this app and rejected; this was it, rebuilt
-        // by accident inside the allocator.
-        //
-        // Contested stock is SAID instead of enforced ("Also needed by …"), and
-        // settled where it can actually be settled: issueMaterials re-checks
-        // every lot server-side. Two cards may therefore offer the same metres
-        // and the same offcut, and whoever is issued second gets what is really
-        // left. That is honest; pre-emptying him was not.
-        //
-        // Within one card they still do their real job, and it is not optional:
-        // one Issue press serves the whole card, so two orders or two cut sizes
-        // of the same supervisor must not promise the same cloth twice.
-        var wasteLeft = {};    // wasteId -> pieces unclaimed ON THIS CARD
-        var lotLeft = {};      // materialId|lotId -> washed metres, this card
-        // GREIGE IS SPENT TOO, and forgetting it was a real hole: an order that
-        // picks a lot because its greige can finish it has spoken for that
-        // greige at the wash house. Track only the washed metres and the card's
-        // next order is told the same pile will finish it as well.
-        var greigeLeft = {};   // materialId|lotId -> unwashed metres, this card
-        // pieceId -> printed pieces unclaimed ON THIS CARD. A Pieces lot holds
-        // no continuous cloth, so lotLeft alone cannot stop two orders on one
-        // card being offered the same physical piece.
-        var pieceLeft = {};
-        // materialId|lotId|rollId -> metres left on that physical roll, this
-        // card. lotLeft is the WASH-STATE budget; rollLeft is the PHYSICAL
-        // length. Both bound a fill — a lot can be washed enough yet have no
-        // single roll long enough, or have the roll but not the wash.
-        var rollLeft = {};
+    // ONE LEDGER ACROSS EVERY CARD — a real reservation, walked in priority
+    // order. This REVERSES a previous decision, deliberately, and the reversal
+    // is the whole feature. What the old comment said, and why it no longer
+    // holds:
+    //
+    //   "ONE LEDGER PER SUPERVISOR — NEVER ONE SHARED BETWEEN THEM. Shared,
+    //    these stopped being a working total and became a RESERVATION… the
+    //    first supervisor spent the rack and the last was measured against what
+    //    he left: his rows read 'no lot holds enough' while twenty metres sat on
+    //    the shelf with nobody's name on it… The store person could not issue to
+    //    him at all. A hard reservation ledger was considered for this app and
+    //    rejected; this was it, rebuilt by accident inside the allocator."
+    //
+    // Every word of that was true of the version it described. It failed for one
+    // reason: the store person could see a card go short and had NO WAY TO SEE
+    // WHY OR ACT ON IT. Priority was an invisible server-side sort key, so a low
+    // card was simply short, over cloth he was looking at.
+    //
+    // Two things make it work now, and neither existed then:
+    //
+    //   1. HE SETS THE ORDER, on this screen. A card is short because he put
+    //      someone else first — and he can move them up.
+    //   2. IT RE-RUNS LIVE. Reordering recomputes the whole screen; there is no
+    //      stale reservation to argue with.
+    //
+    // Priority stopped being a hint and became the control. That is the trade:
+    // the screen may now say a card cannot be served, but only ever as the
+    // direct consequence of an order the store person chose and can change.
+    //
+    // NOTHING IS RESERVED SERVER-SIDE. This is a view: a pure function of (raw
+    // rack, order). issueMaterials still re-checks every lot when Issue is
+    // actually pressed, so a stale plan can never over-issue.
+    //
+    // Within one card they still do their original job too: one Issue press
+    // serves the whole card, so two orders or two cut sizes of the same
+    // supervisor must not promise the same cloth twice.
+    var wasteLeft = {};    // wasteId -> pieces unclaimed, ACROSS ALL CARDS
+    var lotLeft = {};      // materialId|lotId -> washed metres left
+    // GREIGE IS SPENT TOO, and forgetting it was a real hole: an order that
+    // picks a lot because its greige can finish it has spoken for that
+    // greige at the wash house. Track only the washed metres and the next
+    // order is told the same pile will finish it as well.
+    var greigeLeft = {};   // materialId|lotId -> unwashed metres left
+    // pieceId -> printed pieces unclaimed. Legacy: no lot carries `pieces`
+    // any more (printed cloth is short rolls), kept so the seeding below and
+    // spend() stay shape-compatible.
+    var pieceLeft = {};
+    // materialId|lotId|rollId -> metres left on that physical roll. lotLeft is
+    // the WASH-STATE budget; rollLeft is the PHYSICAL length. Both bound a fill
+    // — a lot can be washed enough yet have no single roll long enough, or have
+    // the roll but not the wash.
+    var rollLeft = {};
 
-        // The server sends the true rack figure to EVERY card — it does not
-        // divide stock between them — so seeding from the card in hand is the
-        // whole rack, which is exactly what this supervisor could be given if
-        // the store person served him first.
+    // SEEDED ONCE, FROM THE WHOLE SCREEN, BEFORE ANY CARD IS SERVED.
+    //
+    // The server sends the true rack figure to EVERY card — it does not divide
+    // stock between them — so any card that mentions a material carries the same
+    // full figure for it. Seeding on first sight is therefore seeding from the
+    // rack, and the `=== undefined` guards mean a second card mentioning the
+    // same lot cannot re-inflate a ledger the first card is about to spend.
+    //
+    // This pass is SEPARATE from the allocation pass below, and that separation
+    // is the reservation: every ledger holds the full rack before supervisor 1
+    // takes anything, and each card afterwards is measured against the running
+    // remainder.
+    (data || []).forEach(function (sup) {
         (sup.materials || []).forEach(function (m) {
             if (!m.isFabric) return;
             (m.wasteStock || []).forEach(function (r) {
@@ -518,9 +538,8 @@ function applyLotAllocation(data) {
                 });
                 // ROLL LEDGER — the remaining length of each physical roll,
                 // keyed material|lot|rollId. Drained by spend() as orders are
-                // served so the next order on the card (and the next card) sees
-                // the shortened roll. Same treatment pieceLeft gets, and for the
-                // same double-promise reason.
+                // served so the next order — on this card OR any later one —
+                // sees the shortened roll.
                 (l.rolls || []).forEach(function (rr) {
                     if (String(rr.status || 'Available') === 'Consumed') return;
                     if ((Number(rr.length) || 0) <= 0) return;
@@ -531,7 +550,12 @@ function applyLotAllocation(data) {
                 });
             });
         });
+    });
 
+    // THE ALLOCATION PASS — cards in priority order, spending the shared
+    // ledgers. `data`'s array order IS the priority order; the caller
+    // (render()) arranges it before calling.
+    (data || []).forEach(function (sup) {
         var done = {};
         (sup.materials || []).forEach(function (m) {
             if (!m.isFabric) return;

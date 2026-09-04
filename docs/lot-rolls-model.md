@@ -7,7 +7,7 @@ and the same numbers:
 | Phase | What | Status |
 |---|---|---|
 | **A — Lot → Rolls** | A lot is a set of physical rolls, not a metres pool. The store person is told **which roll** to cut. | Allocator done (Pieces 1–4); Deluge side not started |
-| **B — Priority reservation** | Stock is **reserved down a priority order** the store person controls, instead of every card seeing the full rack. | B1–B2 done; B3 (the behaviour change) next |
+| **B — Priority reservation** | Stock is **reserved down a priority order** the store person controls, instead of every card seeing the full rack. | B1–B3 done; B4 (render wiring + UI) left |
 
 They are **not independent**. Phase B changes the scoping of the very ledgers
 Phase A rewrote (`lotLeft` / `rollLeft` / `greigeLeft` / `wasteLeft`), so B must
@@ -19,8 +19,9 @@ frozen `git show` baseline, piece-by-piece, tests between every step.
 > `spend()` roll ledger, `applyFabricOverride` multi-roll, `shortReasonFor`,
 > dead-code removal). Parity 31/31 vs frozen baseline; 65/65 across all suites.
 > Deluge side (Steps 4–9) not started.
-> **Phase B** — B1 done (payload fields), B2 done (default-order function,
-> pure + 20 tests). B3–B4 not started.
+> **Phase B** — B1 (payload fields), B2 (default-order function), B3 (the
+> reservation itself) all done. **B4 — wiring `render()` + the reorder UI — is
+> the only piece left.**
 >
 > **Revision 7.** Revs 2–5 were self-review + three external gap-analysis passes.
 > Rev 6 recorded the decisions made during the Phase A build. Rev 7 **merges the
@@ -804,7 +805,7 @@ touching the allocator or `render()`.
 |---|---|---|
 | **B1** | **DONE.** `priorityKey` + `planStartDate` on the payload — `api-experiment.js` (`openPlan` + every line) and `getStoreMaterialRequirements.dg` (`lnMap` + `linesJson`, numeric/free-text handled per repo rules). Additive, nothing reads them yet. | both paths syntax-clean; no behaviour change |
 | **B2** | **DONE.** Default-order function in `main.js` — pure, four-rung rule, wired to nothing yet. | `priority-order.test.js` 20/20; full sweep 94/94 |
-| **B3** | **The behaviour change.** Hoist the five ledgers out of the per-supervisor loop in `applyLotAllocation`; walk in array order (which `render` will set). | see "How B3 is tested" |
+| **B3** | **DONE.** Ledgers hoisted; `applyLotAllocation` is now seed-once + walk-in-order. Old "never one shared" comment rewritten; two tests inverted. | `priority-reservation.test.js` 12/12; full sweep 106/106 |
 | **B4** | `render()` sorts `data` by `window.__priorityOrder`; reorder UI (shape TBD) mutates it and re-renders through the existing `render(window.__rawData)` path. | reorder changes the numbers, live |
 
 ### How B3 is tested — NOT a frozen-baseline parity check
@@ -874,6 +875,58 @@ it is **9/9**. Verified pre-existing via `git stash` before touching it.
 
 **Suite totals after B2: 94/94** — parity 31, lotfill 12, ledger 10,
 override 12, priority-order 20, shortfall-summary 9.
+
+**B3 — the ledgers hoisted. THE BEHAVIOUR CHANGE.** The five ledgers
+(`wasteLeft` / `lotLeft` / `greigeLeft` / `pieceLeft` / `rollLeft`) moved out of
+the per-supervisor loop. `applyLotAllocation` is now **two passes**: seed every
+ledger from the whole screen, then walk the cards in array order spending them.
+The separation *is* the reservation — every ledger holds the full rack before
+card 1 takes anything, and each card after is measured against the remainder.
+
+The `=== undefined` guards on seeding do real work here: the server repeats the
+same full rack figure on every card, so a second card mentioning a lot must not
+re-inflate a ledger the first card is about to spend.
+
+**The old comment was rewritten, not deleted.** It said *"ONE LEDGER PER
+SUPERVISOR — NEVER ONE SHARED"* and recorded a real past failure. The new
+comment quotes it, then says why it no longer holds: that version failed because
+the store person could see a card go short with **no way to see why or act on
+it** — priority was an invisible server-side sort key. Now he sets the order on
+the screen and it re-runs live. Priority stopped being a hint and became the
+control.
+
+**Two existing tests were INVERTED, deliberately** — both asserted the old rule
+in their own names:
+- `allocator-rolls-parity.test.js` **F9** *"two SUPERVISORS both offered the
+  rack — no reservation ledger"*. It compared old-vs-new, which cross-card
+  behaviour can now only fail. Rewritten to assert the new rule directly (S1
+  served, S2 skipped, payload unmutated) and is no longer a parity case. The
+  rest of that file stays genuine parity — everything else in it is
+  within-one-card, which B3 did not touch.
+- `allocator-edgecases-ledger.test.js` **5** *"Two supervisors same roll: no
+  cross-card reservation"*. Same inversion, plus a conservation assertion.
+
+That only these two moved is the evidence B3 changed **cross-card scope and
+nothing else**: `F8` / `F10` (two orders within one card) and ledger `4` (roll
+drain within a card) all still pass untouched.
+
+**New suite `tools/priority-reservation.test.js` — 12 cases**, the three classes
+the plan called for:
+- **No contention (3)** — enough for everyone, everyone served; exact-fit; a
+  single card. The hoist is invisible when nothing is contested.
+- **Contention (5)** — the rack drains card by card; an over-subscribed rack
+  serves who it can and skips the rest whole (never part-serves — the atom rule
+  still holds); **reordering flips who is short** on identical rack and demand;
+  a lower card still gets what a higher one did not want; contention on one
+  material does not starve another.
+- **Conservation (4)** — total promised never exceeds the rack **per material**
+  *and* **per roll**; the raw payload is never mutated so a re-run is
+  idempotent; and running the same array twice does not double-spend — which
+  matters because every re-render (a lot override, a declined remnant) calls
+  `applyLotAllocation` again.
+
+**Suite totals after B3: 106/106** — parity 31, lotfill 12, ledger 10,
+override 12, priority-order 20, **priority-reservation 12**, shortfall-summary 9.
 
 ## Open questions — Phase B
 
