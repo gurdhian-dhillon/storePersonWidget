@@ -1,0 +1,294 @@
+string issueMaterialsHandover(string supervisorId, string handoverJson)
+{
+	// THE HANDOVER RECORD. Called ONCE per press of Issue, after every
+	// issueMaterialsApply chunk has succeeded. Creates one Material_Issue with
+	// its Issue_Lines at MATERIAL-X-LOT grain (not per requirement), then stamps
+	// the SIV onto the Waste_Movement rows the apply calls created.
+	//
+	// THE VOUCHER NUMBER IS MINTED HERE, IN DELUGE, NOT LEFT TO THE WORKFLOW.
+	//
+	// The on-validation form workflow on Material_Issue was tested and DOES fire
+	// on a ZOHO.CREATOR.DATA.addRecords insert (JS API). This function is DELUGE
+	// - and this repo's own note on the old issueMaterials is explicit that an
+	// "on add" workflow using input.Voucher_No does NOT fire for a Deluge
+	// `insert into`. A blank Voucher_No would break the transfer-order document
+	// number, the Waste_Movement Voucher stamp and every history card, silently.
+	//
+	// So the number is generated here with the SAME logic issueMaterials has
+	// always used, and written IN the insert block. The workflow's own
+	// "only when Voucher_No is blank" guard makes it a harmless no-op backup:
+	// whichever fires, the row ends up with exactly one number.
+	//
+	// SORTED ON ID, NOT ON Voucher_No. "sort by Voucher_No desc" is a TEXT sort:
+	// the moment SIV-100000 exists beside SIV-99999 it reads the highest as
+	// 99999 and issues SIV-100000 a second time. Record ids are monotonic, so the
+	// newest row always holds the highest number whatever its width.
+	//
+	// TEN ROWS, NOT ONE. Sorting by id puts the NEWEST on top, not the highest -
+	// and a row with a blank Voucher_No at the top would restart numbering at 1.
+	// Walking a few and keeping the largest cannot be tripped by one bad row.
+	//
+	// handoverJson:
+	// {
+	//   "planCount": 7,
+	//   "wasteMvIds": ["111","222"],          // unioned across every apply chunk
+	//   "lines": [
+	//     { "materialId":"123", "lot":"901", "qty":45.50,
+	//       "piecesFromRaw":120, "piecesFromWaste":8,
+	//       "unit":"Mtr", "cutW":55, "cutL":55 }
+	//   ]
+	// }
+	//
+	// One "lines" entry per (material, lot) the press issued. The widget builds
+	// it by summing what it sent to the apply calls. A trim with no lot uses
+	// lot "" and lands in one row per material.
+	//
+	// WRITE-CONTRACT for receiveMaterials / getStoreIssueHistory /
+	// getSupervisorProductionHistory / postTransferOrders:
+	//  - Material_Issue: Voucher_No (via workflow), Issue_Status="Issued",
+	//    Transfer_Status="Pending", Issued_To, Issue_Date, Issue_Time,
+	//    Source_System="JS_API", Line_Count, Total_Qty, Plan_Count.
+	//    NO Batch_Voucher, NO Batch_Head - one row per press.
+	//  - Issue_Lines: Material, Material_Name, Lot, Qty, Pieces_From_Raw,
+	//    Pieces_From_Waste, Unit, Cut_Size_Width/Length, Received_Qty=0,
+	//    Disputed_Qty=0, Settled_Qty=0, Transferred_Qty unset, Line_Status="Issued".
+	//  - Waste_Movement "Issued": Voucher set to the new SIV.
+	errJson = "";
+	voucherOut = "";
+	issueIdOut = "";
+	// DEBUG WRAPPER: Creator collapses every runtime failure to "code 9430".
+	try
+	{
+		supId = supervisorId.trim().toLong();
+		inp = handoverJson.toMap();
+		lines = ifnull(inp.get("lines"),"[]").toString().toJSONList();
+		pcStr = ifnull(inp.get("planCount"),"0").toString().trim();
+		if(pcStr == "" || pcStr.isNumber() == false)
+		{
+			pcStr = "0";
+		}
+		planCount = pcStr.toLong();
+		wasteMvIn = ifnull(inp.get("wasteMvIds"),"[]").toString().toJSONList();
+		info "issueMaterialsHandover supId=" + supId + " lines=" + lines.size() + " planCount=" + planCount + " wasteMv=" + wasteMvIn.size();
+
+		if(lines.size() == 0)
+		{
+			return "{\"errors\":[\"Handover has no lines\"],\"voucher\":\"\",\"issueId\":\"\"}";
+		}
+
+		// Header tallies, computed before the insert.
+		totalQty = 0.0;
+		lineCount = 0;
+		for each  lnRaw0 in lines
+		{
+			ln0 = lnRaw0.toMap();
+			lq0 = ifnull(ln0.get("qty"),"0").toString().trim();
+			if(lq0 == "")
+			{
+				lq0 = "0";
+			}
+			totalQty = totalQty + lq0.toDecimal();
+			lineCount = lineCount + 1;
+		}
+
+		// THE VOUCHER NUMBER - see the header note. sort by on its own
+		// assignment, never inline in a for-each header.
+		lastVouchers = Material_Issue[ID != 0] sort by ID desc range from 1 to 10;
+		lastVNum = 0;
+		for each  lv in lastVouchers
+		{
+			lvTxt = ifnull(lv.Voucher_No,"").toString().trim();
+			if(lvTxt != "")
+			{
+				vParts = lvTxt.toList("-");
+				if(vParts.size() > 1)
+				{
+					vNumTxt = vParts.get(vParts.size() - 1).trim();
+					if(vNumTxt.isNumber() == true)
+					{
+						vSeen = vNumTxt.toLong();
+						if(vSeen > lastVNum)
+						{
+							lastVNum = vSeen;
+						}
+					}
+				}
+			}
+		}
+		nextVNum = lastVNum + 1;
+		if(nextVNum < 10)
+		{
+			vPad = "0000" + nextVNum;
+		}
+		else if(nextVNum < 100)
+		{
+			vPad = "000" + nextVNum;
+		}
+		else if(nextVNum < 1000)
+		{
+			vPad = "00" + nextVNum;
+		}
+		else if(nextVNum < 10000)
+		{
+			vPad = "0" + nextVNum;
+		}
+		else
+		{
+			vPad = "" + nextVNum;
+		}
+		voucherNo = "SIV-" + vPad;
+
+		// NO COMMENTS INSIDE THE INSERT BLOCK - a "//" in a Deluge insert field
+		// list is a syntax error reported against this try, far from here.
+		newIssueId = insert into Material_Issue
+		[
+			Voucher_No=voucherNo
+			Issue_Date=zoho.currentdate
+			Issue_Status="Issued"
+			Transfer_Status="Pending"
+			Source_System="JS_API"
+			Line_Count=lineCount
+			Total_Qty=totalQty
+			Plan_Count=planCount
+			Added_User=zoho.loginuser
+		];
+		issueIdOut = newIssueId.toString();
+		voucherOut = voucherNo;
+
+		for each  mi in Material_Issue[ID == newIssueId.toLong()]
+		{
+			// Lookups and Time set after the insert - a null cannot go in the
+			// insert block and a Time field wants "HH:mm".
+			mi.Issued_To=supId;
+			mi.Issue_Time=zoho.currenttime.toString("HH:mm");
+			for each  lnRaw in lines
+			{
+				ln = lnRaw.toMap();
+				lnMatTxt = ifnull(ln.get("materialId"),"").toString().trim();
+				if(lnMatTxt == "" || lnMatTxt.isNumber() == false)
+				{
+					continue;
+				}
+				lqS = ifnull(ln.get("qty"),"0").toString().trim();
+				if(lqS == "")
+				{
+					lqS = "0";
+				}
+				prS = ifnull(ln.get("piecesFromRaw"),"0").toString().trim();
+				if(prS == "")
+				{
+					prS = "0";
+				}
+				pwS = ifnull(ln.get("piecesFromWaste"),"0").toString().trim();
+				if(pwS == "")
+				{
+					pwS = "0";
+				}
+				cwS = ifnull(ln.get("cutW"),"0").toString().trim();
+				if(cwS == "")
+				{
+					cwS = "0";
+				}
+				clS = ifnull(ln.get("cutL"),"0").toString().trim();
+				if(clS == "")
+				{
+					clS = "0";
+				}
+				// Resolve the readable name once per line - the catalogue is small
+				// and a handover is ~200 lines at worst, so a point lookup each is
+				// fine. History resolves it from its own map anyway; this is the
+				// snapshot for a reader that does not.
+				lnDisp = "";
+				lnUnit = ifnull(ln.get("unit"),"").toString();
+				for each  rmC in Raw_Material[ID == lnMatTxt.toLong()]
+				{
+					lnDisp = ifnull(rmC.Material_Display_Name,"").toString().trim();
+					if(lnDisp == "")
+					{
+						lnDisp = ifnull(rmC.Name,"").toString().trim();
+					}
+					if(lnDisp == "")
+					{
+						lnDisp = ifnull(rmC.SKU,"").toString().trim();
+					}
+					if(lnUnit == "")
+					{
+						lnUnit = ifnull(rmC.Unit,"").toString();
+					}
+				}
+				lnDisp = lnDisp.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
+				liRow = Material_Issue.Issue_Lines();
+				liRow.Material=lnMatTxt.toLong();
+				liRow.Material_Name=lnDisp;
+				liRow.Qty=lqS.toDecimal();
+				liRow.Pieces_From_Raw=prS.toDecimal().toLong();
+				liRow.Pieces_From_Waste=pwS.toDecimal().toLong();
+				liRow.Unit=lnUnit;
+				liRow.Cut_Size_Width=cwS.toDecimal();
+				liRow.Cut_Size_Length=clS.toDecimal();
+				// Nothing received or settled yet. Started at real 0 so
+				// receiveMaterials / postTransferOrders read a number, not the
+				// EMPTY a Creator numeric otherwise holds.
+				liRow.Received_Qty=0;
+				liRow.Received_Pieces=0;
+				liRow.Disputed_Qty=0;
+				liRow.Settled_Qty=0;
+				liRow.Fanned_Qty=0;
+				liRow.Dispute_Raised_Qty=0;
+				liRow.Line_Status="Issued";
+				lotTxt = ifnull(ln.get("lot"),"").toString().trim();
+				if(lotTxt != "" && lotTxt.isNumber() == true)
+				{
+					liRow.Lot=lotTxt.toLong();
+				}
+				mi.Issue_Lines.insert(liRow);
+			}
+		}
+
+		// Re-read what actually landed. voucherOut already holds the number this
+		// function minted; the re-read only replaces it when the row carries a
+		// non-blank one, so a workflow that renumbered wins and a workflow that
+		// blanked it cannot lose the number we generated.
+		for each  miV in Material_Issue[ID == newIssueId.toLong()]
+		{
+			miVTxt = ifnull(miV.Voucher_No,"").toString().trim();
+			if(miVTxt != "")
+			{
+				voucherOut = miVTxt;
+			}
+		}
+
+		// STAMP THE SIV ONTO THE PRESS'S WASTE MOVEMENTS. issueMaterialsApply
+		// created them with a blank Voucher; getStoreIssueHistory reads the
+		// offcut side of a handover as
+		// Waste_Movement[Voucher == <SIV>, Movement_Type == "Issued"].
+		if(voucherOut != "")
+		{
+			for each  wmRaw in wasteMvIn
+			{
+				wmTxt = ifnull(wmRaw,"").toString().trim();
+				if(wmTxt != "" && wmTxt.isNumber() == true)
+				{
+					for each  wmRow in Waste_Movement[ID == wmTxt.toLong()]
+					{
+						wmRow.Voucher=voucherOut;
+					}
+				}
+			}
+		}
+		else
+		{
+			// The workflow did not fill it in time. The handover row exists and
+			// its lines are written - losing the SIV on the waste movements is a
+			// cosmetic history gap, not a stock error - so this is logged, not
+			// thrown.
+			info "issueMaterialsHandover: Voucher_No still blank on re-read for issue " + newIssueId + " - Waste_Movement Voucher not stamped";
+		}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"voucher\":\"" + voucherOut + "\",\"issueId\":\"" + issueIdOut + "\"}";
+	}
+	return "{\"errors\":[" + errJson + "],\"voucher\":\"" + voucherOut + "\",\"issueId\":\"" + issueIdOut + "\"}";
+}

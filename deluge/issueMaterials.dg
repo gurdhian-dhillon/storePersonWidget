@@ -101,6 +101,12 @@ string issueMaterials(string supervisorId, string issuesJson, string voucherIn)
 		// anything to record.
 		issueLines = List();
 		primaryPlanId = 0;
+		// The Waste_Movement "Issued" rows this chunk writes (one per waste pick,
+		// across every material). Their Voucher is back-filled once the SIV is
+		// minted below - the SIV does not exist yet at the point they are
+		// inserted. getStoreIssueHistory keys the offcut side of a handover on
+		// this Voucher, so it must land on every one.
+		wasteMvIds = List();
 		for each  issue in issues
 		{
 			// toJSONList() yields JSON objects, NOT Deluge Maps - .get() silently
@@ -294,6 +300,7 @@ string issueMaterials(string supervisorId, string issuesJson, string voucherIn)
 					}
 					else
 					{
+						pkCarton = "";
 						for each  wRec in wRecs
 						{
 							haveStr = ifnull(wRec.Piece_Count,"0").toString().trim();
@@ -306,6 +313,11 @@ string issueMaterials(string supervisorId, string issuesJson, string voucherIn)
 							{
 								transStr2 = "0";
 							}
+							// The carton the store racked this offcut in, captured
+							// here where the Waste_Master row is already open, and
+							// stamped onto the Issued movement below so History
+							// shows "where it was" with no hop back to the master.
+							pkCarton = ifnull(wRec.Carton_Number,"").toString().trim();
 							leftPcs = haveStr.toDecimal().toLong() - takePcs;
 							if(leftPcs < 0)
 							{
@@ -352,7 +364,13 @@ string issueMaterials(string supervisorId, string issuesJson, string voucherIn)
 								mv.Plan_Item=pkItemStr;
 							}
 							mv.Moved_By=supId;
+							if(pkCarton != "")
+							{
+								mv.Carton_Number=pkCarton;
+							}
 						}
+						// Voucher is back-filled after the SIV is minted (below).
+						wasteMvIds.add(newMvId.toString());
 					}
 				}
 				//--------------------------------------------------------------
@@ -777,6 +795,19 @@ string issueMaterials(string supervisorId, string issuesJson, string voucherIn)
 							liRow.Plan_Item=piTxt;
 						}
 						mi.Issue_Lines.insert(liRow);
+					}
+				}
+
+				// BACK-FILL THE SIV ONTO THIS CHUNK'S WASTE MOVEMENTS. They were
+				// inserted in the per-material loop above, before voucherNo
+				// existed. getStoreIssueHistory reads the offcut side of a
+				// handover as Waste_Movement[Voucher == <SIV>, Movement_Type ==
+				// "Issued"], so every one written this chunk has to carry it.
+				for each  wmId in wasteMvIds
+				{
+					for each  wmRow in Waste_Movement[ID == wmId.toLong()]
+					{
+						wmRow.Voucher=voucherNo;
 					}
 				}
 			}

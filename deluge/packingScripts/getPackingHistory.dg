@@ -459,12 +459,26 @@ string getPackingHistory(string payloadJson)
 					}
 				}
 
+				// TEXUS PUSH STATUS - read straight off the Packing row, no extra
+				// query. Written by pushPackingToTexus: Sent / Failed / Skipped /
+				// Pending (or empty on a record packed before this existed). The
+				// error is flattened for JSON - it is a Multi Line field that can
+				// hold an API message with quotes and newlines.
+				txStatus = ifnull(pk.Texus_Push_Status,"").toString().trim();
+				txPkgNo = ifnull(pk.Texus_Package_No,"").toString().trim().replaceAll("\"","'");
+				txErr = ifnull(pk.Texus_Push_Error,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
+				// GAD INVENTORY INVOICE status - same, off the row, no query.
+				giStatus = ifnull(pk.Gad_Invoice_Status,"").toString().trim();
+				giNo = ifnull(pk.Gad_Invoice_No,"").toString().trim().replaceAll("\"","'");
+				giErr = ifnull(pk.Gad_Invoice_Error,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
 				if(rowsJson != "")
 				{
 					rowsJson = rowsJson + ",";
 				}
 				// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-				rowsJson = rowsJson + "{\"id\":\"" + pk.ID + "\",\"salesOrder\":\"" + soNo + "\",\"source\":\"" + soSrc + "\",\"planNo\":\"" + planNo + "\",\"supervisorId\":\"" + rowSupKey + "\",\"supervisor\":\"" + rowSupName + "\",\"packedBy\":\"" + packedBy + "\",\"packedOn\":\"" + packedOn + "\",\"boxCount\":" + rowBoxes + ",\"innerBoxCount\":" + rowInnerBoxes + ",\"pieces\":" + rowPieces + ",\"estimatedWeight\":" + totEst + ",\"grossWeight\":" + totGross + ",\"volumetricWeight\":" + totVol + ",\"chargeableWeight\":" + chargeable + ",\"imageCount\":" + imgCount + ",\"boxes\":[" + boxesJson + "]}";
+				rowsJson = rowsJson + "{\"id\":\"" + pk.ID + "\",\"salesOrder\":\"" + soNo + "\",\"source\":\"" + soSrc + "\",\"planNo\":\"" + planNo + "\",\"supervisorId\":\"" + rowSupKey + "\",\"supervisor\":\"" + rowSupName + "\",\"packedBy\":\"" + packedBy + "\",\"packedOn\":\"" + packedOn + "\",\"boxCount\":" + rowBoxes + ",\"innerBoxCount\":" + rowInnerBoxes + ",\"pieces\":" + rowPieces + ",\"estimatedWeight\":" + totEst + ",\"grossWeight\":" + totGross + ",\"volumetricWeight\":" + totVol + ",\"chargeableWeight\":" + chargeable + ",\"imageCount\":" + imgCount + ",\"texusStatus\":\"" + txStatus + "\",\"texusPackageNo\":\"" + txPkgNo + "\",\"texusError\":\"" + txErr + "\",\"gadInvoiceStatus\":\"" + giStatus + "\",\"gadInvoiceNo\":\"" + giNo + "\",\"gadInvoiceError\":\"" + giErr + "\",\"boxes\":[" + boxesJson + "]}";
 
 				shownCount = shownCount + 1;
 			}

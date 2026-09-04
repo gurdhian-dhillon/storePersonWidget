@@ -89,6 +89,15 @@
 
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
     <script src="js/lot-allocator.js"></script>
+    <!-- EXPERIMENT — JS-Data-API stand-in for getStoreMaterialRequirements.
+         MUST load before main.js: loadRequirements() calls ApiExperiment.run().
+         Console: ApiExperiment.run() / ApiExperiment.compare().
+         Remove this file and this tag when the experiment is done. -->
+    <script src="js/api-experiment.js"></script>
+    <!-- THROWAWAY — tests whether a Material_Issue form workflow fires on a
+         JS-API insert and fills Voucher_No. Red "WF test" button, bottom-left.
+         Delete this file and this tag once the question is answered. -->
+    <script src="js/voucher-wf-test.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

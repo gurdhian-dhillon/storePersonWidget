@@ -142,11 +142,16 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	// handovers costs what counting 4 does. It is what lets the pager say "of
 	// 137" without fetching anything it will not show.
 	//
-	// COUNTS HEAD ROWS - one per press, so the pager total is presses, not
-	// chunks. Batch_Head is written explicitly true/false by issueMaterials
-	// (never left empty, because a Creator criteria drops an empty field in both
-	// directions), so this == true is safe.
-	total = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo && Batch_Head == true].count();
+	// ONE ROW PER PRESS, both eras:
+	//   NEW  - Source_System == "JS_API": issueMaterialsHandover writes ONE
+	//          Material_Issue per press, Issue_Lines at material x lot grain, no
+	//          Batch_Voucher / Batch_Head. It is its own card.
+	//   OLD  - Batch_Head == true: the chunked press's first chunk; its siblings
+	//          are pulled by Batch_Voucher and merged.
+	// Both are POSITIVE == matches OR'd, so an empty field simply fails to match
+	// (the "criteria drops empty" rule works FOR us here) - a legacy sibling
+	// (neither flag) is excluded, which is right, it was merged into its head.
+	total = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo && (Batch_Head == true || Source_System == "JS_API")].count();
 
 	// range is 1-BASED and INCLUSIVE at both ends, so page 1 of 10 is 1 to 10
 	// and page 2 is 11 to 20 - not 10 to 20, which repeats a handover on every
@@ -154,10 +159,9 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	rFrom = offset + 1;
 	rTo = offset + limit;
 
-	// HEAD ROWS ONLY, so the paged loop runs at most `limit` times whatever the
-	// range holds - the same bound the record-paged version had. Siblings are
-	// fetched per head below, unpaged, because a press is only ever a few chunks.
-	issues = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo && Batch_Head == true] sort by Added_Time desc range from rFrom to rTo;
+	// One row per press, so the paged loop runs at most `limit` times whatever
+	// the range holds. Legacy siblings are fetched per head below, unpaged.
+	issues = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo && (Batch_Head == true || Source_System == "JS_API")] sort by Added_Time desc range from rFrom to rTo;
 
 	//--------------------------------------------------------------------------
 	// The material catalogue, fetched ONCE, as two id-keyed maps.
@@ -220,6 +224,24 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	// outside - so that one stays a single fetch.
 	lotNumMap = Map();
 
+	// THE OFFCUT SIDE OF A HANDOVER.
+	//
+	// A waste piece issued as material is NOT an Issue_Line - issueMaterials
+	// records it only as Waste_Movement[Movement_Type == "Issued"], stamped with
+	// the chunk's SIV (Voucher) and the carton it was racked in (Carton_Number).
+	// So the fresh cloth of a handover comes from Issue_Lines (above) and the
+	// offcuts from Waste_Movement, keyed together by SIV.
+	//
+	// Two caches, filled one indexed query per DISTINCT waste piece on the page:
+	//   wpSkuMap  - waste piece id -> its Raw_Material id (to bucket the remnant
+	//               under the right SKU row on screen)
+	//   wpLotMap  - waste piece id -> its lot's readable number
+	// A piece appearing on several movements is read once. The Raw_Material and
+	// Raw_Material_Lot names still come from matNameMap / matSkuMap / lotNumMap.
+	wpSkuMap = Map();
+	wpLotMap = Map();
+	wpSeenMap = Map();
+
 	for each  rmC in Raw_Material[ID != 0]
 	{
 		rmKey = rmC.ID.toString();
@@ -240,23 +262,6 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	// person's name is a fact about them now, not about the day they collected.
 	supCache = Map();
 
-	// WHICH ITEM EACH ISSUE LINE WAS FOR - the "how this handover was divided"
-	// detail the History card expands to. Issue_Lines.Plan_Item is stamped by
-	// issueMaterials on every line it can resolve one for, so the item id is
-	// read straight off the line. This is HONEST per line - unlike
-	// Material_Issue.Plan on the header, which holds only the first plan the
-	// fan-out touched (see the note above). A LINE has exactly one Plan_Item.
-	//
-	// Two id-keyed maps (name, status) filled together in one indexed query per
-	// DISTINCT item on the page, read for free after. TWO maps rather than one
-	// "name|status" string because Item_Name is flattened with " | " and a
-	// delimiter split would break on a name that contains a pipe. itemSeenMap
-	// remembers a queried id so a real item with an empty status is not
-	// re-queried. Same shape as lotNumMap above.
-	itemNameMap = Map();
-	itemStatMap = Map();
-	itemSeenMap = Map();
-
 	// No cap guard here any more. The query returned the page, so every HEAD
 	// record this loop sees is one card that is going on screen.
 	for each  mi in issues
@@ -274,24 +279,24 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 		}
 
 		//----------------------------------------------------------------------
-		// THE CHUNKS OF THIS PRESS. The head plus its siblings, oldest first so
-		// the SIV list on the card reads in the order they were minted. A press
-		// is a few chunks at most, so this is unpaged - and Batch_Voucher is an
-		// exact string match, not a scan.
-		//
-		// The head's own Batch_Voucher is its own SIV (issueMaterials sets it
-		// even for a single-chunk press), so this query returns the head too and
-		// there is no separate "add the head" step.
+		// THE CHUNKS OF THIS PRESS.
+		//   NEW (Source_System == "JS_API"): one row = one press. batchChunks is
+		//   just [mi] - the code below already handles a one-element list.
+		//   OLD: the head plus its Batch_Voucher siblings, oldest first.
 		//----------------------------------------------------------------------
-		batchKey = ifnull(mi.Batch_Voucher,"").toString().trim();
-		if(batchKey == "")
+		if(ifnull(mi.Source_System,"").toString().trim() == "JS_API")
 		{
-			// Defensive: a row that somehow missed Batch_Voucher is its own
-			// one-chunk batch rather than being dropped from History.
-			batchKey = ifnull(mi.Voucher_No,"").toString().trim();
+			batchChunks = Material_Issue[ID == mi.ID];
 		}
-
-		batchChunks = Material_Issue[Batch_Voucher == batchKey] sort by Added_Time;
+		else
+		{
+			batchKey = ifnull(mi.Batch_Voucher,"").toString().trim();
+			if(batchKey == "")
+			{
+				batchKey = ifnull(mi.Voucher_No,"").toString().trim();
+			}
+			batchChunks = Material_Issue[Batch_Voucher == batchKey] sort by Added_Time;
+		}
 
 		// No plan or sales order resolved here any more.
 		//
@@ -315,6 +320,7 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 		// seconds apart and can straddle midnight). Status is the head's - all
 		// chunks of one press share it.
 		linesJson = "";
+		wasteJson = "";
 		sivJson = "";
 		earliestDate = null;
 		earliestTime = "";
@@ -322,7 +328,8 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 
 		for each  bc in batchChunks
 		{
-			bcSiv = ifnull(bc.Voucher_No,"").toString().trim().replaceAll("\"","'");
+			bcSivRaw = ifnull(bc.Voucher_No,"").toString().trim();
+			bcSiv = bcSivRaw.replaceAll("\"","'");
 			if(bcSiv != "")
 			{
 				if(sivJson != "")
@@ -397,42 +404,71 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 					lnLot = ifnull(lotNumMap.get(lnLotKey),"").toString();
 				}
 
-				// The item this line's quantity was cut for. Plan_Item is a
-				// LOOKUP - toString() gives the record id, the map key. Empty on
-				// a pre-Plan_Item handover or a line issued without one; the ""
-				// key misses the maps and the line carries blank item fields,
-				// which the widget folds into an "unassigned" bucket.
-				lnItemKey = "";
-				if(ln.Plan_Item != null)
-				{
-					lnItemKey = ln.Plan_Item.toString().trim();
-				}
-				lnItemName = "";
-				lnItemStat = "";
-				if(lnItemKey != "" && lnItemKey.isNumber() == true)
-				{
-					if(ifnull(itemSeenMap.get(lnItemKey),"").toString() == "")
-					{
-						itemSeenMap.put(lnItemKey,"1");
-						itemNameMap.put(lnItemKey,"");
-						itemStatMap.put(lnItemKey,"");
-						for each  piC in Plan_Item[ID == lnItemKey.toLong()]
-						{
-							piName = ifnull(piC.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
-							itemNameMap.put(lnItemKey,piName);
-							itemStatMap.put(lnItemKey,ifnull(piC.Item_Status,"").toString().trim());
-						}
-					}
-					lnItemName = ifnull(itemNameMap.get(lnItemKey),"").toString();
-					lnItemStat = ifnull(itemStatMap.get(lnItemKey),"").toString();
-				}
-
 				if(linesJson != "")
 				{
 					linesJson = linesJson + ",";
 				}
-				linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"lot\":\"" + lnLot + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + ",\"itemId\":\"" + lnItemKey + "\",\"itemName\":\"" + lnItemName + "\",\"itemStatus\":\"" + lnItemStat + "\"}";
+				linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"lot\":\"" + lnLot + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + "}";
 				totalLines = totalLines + 1;
+			}
+
+			//----------------------------------------------------------------
+			// THE OFFCUTS OF THIS CHUNK - Waste_Movement "Issued" rows stamped
+			// with this SIV. Empty on a handover of fresh cloth only, and on
+			// every handover issued before the Voucher field existed (those
+			// remnants simply do not show - the fresh side is unaffected).
+			//----------------------------------------------------------------
+			if(bcSivRaw != "")
+			{
+				for each  wm in Waste_Movement[Voucher == bcSivRaw && Movement_Type == "Issued"]
+				{
+					wpKey = "";
+					if(wm.Waste_Piece != null)
+					{
+						wpKey = wm.Waste_Piece.toString().trim();
+					}
+
+					wmSku = "";
+					wmName = "";
+					wmLot = "";
+					if(wpKey != "" && wpKey.isNumber() == true)
+					{
+						if(ifnull(wpSeenMap.get(wpKey),"").toString() == "")
+						{
+							wpSeenMap.put(wpKey,"1");
+							wpSkuMap.put(wpKey,"");
+							wpLotMap.put(wpKey,"");
+							for each  wpC in Waste_Master[ID == wpKey.toLong()]
+							{
+								wpSkuMap.put(wpKey,ifnull(wpC.SKU,"").toString().trim());
+								wpLotRef = ifnull(wpC.Lot,"").toString().trim();
+								if(wpLotRef != "" && wpLotRef.isNumber() == true)
+								{
+									for each  wpLotC in Raw_Material_Lot[ID == wpLotRef.toLong()]
+									{
+										wpLotMap.put(wpKey,ifnull(wpLotC.Lot_Number,"").toString().trim().replaceAll("\"","'"));
+									}
+								}
+							}
+						}
+						wmMatId = ifnull(wpSkuMap.get(wpKey),"").toString();
+						wmSku = ifnull(matSkuMap.get(wmMatId),"").toString();
+						wmName = ifnull(matNameMap.get(wmMatId),"").toString();
+						wmLot = ifnull(wpLotMap.get(wpKey),"").toString();
+					}
+
+					wpcS = ifnull(wm.Piece_Count,"0").toString().trim();
+					if(wpcS == "")
+					{
+						wpcS = "0";
+					}
+
+					if(wasteJson != "")
+					{
+						wasteJson = wasteJson + ",";
+					}
+					wasteJson = wasteJson + "{\"material\":\"" + wmName + "\",\"sku\":\"" + wmSku + "\",\"lot\":\"" + wmLot + "\",\"carton\":\"" + ifnull(wm.Carton_Number,"").toString().trim().replaceAll("\"","'") + "\",\"pieces\":" + wpcS.toLong() + ",\"cutWidth\":" + ifnull(wm.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(wm.Cut_Size_Length,0) + "}";
+				}
 			}
 		}
 
@@ -449,7 +485,7 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 		// id / voucher are the HEAD's - a stable handle for the card. sivNumbers
 		// is every chunk's SIV so a transfer-order check in Zoho Inventory lines
 		// up. IDs forced to string - 18-digit ids break JSON.parse otherwise.
-		rowsJson = rowsJson + "{\"id\":\"" + mi.ID + "\",\"voucher\":\"" + ifnull(mi.Voucher_No,"").toString() + "\",\"sivNumbers\":[" + sivJson + "],\"date\":\"" + issueDateTxt + "\",\"time\":\"" + earliestTime + "\",\"supervisor\":\"" + supName + "\",\"status\":\"" + ifnull(mi.Issue_Status,"").toString() + "\",\"lines\":[" + linesJson + "]}";
+		rowsJson = rowsJson + "{\"id\":\"" + mi.ID + "\",\"voucher\":\"" + ifnull(mi.Voucher_No,"").toString() + "\",\"sivNumbers\":[" + sivJson + "],\"date\":\"" + issueDateTxt + "\",\"time\":\"" + earliestTime + "\",\"supervisor\":\"" + supName + "\",\"status\":\"" + ifnull(mi.Issue_Status,"").toString() + "\",\"lines\":[" + linesJson + "],\"waste\":[" + wasteJson + "]}";
 	}
 	}
 	catch (e)

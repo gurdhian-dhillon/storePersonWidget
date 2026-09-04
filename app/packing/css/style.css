@@ -1289,6 +1289,55 @@
     font-variant-numeric: tabular-nums;
 }
 
+/* Whether this packing was pushed to Texus Inventory as a Package, and a retry
+   when it was not. Sits under the weights strip, above the photos. */
+.texus-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+    padding: 0 0 1rem;
+}
+
+.texus-pill {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.texus-pill.is-sent {
+    color: #047857;
+    background: #ecfdf5;
+    border: 1px solid #6ee7b7;
+}
+
+.texus-pill.is-failed {
+    color: #b91c1c;
+    background: #fef2f2;
+    border: 1px solid #fca5a5;
+}
+
+.texus-pill.is-skipped,
+.texus-pill.is-pending {
+    color: var(--text-muted);
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+}
+
+.texus-retry {
+    padding: 0.2rem 0.6rem;
+    font-size: 0.75rem;
+}
+
+.texus-err {
+    flex-basis: 100%;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
 /* ONE BLOCK PER PHYSICAL BOX, drawn like the box card in the queue tab so the
    thing he built and the thing he is reading back are recognisably the same
    object. Every figure the record holds is here: a packed box is answered for
@@ -1506,6 +1555,19 @@
     height: 100%;
     object-fit: cover;
     display: block;
+    cursor: zoom-in;
+}
+
+.hist-photo.is-broken {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hist-photo.is-broken::after {
+    content: "!";
+    font-weight: 700;
+    color: var(--text-muted);
 }
 
 .hist-photos-note {

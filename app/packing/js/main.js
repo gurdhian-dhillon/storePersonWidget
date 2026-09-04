@@ -106,8 +106,23 @@ var PackingScreen = (function () {
     // sends imageCount, and the URLs are fetched lazily with getRecords when a
     // history card is opened.
     var PHOTO_CACHE = {};
+
+    // Box_Images comes back from getRecords as RELATIVE "/api/v2.1/…/download"
+    // paths, so an <img> needs the Creator host prepended. In production the
+    // widget iframe is served from a *.zappsusercontent.* origin, NOT from
+    // Creator, so document.location is no use. The reliable source is the
+    // "serviceOrigin" query param Creator adds to the widget URL
+    // (e.g. https://creatorapp.zoho.in); document.referrer is the fallback, and
+    // a hard-coded .in host the last resort for this India-DC app.
     var CREATOR_ORIGIN = (function () {
-        try { return new URL(document.referrer).origin; } catch (e) { return ''; }
+        try {
+            var q = new URLSearchParams(window.location.search).get('serviceOrigin');
+            if (q) return new URL(q).origin;
+        } catch (e) {}
+        try {
+            if (document.referrer) return new URL(document.referrer).origin;
+        } catch (e) {}
+        return 'https://creatorapp.zoho.in';
     })();
 
     // ----------------------------------------------------
@@ -1240,16 +1255,30 @@ var PackingScreen = (function () {
                     });
                     allPhotos.forEach(function (p) {
                         uploadPromises.push(
+                            // v2 SDK config is snake_case - report_name / field_name,
+                            // NOT reportName / fieldName. Passing the camelCase keys
+                            // left the required fields undefined and every upload
+                            // failed silently ("0 of N uploaded"). Box_Images is a
+                            // multi-image field on the PARENT Packing form, one call
+                            // per photo appends to it.
                             fileNs.uploadFile({
-                                reportName: 'Packing_Report',
-                                id: packId,
-                                fieldName: 'Box_Images',
+                                report_name: 'Packing_Report',
+                                id: String(packId),
+                                field_name: 'Box_Images',
                                 file: p.file
-                            }).then(function () { return { ok: true }; })
-                              .catch(function (err) {
-                                  console.error('Photo upload failed (box ' + p.box + ')', err);
-                                  return { ok: false };
-                              })
+                            }).then(function (resp) {
+                                // v2 success is code 3000; anything else is a
+                                // failure the SDK resolved rather than rejected.
+                                var code = resp && (resp.code != null ? resp.code : (resp.data && resp.data.code));
+                                if (code != null && Number(code) !== 3000) {
+                                    console.error('Photo upload rejected (box ' + p.box + '):', resp);
+                                    return { ok: false };
+                                }
+                                return { ok: true };
+                            }).catch(function (err) {
+                                console.error('Photo upload failed (box ' + p.box + ')', err);
+                                return { ok: false };
+                            })
                         );
                     });
                 } else {
@@ -1389,35 +1418,45 @@ var PackingScreen = (function () {
         }
     }
 
-    // Pull Box_Images off the Packing record and turn whatever getRecords returns
-    // for a multi-image field into a list of usable <img> URLs.
+    // Pull Box_Images off the Packing record as a list of API paths.
+    //
+    // v2 getRecords with field_config "all" returns a multi-image field as an
+    // ARRAY of RELATIVE download endpoints, e.g.
+    //   /api/v2.1/livelinenstore/gad-fashions-manufacturing/report/Packing_Report/<id>/Box_Images/download?filepath=<name>
+    // These are NOT directly loadable in an <img src> - the endpoint needs the
+    // Creator session, which a cross-origin <img> from the widget's
+    // *.zappsusercontent host does not carry. ZOHO.CREATOR.UTIL.setImageData
+    // fetches them authenticated and sets the src (see paintPackingPhotos). So
+    // this keeps the paths AS-IS, only unwrapping the odd <a href="…"> form and
+    // the legacy object / joined-string shapes.
     function photoUrlsFromRecord(rec) {
         if (!rec) return [];
         var raw = rec.Box_Images;
         if (raw === undefined || raw === null || raw === '') return [];
+
+        function pick(v) {
+            if (!v) return null;
+            if (typeof v === 'string') return v;
+            return v.url || v.link_url || v.download_url || v.download_Url ||
+                   v.filepath || v.value || v.href || null;
+        }
+
         var parts = [];
         if (Array.isArray(raw)) {
-            raw.forEach(function (v) {
-                if (!v) return;
-                if (typeof v === 'string') parts.push(v);
-                else if (v.url) parts.push(v.url);
-                else if (v.download_Url) parts.push(v.download_Url);
-                else if (v.filepath) parts.push(v.filepath);
-            });
+            raw.forEach(function (v) { var s = pick(v); if (s) parts.push(s); });
         } else if (typeof raw === 'object') {
-            if (raw.url) parts.push(raw.url);
+            var s = pick(raw);
+            if (s) parts.push(s);
         } else {
-            String(raw).split(/[\n,]/).forEach(function (s) { if (s.trim()) parts.push(s.trim()); });
+            String(raw).split(/[\n,]/).forEach(function (t) { if (t.trim()) parts.push(t.trim()); });
         }
+
         return parts.map(function (s) {
-            // getRecords may hand back an <a href="…"> wrapper, a bare /api/v2
-            // path, or a full URL. Normalise to something an <img> can load.
-            var m = String(s).match(/(?:href=")?((?:https?:)?\/\/[^"\s]+|\/[^"\s]+)/);
-            var u = m ? m[1] : s;
-            if (/^https?:\/\//.test(u)) return u;
-            if (/^\/\//.test(u)) return 'https:' + u;
-            if (u.charAt(0) === '/') return (CREATOR_ORIGIN || '') + u;
-            return u;
+            // Unwrap an <a href="…"> fragment if that is what came back; otherwise
+            // take the string as-is (a relative /api/… path is exactly what
+            // setImageData wants).
+            var m = String(s).match(/href=["']([^"']+)["']/);
+            return (m ? m[1] : String(s)).trim();
         }).filter(Boolean);
     }
 
@@ -1425,31 +1464,159 @@ var PackingScreen = (function () {
         PHOTO_CACHE[packId] = { state: 'loading', urls: [] };
         paintPackingPhotos(packId);
 
-        if (!isRunningInCreator() || !(ZOHO && ZOHO.CREATOR && ZOHO.CREATOR.DATA && ZOHO.CREATOR.DATA.getRecords)) {
+        var getRecs = ZOHO && ZOHO.CREATOR && ZOHO.CREATOR.DATA && ZOHO.CREATOR.DATA.getRecords;
+        if (!isRunningInCreator() || typeof getRecs !== 'function') {
+            console.warn('getRecords not available on this SDK build - packing photos cannot load.');
             PHOTO_CACHE[packId] = { state: 'error', urls: [] };
             paintPackingPhotos(packId);
             return;
         }
-        ZOHO.CREATOR.DATA.getRecords({
-            reportName: 'Packing_Report',
-            criteria: '(ID == ' + packId + ')',
-            fieldConfig: 'quick_view'
-        }).then(function (resp) {
+
+        // settle() guarantees the card never stays on "Loading photos…".
+        var done = false;
+        function settle(state, urls) {
+            if (done) return;
+            done = true;
+            PHOTO_CACHE[packId] = { state: state, urls: urls || [] };
+            paintPackingPhotos(packId);
+        }
+        var watchdog = setTimeout(function () {
+            console.error('getRecords for packing photos timed out (id ' + packId + ')');
+            settle('error', []);
+        }, 15000);
+
+        // v2 SDK config is snake_case; field_config MUST be "all" (the default
+        // "quick_view" omits image fields); criteria takes NO wrapping parens.
+        // Box_Images comes back as an array of relative /api/v2.1/… download
+        // paths, resolved to a src by setImageData in hydratePackingPhotos.
+        var cfg = { report_name: 'Packing_Report', criteria: 'ID == ' + packId, field_config: 'all' };
+        var p;
+        try {
+            p = getRecs(cfg);
+        } catch (err) {
+            console.error('getRecords threw for packing photos:', err);
+            clearTimeout(watchdog);
+            settle('error', []);
+            return;
+        }
+        if (!p || typeof p.then !== 'function') {
+            console.error('getRecords returned no promise for packing photos');
+            clearTimeout(watchdog);
+            settle('error', []);
+            return;
+        }
+        p.then(function (resp) {
+            if (done) return;
             var recs = (resp && (resp.data || resp.records)) || [];
             var rec = Array.isArray(recs) ? recs[0] : recs;
-            PHOTO_CACHE[packId] = { state: 'ok', urls: photoUrlsFromRecord(rec) };
-            paintPackingPhotos(packId);
+            clearTimeout(watchdog);
+            settle('ok', photoUrlsFromRecord(rec));
         }).catch(function (err) {
-            console.error('getRecords for packing photos failed:', err);
-            PHOTO_CACHE[packId] = { state: 'error', urls: [] };
-            paintPackingPhotos(packId);
+            console.error('getRecords rejected for packing photos:', err);
+            clearTimeout(watchdog);
+            settle('error', []);
         });
     }
 
     function paintPackingPhotos(packId) {
-        var box = el('hist-photos-' + packId);
+        // NOT el() - that helper prepends "pack-", but the history card renders
+        // this container as id="hist-photos-<id>" with no prefix. Using el() here
+        // meant box was always null, paint never happened, and the card stayed
+        // stuck on "Loading photos…".
+        var box = document.getElementById('hist-photos-' + packId);
         if (!box) return;
         box.innerHTML = photoGalleryHtml(packId);
+        hydratePackingPhotos(box);
+    }
+
+    // The <img> tags render with NO src and a data-photo-url holding the
+    // RELATIVE /api/v2.1/… download endpoint getRecords returns for a
+    // multi-image field. Getting the bytes into the page is the hard part and
+    // there is exactly one way that works from a widget sandbox:
+    //
+    //   ZOHO.CREATOR.UTIL.setImageData(img, relativePath, cb)
+    //     - asks the PARENT Creator frame (via postMessage) to resolve the file
+    //       and writes the resolved src onto the element. Not a decode (nothing
+    //       to mangle), not a connection (connect-src does not govern
+    //       postMessage).
+    //
+    // What does NOT work, and why:
+    //   - ZOHO.CREATOR.FILE.readFile        -> this SDK build decodes the bytes
+    //       as UTF-8, so every non-ASCII byte comes back as U+FFFD. The image is
+    //       already destroyed; no re-encoding recovers it.
+    //   - fetch(downloadUrl)                -> widget CSP connect-src omits the
+    //       Creator origin, so the request is never sent ("Failed to fetch").
+    //   - <img src="https://creatorapp…/api/…">  -> cross-origin, no session.
+    //
+    // TRAPS (all cost real time elsewhere):
+    //   1. The path MUST be relative and MUST start with /api/v2/, /api/v2.1/ or
+    //      /publishapi/v2/. Anything else and setImageData SILENTLY assigns the
+    //      raw value as src and still reports status 200 - so an absolute URL
+    //      fails without saying so. We assert the resolved src changed.
+    //   2. The callback is not guaranteed to fire - time it out (~6s) and read
+    //      the src attribute directly.
+    function hydratePackingPhotos(box) {
+        var util = ZOHO && ZOHO.CREATOR && ZOHO.CREATOR.UTIL;
+        console.log('hydratePackingPhotos: UTIL.setImageData?', !!(util && util.setImageData));
+
+        var imgs = box.querySelectorAll('img[data-photo-url]');
+        for (var i = 0; i < imgs.length; i++) {
+            (function (img) {
+                var path = img.getAttribute('data-photo-url');
+                if (!path) return;
+
+                img.addEventListener('click', function () {
+                    if (img.src) { try { window.open(img.src, '_blank', 'noopener'); } catch (e) {} }
+                });
+
+                function markBroken(why) {
+                    console.warn('packing photo could not load:', why, '-', path.slice(0, 90));
+                    var wrap = img.parentNode;
+                    if (wrap && wrap.classList) wrap.classList.add('is-broken');
+                }
+
+                if (!(util && typeof util.setImageData === 'function')) {
+                    markBroken('ZOHO.CREATOR.UTIL.setImageData not on this SDK build');
+                    return;
+                }
+                // Trap 1: must be a bare relative /api/… path. The value from
+                // getRecords already is; guard anyway.
+                if (!/^\/(api\/v2(\.1)?|publishapi\/v2)\//.test(path)) {
+                    markBroken('path is not a bare /api/v2(.1)/ endpoint');
+                    return;
+                }
+
+                var done = false;
+                function finish(src) {
+                    if (done) return;
+                    done = true;
+                    if (src && src !== path) {
+                        console.log('packing photo resolved:', src.slice(0, 60));
+                        img.src = src;
+                    } else {
+                        // Trap 1: unchanged src == setImageData silently no-op'd.
+                        markBroken('setImageData did not resolve a new src');
+                    }
+                }
+
+                img.addEventListener('error', function () {
+                    if (done) markBroken('resolved src failed to decode');
+                });
+
+                try {
+                    util.setImageData(img, path, function (r) {
+                        // r shape varies by build; the src attribute is the
+                        // reliable signal.
+                        finish(img.getAttribute('src'));
+                    });
+                } catch (e) {
+                    markBroken('setImageData threw: ' + (e && e.message ? e.message : e));
+                    return;
+                }
+                // Trap 2: callback may never fire.
+                setTimeout(function () { finish(img.getAttribute('src')); }, 6000);
+            })(imgs[i]);
+        }
     }
 
     function photoGalleryHtml(packId) {
@@ -1458,8 +1625,9 @@ var PackingScreen = (function () {
         if (hit.state === 'error') return '<span class="hist-photos-note">Could not load photos.</span>';
         if (!hit.urls.length) return '<span class="hist-photos-note">No photos on this record.</span>';
         return hit.urls.map(function (u) {
-            return '<a class="hist-photo" href="' + esc(u) + '" target="_blank" rel="noopener">' +
-                '<img src="' + esc(u) + '" alt="Box photo" loading="lazy"></a>';
+            return '<span class="hist-photo">' +
+                '<img data-photo-url="' + esc(u) + '" alt="Box photo" loading="lazy">' +
+                '</span>';
         }).join('');
     }
 
@@ -1551,6 +1719,9 @@ var PackingScreen = (function () {
                 ' &middot; ' + plural(n(p.boxCount), 'box') +
                 ' &middot; ' + plural(n(p.pieces), 'piece');
 
+            var texus = texusBlock(p);
+            var gadInv = gadInvoiceBlock(p);
+
             return '<div class="item-card' + (open ? ' open' : '') + '">' +
                 '<div class="item-header" onclick="PackingScreen.toggleHistory(\'' + esc(p.id) + '\')">' +
                 '<div class="item-header-info">' +
@@ -1585,6 +1756,8 @@ var PackingScreen = (function () {
                 '<span>Inner cartons <b>' + n(p.innerBoxCount) + ' of ' + n(p.boxCount) + '</b></span>' +
                 (p.source ? '<span>Source <b>' + esc(p.source) + '</b></span>' : '') +
                 '</div>' +
+                texus +
+                gadInv +
                 (n(p.imageCount) > 0
                     ? '<div class="hist-photos-wrap"><div class="hist-photos-head">Photos</div>' +
                       '<div class="hist-photos" id="hist-photos-' + esc(p.id) + '">' +
@@ -1594,6 +1767,165 @@ var PackingScreen = (function () {
                 '</div>' +
                 '</div>';
         }).join('');
+    }
+
+    // ---- Texus Inventory push status --------------------------------------
+    //
+    // savePackingRecord calls pushPackingToTexus, which creates a Package on the
+    // Texus sales order and stamps the outcome on the Packing row. This shows
+    // that outcome under the weights, and gives a Retry button when it FAILED or
+    // was SKIPPED (skipped == the sales order had no Reference number; a retry
+    // is worth offering because someone may have filled it in since).
+    function texusBlock(p) {
+        var st = String(p.texusStatus || '');
+        var cls = 'is-pending';
+        var label = 'Not sent to Texus';
+        var showRetry = false;
+
+        if (st === 'Sent') {
+            cls = 'is-sent';
+            label = 'Sent to Texus' + (p.texusPackageNo ? ' &middot; ' + esc(p.texusPackageNo) : '');
+        } else if (st === 'Failed') {
+            cls = 'is-failed';
+            label = 'Texus push failed';
+            showRetry = true;
+        } else if (st === 'Skipped') {
+            cls = 'is-skipped';
+            label = 'Skipped &mdash; no order reference';
+            showRetry = true;
+        } else if (st === 'Pending') {
+            cls = 'is-pending';
+            label = 'Texus push in progress&hellip;';
+        }
+
+        var errLine = (p.texusError && (st === 'Failed' || st === 'Skipped'))
+            ? '<div class="texus-err">' + esc(p.texusError) + '</div>'
+            : '';
+
+        var retryBtn = showRetry
+            ? '<button type="button" class="raise-btn texus-retry" id="texus-retry-' + esc(p.id) + '" ' +
+              'onclick="PackingScreen.retryTexus(\'' + esc(p.id) + '\')">Retry Texus sync</button>'
+            : '';
+
+        return '<div class="texus-row">' +
+            '<span class="texus-pill ' + cls + '">' + label + '</span>' +
+            retryBtn +
+            errLine +
+            '</div>';
+    }
+
+    function retryTexus(id) {
+        // The retry button id in the markup is not pack-prefixed, so el() (which
+        // prepends "pack-") would miss it.
+        var btn = document.getElementById('texus-retry-' + id);
+        if (btn) { btn.disabled = true; btn.innerText = 'Syncing…'; }
+
+        if (!isRunningInCreator()) {
+            alert('Texus sync only runs inside Creator.');
+            if (btn) { btn.disabled = false; btn.innerText = 'Retry Texus sync'; }
+            return;
+        }
+
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'pushPackingToTexus',
+            http_method: 'POST',
+            payload: { packingIdTxt: String(id) }
+        }).then(function (response) {
+            var parsed;
+            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+            if (parsed && parsed.success) {
+                alert(parsed.adopted
+                    ? 'Already had a package in Texus — linked it.'
+                    : 'Sent to Texus as ' + (parsed.packageNo || 'a package') + '.');
+            } else if (parsed && parsed.skipped) {
+                alert('Still skipped — the sales order has no Reference number.');
+            } else {
+                alert('Texus sync failed:\n\n' + ((parsed && parsed.error) || 'unknown error'));
+            }
+            loadHistory();
+        }).catch(function (err) {
+            console.error('pushPackingToTexus retry failed:', err);
+            alert('Could not reach the server for the Texus sync.');
+            if (btn) { btn.disabled = false; btn.innerText = 'Retry Texus sync'; }
+        });
+    }
+
+    // ---- Gad Inventory invoice status -----------------------------------
+    //
+    // savePackingRecord also calls pushInvoiceToGad, which raises the invoice for
+    // the ORIGINAL sales order in Gad's own Inventory (a full invoice is what
+    // closes the SO - there is no close endpoint). Same pill + retry pattern as
+    // Texus. Skipped == the Creator sales order has no Inventory sales-order id.
+    function gadInvoiceBlock(p) {
+        var st = String(p.gadInvoiceStatus || '');
+        var cls = 'is-pending';
+        var label = 'Not invoiced in Gad';
+        var showRetry = false;
+
+        if (st === 'Sent') {
+            cls = 'is-sent';
+            label = 'Invoiced in Gad' + (p.gadInvoiceNo ? ' &middot; ' + esc(p.gadInvoiceNo) : '');
+        } else if (st === 'Failed') {
+            cls = 'is-failed';
+            label = 'Gad invoice failed';
+            showRetry = true;
+        } else if (st === 'Skipped') {
+            cls = 'is-skipped';
+            label = 'Skipped &mdash; no Inventory order';
+            showRetry = true;
+        } else if (st === 'Pending') {
+            cls = 'is-pending';
+            label = 'Gad invoice in progress&hellip;';
+        }
+
+        var errLine = (p.gadInvoiceError && (st === 'Failed' || st === 'Skipped'))
+            ? '<div class="texus-err">' + esc(p.gadInvoiceError) + '</div>'
+            : '';
+
+        var retryBtn = showRetry
+            ? '<button type="button" class="raise-btn texus-retry" id="gadinv-retry-' + esc(p.id) + '" ' +
+              'onclick="PackingScreen.retryGadInvoice(\'' + esc(p.id) + '\')">Retry Gad invoice</button>'
+            : '';
+
+        return '<div class="texus-row">' +
+            '<span class="texus-pill ' + cls + '">' + label + '</span>' +
+            retryBtn +
+            errLine +
+            '</div>';
+    }
+
+    function retryGadInvoice(id) {
+        var btn = document.getElementById('gadinv-retry-' + id);
+        if (btn) { btn.disabled = true; btn.innerText = 'Invoicing…'; }
+
+        if (!isRunningInCreator()) {
+            alert('Gad invoicing only runs inside Creator.');
+            if (btn) { btn.disabled = false; btn.innerText = 'Retry Gad invoice'; }
+            return;
+        }
+
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'pushInvoiceToGad',
+            http_method: 'POST',
+            payload: { packingIdTxt: String(id) }
+        }).then(function (response) {
+            var parsed;
+            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+            if (parsed && parsed.success) {
+                alert(parsed.alreadyInvoiced
+                    ? 'The sales order was already fully invoiced in Gad.'
+                    : 'Invoiced in Gad as ' + (parsed.invoiceNo || 'an invoice') + '.');
+            } else if (parsed && parsed.skipped) {
+                alert('Still skipped — the sales order has no Inventory sales-order id.');
+            } else {
+                alert('Gad invoicing failed:\n\n' + ((parsed && parsed.error) || 'unknown error'));
+            }
+            loadHistory();
+        }).catch(function (err) {
+            console.error('pushInvoiceToGad retry failed:', err);
+            alert('Could not reach the server for the Gad invoice.');
+            if (btn) { btn.disabled = false; btn.innerText = 'Retry Gad invoice'; }
+        });
     }
 
     // Refresh reloads whichever tabs have been opened - the same rule the store
@@ -1613,6 +1945,8 @@ var PackingScreen = (function () {
         refresh: refreshAll,
         showTab: showTab,
         toggleHistory: toggleHistory,
+        retryTexus: retryTexus,
+        retryGadInvoice: retryGadInvoice,
         viewPhoto: viewPhoto,
         selectOrder: selectOrder,
         setStaff: setStaff,

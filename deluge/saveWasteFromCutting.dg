@@ -44,89 +44,44 @@ string saveWasteFromCutting(string planId, string planItemId, string phaseName, 
 	//
 	// An offcut is cut from a specific lot, and that is the only provenance a
 	// remnant will ever have - Waste_Master records what the piece IS, never
-	// where it came from. The handover lines are the only place that knows,
-	// because the lot is stamped there as the cloth crosses the counter.
+	// where it came from.
 	//
-	// Read via the SUPERVISOR rather than the plan. Material_Issue.Plan holds
-	// the first plan a handover touched, so an issue spanning two plans is
-	// stamped with one of them and filtering on it would miss the other's lines
-	// entirely. The line itself carries Plan_Item, which is exact.
+	// READ FROM Material_Requirement.Issued_Lot - the tone pin. issueMaterials /
+	// issueMaterialsApply write it, once, when the cloth first crosses the
+	// counter for that requirement row; both eras populate it, so no branch.
+	// This replaced a walk of every Material_Issue.Issue_Lines the supervisor
+	// held (filtered by Plan_Item) - the new material x lot Issue_Lines carry no
+	// Plan_Item, and the requirement row is exact anyway and bounded by
+	// [Plan_Item == this item] - a handful of rows, no date bound, no scan.
 	//
-	// TWO LOTS FOR ONE ITEM MEANS NO LOT IS WRITTEN. That only happens when the
-	// store split the issue across lots, and there is then no way to tell which
-	// of them a given remnant was cut from. Stamping the bigger one would put a
-	// tone on the piece that might be a lie, and a remnant offered later as the
-	// wrong shade is exactly what lots exist to prevent. Left empty and counted,
-	// so the gap is visible rather than invented.
+	// TWO LOTS FOR ONE ITEM MEANS NO LOT IS WRITTEN. One Plan_Item can carry
+	// several requirement rows for the same material (a body panel and a facing,
+	// two cut sizes). If two of them pinned DIFFERENT lots the store split the
+	// issue across lots, and there is no way to tell which a given remnant was
+	// cut from - stamping either would put a tone on the piece that might be a
+	// lie. Left empty and counted, so the gap is visible.
 	//----------------------------------------------------------------------
 	lotForMat = Map();
 	ambigMat = List();
 
-	planIdTxt = ifnull(planId,"").toString().trim();
-	wSupId = 0;
-
-	// Declared out here beside wSupId, not inside the block below: a payload
-	// with no plan id never enters that block, and the scan further down reads
-	// this either way.
-	wPlanStart = null;
-
-	if(planIdTxt != "" && planIdTxt.isNumber() == true)
+	if(itemIdStr != "" && itemIdStr.isNumber() == true)
 	{
-		for each  wPlan in Production_Planning[ID == planIdTxt.toLong()]
+		for each  rqLot in Material_Requirement[Plan_Item == itemIdStr.toLong()]
 		{
-			wSupId = ifnull(wPlan.Assigned_To,0);
+			lnMatW = ifnull(rqLot.Material,"").toString().trim();
+			lnLotW = ifnull(rqLot.Issued_Lot,"").toString().trim();
 
-			// Bounds the handover scan below. Written as zoho.currentdate by
-			// createProductionPlans, so it is a plain Date like Issue_Date.
-			wPlanStart = wPlan.Plan_Start_Date;
-		}
-	}
-
-	if(wSupId != 0 && itemIdStr != "")
-	{
-		//--------------------------------------------------------------
-		// BOUNDED BY THE PLAN'S OWN START DATE. Same walk, same bound and
-		// same reasoning as getExpectedWaste - see the long note there.
-		//
-		// It matters more here because THIS IS A WRITE PATH: the
-		// statement-execution limit is not catchable, so an unbounded scan
-		// that outgrew it would take the supervisor's waste declaration down
-		// with it, with a bare HTTP 500 and no error card.
-		//
-		// A handover cannot carry a line for an item of this plan before the
-		// plan existed, so nothing the Plan_Item test below would have kept
-		// is filtered out. An empty Plan_Start_Date falls back to the old
-		// unbounded query rather than to a date.
-		//--------------------------------------------------------------
-		wIssues = Material_Issue[Issued_To == wSupId];
-
-		if(wPlanStart != null)
-		{
-			wIssues = Material_Issue[Issued_To == wSupId && Issue_Date >= wPlanStart];
-		}
-
-		for each  wIss in wIssues
-		{
-			for each  wLn in wIss.Issue_Lines
+			if(lnMatW != "" && lnLotW != "")
 			{
-				if(ifnull(wLn.Plan_Item,"").toString().trim() == itemIdStr)
+				prevLotW = ifnull(lotForMat.get(lnMatW),"").toString();
+				if(prevLotW == "")
 				{
-					lnMatW = ifnull(wLn.Material,"").toString().trim();
-					lnLotW = ifnull(wLn.Lot,"").toString().trim();
-
-					if(lnMatW != "" && lnLotW != "")
-					{
-						prevLotW = ifnull(lotForMat.get(lnMatW),"").toString();
-						if(prevLotW == "")
-						{
-							lotForMat.put(lnMatW,lnLotW);
-						}
-						else if(prevLotW != lnLotW && ambigMat.contains(lnMatW) == false)
-						{
-							ambigMat.add(lnMatW);
-							info "two lots issued for item " + itemIdStr + " material " + lnMatW + " - offcut provenance left blank";
-						}
-					}
+					lotForMat.put(lnMatW,lnLotW);
+				}
+				else if(prevLotW != lnLotW && ambigMat.contains(lnMatW) == false)
+				{
+					ambigMat.add(lnMatW);
+					info "two lots issued for item " + itemIdStr + " material " + lnMatW + " - offcut provenance left blank";
 				}
 			}
 		}

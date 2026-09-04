@@ -56,7 +56,17 @@ string debugIssueVouchers()
 				{
 					qS = "0";
 				}
-				sS = ifnull(ln.Settled_Qty,"0").toString().trim();
+				// DUAL READ - a NEW material x lot line settles into Received_Qty
+				// (Line_Status set); a LEGACY per-requirement line used Settled_Qty.
+				lnStatusTxt = ifnull(ln.Line_Status,"").toString().trim();
+				if(lnStatusTxt != "")
+				{
+					sS = ifnull(ln.Received_Qty,"0").toString().trim();
+				}
+				else
+				{
+					sS = ifnull(ln.Settled_Qty,"0").toString().trim();
+				}
 				if(sS == "")
 				{
 					sS = "0";

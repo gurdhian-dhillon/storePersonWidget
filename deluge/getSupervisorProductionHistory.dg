@@ -380,12 +380,15 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 	// handover on a one-day view shares an Issue_Date, so only the insert stamp
 	// can order them.
 	//
-	// ONE PRESS = ONE ROW. A big issue is chunked by the widget into several
-	// Material_Issue records (each its own SIV), all sharing Batch_Voucher, and
-	// chunk 1 carries Batch_Head == true. This walks HEAD rows only and merges
-	// each head's siblings' Issue_Lines - the supervisor pressed nothing, the
-	// store did, and he saw one handover arrive.
-	issues = Material_Issue[Issued_To == supId && Issue_Date == dDay && Batch_Head == true] sort by Added_Time desc;
+	// ONE PRESS = ONE ROW, both eras.
+	//   NEW  - Source_System == "JS_API": issueMaterialsHandover writes one
+	//          Material_Issue per press, Issue_Lines at material x lot grain
+	//          (NO Plan_Item on the line - the per-item split is gone; those
+	//          lines fold into the widget's "unassigned" bucket, same as a
+	//          legacy line that never resolved an item).
+	//   OLD  - Batch_Head == true: first chunk, siblings merged by Batch_Voucher.
+	// Two positive == matches OR'd - an empty field just fails to match.
+	issues = Material_Issue[Issued_To == supId && Issue_Date == dDay && (Batch_Head == true || Source_System == "JS_API")] sort by Added_Time desc;
 	info "handover batches on day: " + issues.count();
 
 	// The material catalogue, fetched ONCE, rather than a Raw_Material query per
@@ -418,28 +421,38 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 	// holds only the first plan the fan-out touched, which is why the header
 	// carries no order. A LINE has exactly one Plan_Item, so it can name it.
 	//
-	// Two id-keyed maps (name, status) filled together in one indexed query per
+	// Id-keyed maps (name, sku, status) filled together in one indexed query per
 	// DISTINCT item on the page, read for free after that - a handover of a
-	// common trim names the same few items on many lines. TWO maps rather than
-	// one "name|status" string because Item_Name is flattened with " | " and a
-	// delimiter split would break on a name that contains a pipe. A seen item
-	// with an empty status is remembered in itemSeenMap so it is not re-queried.
-	// Same shape as planOwner / empCache / matNameMap above.
+	// common trim names the same few items on many lines. SEPARATE maps rather
+	// than one "name|sku|status" string because Item_Name is flattened with
+	// " | " and a delimiter split would break on a name that contains a pipe. A
+	// seen item with an empty status is remembered in itemSeenMap so it is not
+	// re-queried. Same shape as planOwner / empCache / matNameMap above.
+	//
+	// Item_Sku is itself a LOOKUP to Item_Master, so resolving the SKU text is a
+	// SECOND hop per distinct item - still bounded by items-on-the-day and paid
+	// once each because of the cache.
 	itemNameMap = Map();
+	itemSkuMap = Map();
 	itemStatMap = Map();
 	itemSeenMap = Map();
 
 	for each  mi in issues
 	{
-		// This press's chunks - head plus siblings, oldest first. The head's
-		// Batch_Voucher is its own SIV even for a one-chunk press, so this query
-		// returns the head too.
-		batchKey = ifnull(mi.Batch_Voucher,"").toString().trim();
-		if(batchKey == "")
+		// NEW: one row = one press. OLD: head + Batch_Voucher siblings.
+		if(ifnull(mi.Source_System,"").toString().trim() == "JS_API")
 		{
-			batchKey = ifnull(mi.Voucher_No,"").toString().trim();
+			batchChunks = Material_Issue[ID == mi.ID];
 		}
-		batchChunks = Material_Issue[Batch_Voucher == batchKey] sort by Added_Time;
+		else
+		{
+			batchKey = ifnull(mi.Batch_Voucher,"").toString().trim();
+			if(batchKey == "")
+			{
+				batchKey = ifnull(mi.Voucher_No,"").toString().trim();
+			}
+			batchChunks = Material_Issue[Batch_Voucher == batchKey] sort by Added_Time;
+		}
 
 		rLines = "";
 		rSiv = "";
@@ -505,6 +518,7 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 					rItemKey = rln.Plan_Item.toString().trim();
 				}
 				rItemName = "";
+				rItemSku = "";
 				rItemStat = "";
 				if(rItemKey != "" && rItemKey.isNumber() == true)
 				{
@@ -514,15 +528,28 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 						// re-queried on every line that names it.
 						itemSeenMap.put(rItemKey,"1");
 						itemNameMap.put(rItemKey,"");
+						itemSkuMap.put(rItemKey,"");
 						itemStatMap.put(rItemKey,"");
 						for each  piC in Plan_Item[ID == rItemKey.toLong()]
 						{
 							piName = ifnull(piC.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
 							itemNameMap.put(rItemKey,piName);
 							itemStatMap.put(rItemKey,ifnull(piC.Item_Status,"").toString().trim());
+
+							// Item_Sku is a LOOKUP - the master record carries the
+							// SKU text. Empty when the line has no item mapped.
+							piSkuKey = ifnull(piC.Item_Sku,"").toString().trim();
+							if(piSkuKey != "" && piSkuKey.isNumber() == true)
+							{
+								for each  imR in Item_Master[ID == piSkuKey.toLong()]
+								{
+									itemSkuMap.put(rItemKey,ifnull(imR.SKU,"").toString().trim().replaceAll("\"","'"));
+								}
+							}
 						}
 					}
 					rItemName = ifnull(itemNameMap.get(rItemKey),"").toString();
+					rItemSku = ifnull(itemSkuMap.get(rItemKey),"").toString();
 					rItemStat = ifnull(itemStatMap.get(rItemKey),"").toString();
 				}
 
@@ -530,7 +557,7 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 				{
 					rLines = rLines + ",";
 				}
-				rLines = rLines + "{\"material\":\"" + rName + "\",\"qty\":" + rqStr.toDecimal() + ",\"unit\":\"" + ifnull(rln.Unit,"").toString() + "\",\"itemId\":\"" + rItemKey + "\",\"itemName\":\"" + rItemName + "\",\"itemStatus\":\"" + rItemStat + "\"}";
+				rLines = rLines + "{\"material\":\"" + rName + "\",\"qty\":" + rqStr.toDecimal() + ",\"unit\":\"" + ifnull(rln.Unit,"").toString() + "\",\"itemId\":\"" + rItemKey + "\",\"itemName\":\"" + rItemName + "\",\"itemSku\":\"" + rItemSku + "\",\"itemStatus\":\"" + rItemStat + "\"}";
 				totalRecvLines = totalRecvLines + 1;
 			}
 		}

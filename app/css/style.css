@@ -2397,13 +2397,35 @@ th.col-num {
     color: var(--text-muted);
 }
 
-/* Which item a handover line's cloth was cut for. Honest per line
-   (Issue_Lines.Plan_Item), unlike the card header which names no order. */
-.hist-for-item {
-    display: inline-block;
-    font-size: 0.8rem;
-    color: var(--text-main);
+/* "Issued from" column of a merged handover row — a stack of sources, laid out
+   like the Issue screen: one line per lot for fresh cloth, then a green line
+   per offcut with its size, lot and carton. */
+.hist-src-cell {
+    line-height: 1.5;
+}
+
+.hist-src-line {
     white-space: nowrap;
+}
+
+.hist-src-qty {
+    font-weight: 700;
+    color: var(--text-main);
+    font-variant-numeric: tabular-nums;
+    margin-left: 0.25rem;
+}
+
+.hist-src-waste {
+    color: #047857;
+}
+
+.hist-waste-size {
+    font-weight: 700;
+}
+
+.hist-waste-where {
+    font-size: 0.75rem;
+    color: var(--text-muted);
 }
 
 /* Which physical pieces to fetch, under the lot line that names them. Only ever

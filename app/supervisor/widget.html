@@ -107,6 +107,11 @@
     <!-- Shell first: it owns the tabs, the shared picker and Refresh. The two
          tab scripts then attach their own listeners to those shared controls. -->
     <script src="js/shell.js"></script>
+    <!-- JS-Data-API stand-in for getSupervisorMaterials — the receive list built
+         from flat getRecords. MUST load before receive.js. Console:
+         ReceiveRead.run(supId) / ReceiveRead.compare(supId). Behind
+         USE_JS_RECEIVE_READ in receive.js; getSupervisorMaterials is the fallback. -->
+    <script src="js/receive-read.js"></script>
     <script src="js/receive.js"></script>
     <script src="js/production.js"></script>
     <script src="js/tabs.js"></script>

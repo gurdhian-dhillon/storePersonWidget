@@ -2226,9 +2226,22 @@ function buildShortfallSummary(data) {
         // between "same card" and "another supervisor" is still visible.
         var cardWash = {};
         sup.materials.forEach(function (m) {
-            if (isFullyIssued(m)) return;
-            var need = Number(m.remaining) || 0;
-            if (need <= 0) return;
+            // NON-FABRIC keeps the old gate: its shortfall is `needed - owned`
+            // in metres and a fully-issued row genuinely has nothing to add.
+            //
+            // FABRIC does NOT skip here. Its shortfall is derived below from the
+            // allocator's per-order outcomes (demand vs what could be placed on a
+            // lot), which are computed once at load over the WHOLE requirement
+            // set and do not move as material is issued this session. Skipping a
+            // fabric row the moment `m.remaining` hits 0 is exactly what made the
+            // PO figure shrink every time something was handed over — the cloth
+            // that could never complete an order stopped being counted as short.
+            var isFab = !!m.isFabric;
+            if (!isFab) {
+                if (isFullyIssued(m)) return;
+                var need = Number(m.remaining) || 0;
+                if (need <= 0) return;
+            }
 
             var key = String(m.materialId);
             if (!byMat[key]) {
@@ -2274,10 +2287,28 @@ function buildShortfallSummary(data) {
                     // server. No overlap across supervisors — a requirement
                     // belongs to exactly one — so concatenating is safe.
                     lines: [],
-                    openExceptions: (m.openExceptions || []).slice()
+                    openExceptions: (m.openExceptions || []).slice(),
+                    // FABRIC-ONLY, for the buy calc. The allocator writes the
+                    // same `orderOutcomes` onto every row of a material — one
+                    // entry per order it tried to place, carrying why:'skipped'
+                    // + needMetres for the ones no single lot could take. Taken
+                    // once (first row that mentions the material); it is the same
+                    // array on all of them.
+                    orderOutcomes: (m.orderOutcomes || []).slice(),
+                    // What the allocator actually committed to lots, in metres.
+                    // Σ over lotLines. The gap between demand and this is the
+                    // shortfall — stranded greige and skipped orders both.
+                    placeableMetres: round2((m.lotLines || []).reduce(function (t, ln) {
+                        return t + (Number(ln.qty) || 0);
+                    }, 0)),
+                    fabricWidthCm: Number(m.fabricWidthCm) || 0
                 };
             }
-            byMat[key].needed = round2(byMat[key].needed + need);
+            // `need` only exists for non-fabric (fabric skips the early gate).
+            // Fabric's needed total is summed from its lines further down.
+            if (!isFab) {
+                byMat[key].needed = round2(byMat[key].needed + (Number(need) || 0));
+            }
 
             // The supervisor's NAME stamped onto each line, here, because this
             // is the only place it is known — the server sends lines nested
@@ -2369,29 +2400,89 @@ function buildShortfallSummary(data) {
                 });
         }
 
-        // ---- BUY: cloth that does not exist in ANY state ----
-        //
-        // Washed, greige and at-the-wash-house all count as owned. Leaving the
-        // last one out is what had the screen asking him to purchase cloth that
-        // was sitting at the washer — raised the day after he sent it, because
-        // sending moves the metres off the greige pile.
-        //
-        // Deliberately NOT "the wash could not cover it". A shade that cannot be
-        // made up by washing is a purchase question only if the fabric is short
-        // overall; otherwise it is the tone override's business, and that lives
-        // on the row where the decision is.
+        // ---- BUY ----
         //
         // poCovered — cloth already on a raised draft PO — counts as owned. Once
         // a PO is raised for the gap, the material leaves this list and its
         // Raise PO button disappears; if demand later outgrows the PO before the
-        // goods land, the residual gap re-appears here on its own.
+        // goods land, the residual gap re-appears here on its own. A PO raised in
+        // THIS session (openExceptions got a local Shortage entry that covers
+        // every plan) also drops the row immediately, before poCovered comes
+        // back on the next load.
+        var poRaisedThisSession = requestState(e, 'buy', '') === 'open';
+
+        if (e.isFabric) {
+            // FABRIC: short = what the allocator could not place on a single lot.
+            //
+            // Under the one-lot rule an order is issued off ONE lot, so cloth
+            // spread thin across lots — 4 m greige here, 3 m washed there — is
+            // real metres that cannot complete any order. It must NOT count as
+            // owned, or the screen says "enough cloth" over an order that can
+            // never issue. The allocator already worked this out at load, over
+            // the whole requirement set: `placeableMetres` is what it committed
+            // to lots, and every order it could not seat is why:'skipped' in
+            // `orderOutcomes` with the metres it needed.
+            //
+            // demandMetres is rebuilt as WHOLE MARKER ROW-SETS from outstanding
+            // pieces — the same rounding issueMaterials does — so a PO for the
+            // gap yields complete cut-piece sets, not a fraction of a row short.
+            //
+            // This figure is issue-invariant: handing an order over drops its
+            // pieces from demand AND the washed metres it took from placeable by
+            // the same amount, so the shortfall does not move. That is the whole
+            // point — issuing for one supervisor must not make another's
+            // shortage grow or shrink.
+            var fw = Number(e.fabricWidthCm) || 0;
+            var byCut = {};
+            (e.lines || []).forEach(function (l) {
+                var cw = Number(l.cutW) || 0, cl = Number(l.cutL) || 0;
+                if (cw <= 0 || cl <= 0) return;
+                var ck = cw + 'x' + cl;
+                var c = byCut[ck] || (byCut[ck] = { cutW: cw, cutL: cl, out: 0 });
+                var outstanding = (Number(l.reqPieces) || 0) - (Number(l.issPieces) || 0);
+                if (outstanding > 0) c.out += outstanding;
+            });
+            var demandMetres = 0;
+            Object.keys(byCut).forEach(function (ck) {
+                var c = byCut[ck];
+                var perRow = (fw > 0 && c.cutW > 0 && fw >= c.cutW)
+                    ? Math.floor(fw / c.cutW) : 0;
+                if (perRow > 0 && c.out > 0) {
+                    demandMetres += Math.ceil(c.out / perRow) * c.cutL / 100;
+                } else if (c.out > 0) {
+                    // No usable geometry — fall back to the metres balance for
+                    // this cut, mirroring the allocator's own fallback.
+                    demandMetres += c.out; // 1 m per piece is the crudest guard
+                }
+            });
+            demandMetres = round2(demandMetres);
+
+            // e.needed drives the dialog's "Still needed" line and the raise
+            // payload. For fabric it is the outstanding demand in metres.
+            e.needed = demandMetres;
+
+            var buyQty = round2(demandMetres -
+                (Number(e.placeableMetres) || 0) -
+                (Number(e.poCovered) || 0));
+
+            if (buyQty > 0.0001 && !poRaisedThisSession) {
+                toBuy.push({ e: e, qty: buyQty, kind: 'buy' });
+            }
+            return;
+        }
+
+        // ---- NON-FABRIC BUY: cloth that does not exist in ANY state ----
+        //
+        // Washed, greige and at-the-wash-house all count as owned. (Fabric took
+        // the branch above; a trim has no lots and no marker rows, so the raw
+        // metres balance is the whole answer.)
         var owned = round2((Number(e.stock) || 0) +
             (Number(e.unwashed) || 0) +
             (Number(e.inWash) || 0) +
             (Number(e.poCovered) || 0));
-        var buyQty = round2(e.needed - owned);
-        if (buyQty > 0) {
-            toBuy.push({ e: e, qty: buyQty, kind: 'buy' });
+        var trimBuyQty = round2(e.needed - owned);
+        if (trimBuyQty > 0 && !poRaisedThisSession) {
+            toBuy.push({ e: e, qty: trimBuyQty, kind: 'buy' });
         }
     });
 
@@ -2898,8 +2989,15 @@ function render(data) {
     emptyState.classList.add('hidden');
     // Summary last: it is a to-do list for after the issuing is done, not
     // something to read before starting.
+    //
+    // Fed the FULL list (every supervisor, including the fully-issued ones), not
+    // `actionable`. The shortfall is a property of total demand vs stock, and a
+    // supervisor whose issuing is done is still demand that was met from the
+    // same shelf — dropping his card from the input made the fabric shortfall
+    // shrink every time a card cleared. buildShortfallSummary keeps the
+    // non-fabric fully-issued skip internally; fabric it needs to see.
     content.innerHTML = actionable.map(renderSupervisorCard).join('') +
-        renderShortfallSummary(actionable);
+        renderShortfallSummary(data);
 
     // Pending means STILL TO ISSUE. This was counting every line including the
     // ones already handed over, so a card reading "0 pending · 11 issued" was
@@ -3157,6 +3255,111 @@ function buildFabricIssueLine(m, picks) {
     };
 }
 
+// BUILD THE HANDOVER SUMMARY from the SAME issues[] the apply chunks are built
+// from — so the two can never drift. One Material_Issue is written per press
+// (issueMaterialsHandover), its Issue_Lines at MATERIAL × LOT grain, except
+// PRINTED_PIECE lines which stay per physical piece so the supervisor confirms
+// each one.
+//
+// THE INVARIANT this guarantees, per material:
+//   Σ handover line Qty            === Σ allocations.giveQty
+//   Σ handover line piecesFromRaw  === Σ allocations.giveRaw
+//   Σ handover line piecesFromWaste=== Σ allocations.giveWaste
+// It holds because both sides are summed from the SAME allocations array here,
+// adding the already-rounded giveQty values with no re-rounding.
+//
+// Returns { planCount, lines: [ { materialId, lot, qty, piecesFromRaw,
+//   piecesFromWaste, unit, cutW, cutL, printed } ] }.
+//   lot ""  — a trim, or an offcut-only material (giveWaste>0, no lot). Still
+//             gets a row so the receipt screen can confirm the pieces.
+//   printed true — do not merge with anything; keyed per physical piece.
+function buildHandoverSummary(issues) {
+    var byKey = {};
+    var order = [];
+    var planSet = {};
+
+    (issues || []).forEach(function (line) {
+        var matId = String(line.materialId || '');
+        var unit = line.unit || '';
+        // Match a printed-piece issueLine to its allocation by mrqId so its
+        // per-piece Qty (metres equivalent) is used, not the allocation's total.
+        var printedLines = (line.issueLines || []).filter(function (il) {
+            return (il.note || '').indexOf('PRINTED_PIECE') !== -1;
+        });
+        var printedByMrq = {};
+        printedLines.forEach(function (il) {
+            var q = String(il.mrqId || '');
+            (printedByMrq[q] = printedByMrq[q] || []).push(il);
+        });
+
+        (line.allocations || []).forEach(function (a) {
+            var mrq = String(a.mrqId || '');
+            var lot = String(a.issuedLot || '');
+            var giveQty = Number(a.giveQty) || 0;
+            var giveRaw = Number(a.giveRaw) || 0;
+            var giveWaste = Number(a.giveWaste) || 0;
+            if (a.planId) planSet[String(a.planId)] = 1;
+
+            var pls = printedByMrq[mrq];
+            if (pls && pls.length) {
+                // One handover row per physical printed piece. giveRaw is spread
+                // across them the same way the pieces are; qty comes from each
+                // issueLine's own metres-equivalent so it stays per-piece.
+                var rawLeft = giveRaw;
+                pls.forEach(function (il, i) {
+                    var key = matId + '|' + lot + '|P' + mrq + '|' + i;
+                    var rawHere = (i === pls.length - 1)
+                        ? rawLeft
+                        : Math.round(rawLeft / (pls.length - i));
+                    rawLeft -= rawHere;
+                    byKey[key] = {
+                        materialId: matId, lot: lot,
+                        qty: round2(Number(il.qty) || 0),
+                        piecesFromRaw: rawHere,
+                        piecesFromWaste: 0,
+                        unit: unit,
+                        cutW: Number(il.cutW) || 0,
+                        cutL: Number(il.cutL) || 0,
+                        printed: true
+                    };
+                    order.push(key);
+                });
+                return;
+            }
+
+            // Regular: aggregate by material × lot.
+            var k = matId + '|' + lot;
+            var cur = byKey[k];
+            if (!cur) {
+                cur = {
+                    materialId: matId, lot: lot,
+                    qty: 0, piecesFromRaw: 0, piecesFromWaste: 0,
+                    unit: unit, cutW: Number(a.cutW) || 0, cutL: Number(a.cutL) || 0,
+                    printed: false
+                };
+                byKey[k] = cur;
+                order.push(k);
+            }
+            // Sum the already-rounded giveQty values — no re-rounding, so the
+            // total equals Σ allocations.giveQty exactly.
+            cur.qty += giveQty;
+            cur.piecesFromRaw += giveRaw;
+            cur.piecesFromWaste += giveWaste;
+        });
+    });
+
+    var lines = order.map(function (k) {
+        var r = byKey[k];
+        r.qty = round2(r.qty);
+        return r;
+    }).filter(function (r) {
+        // Drop a genuinely empty bucket (no qty, no pieces).
+        return r.qty > 0 || r.piecesFromRaw > 0 || r.piecesFromWaste > 0;
+    });
+
+    return { planCount: Object.keys(planSet).length, lines: lines };
+}
+
 // SPLIT THE ISSUE LINES INTO PAYLOADS OF AT MOST maxAllocs ALLOCATIONS.
 //
 // A payload with hundreds of allocations is too large for one invokeCustomApi —
@@ -3371,14 +3574,27 @@ function issueForSupervisor(supIdx) {
     var MAX_ALLOCS = 100;
     var issueChunks = splitIssuesByAllocation(issues, MAX_ALLOCS);
 
+    // SPLIT ISSUE PATH. When on: each chunk calls issueMaterialsApply (fan-out
+    // only — Material_Requirement + stock, NO handover record), the wasteMvIds
+    // it returns are collected, and after the last chunk ONE
+    // issueMaterialsHandover call writes a single Material_Issue with its
+    // Issue_Lines at material × lot grain. No Batch_Voucher, no per-chunk
+    // Material_Issue. The old issueMaterials path stays as the fallback.
+    var USE_SPLIT_ISSUE = true;
+    var ISSUE_API = USE_SPLIT_ISSUE ? 'issueMaterialsApply' : 'issueMaterials';
+    // The handover summary is NOT built here - sendHandover builds it from the
+    // chunks that actually landed (see appliedIssues), so a press that dies
+    // part-way records exactly what left the shelf and no more.
+    // One id for this whole press — echoed on every apply chunk. Not stored
+    // server-side; only carried so a log line can tie the chunks together.
+    var applyKey = 'P' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    var collectedWasteMvIds = [];
+
     var allErrors = [];
     var chunkIndex = 0;
 
-    // The batch key for this whole press. Chunk 0 sends voucherIn:"" and
-    // issueMaterials replies with batchVoucher = its own SIV; every later chunk
-    // sends that back so all of this press's Material_Issue rows share one
-    // Batch_Voucher and History renders them as a single handover card. Empty
-    // until chunk 0 lands — chunks are sequential, so it is always set by then.
+    // Legacy-path only: the batch key threaded through the old issueMaterials'
+    // 3rd arg. Unused on the split path.
     var batchVoucher = '';
 
     // RATE-LIMIT RECOVERY. Zoho caps API calls per minute. A big handover is
@@ -3414,8 +3630,75 @@ function issueForSupervisor(supIdx) {
         );
     }
 
+    // THE HANDOVER RECORD FOR WHAT ACTUALLY LANDED.
+    //
+    // Built from the chunks that were APPLIED, never from the whole press. Two
+    // reasons, and the second one strands stock if it is got wrong:
+    //
+    //  - A press that dies at chunk 3 of 5 has moved chunks 0-2's stock and
+    //    written their Material_Requirement counters. Recording all five would
+    //    claim cloth that never left the shelf.
+    //  - Recording NOTHING is worse. The supervisor's receive screen reads
+    //    Issue_Lines, so material with no handover row can never be received,
+    //    and postTransferOrders never moves it - it sits in In_Transit_Qty for
+    //    ever with nothing anywhere saying so. So abortRun calls this too.
+    //
+    // The old per-chunk Material_Issue got this for free (a dead press just
+    // left fewer vouchers); one-record-per-press has to do it deliberately.
+    function appliedIssues() {
+        var out = [];
+        for (var i = 0; i < chunkIndex && i < issueChunks.length; i++) {
+            (issueChunks[i] || []).forEach(function (line) { out.push(line); });
+        }
+        return out;
+    }
+
+    var handoverSent = false;
+
+    function sendHandover(done) {
+        if (!USE_SPLIT_ISSUE || handoverSent) { done(); return; }
+        var applied = appliedIssues();
+        if (applied.length === 0) { done(); return; }   // nothing landed, nothing to record
+        handoverSent = true;
+
+        var summary = buildHandoverSummary(applied);
+        if (!summary.lines.length) { done(); return; }
+
+        showProgressModal('Issuing to ' + sup.supervisorName, 'Recording the handover…');
+        var payload = {
+            planCount: summary.planCount,
+            wasteMvIds: collectedWasteMvIds,
+            lines: summary.lines
+        };
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'issueMaterialsHandover',
+            http_method: 'POST',
+            payload: {
+                supervisorId: sup.supervisorId,
+                handoverJson: JSON.stringify(payload)
+            }
+        }).then(function (response) {
+            console.log('handover response:', response);
+            var parsed;
+            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+            if (parsed && parsed.errors && parsed.errors.length > 0) {
+                allErrors = allErrors.concat(parsed.errors.map(function (e) {
+                    return 'Handover record: ' + e;
+                }));
+            }
+            done();
+        }).catch(function (err) {
+            console.error('issueMaterialsHandover failed:', err);
+            allErrors.push('The material WAS issued and stock moved, but the handover record '
+                + 'was not written — so it will not appear on ' + sup.supervisorName
+                + "'s Receive screen. Tell an admin before issuing again.");
+            done();
+        });
+    }
+
     function processNextChunk() {
         if (chunkIndex >= issueChunks.length) {
+            sendHandover(function () {
             showProgressModal('Issued to ' + sup.supervisorName, 'Done', 100);
             setTimeout(closeProgressModal, 350);
 
@@ -3445,6 +3728,7 @@ function issueForSupervisor(supIdx) {
             footer.innerHTML = '<span class="issued-locked-pill">&#10003; Issued</span>';
 
             loadRequirements();
+            }); // end sendHandover callback
             return;
         }
 
@@ -3461,17 +3745,21 @@ function issueForSupervisor(supIdx) {
                 'Sending the handover…');
         }
 
+        var chunkPayload = {
+            supervisorId: sup.supervisorId,
+            issuesJson: JSON.stringify(issueChunks[chunkIndex])
+        };
+        if (USE_SPLIT_ISSUE) {
+            chunkPayload.applyKey = applyKey;
+        } else {
+            // Legacy issueMaterials 3rd arg — the batch key thread.
+            chunkPayload.voucherIn = batchVoucher;
+        }
+
         ZOHO.CREATOR.DATA.invokeCustomApi({
-            api_name: 'issueMaterials',
+            api_name: ISSUE_API,
             http_method: 'POST',
-            payload: {
-                supervisorId: sup.supervisorId,
-                issuesJson: JSON.stringify(issueChunks[chunkIndex]),
-                // The batch key. Empty on chunk 0 (issueMaterials mints it and
-                // returns it as batchVoucher); every later chunk sends it back
-                // so the whole press shares one Batch_Voucher.
-                voucherIn: batchVoucher
-            }
+            payload: chunkPayload
         }).then(function (response) {
             console.log('issue response chunk ' + chunkIndex + ':', response);
             var parsed;
@@ -3491,10 +3779,15 @@ function issueForSupervisor(supIdx) {
                 allErrors = allErrors.concat(parsed.errors);
             }
 
-            // Capture the batch key off chunk 0's landed reply, then carry it
-            // forward on every later chunk. Fallback to parsed.voucher so an
-            // older server that predates batchVoucher still threads something.
-            if (parsed && !batchVoucher) {
+            if (USE_SPLIT_ISSUE) {
+                // Collect this chunk's Waste_Movement ids — the handover call
+                // stamps the SIV on all of them once the voucher exists.
+                if (parsed && parsed.wasteMvIds && parsed.wasteMvIds.length) {
+                    collectedWasteMvIds = collectedWasteMvIds.concat(
+                        parsed.wasteMvIds.map(String));
+                }
+            } else if (parsed && !batchVoucher) {
+                // Legacy: capture the batch key off chunk 0's landed reply.
                 batchVoucher = parsed.batchVoucher || parsed.voucher || '';
             }
 
@@ -3535,17 +3828,28 @@ function issueForSupervisor(supIdx) {
         setTimeout(processNextChunk, waitMs);
     }
 
+    // RECORD WHAT LANDED BEFORE REPORTING THE FAILURE. The batches that went
+    // through already moved stock and wrote their requirement counters; without
+    // a Material_Issue for them the supervisor can never receive that material
+    // and it is stranded in In_Transit_Qty. sendHandover writes the record for
+    // the applied chunks only, then the abort is reported as before.
     function abortRun(err) {
-        closeProgressModal();
         console.error('issueMaterials error on chunk ' + chunkIndex + ':', err);
-        var batchNum = chunkIndex + 1;
-        alert('Issue stopped at batch ' + batchNum + ' of ' + issueChunks.length + '.\n\n' +
-            'Batches before this one went through. Press Issue again to send the rest — ' +
-            'it will pick up where it stopped.');
-        delete btn.dataset.busy;
-        btn.disabled = false;
-        btn.textContent = 'Issue to ' + sup.supervisorName;
-        loadRequirements();
+        sendHandover(function () {
+            closeProgressModal();
+            var batchNum = chunkIndex + 1;
+            var msg = 'Issue stopped at batch ' + batchNum + ' of ' + issueChunks.length + '.\n\n' +
+                'Batches before this one went through and have been recorded as a handover. ' +
+                'Press Issue again to send the rest — it will pick up where it stopped.';
+            if (allErrors.length > 0) {
+                msg += '\n\n' + allErrors.join('\n');
+            }
+            alert(msg);
+            delete btn.dataset.busy;
+            btn.disabled = false;
+            btn.textContent = 'Issue to ' + sup.supervisorName;
+            loadRequirements();
+        });
     }
 
     processNextChunk();
@@ -3761,7 +4065,6 @@ function loadRequirements() {
     var refreshBtn = document.getElementById('refresh-btn');
     emptyState.classList.add('hidden');
     refreshBtn.disabled = true;
-    // Kick off indeterminate until getOpenPlanCount tells us the page count.
     LoadProgress.start(content, 'Counting open orders…', 0);
 
     function done(merged) {
@@ -3782,6 +4085,27 @@ function loadRequirements() {
         content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Failed to load requirements</h2><p>Check the browser console for details.</p></div>';
     }
 
+    // ============================ EXPERIMENT ==============================
+    // The custom-API path (getOpenPlanCount + parallel getStoreMaterialRequirements
+    // pages) is COMMENTED OUT below. Requirements are fetched with the Creator JS
+    // Data API instead, via ApiExperiment.run(). This is a temporary swap for
+    // measuring the JS-API approach — restore the block below to go back.
+    //
+    // KNOWN GAP: ApiExperiment does NOT run the fabric allocator, so fabric rows
+    // arrive without wastePicks / freshMeters / the outstanding-pieces split.
+    // The screen will render aggregate required/issued but fabric issue rows
+    // will be incomplete until the allocator is ported too.
+    LoadProgress.start(content, 'Loading requirements (JS Data API)…', 0);
+    if (typeof ApiExperiment === 'undefined' || !ApiExperiment.run) {
+        return fail(new Error('ApiExperiment not loaded — check js/api-experiment.js'));
+    }
+    ApiExperiment.run().then(function (out) {
+        done(out.plans || []);
+    }).catch(fail);
+    return;
+    // ====================================================================
+
+    /* CUSTOM-API PATH — restore to revert the experiment.
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getOpenPlanCount',
         http_method: 'POST',
@@ -3791,8 +4115,6 @@ function loadRequirements() {
         try { count = (JSON.parse(response.result) || {}).count || 0; } catch (e) { count = 0; }
 
         if (!count || count < 0) {
-            // Nothing open, or the count call gave us nothing usable — the
-            // sequential walk handles both (it returns [] fast when empty).
             LoadProgress.setTitle('Loading material requirements…');
             return loadRequirementsSequential(content, done, fail);
         }
@@ -3802,9 +4124,8 @@ function loadRequirements() {
         var pending = pages;
         var failed = false;
 
-        // Total units of work = the count call (already done) + one per page.
         LoadProgress.start(content, 'Loading ' + count + ' order' + (count === 1 ? '' : 's') + '…', pages + 1);
-        LoadProgress.tick(); // the getOpenPlanCount call that just returned
+        LoadProgress.tick();
         LoadProgress.setSub(pages === 1
             ? 'One page to fetch.'
             : pages + ' pages to fetch, in parallel.');
@@ -3828,8 +4149,6 @@ function loadRequirements() {
                 }).catch(function (err) {
                     if (failed) return;
                     failed = true;
-                    // One window failed — fall back to the sequential walk from
-                    // scratch rather than render a half-loaded screen.
                     console.warn('parallel page at skip ' + skip + ' failed, falling back to sequential', err);
                     LoadProgress.start(content, 'Loading material requirements…', 0);
                     loadRequirementsSequential(content, done, fail);
@@ -3841,6 +4160,7 @@ function loadRequirements() {
         LoadProgress.start(content, 'Loading material requirements…', 0);
         loadRequirementsSequential(content, done, fail);
     });
+    */
 }
 
 // THE ORIGINAL CHAINED WALK, kept as the fallback path. Each call's cursor is
@@ -3968,6 +4288,25 @@ function loadWasteReceipt() {
             return;
         }
         wastePending = parsed.pieces || [];
+
+        // Sort so the same fabric's remnants sit together — the store person
+        // checks one fabric onto the rack, then the next. The server returns
+        // them oldest-first; a STABLE sort by fabric keeps that order within
+        // each fabric. Grouping key is materialId (the Raw_Material id), with
+        // the display name as a tiebreak so a piece that somehow has no id
+        // still lands beside its namesakes. wastePending is reordered in place,
+        // so every input's flat index still matches the row it is drawn on.
+        wastePending = wastePending
+            .map(function (p, i) { return { p: p, i: i }; })
+            .sort(function (a, b) {
+                var ka = String(a.p.materialId || '') + ' ' + String(a.p.material || '');
+                var kb = String(b.p.materialId || '') + ' ' + String(b.p.material || '');
+                if (ka < kb) return -1;
+                if (ka > kb) return 1;
+                return a.i - b.i;
+            })
+            .map(function (x) { return x.p; });
+
         renderWasteReceipt();
         // AFTER the first render, never before — loadWasteHistory draws into
         // #waste-hist-block, which does not exist until the panel has been built
@@ -4013,14 +4352,19 @@ function wasteRecvCarton(i) {
     return box ? String(box.value).trim() : '';
 }
 
-// Typing a carton fills the EMPTY ones below it. A rack of returns usually goes
-// into one or two boxes, so typing it once and having the rest follow is the
-// common case — and it only ever touches blanks, so nothing he has already
-// written is overwritten.
+// Typing a carton fills the EMPTY ones below it WITHIN THE SAME FABRIC. One
+// fabric's remnants go on the rack together, so typing the box once and having
+// that fabric's rows follow is the common case — but the next fabric is a
+// separate decision and a separate box, so the fill stops at the group boundary.
+// It only ever touches blanks, so nothing already written is overwritten.
 function onWasteCartonInput(i) {
     var val = wasteRecvCarton(i);
     if (val === '') return;
+    var here = wastePending[i];
+    var matKey = here ? String(here.materialId || here.material || '') : '';
     for (var j = i + 1; j < wastePending.length; j++) {
+        var q = wastePending[j];
+        if (String(q.materialId || q.material || '') !== matKey) break;
         var box = document.getElementById(wasteRecvCartonId(j));
         if (box && String(box.value).trim() === '') box.value = val;
     }
@@ -4077,6 +4421,11 @@ function wastePendingHtml() {
             '</div>';
     }
 
+    // SORTED so the same fabric's remnants sit next to each other — the store
+    // person checks one fabric onto the rack, then the next. It is only a sort:
+    // no group headers, no accordion. wastePending itself is re-ordered on load
+    // (see loadWasteReceipt) so every input's flat index still lines up with the
+    // row it is drawn against.
     var rows = wastePending.map(function (p, i) {
         var actionCell;
         if (wasteRecvEdit) {
@@ -4100,10 +4449,10 @@ function wastePendingHtml() {
             '<tr>' +
             '<td class="material-name-cell">' +
             '<div class="mat-name">&#9851; ' + escapeHtml(p.material || '—') + '</div>' +
-            '<div class="mat-sku">' + escapeHtml(p.salesOrder || '') +
-            (p.planNo ? ' · ' + escapeHtml(p.planNo) : '') +
-            ' · from ' + escapeHtml(p.supervisor || '—') +
-            ' · ' + escapeHtml(p.declaredOn || '') + '</div>' +
+            // Just who declared it and when — the order / plan number is not part
+            // of checking a remnant onto the rack.
+            '<div class="mat-sku">from ' + escapeHtml(p.supervisor || '—') +
+            (p.declaredOn ? ' · ' + escapeHtml(p.declaredOn) : '') + '</div>' +
             '</td>' +
             '<td class="col-num col-strong">' +
             '<span class="qty-big">' + p.count + '<span class="unit">pcs</span></span>' +
@@ -5218,6 +5567,105 @@ function histBar(handovers, lineCount) {
         '</div>';
 }
 
+// ONE ROW PER MATERIAL in a handover card, laid out like the Issue screen:
+// column 1 the SKU + name (never repeated), column 2 a stack of where it came
+// from — a line per lot for fresh cloth, then a green line per offcut with its
+// size, lot and carton — column 3 the total that went out.
+//
+// h.lines is one entry per Issue_Line (fresh cloth, fanned per plan-item);
+// h.waste is one entry per Waste_Movement "Issued" row (offcuts). Both are
+// grouped here by SKU. Fresh entries sharing a (sku, lot) sum together.
+function histMaterialGroups(h) {
+    var byKey = {};
+    var order = [];
+
+    function grp(sku, name, unit) {
+        var k = sku || name || '—';
+        if (!byKey[k]) {
+            byKey[k] = { key: k, sku: sku || '', name: name || '—', unit: unit || '',
+                         freshByLot: {}, freshOrder: [], waste: [], total: 0 };
+            order.push(k);
+        }
+        return byKey[k];
+    }
+
+    (h.lines || []).forEach(function (l) {
+        var g = grp(l.sku, l.material, l.unit);
+        if (!g.unit && l.unit) g.unit = l.unit;
+        var lot = l.lot || '';
+        var lk = lot || '(no lot)';
+        if (!g.freshByLot[lk]) {
+            g.freshByLot[lk] = { lot: lot, qty: 0 };
+            g.freshOrder.push(lk);
+        }
+        g.freshByLot[lk].qty += Number(l.qty) || 0;
+        g.total += Number(l.qty) || 0;
+    });
+
+    (h.waste || []).forEach(function (w) {
+        var g = grp(w.sku, w.material, w.unit);
+        var pcs = Number(w.pieces) || 0;
+        g.waste.push({
+            lot: w.lot || '', carton: w.carton || '', pieces: pcs,
+            cutWidth: Number(w.cutWidth) || 0, cutLength: Number(w.cutLength) || 0
+        });
+    });
+
+    return order.map(function (k) { return byKey[k]; });
+}
+
+function histDistinctMaterialCount(h) {
+    return histMaterialGroups(h).length;
+}
+
+function histMaterialRows(h) {
+    var groups = histMaterialGroups(h);
+    if (groups.length === 0) {
+        return '<tr><td colspan="3"><span class="is-muted">No lines on this handover.</span></td></tr>';
+    }
+    return groups.map(function (g) {
+        // Column 2 — the stack. Fresh lots first, then offcuts (green).
+        var stack = g.freshOrder.map(function (lk) {
+            var f = g.freshByLot[lk];
+            // Lot only qualifies fabric — thread and labels are issued by count
+            // off no roll, so their line is just the quantity, no "no lot" tag.
+            return '<div class="hist-src-line">' +
+                (f.lot ? '<span class="hist-lot">' + escapeHtml(f.lot) + '</span> ' : '') +
+                '<span class="hist-src-qty">' + fmt(f.qty) +
+                '<span class="unit">' + escapeHtml(g.unit || '') + '</span></span>' +
+                '</div>';
+        });
+        g.waste.forEach(function (w) {
+            var size = (w.cutWidth > 0 && w.cutLength > 0)
+                ? fmt(w.cutLength) + ' &times; ' + fmt(w.cutWidth) + '<span class="unit">cm</span>'
+                : w.pieces + '<span class="unit">pcs</span>';
+            var tail = [];
+            if (w.lot) tail.push(escapeHtml(w.lot));
+            if (w.carton) tail.push('Carton ' + escapeHtml(w.carton));
+            stack.push('<div class="hist-src-line hist-src-waste">' +
+                '&#9851; <span class="hist-waste-size">' + size + '</span>' +
+                (tail.length ? ' <span class="hist-waste-where">' + tail.join(' &middot; ') + '</span>' : '') +
+                (w.pieces ? ' <span class="hist-src-qty">' + w.pieces + '<span class="unit">pcs</span></span>' : '') +
+                '</div>');
+        });
+
+        var totalTxt = g.total > 0
+            ? fmt(g.total) + '<span class="unit">' + escapeHtml(g.unit || '') + '</span>'
+            : (g.waste.length
+                ? g.waste.reduce(function (n, w) { return n + w.pieces; }, 0) + '<span class="unit">pcs</span>'
+                : '<span class="is-muted">&mdash;</span>');
+
+        return '<tr>' +
+            '<td class="material-name-cell">' +
+            '<div class="mat-name">' + escapeHtml(g.name) + '</div>' +
+            (g.sku ? '<div class="mat-sku">' + escapeHtml(g.sku) + '</div>' : '') +
+            '</td>' +
+            '<td class="hist-src-cell">' + (stack.join('') || '<span class="is-muted">&mdash;</span>') + '</td>' +
+            '<td class="col-num col-strong">' + totalTxt + '</td>' +
+            '</tr>';
+    }).join('');
+}
+
 function renderHistory(handovers, lineCount) {
     var panel = document.getElementById('panel-history');
     var bar = histBar(handovers, lineCount);
@@ -5247,40 +5695,7 @@ function renderHistory(handovers, lineCount) {
     // The newest is expanded because "what just went out" is the question this
     // tab is nearly always asked, and it should not cost a click.
     var cards = handovers.map(function (h, idx) {
-        var lines = (h.lines || []).map(function (l) {
-            var hasCut = Number(l.cutWidth) > 0 && Number(l.cutLength) > 0;
-            return '<tr>' +
-                '<td class="material-name-cell">' +
-                '<div class="mat-name">' + escapeHtml(l.material || '—') + '</div>' +
-                (l.sku ? '<div class="mat-sku">' + escapeHtml(l.sku) + '</div>' : '') +
-                '</td>' +
-                // WHICH ITEM this line was cut for. Issue_Lines carries Plan_Item
-                // on every row, so unlike the header (which latches one plan out
-                // of the fan-out) this is honest. A dash on a handover issued
-                // before the field existed or a trim line issued without one.
-                '<td>' + (l.itemName
-                    ? '<span class="hist-for-item">' + escapeHtml(l.itemName) + '</span>'
-                    : '<span class="is-muted">&mdash;</span>') + '</td>' +
-                '<td>' + (hasCut
-                    ? '<span class="cut-size">' + fmt(l.cutLength) + ' &times; ' + fmt(l.cutWidth) + '<span class="unit">cm</span></span>'
-                    : '<span class="is-muted">&mdash;</span>') + '</td>' +
-                // WHICH SHADE WENT OUT. Stamped on Issue_Lines as the cloth
-                // crossed the counter — the requirement row holds metres and has
-                // never held a lot, so this line is the only record of it.
-                //
-                // Beside the quantity, the same place the issue screen puts it,
-                // because it qualifies the metres rather than the material.
-                //
-                // A dash on every non-fabric row and on any handover written
-                // before lots existed. Lots exist for fabric alone, so an empty
-                // cell here is the ordinary case for thread and labels, not a
-                // gap — which is why it reads as a dash and not as blank.
-                '<td>' + (l.lot
-                    ? '<span class="hist-lot">' + escapeHtml(l.lot) + '</span>'
-                    : '<span class="is-muted">&mdash;</span>') + '</td>' +
-                '<td class="col-num col-strong">' + fmt(l.qty) + '<span class="unit">' + escapeHtml(l.unit || '') + '</span></td>' +
-                '</tr>';
-        }).join('');
+        var lines = histMaterialRows(h);
 
         // Date on every card now — over a range, "18:05" alone does not say
         // which day it was.
@@ -5294,8 +5709,11 @@ function renderHistory(handovers, lineCount) {
         var when = escapeHtml(h.date || '');
         if (h.time) when += (when ? ' · ' : '') + escapeHtml(h.time);
 
-        var nLines = (h.lines || []).length;
-        when += ' · ' + nLines + ' line' + (nLines === 1 ? '' : 's');
+        // "N materials" — one row per SKU now, not per Issue_Line, so this
+        // counts distinct materials in the handover the way the merged table
+        // reads.
+        var nMats = histDistinctMaterialCount(h);
+        when += ' · ' + nMats + ' material' + (nMats === 1 ? '' : 's');
 
         // ONE PRESS OF ISSUE = ONE CARD, even when the store person's backlog
         // was big enough that the widget chunked it into several Material_Issue
@@ -5337,7 +5755,7 @@ function renderHistory(handovers, lineCount) {
             '<div class="tables-container">' +
             '<div class="table-wrapper">' +
             '<table><thead><tr>' +
-            '<th>Material</th><th>For item</th><th>Cut piece size</th><th>Lot</th><th class="col-num">Qty issued</th>' +
+            '<th>Material</th><th>Issued from</th><th class="col-num">Qty issued</th>' +
             '</tr></thead><tbody>' + lines + '</tbody></table>' +
             '</div>' +
             '</div>' +
