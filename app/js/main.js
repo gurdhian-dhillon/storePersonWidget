@@ -2306,6 +2306,143 @@ function defaultPriorityOrder(data) {
     return stats.map(function (s) { return s.supervisorId; });
 }
 
+// ---- The applied order, and the draft the arrows build ----
+//
+// TWO PIECES OF STATE, and keeping them apart is the whole design.
+//
+//   __priorityOrder  the order the numbers on screen were computed against.
+//                    Only Apply writes it. null = "use the default".
+//   __draftOrder     what the arrows are building. null = "no draft, the
+//                    applied order is what you see".
+//
+// The arrows move cards on the page immediately — he has to see the sequence he
+// is assembling — but every stock figure keeps the last applied allocation
+// until he presses Apply. Re-allocating on each arrow click would recompute the
+// whole screen three or four times while he is still deciding, and the numbers
+// would flicker through orders he never chose.
+//
+// Neither is saved to Creator. The order is a plan for the next few minutes,
+// not a fact about the rack: issueMaterials re-checks every lot server-side
+// when Issue is actually pressed.
+var __priorityOrder = null;
+var __draftOrder = null;
+
+// Sort `data` into the order the allocation should walk. Falls back to the
+// server's own order for any supervisor the saved order does not name, so a
+// card that appears after the order was set (a new plan mid-session) lands at
+// the end rather than vanishing.
+function orderByPriority(data) {
+    var arr = (data || []).slice();
+    var order = __priorityOrder || defaultPriorityOrder(arr);
+    var rank = {};
+    order.forEach(function (sid, i) { rank[String(sid)] = i; });
+    return arr.sort(function (a, b) {
+        var ra = rank[String(a.supervisorId)];
+        var rb = rank[String(b.supervisorId)];
+        if (ra === undefined && rb === undefined) return 0;
+        if (ra === undefined) return 1;   // unknown -> the end
+        if (rb === undefined) return -1;
+        return ra - rb;
+    });
+}
+
+// The sequence the cards are DRAWN in — the draft while one is being built,
+// otherwise the applied order.
+//
+// SORTED FROM THE APPLIED ORDER, NEVER FROM `data`'s CURRENT ORDER. redrawCards
+// writes the draft order back into __reqData (it has to — issue handlers index
+// into it by card position), so by the time Cancel runs, __reqData is already
+// the draft. Falling back to "leave it as it is" would make Cancel a no-op that
+// silently kept the order it was meant to throw away. orderByPriority rebuilds
+// from __priorityOrder, which Cancel never touched.
+function displayOrder(data) {
+    if (!__draftOrder) return orderByPriority(data);
+    var rank = {};
+    __draftOrder.forEach(function (sid, i) { rank[String(sid)] = i; });
+    return (data || []).slice().sort(function (a, b) {
+        var ra = rank[String(a.supervisorId)];
+        var rb = rank[String(b.supervisorId)];
+        if (ra === undefined && rb === undefined) return 0;
+        if (ra === undefined) return 1;
+        if (rb === undefined) return -1;
+        return ra - rb;
+    });
+}
+
+function movePriority(supId, delta) {
+    var cards = window.__reqData || [];
+    // Work out the move BEFORE committing to a draft. A click that cannot move
+    // anything — the top card's up-arrow, an id that is not on screen — must
+    // leave no trace: seeding first would raise the Apply bar over an order
+    // nobody changed, and "Apply" would then be offering to re-run the
+    // allocation for nothing.
+    var seq = __draftOrder ||
+        cards.map(function (s) { return String(s.supervisorId); });
+    var i = seq.indexOf(String(supId));
+    var j = i + delta;
+    if (i < 0 || j < 0 || j >= seq.length) return;
+
+    if (!__draftOrder) __draftOrder = seq.slice();
+    var tmp = __draftOrder[i];
+    __draftOrder[i] = __draftOrder[j];
+    __draftOrder[j] = tmp;
+    // Redraw only — the numbers are NOT recomputed. render() would re-allocate,
+    // which is exactly what Apply is for.
+    redrawCards();
+}
+
+function applyPriorityOrder() {
+    if (!__draftOrder) return;
+    __priorityOrder = __draftOrder.slice();
+    __draftOrder = null;
+    render(window.__rawData || window.__reqData);
+}
+
+function cancelPriorityOrder() {
+    if (!__draftOrder) return;
+    __draftOrder = null;
+    redrawCards();
+}
+
+// THE APPLY BAR — only while a draft is unapplied. Its absence is the signal
+// that what is on screen and what the numbers mean are the same thing.
+//
+// It says the numbers are stale, because that is the one thing that is not
+// obvious: the cards have visibly moved but every figure below them still
+// belongs to the previous order.
+function priorityBarHtml() {
+    if (!__draftOrder) return '';
+    return '' +
+        '<div class="prio-bar">' +
+        '<span class="prio-bar-msg">' +
+        'Order changed &mdash; the figures below are still for the previous order.' +
+        '</span>' +
+        '<span class="prio-bar-actions">' +
+        '<button type="button" class="ghost-btn" onclick="cancelPriorityOrder()">Cancel</button>' +
+        '<button type="button" class="primary-btn" onclick="applyPriorityOrder()">' +
+        'Apply order</button>' +
+        '</span>' +
+        '</div>';
+}
+
+// Repaint the card list in the draft order WITHOUT touching the allocation.
+// Everything it draws comes from figures already computed by the last render.
+function redrawCards() {
+    var content = document.getElementById('dynamic-content');
+    if (!content) return;
+    var ordered = displayOrder(window.__reqData || []);
+    // __reqData must follow the drawn order: every issue handler looks its
+    // supervisor up by CARD INDEX, so a list drawn in one order and cached in
+    // another would point each Issue button at the wrong man.
+    window.__reqData = ordered;
+    content.innerHTML = priorityBarHtml() +
+        ordered.map(renderSupervisorCard).join('') +
+        renderShortfallSummary(window.__rawData || ordered);
+    ordered.forEach(function (_, idx) { refreshCardState(idx); });
+    var firstCard = document.getElementById('sup-card-0');
+    if (firstCard) firstCard.classList.add('open');
+}
+
 // ---- End-of-page shortfall summary ----
 //
 // The per-supervisor cards deliberately show every supervisor the TRUE stock
@@ -2969,6 +3106,24 @@ function renderSupervisorCard(sup, idx, arr) {
         headerPill = '<span class="item-qty item-qty-ok">All in stock</span>';
     }
 
+    // REORDER ARROWS. They sit ON the priority tag because that is the thing
+    // they change. stopPropagation on both: the header's own onclick expands
+    // the card, and moving a supervisor must not also open his materials.
+    //
+    // Disabled at the ends rather than hidden, so the control does not move
+    // around under the cursor as cards are shuffled.
+    var supIdJs = "'" + String(sup.supervisorId).replace(/'/g, "\\'") + "'";
+    var prioArrows = supTotal > 1
+        ? '<span class="prio-move">' +
+            '<button type="button" class="prio-arrow" title="Serve earlier"' +
+              (idx === 0 ? ' disabled' : '') +
+              ' onclick="event.stopPropagation();movePriority(' + supIdJs + ',-1)">&#9650;</button>' +
+            '<button type="button" class="prio-arrow" title="Serve later"' +
+              (idx === supTotal - 1 ? ' disabled' : '') +
+              ' onclick="event.stopPropagation();movePriority(' + supIdJs + ',1)">&#9660;</button>' +
+          '</span>'
+        : '';
+
     return '' +
         '<div class="item-card" id="sup-card-' + idx + '">' +
         '<div class="item-header" onclick="toggleSupervisor(' + idx + ')">' +
@@ -2978,6 +3133,7 @@ function renderSupervisorCard(sup, idx, arr) {
         '<h2>' + escapeHtml(sup.supervisorName) + '</h2>' +
         '<div class="item-meta-line">' +
         '<span class="' + prioClass + '">' + prioText + '</span>' +
+        prioArrows +
         '<span>' + metaText + '</span>' +
         '</div>' +
         '</div>' +
@@ -3074,6 +3230,20 @@ function render(data) {
     // __reqData below is the filtered, actionable list; feeding that back through
     // here would quietly drop the filtered-out cards out of contention and hand
     // their cloth to someone else.
+    // PRIORITY ORDER DECIDES WHO IS SERVED FIRST, and it does that by deciding
+    // array order — applyLotAllocation walks `data` in order, spending shared
+    // ledgers, so position IS the reservation.
+    //
+    // The order is session state, not a server field: default computed from
+    // Priority_Key, overridden by whatever the store person last applied. It
+    // survives a Refresh (loadRequirements re-fetches stock but never touches
+    // __priorityOrder) and resets on a page reload, which is the honest
+    // lifetime for a plan nobody has written down.
+    //
+    // Sorted BEFORE __rawData is cached, so every later re-render (a lot
+    // override, a declined remnant) re-runs the allocation over the same order
+    // rather than silently falling back to the server's.
+    data = orderByPriority(data);
     window.__rawData = data;
 
     applyLotAllocation(data);
@@ -3120,7 +3290,8 @@ function render(data) {
     // same shelf — dropping his card from the input made the fabric shortfall
     // shrink every time a card cleared. buildShortfallSummary keeps the
     // non-fabric fully-issued skip internally; fabric it needs to see.
-    content.innerHTML = actionable.map(renderSupervisorCard).join('') +
+    content.innerHTML = priorityBarHtml() +
+        actionable.map(renderSupervisorCard).join('') +
         renderShortfallSummary(data);
 
     // Pending means STILL TO ISSUE. This was counting every line including the

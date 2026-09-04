@@ -7,7 +7,7 @@ and the same numbers:
 | Phase | What | Status |
 |---|---|---|
 | **A — Lot → Rolls** | A lot is a set of physical rolls, not a metres pool. The store person is told **which roll** to cut. | Allocator done (Pieces 1–4); Deluge side not started |
-| **B — Priority reservation** | Stock is **reserved down a priority order** the store person controls, instead of every card seeing the full rack. | B1–B3 done; B4 (render wiring + UI) left |
+| **B — Priority reservation** | Stock is **reserved down a priority order** the store person controls, instead of every card seeing the full rack. | **Complete** (B1–B4) |
 
 They are **not independent**. Phase B changes the scoping of the very ledgers
 Phase A rewrote (`lotLeft` / `rollLeft` / `greigeLeft` / `wasteLeft`), so B must
@@ -19,9 +19,8 @@ frozen `git show` baseline, piece-by-piece, tests between every step.
 > `spend()` roll ledger, `applyFabricOverride` multi-roll, `shortReasonFor`,
 > dead-code removal). Parity 31/31 vs frozen baseline; 65/65 across all suites.
 > Deluge side (Steps 4–9) not started.
-> **Phase B** — B1 (payload fields), B2 (default-order function), B3 (the
-> reservation itself) all done. **B4 — wiring `render()` + the reorder UI — is
-> the only piece left.**
+> **Phase B** — B1–B4 all done: payload fields, default-order function, the
+> reservation itself, and the reorder UI. **Phase B is complete.**
 >
 > **Revision 7.** Revs 2–5 were self-review + three external gap-analysis passes.
 > Rev 6 recorded the decisions made during the Phase A build. Rev 7 **merges the
@@ -806,7 +805,7 @@ touching the allocator or `render()`.
 | **B1** | **DONE.** `priorityKey` + `planStartDate` on the payload — `api-experiment.js` (`openPlan` + every line) and `getStoreMaterialRequirements.dg` (`lnMap` + `linesJson`, numeric/free-text handled per repo rules). Additive, nothing reads them yet. | both paths syntax-clean; no behaviour change |
 | **B2** | **DONE.** Default-order function in `main.js` — pure, four-rung rule, wired to nothing yet. | `priority-order.test.js` 20/20; full sweep 94/94 |
 | **B3** | **DONE.** Ledgers hoisted; `applyLotAllocation` is now seed-once + walk-in-order. Old "never one shared" comment rewritten; two tests inverted. | `priority-reservation.test.js` 12/12; full sweep 106/106 |
-| **B4** | `render()` sorts `data` by `window.__priorityOrder`; reorder UI (shape TBD) mutates it and re-renders through the existing `render(window.__rawData)` path. | reorder changes the numbers, live |
+| **B4** | **DONE.** `render()` sorts by the applied order before caching `__rawData`; up/down arrows build a draft and an **Apply** bar commits it (figures freeze until then); order survives Refresh. | `priority-reorder-ui.test.js` 16/16; full sweep 122/122 |
 
 ### How B3 is tested — NOT a frozen-baseline parity check
 
@@ -928,10 +927,66 @@ the plan called for:
 **Suite totals after B3: 106/106** — parity 31, lotfill 12, ledger 10,
 override 12, priority-order 20, **priority-reservation 12**, shortfall-summary 9.
 
+**B4 — the wiring and the reorder control.** `render()` now calls
+`orderByPriority(data)` **before** caching `__rawData`, so every later
+re-render (a lot override, a declined remnant) re-runs the allocation over the
+same order rather than falling back to the server's.
+
+**Two pieces of state, deliberately separate:**
+
+| | |
+|---|---|
+| `__priorityOrder` | what the numbers on screen were computed against. Only **Apply** writes it. `null` = use the computed default. |
+| `__draftOrder` | what the arrows are building. `null` = no draft; what you see is what the figures mean. |
+
+**Arrows move cards immediately; figures freeze until Apply.** Re-allocating on
+every arrow click would recompute the whole screen three or four times while the
+store person is still deciding, and the numbers would flicker through orders he
+never chose. `movePriority` calls `redrawCards()` — a repaint from figures the
+last render already computed — never `render()`, which is the allocating path.
+
+**The Apply bar** only exists while a draft does, so its absence is the signal
+that screen and numbers agree. It says *"the figures below are still for the
+previous order"*, because that is the one thing not otherwise visible: the cards
+have moved but every number under them belongs to the old sequence.
+
+**Persistence:** the order survives Refresh for free — `loadRequirements()`
+re-fetches stock and calls `render()`, which reads `__priorityOrder`; the fetch
+never touches it. Resets on a page reload. Nothing is written to Creator.
+
+**New suite `tools/priority-reorder-ui.test.js` — 16 cases**, run against the
+extracted functions in a stub DOM. It caught **two real bugs in the code it was
+written for**:
+
+1. **Cancel did not cancel.** `redrawCards` writes the draft order back into
+   `__reqData` — it has to, because every issue handler indexes into that array
+   by card position. So by the time Cancel ran, `__reqData` was *already* the
+   draft, and `displayOrder`'s "no draft, leave it as it is" fallback silently
+   kept the order it was meant to discard. Fixed: `displayOrder` now rebuilds
+   from `orderByPriority` (i.e. from `__priorityOrder`, which Cancel never
+   touched) instead of trusting the current array.
+2. **A dead click raised the Apply bar.** `movePriority` seeded the draft
+   *before* checking the move was possible, so the top card's up-arrow created
+   a draft identical to the current order — offering to "apply" a change nobody
+   made. Fixed: work the move out first, commit to a draft only if it lands.
+
+Also pinned: `I1`, that `__reqData` is always in the same order as the cards
+drawn — a list drawn in one order and cached in another would point every Issue
+button at the wrong supervisor.
+
+**Suite totals after B4: 122/122** — parity 31, lotfill 12, ledger 10,
+override 12, priority-order 20, priority-reservation 12, **priority-reorder-ui
+16**, shortfall-summary 9.
+
+*(`tools/store-ui.test.js` has one failure, `U3`, **pre-existing at HEAD** and
+unrelated — a waste-decline fixture, most likely another rolls-migration
+casualty like the `shortfall-summary` ones. Not touched here.)*
+
 ## Open questions — Phase B
 
-- **Reorder UI shape** — up/down arrows vs numeric rank input. Deferred; does
-  not block B2/B3.
+- ~~Reorder UI shape~~ — **RESOLVED**: up/down arrows on the priority tag, with
+  a separate Apply step so the allocation runs once per decision rather than
+  once per click.
 - **Does the shortfall summary need to distinguish "short because reserved" from
   "short because the rack is empty"?** Decided **no** for now — the number is
   the answer, and reordering is the way to interrogate it. Revisit if the store

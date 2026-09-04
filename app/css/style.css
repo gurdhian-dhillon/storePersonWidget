@@ -2056,10 +2056,11 @@ th.col-num {
     padding: 0.75rem 1.25rem;
 }
 
-/* Priority position on a supervisor card. The cards are already ordered by it —
-   the server sorts plans by Priority_Key and the card order follows — so this
-   only names what the order already means. Highest is the one that gets read
-   first and gets contested offcuts first, so it is the only one coloured. */
+/* Priority position on a supervisor card. Position IS the reservation: the
+   allocator walks the cards in order spending one shared ledger, so the top
+   card is served off the full rack and every card below sees what is left.
+   Highest is the one that gets the contested cloth, so it is the only one
+   coloured. */
 .prio-tag {
     color: var(--text-muted);
 }
@@ -2067,6 +2068,69 @@ th.col-num {
 .prio-tag.is-top {
     color: var(--primary);
     font-weight: 700;
+}
+
+/* Reorder arrows, on the priority tag because that is what they change.
+   Small and quiet — this is an occasional correction, not the main action on
+   the card, and it sits inside a header whose whole surface is a toggle. */
+.prio-move {
+    display: inline-flex;
+    gap: 2px;
+    margin: 0 0.5rem 0 0.25rem;
+    vertical-align: middle;
+}
+
+.prio-arrow {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-muted);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.6rem;
+    line-height: 1;
+    padding: 2px 4px;
+}
+
+.prio-arrow:hover:not(:disabled) {
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+/* Disabled at the ends rather than hidden, so the control keeps its size and
+   does not shift under the cursor while cards are being shuffled. */
+.prio-arrow:disabled {
+    opacity: 0.3;
+    cursor: default;
+}
+
+/* THE APPLY BAR. Only rendered while a reorder is unapplied, so its presence
+   is the whole message: the cards have moved but the figures under them have
+   not been recomputed yet. Sticky because a long card list can put the bar off
+   screen exactly when it is the thing that needs answering. */
+.prio-bar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--primary);
+    border-radius: 8px;
+    background: #eef4ff;
+}
+
+.prio-bar-msg {
+    font-size: 0.85rem;
+    color: var(--text-main);
+}
+
+.prio-bar-actions {
+    display: flex;
+    gap: 0.5rem;
 }
 
 /* ---- Stock in tab ----
