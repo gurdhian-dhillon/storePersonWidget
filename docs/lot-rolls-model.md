@@ -7,7 +7,7 @@ and the same numbers:
 | Phase | What | Status |
 |---|---|---|
 | **A — Lot → Rolls** | A lot is a set of physical rolls, not a metres pool. The store person is told **which roll** to cut. | Allocator done (Pieces 1–4); Deluge side not started |
-| **B — Priority reservation** | Stock is **reserved down a priority order** the store person controls, instead of every card seeing the full rack. | Piece 1 done (payload fields) |
+| **B — Priority reservation** | Stock is **reserved down a priority order** the store person controls, instead of every card seeing the full rack. | B1–B2 done; B3 (the behaviour change) next |
 
 They are **not independent**. Phase B changes the scoping of the very ledgers
 Phase A rewrote (`lotLeft` / `rollLeft` / `greigeLeft` / `wasteLeft`), so B must
@@ -19,8 +19,8 @@ frozen `git show` baseline, piece-by-piece, tests between every step.
 > `spend()` roll ledger, `applyFabricOverride` multi-roll, `shortReasonFor`,
 > dead-code removal). Parity 31/31 vs frozen baseline; 65/65 across all suites.
 > Deluge side (Steps 4–9) not started.
-> **Phase B** — Piece 1 done (`priorityKey` + `planStartDate` on the payload,
-> both read paths). Pieces 2–4 not started.
+> **Phase B** — B1 done (payload fields), B2 done (default-order function,
+> pure + 20 tests). B3–B4 not started.
 >
 > **Revision 7.** Revs 2–5 were self-review + three external gap-analysis passes.
 > Rev 6 recorded the decisions made during the Phase A build. Rev 7 **merges the
@@ -730,16 +730,21 @@ every lot server-side regardless).
 ### Default order
 
 One supervisor usually holds one order source, but a manual reassignment can
-give them several. So the default rank is, per supervisor, over their open plans:
+give them several. So the default rank is, per supervisor, over their open plans (four rungs):
 
-1. **Best `Priority_Key` they hold** (Shopify > Faire > Custom > PR). Any Shopify
-   order ranks them at Shopify's level.
-2. **Tie → more plans at that best level wins.**
-3. **Tie → earliest `Plan_Start_Date` among their plans at that level wins.**
+1. **Best source RANK they hold** (Shopify > Faire > Custom > PR). Any Shopify
+   order ranks them at Shopify's level, whatever else they carry.
+2. **Tie → more plans AT THAT RANK wins.** Lower-rank plans do not pad it.
+3. **Tie → earliest `Plan_Start_Date` among their plans AT THAT RANK.**
    (Matches the plan-age tiebreak the server already applies inside one level.)
+   Falls back to the key's sequence half when a plan has no date.
+4. **Tie → supervisor name**, so two loads of the same data never disagree.
 
 Fully deterministic. `Priority_Key` is `rank * 1000000 + sequence`, stamped at
-plan creation; `Plan_Start_Date` is a date, written once, never rewritten.
+plan creation; the **rank is the top half** — counting raw keys would make every
+plan its own level and rung 2 would always count 1. An empty key (a plan created
+before `Priority_Key` existed) ranks `Infinity` and sorts **last**, never first.
+`Plan_Start_Date` is a date, written once, never rewritten.
 
 ### What the store person can change
 
@@ -758,7 +763,7 @@ given the order he set. He set it; he can change it.
 `salesOrder` is already carried. Additive; nothing server-side reads them.
 
 **2. Default-order function (`main.js`) — pure, unit-testable.** Takes the
-supervisor blocks, returns an ordered array of supervisor ids per the three-rung
+supervisor blocks, returns an ordered array of supervisor ids per the four-rung
 rule. Replaces the existing min-key-only sort as the *default*; the session's
 chosen order overrides it.
 
@@ -798,7 +803,7 @@ touching the allocator or `render()`.
 | Piece | What | Ships when |
 |---|---|---|
 | **B1** | **DONE.** `priorityKey` + `planStartDate` on the payload — `api-experiment.js` (`openPlan` + every line) and `getStoreMaterialRequirements.dg` (`lnMap` + `linesJson`, numeric/free-text handled per repo rules). Additive, nothing reads them yet. | both paths syntax-clean; no behaviour change |
-| **B2** | Default-order function in `main.js` — pure, the three-rung rule. Unit-tested against hand-worked cases before it is wired to anything. | its own test suite green |
+| **B2** | **DONE.** Default-order function in `main.js` — pure, four-rung rule, wired to nothing yet. | `priority-order.test.js` 20/20; full sweep 94/94 |
 | **B3** | **The behaviour change.** Hoist the five ledgers out of the per-supervisor loop in `applyLotAllocation`; walk in array order (which `render` will set). | see "How B3 is tested" |
 | **B4** | `render()` sorts `data` by `window.__priorityOrder`; reorder UI (shape TBD) mutates it and re-renders through the existing `render(window.__rawData)` path. | reorder changes the numbers, live |
 
@@ -834,6 +839,41 @@ Verified: `node --check` clean on the JS; `dgscan` clean on the Deluge except
 one **pre-existing** `sort by` inline finding in the `Fabric_Piece` printed-cloth
 loop ~550 lines away — confirmed present on the unmodified file via `git stash`,
 not introduced here.
+
+**B2 — the default-order function.** `priorityRankOf(key)` and
+`defaultPriorityOrder(data)` added to `main.js`, pure, wired to nothing yet.
+`tools/priority-order.test.js`, **20 cases**, every one hand-worked in its
+comment: the four rungs in isolation, then the traps —
+
+- **rank, not the raw key.** `Priority_Key = rank * 1000000 + sequence`, so two
+  plans from one source have *different* keys. Counting raw keys would make
+  every plan its own level and rung 2 would always count 1.
+- **plans, not lines.** A plan appears on a line of every material it needs;
+  the test gives one supervisor a single plan across ten materials against
+  another's two real plans, so a line-count would pick the wrong winner.
+- **at the best rank only**, for both count and date. A supervisor's ancient PR
+  order must not drag his Shopify ranking forward (rung 3), and nine PR orders
+  must not pad his Shopify count (rung 2).
+- **an unranked plan sorts LAST.** A pre-`Priority_Key` plan has an empty key;
+  `priorityRankOf` returns `Infinity` so it can never outrank a real order by
+  accident — the "backfill or it sorts to one end" trap the Deluge comment warns
+  about.
+- **rung 3 falls back to the key's sequence half** when a plan predates
+  `Plan_Start_Date` and has no date to compare. (The sequence already carries
+  age — preferring the explicit date keeps this readable and independent of the
+  key's encoding staying stable.)
+
+**Also fixed in this piece: `tools/shortfall-summary.test.js` (9 cases) was
+failing at HEAD**, unrelated to B2 — its lot fixtures were scalar-metres with no
+`rolls[]`, so under the rolls-only allocator every order reported `skipped` and
+the PO figure inflated (S1 read 22.5 where it should read 7.5). Same fixture
+obsolescence that retired two suites in Phase A Piece 4; this one was missed.
+Given seed rolls (one roll = the lot's shelf total, exactly what
+`seedLotRolls.dg` writes) and its printed-Pieces lot restated as 20 short rolls,
+it is **9/9**. Verified pre-existing via `git stash` before touching it.
+
+**Suite totals after B2: 94/94** — parity 31, lotfill 12, ledger 10,
+override 12, priority-order 20, shortfall-summary 9.
 
 ## Open questions — Phase B
 

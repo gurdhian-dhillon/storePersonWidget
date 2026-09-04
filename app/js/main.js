@@ -2202,6 +2202,110 @@ function renderSection(title, note, headCells, rowsHtml, actionHtml) {
         '</div>';
 }
 
+// ---- Default supervisor priority order ----
+//
+// THE ORDER STOCK IS RESERVED DOWN. The allocator walks supervisors in array
+// order and spends the rack as it goes, so position is not decoration — the
+// first card gets the cloth and the last is measured against what is left. This
+// function decides the DEFAULT position; the store person can reorder on screen
+// and everything re-runs.
+//
+// One supervisor usually holds one order source, but a manual reassignment can
+// give him several, so the rank is worked out over ALL his open plans:
+//
+//   1. BEST source rank he holds anywhere. Any Shopify plan ranks him at
+//      Shopify's level, whatever else he is carrying.
+//   2. Tie -> MORE plans at that best rank wins. Two supervisors both on
+//      Shopify: the one with three Shopify orders outranks the one with one.
+//   3. Tie -> EARLIEST Plan_Start_Date among his plans at that rank. Whoever
+//      has been waiting longest goes first.
+//   4. Tie -> supervisor name, so the result is fully deterministic and two
+//      loads of the same data never disagree.
+//
+// RANK, NOT THE RAW KEY. Priority_Key is `rank * 1000000 + plan sequence`
+// (createProductionPlans), so two plans from one source have DIFFERENT keys —
+// counting raw keys would make every plan its own level and rung 2 would always
+// count 1. The rank is the top half.
+//
+// The sequence half carries plan age, so it is the fallback for rung 3 when a
+// plan predates Plan_Start_Date and has no date to compare. Preferring the date
+// keeps this readable and independent of the key's encoding staying stable.
+//
+// PURE. Takes the supervisor blocks, returns an array of supervisor ids. Reads
+// nothing global, mutates nothing — so it is unit-testable and the caller
+// decides whether to use it.
+function priorityRankOf(key) {
+    var k = Number(key);
+    if (!isFinite(k) || k <= 0) return Infinity;   // unranked sorts last
+    return Math.floor(k / 1000000);
+}
+
+function defaultPriorityOrder(data) {
+    var stats = (data || []).map(function (sup, idx) {
+        // Dedupe by plan: the same plan appears on a line of every material it
+        // needs, and counting lines would rank a supervisor by how many
+        // MATERIALS his orders use rather than how many ORDERS he has.
+        var planSeen = {};
+        (sup.materials || []).forEach(function (m) {
+            (m.lines || []).forEach(function (ln) {
+                var pid = String(ln.planId || '');
+                if (!pid || planSeen[pid]) return;
+                planSeen[pid] = {
+                    rank: priorityRankOf(ln.priorityKey),
+                    seq: (function () {
+                        var k = Number(ln.priorityKey);
+                        return (isFinite(k) && k > 0) ? (k % 1000000) : Infinity;
+                    })(),
+                    start: String(ln.planStartDate || '')
+                };
+            });
+        });
+
+        var plans = Object.keys(planSeen).map(function (p) { return planSeen[p]; });
+        var bestRank = Infinity;
+        plans.forEach(function (p) { if (p.rank < bestRank) bestRank = p.rank; });
+
+        var atBest = plans.filter(function (p) { return p.rank === bestRank; });
+
+        // Earliest start among the plans AT THE BEST RANK — not across all of
+        // them. A supervisor's old Custom order must not pull his Shopify
+        // ranking forward.
+        var earliest = '';
+        var earliestSeq = Infinity;
+        atBest.forEach(function (p) {
+            if (p.start && (earliest === '' || p.start < earliest)) earliest = p.start;
+            if (p.seq < earliestSeq) earliestSeq = p.seq;
+        });
+
+        return {
+            supervisorId: String(sup.supervisorId || ''),
+            supervisorName: String(sup.supervisorName || ''),
+            idx: idx,
+            bestRank: bestRank,
+            countAtBest: atBest.length,
+            earliest: earliest,
+            earliestSeq: earliestSeq
+        };
+    });
+
+    stats.sort(function (a, b) {
+        if (a.bestRank !== b.bestRank) return a.bestRank - b.bestRank;   // 1
+        if (a.countAtBest !== b.countAtBest) return b.countAtBest - a.countAtBest; // 2 (more wins)
+        // 3 — earliest date first. A supervisor with no date on any of his
+        // best-rank plans falls back to the key's sequence half.
+        if (a.earliest && b.earliest && a.earliest !== b.earliest) {
+            return a.earliest < b.earliest ? -1 : 1;
+        }
+        if (a.earliest && !b.earliest) return -1;
+        if (!a.earliest && b.earliest) return 1;
+        if (a.earliestSeq !== b.earliestSeq) return a.earliestSeq - b.earliestSeq;
+        // 4 — deterministic last resort.
+        return String(a.supervisorName).localeCompare(String(b.supervisorName));
+    });
+
+    return stats.map(function (s) { return s.supervisorId; });
+}
+
 // ---- End-of-page shortfall summary ----
 //
 // The per-supervisor cards deliberately show every supervisor the TRUE stock

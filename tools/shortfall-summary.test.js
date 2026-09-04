@@ -59,6 +59,19 @@ const buildShortfallSummary = sandbox.buildShortfallSummary;
 const applyLotAllocation = sandbox.applyLotAllocation;
 const round2 = sandbox.round2;
 
+// Give a scalar-metres lot fixture ONE seed roll carrying its whole shelf total
+// (wash + unwash + inWash), labelled the way deluge/seedLotRolls.dg labels it.
+// The allocator is rolls-only: without this a lot has no cuttable cloth at all.
+function seedRoll(lot) {
+  const shelf = round2((Number(lot.wash) || 0) + (Number(lot.unwash) || 0) +
+                       (Number(lot.inWash) || 0));
+  lot.rolls = shelf > 0
+    ? [{ rollId: lot.lotNumber + '-R1', label: lot.lotNumber + '-R1',
+         length: shelf, status: 'Available', origin: 'Purchased' }]
+    : [];
+  return lot;
+}
+
 // ----------------------------------------------------------------------------
 // A rack that is short by exactly one order under the one-lot rule.
 //
@@ -99,9 +112,14 @@ function makeData(opts) {
     requiredPieces: 30, issuedPieces: issuedPieces,
     cuts: [{ cutW: 150, cutL: 150, reqPieces: 30, issPieces: issuedPieces }],
     cutsJson: '[]',
+    // SEED ROLLS. The allocator is rolls-only since the lot->rolls migration:
+    // a lot with no Lot_Rolls has no cuttable cloth and every order against it
+    // reports `skipped`. One roll = the lot's shelf total is exactly what the
+    // backfill (deluge/seedLotRolls.dg) writes, and is the shape that makes the
+    // roll allocator reproduce the old scalar behaviour.
     lots: [
-      { lotId: 'L2', lotNumber: 'L2', blocked: false, wash: round2(15 - issuedMetres), unwash: 4.3, inWash: 0, form: 'Roll', pieces: [] },
-      { lotId: 'L1', lotNumber: 'L1', blocked: false, wash: 3.2, unwash: 0, inWash: 0, form: 'Roll', pieces: [] }
+      seedRoll({ lotId: 'L2', lotNumber: 'L2', blocked: false, wash: round2(15 - issuedMetres), unwash: 4.3, inWash: 0, form: 'Roll', pieces: [] }),
+      seedRoll({ lotId: 'L1', lotNumber: 'L1', blocked: false, wash: 3.2, unwash: 0, inWash: 0, form: 'Roll', pieces: [] })
     ],
     wasteStock: [],
     lines: [
@@ -148,9 +166,15 @@ test('S3 PO figure does not move after an order is issued', () => {
 // ---- 3. enough cloth on ONE lot -> no PO --------------------------------
 test('S4 a rack that can seat every order raises no PO', () => {
   const data = makeData();
-  // widen L2 so it holds all 3 orders (22.5 m) washed
+  // widen L2 so it holds all 3 orders (22.5 m) washed. The ROLL has to grow
+  // with the wash column — the allocator cuts from rolls, so leaving the seed
+  // roll at its old length would keep the lot physically unable to serve the
+  // orders however much the header claims.
   data[0].materials[0].lots[0].wash = 30;
   data[0].materials[0].lots[0].unwash = 0;
+  data[0].materials[0].lots[0].rolls = [
+    { rollId: 'L2-R1', label: 'L2-R1', length: 30, status: 'Available', origin: 'Purchased' }
+  ];
   applyLotAllocation(data);
   const s = buildShortfallSummary(data);
   assert.strictEqual(s.toBuy.length, 0, 'no buy row when one lot covers everything');
@@ -223,12 +247,16 @@ test('S9 printed Pieces lot, order fully covered -> no false PO', () => {
     requiredPieces: 4, issuedPieces: 0,
     cuts: [{ cutW: 100, cutL: 70, reqPieces: 4, issPieces: 0 }],
     cutsJson: '[]',
-    // one Pieces-form lot: many short washed pieces, well over the demand
+    // A printed lot, as SHORT ROLLS. Pre-migration this was a `form: 'Pieces'`
+    // lot with 20 Fabric_Piece rows of 320 cm; under the rolls model printed
+    // cloth is not a special case — each piece is simply a 3.2 m roll, which is
+    // exactly what the Fabric_Piece -> Lot_Rolls migration writes.
     lots: [{
       lotId: 'LP', lotNumber: 'LP', blocked: false,
-      wash: 641, unwash: 0, inWash: 0, form: 'Pieces',
-      pieces: Array.from({ length: 20 }, (_, i) => ({
-        pieceId: 'FP' + i, lengthCm: 320, widthCm: 314.96, count: 1, state: 'Wash', carton: ''
+      wash: 64, unwash: 0, inWash: 0, form: 'Roll', pieces: [],
+      rolls: Array.from({ length: 20 }, (_, i) => ({
+        rollId: 'LP-P' + (i + 1), label: 'LP-P' + (i + 1),
+        length: 3.2, status: 'Available', origin: 'Printed'
       }))
     }],
     wasteStock: [],
