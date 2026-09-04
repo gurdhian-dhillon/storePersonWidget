@@ -1,0 +1,649 @@
+# Lot → Rolls model — the store person is told which roll to cut
+
+> **Status: DESIGN. Nothing here is built.** This is the core stock mechanism.
+> Every step ships only after a parity test proves each number that moves,
+> moved for a reason we wrote down first.
+>
+> **Revision 5.** Rev 2 fixed three self-review errors. Rev 3–5 fold in three
+> external gap-analysis passes, each finding verified line-by-line against the
+> code before applying. Rev 5's pass added 8 findings, all valid: the
+> `Fabric_Piece` backfill must expand `Piece_Count` into that many rolls (a
+> silent stock-loss bug otherwise); `Issue_Lines.Roll_Label` and
+> `Print_Job.Source_Roll` were missing from the Step 0 schema;
+> `issueMaterialsHandover` — not `issueMaterialsApply` — is what stamps the
+> label; `spend()` needs an in-memory roll ledger or sequential orders
+> double-claim; `applyFabricOverride`, `getProductionWidgetData`'s inline waste
+> copy, and `shortReasonFor` all need roll-awareness; and the writer/reader
+> counts were off. All revision tables are at the end.
+
+---
+
+## Why
+
+`Raw_Material_Lot` carries `Wash_Quantity` (and `Unwash_Quantity`,
+`In_Wash_Qty`) as a **scalar**, and every calculation that plans a cut treats
+that scalar as **one continuous length**. It is not.
+
+- A lot is a **shade** (a dye batch). Cloth of that shade arrives more than
+  once. The store adds the new delivery to the existing lot — `Wash_Quantity +=
+  n` — so one lot's 758 m is really **a ~750 m roll and an 8 m roll**.
+- An order needing a 10 m marker cannot be cut from the 8 m roll, but the
+  allocator sees `758 >= 10` and says the lot covers it. **Over-promise.**
+- `getExpectedWaste` predicts **one** tail for the lot's fresh cloth; the truth
+  is **one tail per roll**. **Waste under-predicted.**
+
+And the thing that makes this worth building rather than merely correct:
+
+> **The store person must be told WHICH ROLL to cut from.** He walks to the
+> rack holding an instruction. Without a roll identity the instruction cannot
+> be given, and the screen is guessing on his behalf.
+
+Printed cloth is the same shape — a lot whose pieces are short — so this
+retires `Fabric_Piece` and unifies the two.
+
+---
+
+## What a roll is, and what washing does to it
+
+Two facts, two owners, **no overlap** — which is what makes them unable to
+disagree:
+
+| Fact | Owner | Grain |
+|---|---|---|
+| What lengths the cloth is in | `Lot_Rolls` | roll |
+| How much of it is washed | `Raw_Material_Lot` | lot |
+
+**A roll has a length. A roll does NOT have a wash state.**
+
+That is not a simplification with a cost — it is how the floor actually works.
+Washing follows the *cut*, not the roll: they either wash a whole roll, or they
+cut what the job needs and wash that. **Washing never changes a roll's length.**
+So a roll's length is state-agnostic by nature, and the lot's three wash columns
+stay exactly as they are today.
+
+> **This is why the `Fabric_Piece` failure does not repeat.**
+> `lot-allocator.js:112-129` records that `Fabric_Piece.State` disagreeing with
+> the lot's wash columns is *"the fault this whole design is built to avoid"* —
+> and it is why piece-washing was never built. That happened because a piece
+> **carried a state** that a second writer (`completeWashRequest`, moving lot
+> metres) could contradict. A roll carries no state, so there is nothing to
+> contradict. The lot's columns remain the single source of truth for wash.
+
+### The five buckets, and which ones are rolls
+
+A lot has **five** quantity buckets, not three:
+
+```
+Wash_Quantity + Unwash_Quantity + In_Wash_Qty   ==  Σ Lot_Rolls.Roll_Length
+                                                    (cloth ON THE SHELF)
+
+In_Transit_Qty                                  ==  issued, left the shelf
+Disputed_Qty                                    ==  short on receipt, gone
+```
+
+**Rolls are only the cloth physically on the shelf.** Issuing 7.5 m off roll R3
+shrinks R3 to 742.5 and moves 7.5 into `In_Transit_Qty` — the cloth is not on
+the rack any more, so it is not a roll any more. This is the invariant the
+first draft got wrong by omitting the last two buckets.
+
+`In_Wash_Qty` **is** still a roll: cloth at the wash house is still that
+physical roll, coming back the same length. It counts toward capacity.
+
+### Store_Correction — cloth coming back
+
+The one case that needs the roll id kept: a `Store_Correction` (or `Found`
+resolution) returns cloth to the shelf. Because the issue line records **which
+roll** it was cut from, the correction winds that roll back up by the corrected
+metres. If the roll has since been consumed and closed, the correction creates a
+new roll row (`Origin = "Returned"`). Either way `Σ Roll_Length` and the wash
+columns move together.
+
+---
+
+## The model
+
+### `Raw_Material_Lot` — the shade
+
+| Field | Change | Meaning |
+|---|---|---|
+| `Lot_Number`, `Material`, `Status`, `Source_Lot`, … | — | unchanged |
+| `Wash_Quantity` / `Unwash_Quantity` / `In_Wash_Qty` | **unchanged, still authoritative** | The wash-state split. Every existing writer keeps writing them exactly as it does today. Rolls do not replace or derive these. |
+| `In_Transit_Qty` / `Disputed_Qty` | **unchanged** | Cloth off the shelf. Never rolls. |
+| `Width` | **ADD** (Decimal, cm) | Constant for the lot, `= Raw_Material.Fabric_Width_Inches × 2.54`. Every roll shares it. Seeded at lot creation. Printed lots may differ from their plain base — see Open Questions. |
+
+### `Lot_Rolls` — NEW subform on `Raw_Material_Lot`
+
+One row = one physical roll the store person can walk to and identify.
+
+| Field | Type | Written by | Meaning |
+|---|---|---|---|
+| `Roll_Label` | Single Line | receive (system-assigned) | **What the store writes on the roll.** Short and human — `L2-R1`, `L2-R2`. This is what the issue screen names, and what he matches at the rack. Unique within the lot. |
+| `Roll_Length` | Decimal (m) | receive; issue (decrement); dispute (wind back); waste (remnant) | Physical length on the shelf, at the lot's `Width`. **Washing never changes this.** |
+| `Roll_Status` | Dropdown | receive; issue | `Available`, `Consumed`. `Consumed` when `Roll_Length` reaches 0. Never deleted — history holds. |
+| `Origin` | Dropdown | receive / waste / dispute | `Purchased`, `Printed`, `Remnant`, `Returned`. |
+| `Source_Receipt` | Single Line | receive | GRN / print job / backfill marker. Provenance. |
+
+**Deliberately NOT on a roll:** wash state (lot-level, see above), width
+(lot-level), lot number (it is the parent).
+
+### Identification at the rack
+
+The screen shows **label + length together** — `L2-R2 · 8 m`. The label is the
+primary key he reads; the length is the confirmation that he is at the right
+roll. Either alone is ambiguous on a rack (labels smudge; two rolls can be
+similar lengths), together they are not.
+
+**This is a new floor practice.** Rolls are not labelled today. Step 1 of the
+build is the store labelling existing stock as part of the backfill — that is a
+real-world task, not just a script, and the plan must not pretend otherwise.
+
+---
+
+## The allocation rule
+
+Per candidate lot, for **one sales order's** cut-piece demand:
+
+### Check 1 — cut-piece capacity (reads the ROLLS)
+
+```
+perRow   = floor(lot.Width / cutW)                          // markers across
+capacity = Σ over Available rolls:
+             perRow × floor(roll.Roll_Length / cutL)        // whole rows per roll
+```
+
+Summed **per roll** — a roll too short for one marker row contributes 0. This
+is the continuity fix.
+
+### Check 2 — wash state (reads the LOT, unchanged from today)
+
+```
+orderMetres = Σ per cut: ceil(pieces / perRow) × cutL / 100
+
+if Wash_Quantity                      >= orderMetres  → issue now
+else if Wash + Unwash + In_Wash       >= orderMetres  → covered after a wash
+else                                                   → this lot cannot
+```
+
+### The decision
+
+| Check 1 (rolls) | Check 2 (state) | Outcome |
+|---|---|---|
+| capacity ≥ demand | washed covers | **use this lot — name the roll(s), issue now** |
+| capacity ≥ demand | only wash+greige covers | **use this lot — raise its wash request** |
+| capacity ≥ demand | nothing covers | this lot cannot — next lot |
+| capacity < demand | (any) | this lot cannot — next lot |
+| — no lot passes both — | | **raise a PO** |
+
+**One order → one lot** (the atom rule — tone). Within a lot an order may take
+rows off several rolls: same dye batch, and the store already does this.
+
+### Which roll gets named
+
+**Shortest roll first** — among the lot's rolls that can yield at least one
+marker row of this cut, pick the shortest; tie on length broken by `Roll_Label`
+(string sort). Drain it in whole marker rows until it can give no more, then the
+next-shortest. Rationale: a short roll left sitting becomes unusable scrap, so
+clear it while it can still take a marker row — this **consolidates the rack
+into fewer, longer rolls** over time. A roll below one marker row of the cut
+contributes nothing and is skipped. The issue line records every roll used and
+the metres off each.
+
+> This reverses an earlier draft of this doc, which said *longest*-first to
+> protect big rolls. The shop's rule is the opposite: drain the small ones.
+> The allocator implements shortest-first; `spend()` and `chooseLotForOrder`
+> follow it.
+
+Wash does not enter roll choice at all — see "what washing does to a roll".
+The store cuts from the named roll and washes what the job needs.
+
+---
+
+## Blast radius
+
+Each entry: **today** → **change** → **parity test**.
+
+> **The first draft named 3 Deluge writers.** Verified line-by-line against the
+> code: **10 functions genuinely move a lot's cloth and need a roll decision**
+> (of which `issueMaterialsHandover` stamps the label and `issueMaterialsApply`
+> decrements the length — the split matters), **2 more** are read-only drift
+> reports that gain the roll sum, **5 more** touch only the wash-state columns or
+> a material-level bucket and need **no roll change**, and **1 is dead**
+> (`resolveStockDispute`). The full breakdown is in Group B. This is the true
+> cost of the model and the main reason the build is staged.
+
+### The roll-length invariant
+
+`Roll_Length >= 0`, always, on every roll — and `Σ Roll_Length` for a lot's
+`Available` rolls equals `Wash + Unwash + In_Wash` for that lot (the shelf
+buckets). **Enforced by every Deluge writer**, not assumed:
+
+- **Decrement (issue, send-to-print):** if the payload asks for more than the
+  roll holds, the writer **caps at the roll's current length and errors the
+  line** — it never drives a roll negative and never silently spills onto
+  another roll. The allocator should not produce such a payload (it read the
+  same rolls), so this firing means the data moved between read and write —
+  treat it as a concurrency / stale-read failure, report it, do not partially
+  apply.
+- **Wind-back (`Store_Correction`, `Found`, `cancelPrintJob`):** adds to the
+  roll named on the issue line. If that roll is `Consumed`, create a new roll
+  row (`Origin = "Returned"`) rather than un-consuming — a consumed roll may
+  have been physically discarded.
+- **Concurrency:** two issues racing on one roll is the real risk. Deluge has
+  no row lock, so each writer **re-reads `Roll_Length` inside its own execution**
+  immediately before the decrement (the pattern `issueMaterials` already uses
+  for `Issued_Qty`), and caps against that fresh read.
+
+### Group A — the allocation and estimate path (read-only, reversible)
+
+**1. `getStoreMaterialRequirements.dg`** — payload gains `lots[].rolls[]`
+(`{label, length, status, origin}`). The per-cut fresh estimate becomes
+per-roll: `Σ perRow × floor(rollLen/cutL)` rather than `floor(washMetres/cutL)`.
+The lot-level rollups (`calcWashByMat` etc.) are **unchanged** — they still read
+the wash columns.
+*Parity:* one-roll-per-lot = today's output exactly; multi-roll cases hand-worked.
+
+**2. `app/js/api-experiment.js`** — read `Lot_Rolls` (a `Lot_Rolls_Report`,
+joined by lot id, the pattern `Fabric_Piece_Report` already uses). Expose
+`rolls[]`.
+*Parity:* `api-experiment-parity.test.js` extended — assembled `rolls[]` matches
+the Deluge read path.
+
+**3. `app/js/lot-allocator.js`** — **one path.** `lotFill` works off
+`lot.rolls[]` with check-1 capacity; `lotIsPieces` / `lotPieces` /
+`lotGreigePieces` and the `metres = 0` special case are deleted (every lot is
+rolls now). `chooseLotForOrder` applies the decision table and **names the
+rolls**. `lotLines[]` gains `rolls: [{label, metres}]`. The remnant scorer is
+untouched — `wasteStock` stays separate from rolls. Four sub-points:
+
+- **`spend()` must carry a roll ledger.** This is the load-bearing one.
+  `spend()` (`lot-allocator.js:~890`) decrements in-memory ledgers after each
+  order so the *next* order on the card measures against what's left — its own
+  comment: *"two orders each took 5.50 m from a 6.00 m lot… the double-promise
+  this whole design exists to prevent."* Today it maintains `lotLeft`,
+  `lot.wash`, `lot.unwash`, `greigeLeft`, `wasteLeft`, `pieceLeft`, `lot.pieces`.
+  Under rolls it **must also deduct the allocated metres from the specific
+  `roll.Roll_Length`** (on the in-memory `lot.rolls` objects) and carry a
+  `rollLeft` map across cards — exactly the treatment `lot.pieces` / `pieceLeft`
+  get now. Without it, Order 2 sees Order 1's roll at full length and allocates
+  cloth already promised. `chooseLotForOrder` / `lotFill` then read the
+  spent-down `lot.rolls`.
+- **`perRowFor` and width.** Today `allocateMaterial` builds one `fab =
+  { fabricWidthCm: m0.fabricWidthCm }` per **material** (`lot-allocator.js:573`)
+  and `perRowFor` reads it for every lot. That is fine **only if `Width` stays
+  lot-level AND every lot of a material shares it**. If OQ1 resolves that
+  printed lots have a narrower print-table width, `Width` moves onto the roll
+  and `perRowFor` must take it per roll — `check 1`'s `perRow` is already
+  written `floor(lot.Width / cutW)`, so the allocator would read `lot.Width` (or
+  `roll.width`) rather than `fab.fabricWidthCm`. **This is why OQ1 blocks Step 3,
+  not just Step 1.**
+- **`chooseLotForOrder` ranking.** It filters to lots where `lotFill(...).covers`
+  (so a lot of pure unusable scrap is already excluded), then picks the
+  *smallest* by `wash + unwash` to protect big lots for big orders. Under rolls
+  that total counts short rolls that add zero capacity — a lot with 19 m + 1 m
+  ranks as "bigger" (less protected) than a clean 19 m lot of equal usable
+  capacity. It is a heuristic, not a correctness bug (`covers` is the gate), but
+  the ranking metric should change to `Σ usable roll capacity`
+  (`Σ Roll_Length where Roll_Length >= cutL`, or the check-1 `capacity` figure).
+  Decide in Step 3.
+- **`shortReasonFor` `nofit` message.** `lot-allocator.js:~1620` reports
+  `kind:'nofit', have: round2(Number(l.wash) || 0)` — the lot's total washed
+  metres. Under rolls a lot with 20 m across two 10 m rolls, against a 12 m
+  order, would say *"L2 has 20 m, need 12 m"*, which reads as a bug. Change
+  `have` to the **longest roll's length** — *"L2 longest roll 10 m, need 12 m"*.
+
+*Parity:* the whole existing `allocator.test.js` set re-run with one roll per lot
+= **byte-identical**; then the 750+8 continuity case; a lot covered only across
+three rolls; two orders on one card racing a single roll (the `spend()` ledger
+test); the printed cases restated as short rolls; a same-material two-lot case
+where the lots have different widths (guards the `perRowFor` decision).
+
+**3b. `applyFabricOverride` (in `lot-allocator.js`) — the store-screen manual
+override.** Today it **refuses** a hand-typed metres edit on a lot whose lines
+carry a per-piece cut list (`lot-allocator.js:1391-1403`) — *"a hand-sized
+metres figure cannot be mapped onto discrete pieces."* Under rolls the same
+problem is universal: a typed metres figure cannot say **which roll(s)** the
+metres come off or how much off each. So the guard must widen: **refuse a
+hand-edit on any multi-roll lot** (the single-roll case is unambiguous and stays
+editable), OR the override dialog carries a per-roll breakdown the store person
+fills in. Refuse-if-multi-roll is the smaller change and matches the existing
+Pieces guard exactly — the box renders read-only, same as a Pieces lot does
+today.
+
+**And the single-roll case that stays editable must keep `ln.rolls` in step.**
+`applyFabricOverride` rebuilds `lines` from a JSON clone of `thisLotBase` and
+scales `ln.qty` (`lot-allocator.js:~1446`) — it never touches `ln.rolls`. So a
+single-roll line carrying `rolls: [{label:'L1-R1', metres:10}]`, edited 10 → 12,
+ends with `ln.qty = 12` but `ln.rolls[0].metres = 10`, and the handover payload
+carries two disagreeing figures → a mismatched issue or an under-decremented
+roll. The override must, for the single-roll case, also set
+`ln.rolls[0].metres = ln.qty` **and** clamp `ln.qty` to that roll's
+`Roll_Length` (a hand-typed figure above the roll's length is refused, same as
+`maxIssuable` caps the box today).
+*Parity:* single-roll lots stay editable and `qty` == `rolls[0].metres` after
+every edit; multi-roll lots render read-only; no metres edit ever produces an
+ambiguous or over-length roll decrement.
+
+**4. `app/js/main.js`** — the issue row shows the named roll(s):
+`L2-R2 · 8 m`. `buildShortfallSummary` is **unaffected** — it already drives off
+`orderOutcomes` (the D11 fix), which is roll-agnostic.
+*Parity:* `shortfall-summary.test.js` re-run against the roll allocator; the
+issue-invariance and no-false-PO assertions must still hold.
+
+**4b. `app/admin/js/main.js` — the calculation-audit widget.** It loads
+**the same `../js/lot-allocator.js`** (`app/admin/widget.html:102`) and calls
+`applyLotAllocation(LIVE)` (`main.js:1844`) over the payload
+`getAdminCalculation.dg` returns. So `getAdminCalculation` must also carry
+`lots[].rolls[]`, and the audit's lot breakdown gains a roll level (which roll
+each order's rows came off, each roll's tail). `getAdminCalculation`'s headline
+numbers (issuedQty, receivedQty, pinLot) are unchanged — only the working shown.
+*Parity:* the audit's totals unchanged for one-roll-per-lot; `applyLotAllocation`
+output identical to Group A item 3's.
+
+**5. `getExpectedWaste.dg` + `getProductionWidgetData.dg`** — **the big number
+change, in TWO places.** `getExpectedWaste`'s Pass 2 already gives each *lot* its
+own side strip + full rows + one part-row; it goes one level deeper to each
+*roll*. N rolls → N tails. Pass 1.5 (printed pieces) merges into Pass 2 —
+printed pieces are just short rolls.
+**`getProductionWidgetData.dg` carries an INLINE COPY of this arithmetic**
+(`getProductionWidgetData.dg:~925-1070`, `ewPerRowR = (ewFabWcm / ewCutW).floor()`
+… — the "ARITHMETIC ONLY" fold-in `CLAUDE.md` documents). It must be upgraded to
+per-roll tails **in the same pass**, or the supervisor production widget's
+"Expected waste" cell diverges from the cutting dialog's.
+*Parity:* one-roll-per-lot = identical for BOTH (the regression guard);
+multi-roll tails hand-worked; a cross-check that `getProductionWidgetData`'s
+inline result still equals `getExpectedWaste`'s no-lot path exactly (8 cases, as
+the original fold-in was verified).
+
+**6. `saveWasteFromCutting.dg` — reader, needs the roll for provenance.** Today
+it stamps an offcut's lot from `Material_Requirement[Plan_Item].Issued_Lot`
+(`saveWasteFromCutting.dg:49-83`, with an `ambigMat` guard for split-lot items).
+Under rolls it also wants **which roll** the offcut came off, so the remnant-vs-
+`Waste_Master` decision (Open Q 3) and any later re-shelving know the parent
+roll. The lot resolution is unchanged; the roll stamp is additive and never
+blocks. `Waste_Master.Source_Roll` — ADD, optional.
+*Parity:* provenance resolves to the same lot for one-roll lots; the roll stamp
+is additive.
+
+**7. `getStoreIssueHistory.dg` / `getSupervisorProductionHistory.dg` — readers,
+display only.** Both read `Issue_Lines.Lot` and resolve lot names for the
+history card (`getStoreIssueHistory.dg:387-411`). Once Step 5 stamps a roll
+label on `Issue_Lines`, these should surface it too (`L2-R2 · 8 m` on the
+history line), so what the store person cut from reads back the same way it was
+issued. No write path; if the label is absent (a pre-Step-5 line) the card
+falls back to the lot name exactly as now.
+*Parity:* pre-Step-5 lines render identically; post-Step-5 lines gain the label.
+
+### Group B — the writers, staged
+
+Verified `grep` against every `.dg` for `<var>.(Wash_Quantity|Unwash_Quantity|
+In_Wash_Qty) =` **on a lot object** vs on `Raw_Material`, and for
+`insert into Raw_Material_Lot`:
+
+**Roll decision needed (10 + 1 dead):**
+
+| Function | What it moves | Roll decision |
+|---|---|---|
+| `issueMaterials` / `issueMaterialsApply` | shelf → in-transit; decrements the lot's washed metres | **payload names the roll**; `issueMaterialsApply` decrements `Roll_Length` |
+| **`issueMaterialsHandover`** | inserts `Material_Issue` + `Issue_Lines` (no stock write) | **stamps `Issue_Lines.Roll_Label`** from the handover payload — the record every wind-back and history read depends on |
+| `saveStockInward` | new bought cloth → lot washed/greige | **new roll row** (+ label) |
+| `receiveFromPrint` | printed cloth in, per table run | **new roll rows**, one per run; a `Piece_Count` run = that many rows |
+| `sendToPrint` | plain cloth → printer, off the lot | **named roll(s)** — same choice as an issue; stamp `Print_Job.Source_Roll` |
+| `cancelPrintJob` | printed cloth back | wind the sent rolls back up (read `Print_Job.Source_Roll`) |
+| `resolveDispute` | disputed → shelf on `Store_Correction` / `Found` | wind back the roll named on the `Issue_Line`; new `Origin="Returned"` row if consumed |
+| `seedOpeningLots`, `seedTestLots`, `migrateOpeningLots`, `resetRawMaterialBaseline` | seeding / test | create seed rolls |
+| ~~`resolveStockDispute`~~ *(dead — see note)* | `Raw_Material.Wash_Quantity` / `.Disputed_Qty` on `Store_Correction` | **DELETE, do not migrate** |
+
+**Read-only reports — gain the roll sum, write nothing:**
+
+| Function | Role |
+|---|---|
+| `verifyLotSync` | drift report — **gains `Σ Roll_Length == Wash+Unwash+In_Wash` as a third check** (Group C) |
+| `reconcileRawMaterial` | drift report — reads `Fabric_Piece[Piece_Status=="Available"]` (`:53`), never writes it; swap that read for `Lot_Rolls`, add the roll sum to the report |
+
+**No roll change — touch the wash columns or a non-lot bucket only:**
+
+| Function | Why |
+|---|---|
+| `completeWashRequest` | moves cloth `Unwash → Wash` on lot **and** `Raw_Material` — a state change, no length |
+| `cancelWashRequest` | `In_Wash → Unwash` — state change, no length |
+| `raiseMaterialException` | moves `Unwash → In_Wash` when a wash ticket is raised — state change, no length |
+| `resolvePurchaseShortages` | **reads** `Wash_Quantity` (`:76`); writes only `Material_Exception.Status = "Resolved"` |
+| `syncPurchaseInflow` | writes `Raw_Material.Unallocated_Qty` / `.Quantity` only — **never references `Raw_Material_Lot`** (0 refs); the material-level unallocated bucket, not a lot or a roll |
+
+> **`resolveStockDispute.dg` is a legacy form workflow** duplicating
+> `resolveDispute`, flagged in `CLAUDE.md` for deletion ("It has none of the
+> current logic. Delete it."). It writes `Raw_Material.Wash_Quantity` /
+> `Disputed_Qty` at the **material** level (no lot, no roll). It must be
+> **deleted before Step 5** — if still live when `issueMaterialsApply` starts
+> moving rolls, a dispute resolved through it credits `Raw_Material` metres with
+> no roll behind them and `verifyLotSync`'s third check flags the drift. On the
+> Step 0 checklist.
+
+**Five functions need NO roll change** — the three wash-column functions
+(`completeWashRequest`, `cancelWashRequest`, `raiseMaterialException`), the
+read-only `resolvePurchaseShortages`, and `syncPurchaseInflow` (material-level,
+no lot at all). That is the payoff of the stateless-roll decision: washing moves
+a lot-level metres figure between columns and never touches a roll's length.
+
+### Group C — the third level
+
+`Raw_Material.Wash_Quantity` (the parent material total) is maintained in the
+same pass as the lot's, deliberately, *"so the lot and the maintained parent
+total cannot disagree"* (`completeWashRequest.dg:207`). Rolls make it **three**
+levels. `verifyLotSync` is the only checker and must gain the roll sum:
+
+```
+Σ Lot_Rolls.Roll_Length  ==  lot.Wash + lot.Unwash + lot.In_Wash     (per lot)
+Σ lot.*                  ==  Raw_Material.*                           (per material)
+```
+
+### Group D — retire `Fabric_Piece`
+
+Verified against the code — `Fabric_Piece` is named in **10 `.dg` + 3 `.js`**,
+but half the `.dg` mentions are *comments explaining why that function does NOT
+touch pieces*. The real code:
+
+| File | Role | Under rolls |
+|---|---|---|
+| `issueMaterials.dg` | **writer** — `insert into Fabric_Piece` (remnant), field writes | insert a `Lot_Rolls` row instead (`Origin="Remnant"`) |
+| `issueMaterialsApply.dg` | **writer** — same | same |
+| `receiveFromPrint.dg` | **writer** — `insert into Fabric_Piece` (`:521`), one per run | insert `Lot_Rolls` rows — **`Piece_Count` rows per run** (see F1) |
+| `reconcileRawMaterial.dg` | **reader** — `Fabric_Piece[Piece_Status=="Available"]` scan (`:53`), zero writes | scan `Lot_Rolls` instead |
+| `getStoreMaterialRequirements.dg` | **reader** — `piecesByLot` (`:612`) | read `Lot_Rolls` |
+| `app/js/api-experiment.js` | **reader** — `Fabric_Piece_Report` (`:55`) | read `Lot_Rolls_Report` |
+| `app/js/lot-allocator.js` | **reader** — `lotPieces` / `lotGreigePieces` / `lot.pieces` | delete those, read `lot.rolls` |
+| `app/js/main.js` | **reader** — piece display | read rolls |
+| `cancelPrintJob`, `completeWashRequest`, `raiseMaterialException`, `resolveDispute`, `sendToPrint` | **comment-only** — explain why they don't touch pieces | comments updated, no code change |
+
+So: **3 writers, 5 readers, 5 comment-only.**
+
+> **A `Fabric_Piece` row can hold `Piece_Count > 1` — the backfill must EXPAND
+> it.** `receiveFromPrint` writes `Piece_Count=pCntS` (`:521`) and the allocator
+> treats each *count* as a discrete mini-roll (`lot-allocator.js:322`,
+> `p.pieces -= 1; // Take one count of this piece`). A row with
+> `Piece_Length_Cm = 300, Piece_Count = 4` is **four 3 m pieces = 12 m**, not
+> one 3 m roll. So the migration is:
+>
+> ```
+> for each Fabric_Piece row:
+>   repeat Piece_Count times:
+>     insert Lot_Rolls { Roll_Length = Piece_Length_Cm / 100,
+>                        Roll_Label  = "<Lot>-P<seq>",
+>                        Origin      = "Printed",
+>                        Source_Receipt = <its Print_Job> }
+> ```
+>
+> Getting this wrong fails `verifyLotSync` on the first run — `Σ Roll_Length`
+> would be short by `(Piece_Count − 1) × Piece_Length_Cm / 100` per row.
+
+**Lossy on two fields:** `State` (deliberate — rolls are stateless; the lot's
+columns carry the wash split) and `Piece_Width_Cm` (see Open Q 1 — verify
+against real data first). Move readers one at a time behind a dual-read; delete
+last.
+
+> **`Fabric_Piece_Report` and `Lot_Rolls_Report` are Creator Reports, not
+> Deluge.** `Fabric_Piece_Report` is a standalone report link the JS side reads
+> via `getRecords` (`api-experiment.js:55`); no `.dg` defines it. `Lot_Rolls_Report`
+> must be created the same way in Step 0 — a Creator Report on the `Lot_Rolls`
+> subform, not a function.
+
+---
+
+## Build order
+
+| Step | What | Ships when |
+|---|---|---|
+| **0** | Creator, manual, additive: `Lot_Rolls` subform; `Raw_Material_Lot.Width` (Decimal cm); **`Material_Issue.Issue_Lines.Roll_Label` (Single Line)**; **`Print_Job.Source_Roll` (Single Line)** (or wherever `sendToPrint` records its send lines); `Lot_Rolls_Report` (a Creator **Report** on the subform, the `Fabric_Piece_Report` pattern); `Waste_Master.Source_Roll` (Single Line). **Delete `resolveStockDispute` and its Creator workflow** — gone before Step 5. **Answer Open Q 5** (who splits a seed roll) — Step 1 cannot start without it. | all fields + report exist, `resolveStockDispute` deleted, OQ5 answered |
+| **1** | **Backfill + LABELLING.** Script, per lot with no `Lot_Rolls`: set `Width = Fabric_Width_Inches × 2.54` from the material; create one seed roll `Roll_Length = Wash + Unwash + In_Wash`, `Roll_Label = "<Lot_Number>-R1"`, `Origin = "Purchased"`, `Source_Receipt = "BACKFILL"`. **Each `Fabric_Piece` row → `Piece_Count` `Lot_Rolls` rows** of `Piece_Length_Cm / 100` each (`Origin="Printed"`) — see the F1 note in Group D. **Then the store physically labels the rack** and, via the OQ5 mechanism, splits any seed row that is really several rolls. | `verifyLotSync` roll check green on every lot; `Width` set on every lot; `Σ Roll_Length` matches after the `Piece_Count` expansion; the rack matches the rows |
+| **2** | Read path exposes `rolls[]` (`getStoreMaterialRequirements`, `api-experiment.js`). No behaviour change. | one-roll parity identical |
+| **3** | `lot-allocator.js` single path + roll naming + **`spend()` roll ledger**; `applyFabricOverride` guard widened to multi-roll **and single-roll `ln.rolls` sync**; `chooseLotForOrder` ranking + `shortReasonFor` `nofit` message; issue screen + admin audit show the roll. **Needs OQ1 answered** (width lot vs roll → whether `perRowFor` changes). | allocator parity: one-roll byte-identical; continuity, different-width, and two-orders-race-one-roll cases verified; admin totals unchanged; single-roll override keeps `qty == rolls[0].metres` |
+| **4** | `getExpectedWaste.dg` **and `getProductionWidgetData.dg`'s inline copy** per-roll tails, same pass; `saveWasteFromCutting.dg` roll stamp. | waste parity: one-roll identical for both; multi-roll hand-worked; `getProductionWidgetData` inline == `getExpectedWaste` no-lot path (8 cases) |
+| **5** | **`issueMaterialsApply.dg`** decrements the named roll (re-read length inside the execution, cap-and-error); **`issueMaterialsHandover.dg`** stamps `Issue_Lines.Roll_Label` from the handover payload. **First write — both, same pass.** | full lifecycle test, conservation invariants after every step; concurrent-issue race test; `Issue_Lines` carries the label |
+| **6** | `saveStockInward`, `receiveFromPrint` create roll rows on receipt (`receiveFromPrint`: one row per printed run). | roll sum holds after each receipt |
+| **7** | `sendToPrint` / `cancelPrintJob` / `resolveDispute` name and wind back rolls (new `Origin="Returned"` row if the roll is `Consumed`). | dispute lifecycle: correction returns exact roll length |
+| **8** | `reconcileRawMaterial` swaps its `Fabric_Piece` scan for `Lot_Rolls` and adds the roll sum to its report; `verifyLotSync` third check. (`syncPurchaseInflow` needs nothing — material-level only.) | drift report clean |
+| **9** | Retire `Fabric_Piece` — move the 5 readers, delete the 3 writers' piece code, update the 5 comment-only files. | no reader references it |
+
+**Step 1 is the real risk** and it is not a code risk — it is a stocktake. Until
+the rack is labelled and split, every lot is one seed roll and the system
+behaves **exactly as today**. That is deliberate: steps 2–4 can ship against
+seed rolls and prove parity before any physical work is done. **Step 0's hard
+gates** — every schema field + the report created, `resolveStockDispute` deleted,
+OQ5 answered — none optional. Missing `Issue_Lines.Roll_Label` or
+`Print_Job.Source_Roll` at Step 0 means Steps 5/7 have nowhere to write the roll.
+**OQ1 (width lot vs roll) additionally blocks Step 3**, because `perRowFor` reads
+width and the allocator builds one width per material today.
+
+---
+
+## Testing infrastructure (before Step 2)
+
+- **`tools/rolls-model.js`** — **NEW, to be built.** Node reference model:
+  `{ width, washQty, unwashQty, inWashQty, inTransit, disputed,
+  rolls: [{label, length, status}] }` with `capacity(cutW, cutL)`,
+  `chooseRolls(order)`, `issue(rolls, m)`, `returnToShelf(label, m)`,
+  `invariants()` (asserts `Roll_Length >= 0`, `Σ Available == Wash+Unwash+InWash`,
+  and the three-level sum). Every Deluge/allocator change is ported here and
+  checked against a hand-worked number first. **Pattern:** `tools/receive-model.js`
+  (exists — 15 KB, the issue/receive migration's reference model) — same shape,
+  same `test()` + queue runner.
+- **The regression guard is the same everywhere:** seed one roll = the old
+  scalar, assert byte-identical output against today. Only then add multi-roll
+  cases, each with a hand-verified expected number.
+- `tools/dgscan.js` (exists) on every touched `.dg`.
+
+---
+
+## Open questions
+
+**Blocking Step 0 (Step 0 will not close until answered):**
+
+- **OQ5 — who splits a seed roll.** After backfill every lot has one roll. When
+  the store finds it is really three, what do they edit — a Creator subform
+  view on `Raw_Material_Lot`, or a screen in the store widget? A Creator
+  subform is zero build but every split is a raw record edit with no validation
+  (`Σ Roll_Length == Wash+Unwash+In_Wash` not enforced). A widget screen is
+  build but can enforce the invariant on save. **Step 1 physically cannot start
+  without this** — it is the tool the labelling uses.
+
+**Blocking Step 1:**
+
+- **OQ1 — printed roll width.** `Fabric_Piece` carries `Piece_Width_Cm`;
+  `Lot_Rolls` puts width on the lot. **Query the real `Fabric_Piece` data
+  first:** if every piece of a lot shares a width (expected — the print table is
+  a fixed width), lot-level `Width` is right and the migration is lossless. If
+  widths vary within a lot, `Width` moves onto the roll and check-1's `perRow`
+  reads it per roll.
+- **OQ4 — roll label scheme.** `<Lot_Number>-R<n>` proposed. Must survive a lot
+  split/merge, be short enough to write on a roll end, and not collide when a
+  seed roll `L2-R1` is split into `L2-R1`..`L2-R3`.
+
+**Blocking Step 3:**
+
+- **OQ2 — multi-cut-size order across rolls.** RESOLVED: shortest-roll-first
+  (see "Which roll gets named"), one cut size at a time, in demand order. The
+  allocator does this. Revisit if it strands too much.
+
+**Blocking Step 4:**
+
+- **OQ3 — remnant threshold.** A usable tail long enough for a marker row of its
+  own becomes a `Lot_Rolls` row (`Origin = "Remnant"`); anything smaller stays
+  `Waste_Master`. `saveWasteFromCutting` makes this call. Pin the exact number
+  when Step 4 lands.
+
+---
+
+## Not covered (follow-up)
+
+- **Printed-fabric creation** — the print flow writing `Lot_Rolls` rows
+  (`Origin = "Printed"`, one per table run). This doc only makes the
+  *consumption* side treat printed cloth as short rolls; until the print flow is
+  updated, printed lots get rolls from the `Fabric_Piece` migration.
+- **Print-base chaining** — `plainBaseStock` in the allocator, unchanged.
+- **Per-roll wash state** — deliberately excluded. Washing follows the cut, not
+  the roll, so a roll's length is state-agnostic and the lot's columns stay the
+  single source of truth. Revisit only if the floor starts holding one lot
+  half-washed for long periods.
+
+---
+
+## Revision history
+
+### Rev 1 → Rev 2 (self-review against the code)
+
+| Draft 1 said | Reality | Fixed |
+|---|---|---|
+| `Wash+Unwash+In_Wash == Σ Roll_Length` is the invariant | ignores `In_Transit_Qty` and `Disputed_Qty`; breaks on the first issue | rolls = **shelf only**; issued/disputed cloth is not a roll |
+| 3 Deluge writers affected | **13 real + 3 no-length + 1 read-only + 1 dead** touch lot quantity | full table in Group B, build staged around it |
+| `Wash_Quantity` becomes derived from rolls | written by many functions and mirrored onto `Raw_Material` | wash columns stay **authoritative and unchanged**; rolls are a parallel fact |
+| Rolls stateless, "assume washed metres spread proportionally" | that approximation is the exact `Fabric_Piece.State` fault the allocator documents | rolls stateless **because washing follows the cut** — no state to disagree |
+| Two levels to keep in step | three (`Raw_Material` mirrors the lot) | `verifyLotSync` gains the roll check |
+| `Fabric_Piece` migration lossless | it carries `State` and `Piece_Width_Cm` | called out as lossy; width is OQ1 |
+| Backfill is a script | it is a **stocktake** — the rack must be labelled | Step 1 is physical work; steps 2–4 ship against seed rolls first |
+
+### Rev 2 → Rev 3 (external gap analysis, each verified against the code)
+
+| Gap | Verified | Fix |
+|---|---|---|
+| `resolveStockDispute.dg` missing from writers | **valid** — writes `Raw_Material.Wash_Quantity` / `.Disputed_Qty` on `Store_Correction`; flagged legacy in `CLAUDE.md` | added to Group B as **delete, don't migrate**; Step 0 gate |
+| `lotIsPieces`/`lotPieces`/`lotGreigePieces` don't exist | **rejected** — all three at `lot-allocator.js:108/129/141` | no change |
+| `Fabric_Piece` 8w/13r count invented | **valid** | replaced with the verified 4-writer / 4-reader / 5-comment table in Group D |
+| `Fabric_Piece_Report` is a Creator Report not `.dg` | **valid** | clarified; `Lot_Rolls_Report` created the same way in Step 0 |
+| admin widget runs the same allocator, not in blast radius | **valid** — `app/admin/` loads `lot-allocator.js`, calls `applyLotAllocation` | added as Group A item 4b; `getAdminCalculation` payload gains `rolls[]` |
+| OQ5 (split UX) vs Step 1 contradiction | **valid** | OQ5 is now an explicit Step 0 gate; Step 1 references it |
+| `Width` backfill not in build steps | **valid** | Step 1 now sets `Width = Fabric_Width_Inches × 2.54` on every lot |
+| no negative-`Roll_Length` guard | **valid** | "The roll-length invariant" section: `>= 0`, cap-and-error on decrement, re-read for concurrency |
+| `saveWasteFromCutting` not in blast radius | **valid** | added as Group A item 6 (reader, `Waste_Master.Source_Roll`) |
+| `receive-model.js` may not exist | **rejected** — exists, 15 KB | pattern reference kept, marked "exists" |
+
+### Rev 3 → Rev 4 (external gap analysis pass 2, each verified against the code)
+
+| Gap | Verified | Fix |
+|---|---|---|
+| `resolvePurchaseShortages` classified as a roll-creating writer | **valid** — it only *reads* `Wash_Quantity` (`:76`) and writes `Material_Exception.Status = "Resolved"` | moved to **NO ROLL CHANGE** in Group B; dropped from Step 6 |
+| `perRowFor` "unchanged" glosses over lot-level width | **valid** — `allocateMaterial` builds one `fab.fabricWidthCm` per *material* (`:573`); two lots of different width break it | Group A item 3 sub-point; **OQ1 now blocks Step 3** as well as Step 1; parity gains a different-width two-lot case |
+| `applyFabricOverride` not in blast radius | **valid** — refuses hand-edits on Pieces lots (`:1391-1403`); same ambiguity for multi-roll lots | added as Group A item 3b — guard widens to refuse multi-roll hand-edits |
+| `chooseLotForOrder` ranks by `wash+unwash`, counts unusable short rolls | **valid but minor** — `covers` is still the gate; ranking is a heuristic | Group A item 3 sub-point — ranking metric to change to usable-roll-capacity, decided in Step 3 |
+| `getStoreIssueHistory` / `getSupervisorProductionHistory` read lot data, need roll context | **valid, display-only** — read `Issue_Lines.Lot` (`:387-411`) | added as Group A item 7 — surface the roll label once Step 5 stamps it |
+
+### Rev 4 → Rev 5 (external gap analysis pass 3, each verified against the code)
+
+| Gap | Verified | Fix |
+|---|---|---|
+| Backfill formula `Roll_Length = Piece_Length_Cm / 100` drops `Piece_Count` | **valid, critical** — `receiveFromPrint` writes `Piece_Count > 1` (`:521`), allocator consumes one count at a time (`:322`); a 300cm×4 row is 12 m, not 3 | Group D F1 note + Step 1: **each `Fabric_Piece` → `Piece_Count` roll rows**; `verifyLotSync` gate on Step 1 |
+| `Issue_Lines.Roll_Label` + `Print_Job.Source_Roll` missing from Step 0 schema | **valid** — the doc relies on the label being on the issue line for wind-back and history; no field, no write | added both to Step 0; Step 0 gate note |
+| `issueMaterialsHandover.dg` missing from Step 5 | **valid** — `issueMaterialsApply` ignores `issueLines` (`:39`); `issueMaterialsHandover` inserts `Issue_Lines` (`:221-245`) | added to Group B and Step 5 — **both** functions, same pass; `apply` decrements length, `handover` stamps the label |
+| single-roll `applyFabricOverride` leaves `ln.rolls` stale | **valid** — rebuilds from a clone, scales `ln.qty`, never touches `ln.rolls` (`:1446`) | Group A item 3b: single-roll edit also sets `ln.rolls[0].metres = ln.qty` and clamps to `Roll_Length` |
+| `spend()` needs an in-memory roll ledger | **valid, load-bearing** — `spend()` decrements `lotLeft`/`lot.pieces`/etc. so the next order doesn't double-claim (`:890`, its own comment); rolls need the same | Group A item 3 first sub-point: `spend()` deducts `roll.Roll_Length`, carries `rollLeft`; parity gains a two-orders-race-one-roll case |
+| `getProductionWidgetData.dg` inline waste copy missing from Step 4 | **valid** — inline `ewPerRowR = (ewFabWcm/ewCutW).floor()` (`:~925-1070`), the "ARITHMETIC ONLY" fold-in | Group A item 5 + Step 4: upgrade both in the same pass; cross-check parity |
+| Group B said "1 read-only", table had 2; `reconcileRawMaterial` mislabelled writer | **valid** — `verifyLotSync` + `reconcileRawMaterial` both read-only reports; `reconcileRawMaterial` never writes `Fabric_Piece` (`:53`); `syncPurchaseInflow` never touches a lot (0 refs) | Group B regrouped into "roll decision (10+1 dead) / read-only reports (2) / no change (5)"; Group D → 3 writers, 5 readers |
+| `shortReasonFor` `nofit` message reports lot total not longest roll | **valid** — `have: round2(Number(l.wash) || 0)` (`:~1620`); would say "L2 has 20 m, need 12 m" over two 10 m rolls | Group A item 3 sub-point: `have` = longest roll's length |
+
+---
+
+## Relationship to the issue/receive migration
+
+`docs/issue-receive-model-migration.md` is **independent and ships first** —
+it touches `Material_Requirement` / `Issue_Lines` / watermarks / the JS read
+path, none of which depends on how a lot's cloth is shaped. This work builds on
+top: Step 5 edits `issueMaterialsApply.dg`, which that migration created.

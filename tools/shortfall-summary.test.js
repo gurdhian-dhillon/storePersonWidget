@@ -207,6 +207,48 @@ test('S8 a fully-issued fabric material adds no shortfall', () => {
   assert.strictEqual(s.toBuy.length, 0, 'nothing outstanding -> no buy row');
 });
 
+// ---- 7. a PRINTED (Pieces-form) lot with ample stock raises NO PO --------
+// The regression: a Block Print lot holds 641 m across short pieces, an order
+// needs 2.1 m / a few cuts, the card says "All in stock" — but the metres-
+// balance buy calc saw lotLines[].qty == 0 (Pieces lots yield pieces, not roll
+// metres) and raised a false "short by 1.05 m". Driving the calc off
+// orderOutcomes (the allocator's own verdict) fixes it: every order placed
+// 'ready' with shortPieces 0 -> no PO.
+test('S9 printed Pieces lot, order fully covered -> no false PO', () => {
+  const mat = {
+    materialId: 'PR-1', material: 'Linen / Block Print / Liliana', sku: 'PR-1', unit: 'Mtr',
+    isFabric: true,
+    availableStock: 641, unwashedStock: 0, inWashStock: 0, poCoveredQty: 0,
+    fabricWidthCm: 314.96,
+    requiredPieces: 4, issuedPieces: 0,
+    cuts: [{ cutW: 100, cutL: 70, reqPieces: 4, issPieces: 0 }],
+    cutsJson: '[]',
+    // one Pieces-form lot: many short washed pieces, well over the demand
+    lots: [{
+      lotId: 'LP', lotNumber: 'LP', blocked: false,
+      wash: 641, unwash: 0, inWash: 0, form: 'Pieces',
+      pieces: Array.from({ length: 20 }, (_, i) => ({
+        pieceId: 'FP' + i, lengthCm: 320, widthCm: 314.96, count: 1, state: 'Wash', carton: ''
+      }))
+    }],
+    wasteStock: [],
+    lines: [{
+      mrqId: 'MRQ-P1', planId: 'PP1', salesOrder: 'SO-9', planItemId: 'IT-P1',
+      item: 'Napkin', isRemake: false, supervisorId: 'S1',
+      required: 2.1, issued: 0, cutW: 100, cutL: 70, reqPieces: 4, issPieces: 0,
+      issuedLot: '', issuedLotNo: '', reason: ''
+    }],
+    openExceptions: []
+  };
+  const data = [{ supervisorId: 'S1', supervisorName: 'Suraj', materials: [mat] }];
+  applyLotAllocation(data);
+  const s = buildShortfallSummary(data);
+  assert.strictEqual(s.toBuy.length, 0,
+    'ample printed stock, order covered -> NO buy row (got qty ' +
+    (s.toBuy[0] && s.toBuy[0].qty) + ')');
+  assert.strictEqual(s.toWash.length, 0, 'nothing to wash either');
+});
+
 // ----------------------------------------------------------------------------
 console.log('\n========================================');
 console.log('shortfall-summary: ' + passed + ' passed, ' + failed + ' failed');

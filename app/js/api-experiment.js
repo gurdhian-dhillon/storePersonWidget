@@ -259,6 +259,40 @@ var ApiExperiment = (function () {
                 (lotsByMat[matId] = lotsByMat[matId] || []).push(l);
             });
 
+            // PHYSICAL ROLLS of a lot — the Lot_Rolls subform, nested in the
+            // parent record from getRecords (field_config 'all'). One row per
+            // physical roll: length only, no per-roll wash state (fabric width
+            // is fixed per SKU, so it lives on the lot, not the roll).
+            //
+            // For a SEED-ROLL lot (backfill: one roll = the lot's total metres)
+            // this reproduces the old scalar behaviour exactly — the allocator's
+            // per-roll capacity Σ floor(rollLen/cutL) over one roll equals the
+            // old floor(totalMetres/cutL). Multi-roll only bites once real
+            // split data exists, which it does not yet (dummy data).
+            //
+            // FIELD NAMES verified against a live row: Roll_Label, Roll_Length
+            // (string), Roll_Status, Origin, Source_Receipt, ID. The lot's
+            // width field is `Width1`, NOT `Width` — Creator suffixed it.
+            function readRolls(l) {
+                var raw = l.Lot_Rolls;
+                if (!Array.isArray(raw)) return [];
+                var out = [];
+                raw.forEach(function (rr) {
+                    var status = str(rr.Roll_Status).trim() || 'Available';
+                    if (status === 'Consumed') return; // off the shelf, not cuttable
+                    var len = num(rr.Roll_Length);
+                    if (len <= 0) return;
+                    out.push({
+                        rollId: String(rr.ID),
+                        label: flat(rr.Roll_Label),
+                        length: len,
+                        status: status,
+                        origin: str(rr.Origin).trim() || 'Purchased'
+                    });
+                });
+                return out;
+            }
+
             // Waste_Master (available) grouped by SKU/material id, plus
             // per-piece lot + carton maps.
             var wasteByMat = {};
@@ -423,6 +457,8 @@ var ApiExperiment = (function () {
                         lrWash = pieceMtr; // Pieces lot's issuable stock is its washed pieces
                     }
 
+                    var lrRolls = readRolls(l);
+
                     // Empty lot is not a choice — unless its cloth is at the wash.
                     if (lrWash > 0 || lrUnwash > 0 || lrInWash > 0) {
                         out.push({
@@ -434,7 +470,14 @@ var ApiExperiment = (function () {
                             unwash: lrUnwash,
                             inWash: lrInWash,
                             form: form,
-                            pieces: lrPieces
+                            pieces: lrPieces,
+                            // Physical rolls, shelf only. Σ length should equal
+                            // wash+unwash+inWash for a healthy lot (verifyLotSync
+                            // checks this server-side). A lot with no Lot_Rolls
+                            // rows yet (pre-backfill) gets [] and the allocator
+                            // falls back to the scalar path — see lot-allocator.
+                            rolls: lrRolls,
+                            width1: num(l.Width1)
                         });
                     }
 
@@ -691,8 +734,41 @@ var ApiExperiment = (function () {
         }));
     }
 
+    // ---- subform inspector ----------------------------------------------
+    // A subform comes back NESTED inside its parent record from getRecords
+    // (field_config 'all'), as an array of row objects. Their field names are
+    // not guessable — Creator may nest lookups, append zc_display_value, rename.
+    // Dump the first lot that actually HAS a Lot_Rolls row so the parser is
+    // written against reality.
+    //   ApiExperiment.rollKeys()
+    function rollKeys() {
+        if (!have()) { console.warn('[api-experiment] getRecords not available'); return; }
+        return getAll(RPT.lots, null).then(function (r) {
+            var withRolls = null;
+            var sub = null;
+            for (var i = 0; i < r.rows.length; i++) {
+                var lr = r.rows[i];
+                var cand = lr.Lot_Rolls || lr.Lot_Roll || lr.Rolls || lr.LotRolls;
+                if (cand && cand.length) { withRolls = lr; sub = cand; break; }
+            }
+            if (!withRolls) {
+                console.log('[api-experiment] no lot has a Lot_Rolls row yet — ' +
+                    'run the backfill first. Parent keys of row 0:',
+                    r.rows[0] ? Object.keys(r.rows[0]).sort().join(', ') : '(no lots)');
+                return { parentKeys: r.rows[0] ? Object.keys(r.rows[0]).sort() : [], rollKeys: [], sample: null };
+            }
+            console.log('%c[Lot_Rolls] parent lot ' + withRolls.ID + ' has ' + sub.length + ' roll row(s)', 'font-weight:bold');
+            console.log('  parent keys:', Object.keys(withRolls).sort().join(', '));
+            console.log('  roll[0] keys:', Object.keys(sub[0]).sort().join(', '));
+            console.log('  roll[0] sample:', sub[0]);
+            console.log('  all roll rows:', JSON.stringify(sub, null, 2));
+            return { parentKeys: Object.keys(withRolls).sort(), rollKeys: Object.keys(sub[0]).sort(), sample: sub[0] };
+        });
+    }
+
     return {
         run: run, compare: compare, assemble: assemble, keys: keys,
+        rollKeys: rollKeys,
         _getAll: getAll, _reports: RPT
     };
 })();

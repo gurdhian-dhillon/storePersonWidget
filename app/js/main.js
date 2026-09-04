@@ -2290,17 +2290,11 @@ function buildShortfallSummary(data) {
                     openExceptions: (m.openExceptions || []).slice(),
                     // FABRIC-ONLY, for the buy calc. The allocator writes the
                     // same `orderOutcomes` onto every row of a material — one
-                    // entry per order it tried to place, carrying why:'skipped'
-                    // + needMetres for the ones no single lot could take. Taken
-                    // once (first row that mentions the material); it is the same
-                    // array on all of them.
+                    // entry per order it tried to place. `why:'skipped'` = no
+                    // lot took it; `shortPieces > 0` = a lot took it but fell
+                    // short. Both are a PO gap; anything else is covered (or a
+                    // wash). Taken once — it is the same array on every row.
                     orderOutcomes: (m.orderOutcomes || []).slice(),
-                    // What the allocator actually committed to lots, in metres.
-                    // Σ over lotLines. The gap between demand and this is the
-                    // shortfall — stranded greige and skipped orders both.
-                    placeableMetres: round2((m.lotLines || []).reduce(function (t, ln) {
-                        return t + (Number(ln.qty) || 0);
-                    }, 0)),
                     fabricWidthCm: Number(m.fabricWidthCm) || 0
                 };
             }
@@ -2412,58 +2406,84 @@ function buildShortfallSummary(data) {
         var poRaisedThisSession = requestState(e, 'buy', '') === 'open';
 
         if (e.isFabric) {
-            // FABRIC: short = what the allocator could not place on a single lot.
+            // FABRIC: a PO is raised ONLY for what the ALLOCATOR itself could
+            // not seat. Not a metres balance — a metres balance over a printed
+            // (Pieces-form) lot is meaningless (five 3 m pieces are not 15 m of
+            // cuttable cloth), and that is exactly what raised a false 1.05 m
+            // "short" over a rack holding 641 m.
             //
-            // Under the one-lot rule an order is issued off ONE lot, so cloth
-            // spread thin across lots — 4 m greige here, 3 m washed there — is
-            // real metres that cannot complete any order. It must NOT count as
-            // owned, or the screen says "enough cloth" over an order that can
-            // never issue. The allocator already worked this out at load, over
-            // the whole requirement set: `placeableMetres` is what it committed
-            // to lots, and every order it could not seat is why:'skipped' in
-            // `orderOutcomes` with the metres it needed.
+            // `orderOutcomes` is the allocator's per-order verdict, computed
+            // once at load over the WHOLE requirement set. Per order:
+            //   why 'ready' / 'pinned'  + shortPieces 0  -> fully covered, no PO
+            //   why 'afterWash'         + shortPieces 0  -> a wash, not a PO
+            //   why 'skipped'                            -> no lot at all
+            //   shortPieces > 0 (any why)                -> lot took it, still
+            //                                               short by that many
             //
-            // demandMetres is rebuilt as WHOLE MARKER ROW-SETS from outstanding
-            // pieces — the same rounding issueMaterials does — so a PO for the
-            // gap yields complete cut-piece sets, not a fraction of a row short.
+            // So the PO gap is: Σ over orders that were skipped OR left short,
+            // of the metres for the pieces still owed — rounded up to whole
+            // marker row-sets so the cloth ordered yields complete sets.
             //
-            // This figure is issue-invariant: handing an order over drops its
-            // pieces from demand AND the washed metres it took from placeable by
-            // the same amount, so the shortfall does not move. That is the whole
-            // point — issuing for one supervisor must not make another's
-            // shortage grow or shrink.
+            // Issue-invariant: an order handed over leaves `orderOutcomes`
+            // covered (its requirement pieces are issued, the allocator seats
+            // the rest), so the gap does not move as material goes out.
             var fw = Number(e.fabricWidthCm) || 0;
-            var byCut = {};
+            var perRowFab = function (cutW) {
+                var cw = Number(cutW) || 0;
+                return (fw > 0 && cw > 0 && fw >= cw) ? Math.floor(fw / cw) : 0;
+            };
+
+            // Cut length per plan, so a shortfall in PIECES can be turned into
+            // metres. orderOutcomes carries pieces + planId; the cut geometry is
+            // on the lines.
+            var cutByPlan = {};
             (e.lines || []).forEach(function (l) {
+                var pid = String(l.planId || '');
+                if (!pid) return;
                 var cw = Number(l.cutW) || 0, cl = Number(l.cutL) || 0;
-                if (cw <= 0 || cl <= 0) return;
-                var ck = cw + 'x' + cl;
-                var c = byCut[ck] || (byCut[ck] = { cutW: cw, cutL: cl, out: 0 });
-                var outstanding = (Number(l.reqPieces) || 0) - (Number(l.issPieces) || 0);
-                if (outstanding > 0) c.out += outstanding;
-            });
-            var demandMetres = 0;
-            Object.keys(byCut).forEach(function (ck) {
-                var c = byCut[ck];
-                var perRow = (fw > 0 && c.cutW > 0 && fw >= c.cutW)
-                    ? Math.floor(fw / c.cutW) : 0;
-                if (perRow > 0 && c.out > 0) {
-                    demandMetres += Math.ceil(c.out / perRow) * c.cutL / 100;
-                } else if (c.out > 0) {
-                    // No usable geometry — fall back to the metres balance for
-                    // this cut, mirroring the allocator's own fallback.
-                    demandMetres += c.out; // 1 m per piece is the crudest guard
+                if (cw > 0 && cl > 0 && !cutByPlan[pid]) {
+                    cutByPlan[pid] = { cutW: cw, cutL: cl };
                 }
             });
-            demandMetres = round2(demandMetres);
+
+            // orderOutcomes is written by the allocator onto the material
+            // object; byMat stashed it once (first row that mentioned the
+            // material — it is the same array on every row).
+            var outcomes = e.orderOutcomes || [];
+
+            var shortMetres = 0;
+            var shortSeenPlans = {};
+            outcomes.forEach(function (o) {
+                var owedPieces = 0;
+                if (o.why === 'skipped') {
+                    owedPieces = Number(o.pieces) || 0;
+                } else {
+                    owedPieces = Number(o.shortPieces) || 0;
+                }
+                if (owedPieces <= 0) return;
+                var pid = String(o.planId || '');
+                var geo = cutByPlan[pid];
+                if (geo) {
+                    var pr = perRowFab(geo.cutW);
+                    if (pr > 0) {
+                        shortMetres += Math.ceil(owedPieces / pr) * geo.cutL / 100;
+                    } else if (Number(o.needMetres) > 0) {
+                        shortMetres += Number(o.needMetres);
+                    }
+                } else if (Number(o.needMetres) > 0) {
+                    // No cut geometry for this plan — fall back to the
+                    // allocator's own metres figure for the order.
+                    shortMetres += Number(o.needMetres);
+                }
+                if (pid) shortSeenPlans[pid] = true;
+            });
+            shortMetres = round2(shortMetres);
 
             // e.needed drives the dialog's "Still needed" line and the raise
-            // payload. For fabric it is the outstanding demand in metres.
-            e.needed = demandMetres;
+            // payload. For fabric it is the metres the PO has to cover.
+            e.needed = shortMetres;
 
-            var buyQty = round2(demandMetres -
-                (Number(e.placeableMetres) || 0) -
-                (Number(e.poCovered) || 0));
+            var buyQty = round2(shortMetres - (Number(e.poCovered) || 0));
 
             if (buyQty > 0.0001 && !poRaisedThisSession) {
                 toBuy.push({ e: e, qty: buyQty, kind: 'buy' });

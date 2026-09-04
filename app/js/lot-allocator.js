@@ -208,16 +208,37 @@ function lotFill(lot, demands, fab, greige) {
         return { wasteId: r.wasteId, width: r.width, length: r.length,
                  pieces: Number(r.pieces) || 0 };
     });
-    var metres = round2(Number(lot.wash) || 0);
-    if (greige) metres = round2(metres + (Number(lot.unwash) || 0));
 
-    // A PIECES LOT HAS NO CONTINUOUS CLOTH. Its metres are a maintained sum kept
-    // for valuation and for ranking one lot against another — nothing plans a
-    // cut off them, because five 3.00 m pieces are not 15 m of usable cloth.
-    // Fresh yield comes from the pieces below instead, so the metres budget is
-    // taken out of play here to make it impossible to spend twice.
-    var pcs = lotIsPieces(lot) ? lotPieces(lot) : [];
-    if (lotIsPieces(lot)) metres = 0;
+    // WHETHER THIS LOT CAN COVER THE ORDER ONCE ITS GREIGE IS WASHED is a
+    // LOT-LEVEL question — washing moves a metres figure between the lot's wash
+    // columns and never changes a roll's length. So `greige` here only widens
+    // the wash-state gate below; it does NOT add cloth to any roll.
+    var washMetres = round2(Number(lot.wash) || 0);
+    var gateMetres = greige
+        ? round2(washMetres + (Number(lot.unwash) || 0) + (Number(lot.inWash) || 0))
+        : washMetres;
+
+    // THE PHYSICAL ROLLS — a working copy, drained as this fill places rows so
+    // `covers` can be tested without touching the lot. Shortest first, tie on
+    // length broken by Roll_Label, so short rolls are cleared before a long one
+    // is nibbled (the store consolidates stock into fewer, longer rolls). A
+    // roll below one marker row of the cut contributes nothing and is skipped.
+    //
+    // Printed cloth is not a special case: its lot simply has short rolls, and
+    // they drain shortest-first like any other.
+    var rollWork = (lot.rolls || [])
+        .filter(function (rr) {
+            return String(rr.status || 'Available') !== 'Consumed' &&
+                   (Number(rr.length) || 0) > 0;
+        })
+        .map(function (rr) {
+            return { rollId: String(rr.rollId), label: String(rr.label || ''),
+                     length: round2(Number(rr.length) || 0) };
+        });
+    rollWork.sort(function (a, b) {
+        if (a.length !== b.length) return a.length - b.length;
+        return String(a.label) < String(b.label) ? -1 : (String(a.label) > String(b.label) ? 1 : 0);
+    });
 
     var owed = demands.map(function (d) { return Math.max(0, Number(d.pieces) || 0); });
     var fromWaste = demands.map(function () { return 0; });
@@ -265,93 +286,70 @@ function lotFill(lot, demands, fab, greige) {
         picksPer[bi][rem[br].wasteId] = (picksPer[bi][rem[br].wasteId] || 0) + use;
     }
 
-    // ---- 2. fresh cloth ----
+    // ---- 2. fresh cloth, ONE ROLL AT A TIME ----
     //
-    // TWO SHAPES, AND THE DIFFERENCE IS THE WHOLE POINT OF THIS FILE.
+    // A lot is a set of physical rolls, not a continuous metres pool. Each roll
+    // yields floor(rollLen / cutL) whole marker rows and the tail below one cut
+    // length is stranded — ON EVERY ROLL. Ten metres in one roll yields more
+    // than ten metres split 8 + 2 against a 10 m marker: the 2 m roll yields
+    // nothing. Treating the lot's metres as one pool credits rows nobody can
+    // cut, closes a requirement early, and strands the item at
+    // Awaiting_Material with Issue doing nothing — the silent-loss family
+    // CLAUDE.md records. This is the whole reason the model went to rolls.
     //
-    // A Roll lot is continuous: its metres divide into whole marker rows and any
-    // row can start where the last one ended.
+    // SHORTEST ROLL FIRST (rollWork is pre-sorted), drained in whole marker
+    // rows until it can give no more, then the next-shortest. Short rolls clear
+    // before a long one is touched, which consolidates the rack into fewer,
+    // longer rolls over time.
     //
-    // A Pieces lot is not. Each piece is cut on its own, so its yield is
-    // floor(len/cutL) rows and the tail below one cut length is stranded — on
-    // EVERY piece. Three 3.00 m pieces are 9.00 m and yield 15 rows of a 55 cm
-    // cut, not the 16 that 9.00 continuous metres would. Dividing the metres
-    // would credit a row nobody can cut, the requirement would close a piece
-    // early, and the item would sit at Awaiting_Material for ever with Issue
-    // doing nothing — the exact family of silent-loss bugs CLAUDE.md records.
-    var pieceTaken = {};
+    // THE WASH GATE BOUNDS THE LOOP, not just the result. `gateBudget` starts
+    // at the lot's washed metres (or wash+greige if `greige`) and every row
+    // placed draws it down. When it runs out, no more cloth is cut — exactly as
+    // the old scalar `metres` pool did. So a lot with 50 m of rolls but 0 m
+    // washed places NOTHING today (greige false) and `covers` is false, rather
+    // than cutting metres it cannot wash.
+    //
+    // `rollLinesPer` records, per demand, which rolls it cut and how many
+    // metres off each — this is what the issue line carries so the fan
+    // decrements the right roll.
+    var rollLinesPer = demands.map(function () { return []; });
+    var gateBudget = round2(gateMetres);
 
-    if (pcs.length) {
-        // Scored the same way remnants are — least waste per cut obtained.
-        // A PIECE IS TREATED AS A MINI-ROLL: we cut exactly what we need
-        // from it, and the remainder goes back on the rack (though not
-        // available for the rest of this session to keep piece provenance clean).
-        var pguard = 0;
-        while (pguard++ < 400) {
-            var pi = -1, pp = -1, pScore = 0, pCap = 0, pTake = 0;
-            demands.forEach(function (d, i) {
-                if (owed[i] <= 0) return;
-                pcs.forEach(function (p, ri) {
-                    if (p.pieces <= 0) return;
-                    var cap = remnantYield(p, d.cutW, d.cutL);
-                    if (cap <= 0) return;
-                    var take = Math.min(cap, owed[i]);
-                    // Score based on taking exactly what we need from ONE piece
-                    var pr = Math.floor(p.width / d.cutW);
-                    var rows = Math.ceil(take / pr);
-                    var lengthCut = rows * d.cutL;
-                    // Score = waste area per usable cut
-                    var score = ((p.width * lengthCut) - (take * d.cutW * d.cutL)) / take;
-                    if (pi < 0 || score < pScore || (score === pScore && take > pTake)) { 
-                        pi = i; pp = ri; pScore = score; pCap = cap; pTake = take; 
-                    }
-                });
-            });
-            if (pi < 0) break;
+    demands.forEach(function (d, i) {
+        if (owed[i] <= 0) return;
+        var pr = perRowFor(fab, d.cutW);
+        var cl = Number(d.cutL) || 0;
+        if (pr <= 0 || cl <= 0) return;
 
-            var d = demands[pi];
-            var p = pcs[pp];
-            var pr = Math.floor(p.width / d.cutW);
-
-            // We only process ONE piece count at a time to keep cut sizes exact
-            var take = Math.min(pCap, owed[pi]);
-            var rows = Math.ceil(take / pr);
-            var lengthCut = rows * d.cutL;
-            var got = Math.min(rows * pr, owed[pi]);
-
-            p.pieces -= 1; // Take one count of this piece
-            var pM = round2(lengthCut / 100);
-
-            owed[pi] -= got;
-            // fromFRESH, not fromWaste: this is raw material
-            fromFresh[pi] += got;
-            freshMetres = round2(freshMetres + pM);
-            metresPer[pi] = round2(metresPer[pi] + pM);
-            
-            pieceTaken[p.pieceId] = (pieceTaken[p.pieceId] || 0) + 1;
-            
-            // Record the cut length for this pieceId
-            if (!piecesPer[pi][p.pieceId]) piecesPer[pi][p.pieceId] = [];
-            piecesPer[pi][p.pieceId].push(lengthCut);
-        }
-    } else {
-        demands.forEach(function (d, i) {
-            if (owed[i] <= 0) return;
-            var pr = perRowFor(fab, d.cutW);
-            var cl = Number(d.cutL) || 0;
-            if (pr <= 0 || cl <= 0) return;
-            var rows = Math.min(Math.ceil(owed[i] / pr),
-                                Math.floor((metres * 100 + 0.0001) / cl));
-            if (rows <= 0) return;
+        for (var ri = 0; ri < rollWork.length && owed[i] > 0 && gateBudget > 0.0001; ri++) {
+            var roll = rollWork[ri];
+            if (roll.length <= 0) continue;
+            // Rows this roll can physically give, AND rows the wash gate still
+            // allows — whichever is smaller.
+            var rowsRoll = Math.floor((roll.length * 100 + 0.0001) / cl);
+            var rowsGate = Math.floor((gateBudget * 100 + 0.0001) / cl);
+            var rowsAvail = Math.min(rowsRoll, rowsGate);
+            if (rowsAvail <= 0) continue;         // roll too short, or gate spent
+            var rowsWant = Math.ceil(owed[i] / pr);
+            var rows = Math.min(rowsWant, rowsAvail);
+            if (rows <= 0) continue;
             var m = round2((rows * cl) / 100);
-            metres = round2(metres - m);
+
+            roll.length = round2(roll.length - m);
+            gateBudget = round2(gateBudget - m);
             freshMetres = round2(freshMetres + m);
             metresPer[i] = round2(metresPer[i] + m);
             var got2 = Math.min(rows * pr, owed[i]);
             owed[i] -= got2;
             fromFresh[i] += got2;
-        });
-    }
+
+            rollLinesPer[i].push({ rollId: roll.rollId, label: roll.label, metres: m });
+        }
+    });
+
+    var rollsCovered = owed.every(function (n) { return n <= 0; });
+    // The loop already respected the gate, so anything placed is within it.
+    var washGateOk = true;
 
     return {
         picks: picks,
@@ -360,13 +358,20 @@ function lotFill(lot, demands, fab, greige) {
         freshMetres: freshMetres,
         metresPer: metresPer,
         picksPer: picksPer,
-        // Which physical pieces this fill would take, and how many of each — in
-        // total and per demand. Both empty for a Roll lot, so nothing downstream
-        // has to branch on the form.
-        pieceTaken: pieceTaken,
-        piecesPer: piecesPer,
-        // Nothing still owing means this lot could serve the whole set alone.
-        covers: owed.every(function (n) { return n <= 0; }),
+        // Which ROLLS this fill would cut, and how many metres off each — per
+        // demand. Empty when there is no fresh cloth to take. The issue line
+        // carries these so the fan decrements the right roll.
+        rollLinesPer: rollLinesPer,
+        // The drained working copy — spend() reads it to mirror the cut onto
+        // the real lot.rolls so the next order sees what is left.
+        rollsAfter: rollWork,
+        // Legacy fields, kept so nothing downstream throws on a missing key.
+        // Printed cloth is now short rolls, not Fabric_Piece — these are always
+        // empty.
+        pieceTaken: {},
+        piecesPer: demands.map(function () { return {}; }),
+        // Nothing still owing (the loop already stayed inside the wash gate).
+        covers: rollsCovered && washGateOk,
         shortBy: owed.reduce(function (a, b) { return a + Math.max(0, b); }, 0)
     };
 }

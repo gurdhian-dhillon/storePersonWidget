@@ -1,0 +1,192 @@
+string seedLotRolls(string dryRun)
+{
+	// ONE-TIME BACKFILL for the lot -> rolls model.
+	//
+	// Every Raw_Material_Lot gets:
+	//   - Width1 set from its material's Fabric_Width_Inches x 2.54 (cm).
+	//     Width is fixed per SKU, so every lot and every roll of a material
+	//     shares it - it lives on the lot, never on the roll.
+	//   - ONE seed Lot_Rolls row: Roll_Length = Wash_Quantity +
+	//     Unwash_Quantity + In_Wash_Qty (all the cloth physically on the
+	//     shelf), labelled "<Lot_Number>-R1", Origin "Purchased",
+	//     Source_Receipt "BACKFILL", Roll_Status "Available".
+	//
+	// After this runs, every lot is one roll = its old scalar, so the
+	// roll-based allocator produces byte-identical numbers to the scalar one.
+	// That is the parity checkpoint. Splitting a seed roll into the real
+	// physical rolls is a later, per-lot job (see docs/lot-rolls-model.md OQ5).
+	//
+	// IDEMPOTENT: a lot that already has a Lot_Rolls row is skipped, so a
+	// second run is safe. Width1 is (re)written every run - it is derived, not
+	// entered, so overwriting it cannot lose anything.
+	//
+	// In_Transit_Qty and Disputed_Qty are DELIBERATELY NOT in the roll length.
+	// Rolls are shelf-only cloth; issued / disputed metres have left the shelf
+	// and are not a roll. The invariant is
+	//   Sum(Roll_Length) == Wash + Unwash + In_Wash   (per lot)
+	// and the check block below reports any lot that fails it.
+	//
+	// dryRun "true" / "yes" / "1" -> report what WOULD happen, write nothing.
+	//
+	// FABRIC_PIECE is not migrated here. Printed cloth held as Fabric_Piece
+	// rows becomes Lot_Rolls in a separate pass once the printed-fabric work
+	// starts; on dummy data there is nothing to migrate.
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase();
+		writeAllowed = true;
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			writeAllowed = false;
+		}
+
+		madeRolls = 0;
+		setWidths = 0;
+		skippedHasRoll = 0;
+		skippedNoMaterial = 0;
+		zeroLengthRolls = 0;
+		mismatchCount = 0;
+		mismatchJson = "";
+		sampleJson = "";
+		sampleCount = 0;
+
+		for each  lotRec in Raw_Material_Lot[ID != 0]
+		{
+			lotId = lotRec.ID;
+			lotNum = ifnull(lotRec.Lot_Number,"").toString().trim();
+
+			// ---- material + width -------------------------------------
+			matId = ifnull(lotRec.Material,"").toString().trim();
+			if(matId == "" || matId.isNumber() == false)
+			{
+				skippedNoMaterial = skippedNoMaterial + 1;
+				continue;
+			}
+
+			widthCm = 0.0;
+			for each  rmW in Raw_Material[ID == matId.toLong()]
+			{
+				wiTxt = ifnull(rmW.Fabric_Width_Inches,"").toString().trim();
+				if(wiTxt != "" && wiTxt.isNumber() == true)
+				{
+					widthCm = wiTxt.toDecimal() * 2.54;
+				}
+			}
+
+			// ---- shelf metres = the seed roll's length ---------------
+			wS = ifnull(lotRec.Wash_Quantity,"0").toString().trim();
+			if(wS == "")
+			{
+				wS = "0";
+			}
+			uS = ifnull(lotRec.Unwash_Quantity,"0").toString().trim();
+			if(uS == "")
+			{
+				uS = "0";
+			}
+			iS = ifnull(lotRec.In_Wash_Qty,"0").toString().trim();
+			if(iS == "")
+			{
+				iS = "0";
+			}
+			shelfMtr = wS.toDecimal() + uS.toDecimal() + iS.toDecimal();
+			shelfMtr = shelfMtr.round(2);
+
+			// ---- already has rolls? ---------------------------------
+			existingRolls = 0;
+			rollSum = 0.0;
+			for each  exR in lotRec.Lot_Rolls
+			{
+				existingRolls = existingRolls + 1;
+				erLen = ifnull(exR.Roll_Length,"0").toString().trim();
+				if(erLen == "")
+				{
+					erLen = "0";
+				}
+				rollSum = rollSum + erLen.toDecimal();
+			}
+			rollSum = rollSum.round(2);
+
+			if(existingRolls > 0)
+			{
+				skippedHasRoll = skippedHasRoll + 1;
+				// Still width-check and invariant-check an already-seeded lot.
+				if(writeAllowed == true && widthCm > 0)
+				{
+					lotRec.Width1 = widthCm;
+					setWidths = setWidths + 1;
+				}
+				diff = (rollSum - shelfMtr).abs();
+				if(diff > 0.01)
+				{
+					mismatchCount = mismatchCount + 1;
+					if(mismatchJson != "")
+					{
+						mismatchJson = mismatchJson + ",";
+					}
+					mismatchJson = mismatchJson + "{\"lot\":\"" + lotNum + "\",\"lotId\":\"" + lotId + "\",\"rollSum\":" + rollSum + ",\"shelfMtr\":" + shelfMtr + "}";
+				}
+				continue;
+			}
+
+			// ---- write width -------------------------------------
+			if(writeAllowed == true && widthCm > 0)
+			{
+				lotRec.Width1 = widthCm;
+				setWidths = setWidths + 1;
+			}
+
+			// ---- create the one seed roll -----------------------
+			if(shelfMtr <= 0)
+			{
+				// An empty lot gets no roll - Sum(Roll_Length) == 0 == shelf,
+				// invariant still holds, and the allocator ignores a lot with
+				// no cuttable cloth anyway.
+				zeroLengthRolls = zeroLengthRolls + 1;
+				continue;
+			}
+
+			rollLabel = lotNum + "-R1";
+			if(lotNum == "")
+			{
+				rollLabel = "LOT" + lotId + "-R1";
+			}
+
+			if(writeAllowed == true)
+			{
+				rRow = Raw_Material_Lot.Lot_Rolls();
+				rRow.Roll_Label = rollLabel;
+				rRow.Roll_Length = shelfMtr;
+				rRow.Roll_Status = "Available";
+				rRow.Origin = "Purchased";
+				rRow.Source_Receipt = "BACKFILL";
+				lotRec.Lot_Rolls.insert(rRow);
+			}
+			madeRolls = madeRolls + 1;
+
+			if(sampleCount < 15)
+			{
+				if(sampleJson != "")
+				{
+					sampleJson = sampleJson + ",";
+				}
+				sampleJson = sampleJson + "{\"lot\":\"" + lotNum + "\",\"label\":\"" + rollLabel + "\",\"length\":" + shelfMtr + ",\"widthCm\":" + widthCm + "}";
+				sampleCount = sampleCount + 1;
+			}
+		}
+
+		modeTxt = "WROTE";
+		if(writeAllowed == false)
+		{
+			modeTxt = "DRY-RUN";
+		}
+
+		res = "{\"mode\":\"" + modeTxt + "\"" + ",\"rollsCreated\":" + madeRolls + ",\"widthsSet\":" + setWidths + ",\"skippedHasRoll\":" + skippedHasRoll + ",\"skippedNoMaterial\":" + skippedNoMaterial + ",\"emptyLotsNoRoll\":" + zeroLengthRolls + ",\"invariantMismatches\":" + mismatchCount + ",\"mismatches\":[" + mismatchJson + "]" + ",\"sample\":[" + sampleJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}
