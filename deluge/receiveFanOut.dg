@@ -1,0 +1,929 @@
+string receiveFanOut(string supervisorId, string payloadJson)
+{
+	// FAN + FINALIZE. Called after receiveHandover has settled the handover
+	// lines. One phase per call, driven by finalizeCursor.ph. Resumable so the
+	// readiness sweep over many plans stays bounded.
+	//
+	// Phases:
+	//   "fan"      - NEW. For each material receiveHandover settled, credit the
+	//                arrived amount to Material_Requirement.Received_Qty
+	//                oldest-requirement-first, dispute the shortfall
+	//                newest-first, and raise one Stock_Dispute per (plan,
+	//                material) with a gap - stamped with Voucher_No. Budgeted by
+	//                material count.
+	//   "vouchers" - recheck Material_Issue.Issue_Status from its lines'
+	//                Line_Status. VOUCHER_BUDGET per call.
+	//   "items"    - readiness sweep over "plansTouched". BUDGETED BY Plan_Item
+	//                COUNT. Verbatim from the old receiveMaterials.
+	//   "transfer" - postTransferOrders("auto"), its own try/catch.
+	//   "notify"   - build the dispute digest from "disputeIds" and send the two
+	//                mails, once.
+	//
+	// payloadJson:
+	// {
+	//   "perMaterial":  [ {"materialId":"123","arrived":9.5,"short":0.5,
+	//                      "voucher":"SIV-00042","remark":"..."} ],
+	//   "vouchers":     ["77","78"],          // Material_Issue ids, for the "vouchers" phase
+	//   "plansTouched": ["50","51"],
+	//   "disputeIds":   ["111","222"],       // union of waste + fan disputes so far
+	//   "finalizeCursor": {}                  // {} to start
+	// }
+	//
+	// RETURNS: { errors, disputeIds (new this call), finalizeCursor, finalizeDone }
+	//
+	// receiveFanOut NEVER re-nets open disputes - receiveHandover already did
+	// that when it computed "short". "short" here is final.
+	errJson = "";
+	newDispIdsJson = "";
+	dispRows = List();
+	finalizeCursorJson = "{\"ph\":\"done\"}";
+	finalizeDone = true;
+	try
+	{
+		supId = supervisorId.trim().toLong();
+		inp = payloadJson.toMap();
+		perMatIn = ifnull(inp.get("perMaterial"),"[]").toString().toJSONList();
+		plansTouchedIn = ifnull(inp.get("plansTouched"),"[]").toString().toJSONList();
+		disputeIdsIn = ifnull(inp.get("disputeIds"),"[]").toString().toJSONList();
+		fnCur = Map();
+		fnRawTxt = ifnull(inp.get("finalizeCursor"),"").toString().trim();
+		if(fnRawTxt != "" && fnRawTxt != "{}")
+		{
+			fnCur = fnRawTxt.toMap();
+		}
+
+		FAN_BUDGET = 60;
+		VOUCHER_BUDGET = 60;
+		ITEM_BUDGET = 250;
+
+		ph = ifnull(fnCur.get("ph"),"fan").toString().trim();
+		if(ph == "")
+		{
+			ph = "fan";
+		}
+		info "receiveFanOut supId=" + supId + " ph=" + ph + " perMat=" + perMatIn.size() + " plans=" + plansTouchedIn.size();
+
+		// SO number per plan - for dispute messages and the notify digest.
+		soNoByPlan = Map();
+		for each  ptRaw in plansTouchedIn
+		{
+			ptTxt = ifnull(ptRaw,"").toString().trim();
+			if(ptTxt != "" && ptTxt.isNumber() == true && soNoByPlan.get(ptTxt) == null)
+			{
+				soTxtP = "";
+				for each  ppRec in Production_Planning[ID == ptTxt.toLong()]
+				{
+					ppSoTxt = ifnull(ppRec.Sales_Order,"").toString().trim();
+					if(ppSoTxt != "")
+					{
+						for each  soRec in Sales_Order[ID == ppSoTxt.toLong()]
+						{
+							soTxtP = ifnull(soRec.Sales_Order,"").toString().replaceAll("\"","'");
+						}
+					}
+				}
+				soNoByPlan.put(ptTxt,soTxtP);
+			}
+		}
+
+		if(ph == "fan")
+		{
+			//==========================================================
+			// FAN one budget's worth of materials.
+			//==========================================================
+			vouchersScope = ifnull(inp.get("vouchers"),"[]").toString().toJSONList();
+			mi = 0;
+			miS = ifnull(fnCur.get("mi"),"0").toString().trim();
+			if(miS != "" && miS.isNumber() == true)
+			{
+				mi = miS.toLong();
+			}
+
+			// planId -> "1" open / "0" closed, filled lazily, one query per
+			// DISTINCT plan across every material this call fans. See the note
+			// where it is read.
+			planOpenCache = Map();
+
+			//==========================================================
+			// WHAT STILL HAS TO BE FANNED, READ OFF THE LINES THEMSELVES.
+			//
+			// Each line carries a watermark - Fanned_Qty is how much of its
+			// Received_Qty has already been credited to requirement rows,
+			// Dispute_Raised_Qty how much of its Disputed_Qty already has a
+			// Stock_Dispute. So what is left to do is simply
+			//     Received_Qty - Fanned_Qty      and
+			//     Disputed_Qty - Dispute_Raised_Qty
+			// summed per material over the vouchers being confirmed. This is the
+			// same idiom postTransferOrders uses with Settled/Transferred, and it
+			// is the ONLY formulation that is correct in all four cases:
+			//
+			//   - the fan died: the lines are unstamped, so a re-press applies
+			//     exactly what never landed;
+			//   - the receipt is repeated: the lines are stamped, so it applies
+			//     nothing;
+			//   - handovers are confirmed SEPARATELY (the normal case): each
+			//     press fans only its own lines. Comparing a scope-limited line
+			//     total against the all-time Material_Requirement.Received_Qty
+			//     under-credited here - the second handover saw the first one's
+			//     credit and clamped itself to zero;
+			//   - a Store_Correction has since reduced Issued_Qty: the watermark
+			//     is per line and does not care what the requirement now holds.
+			//
+			// The values are gathered BEFORE the per-material loop so the scope
+			// vouchers are walked once per call, not once per material.
+			toCreditByMat = Map();
+			toDisputeByMat = Map();
+			for each  vScope in vouchersScope
+			{
+				vsTxt = ifnull(vScope,"").toString().trim();
+				if(vsTxt != "" && vsTxt.isNumber() == true)
+				{
+					for each  vsRec in Material_Issue[ID == vsTxt.toLong()]
+					{
+						for each  vsLn in vsRec.Issue_Lines
+						{
+							vsMat = ifnull(vsLn.Material,"").toString().trim();
+							if(vsMat != "")
+							{
+								vsRcvS = ifnull(vsLn.Received_Qty,"0").toString().trim();
+								if(vsRcvS == "")
+								{
+									vsRcvS = "0";
+								}
+								vsFanS = ifnull(vsLn.Fanned_Qty,"0").toString().trim();
+								if(vsFanS == "")
+								{
+									vsFanS = "0";
+								}
+								vsDspS = ifnull(vsLn.Disputed_Qty,"0").toString().trim();
+								if(vsDspS == "")
+								{
+									vsDspS = "0";
+								}
+								vsDrS = ifnull(vsLn.Dispute_Raised_Qty,"0").toString().trim();
+								if(vsDrS == "")
+								{
+									vsDrS = "0";
+								}
+								vsCredit = vsRcvS.toDecimal() - vsFanS.toDecimal();
+								if(vsCredit > 0)
+								{
+									toCreditByMat.put(vsMat,ifnull(toCreditByMat.get(vsMat),0.0) + vsCredit);
+								}
+								vsDisp = vsDspS.toDecimal() - vsDrS.toDecimal();
+								if(vsDisp > 0)
+								{
+									toDisputeByMat.put(vsMat,ifnull(toDisputeByMat.get(vsMat),0.0) + vsDisp);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			mc = 0;
+			mProc = 0;
+			for each  pmRaw in perMatIn
+			{
+				if(mc >= mi && mProc < FAN_BUDGET)
+				{
+					pm = pmRaw.toMap();
+					matTxt = ifnull(pm.get("materialId"),"").toString().trim();
+					arrS = ifnull(pm.get("arrived"),"0").toString().trim();
+					if(arrS == "")
+					{
+						arrS = "0";
+					}
+					shS = ifnull(pm.get("short"),"0").toString().trim();
+					if(shS == "")
+					{
+						shS = "0";
+					}
+					pmVoucher = ifnull(pm.get("voucher"),"").toString().trim();
+					pmLot = ifnull(pm.get("lot"),"").toString().trim();
+					pmRemark = ifnull(pm.get("remark"),"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
+					// perMaterial's arrived / short are NOT used as the amounts to
+					// apply - the line watermarks above are. They stay only as the
+					// list of materials this receipt touched, plus the remark, the
+					// voucher and the lot that a raised Stock_Dispute is stamped
+					// with.
+
+					if(matTxt != "" && matTxt.isNumber() == true)
+					{
+						// --- scan his still-owed requirements for this material ---
+						roomById = Map();
+						rcvById = Map();
+						planById = Map();
+						itemById = Map();
+						reqNameById = Map();
+						reqUnitById = Map();
+						idsOldest = List();
+						rqRcvTotal = 0.0;
+
+						// "room" on a requirement row is Issued_Qty - Received_Qty
+						// - the same gap the store screen nets against open
+						// disputes. The fan credits arrived into it oldest-first
+						// and reads the leftover to decide which plans a
+						// Stock_Dispute is raised for. NOTHING for the shortfall is
+						// written on the requirement itself - Material_Requirement
+						// has no Disputed_Qty; the gap plus the open Stock_Dispute
+						// IS the record, exactly as the old receiveMaterials left
+						// it.
+						//
+						// BOUNDED TO OPEN PLANS, and that is not tidiness. The old
+						// receiveMaterials credited the ONE requirement its
+						// Issue_Line named. A material x lot line names none, so
+						// this fans across the supervisor's rows for that material
+						// - and an abandoned row on a finished plan that still
+						// reads owed would swallow the credit oldest-first, leaving
+						// the plan he ACTUALLY just received for uncredited and its
+						// item stuck at Awaiting_Material for ever. The issue path
+						// only ever feeds Pending / Partially Received / In
+						// Progress; a plan can reach Material Ready between issue
+						// and receipt, so that is accepted too.
+						oldestFirst = Material_Requirement[Assigned_To == supId && Material == matTxt.toLong()] sort by Added_Time;
+						for each  rq0 in oldestFirst
+						{
+							rIssS = ifnull(rq0.Issued_Qty,"0").toString().trim();
+							if(rIssS == "")
+							{
+								rIssS = "0";
+							}
+							rRcvS = ifnull(rq0.Received_Qty,"0").toString().trim();
+							if(rRcvS == "")
+							{
+								rRcvS = "0";
+							}
+							rRoom = rIssS.toDecimal() - rRcvS.toDecimal();
+							rPlanTxt = ifnull(rq0.Plan,"").toString().trim();
+							rPlanOpen = false;
+							if(rPlanTxt != "" && rPlanTxt.isNumber() == true)
+							{
+								rCached = ifnull(planOpenCache.get(rPlanTxt),"").toString();
+								if(rCached == "")
+								{
+									rCached = "0";
+									for each  rPlanRec in Production_Planning[ID == rPlanTxt.toLong()]
+									{
+										rPlanSt = ifnull(rPlanRec.Order_Status,"").toString().trim();
+										if(rPlanSt == "Pending" || rPlanSt == "Partially Received" || rPlanSt == "In Progress" || rPlanSt == "Material Ready")
+										{
+											rCached = "1";
+										}
+									}
+									planOpenCache.put(rPlanTxt,rCached);
+								}
+								if(rCached == "1")
+								{
+									rPlanOpen = true;
+								}
+							}
+							if(rPlanOpen == true)
+							{
+								rqRcvTotal = rqRcvTotal + rRcvS.toDecimal();
+							}
+							if(rRoom > 0 && rPlanOpen == true)
+							{
+								ridTxt = rq0.ID + "";
+								roomById.put(ridTxt,rRoom);
+								rcvById.put(ridTxt,rRcvS.toDecimal());
+								planById.put(ridTxt,rPlanTxt);
+								itemById.put(ridTxt,ifnull(rq0.Plan_Item,"").toString().trim());
+								reqNameById.put(ridTxt,ifnull(rq0.Material_Name,"").toString());
+								reqUnitById.put(ridTxt,ifnull(rq0.Unit,"").toString());
+								idsOldest.add(ridTxt);
+							}
+						}
+
+						// --- what is left to apply, off the line watermarks ---
+						toCredit = ifnull(toCreditByMat.get(matTxt),0.0);
+						toDispute = ifnull(toDisputeByMat.get(matTxt),0.0);
+
+						// --- credit arrived, oldest-first ---
+						for each  rid in idsOldest
+						{
+							if(toCredit > 0)
+							{
+								rmLeft = roomById.get(rid);
+								if(rmLeft != null && rmLeft > 0)
+								{
+									give = rmLeft;
+									if(give > toCredit)
+									{
+										give = toCredit;
+									}
+									for each  rq1 in Material_Requirement[ID == rid.toLong()]
+									{
+										rq1.Received_Qty = rcvById.get(rid) + give;
+									}
+									rcvById.put(rid,rcvById.get(rid) + give);
+									roomById.put(rid,rmLeft - give);
+									toCredit = toCredit - give;
+								}
+							}
+						}
+
+						// --- dispute the shortfall, newest-first ---
+						shortByPlan = Map();
+						planKeys = List();
+						planItemForPlan = Map();
+						newestFirst = Material_Requirement[Assigned_To == supId && Material == matTxt.toLong()] sort by Added_Time desc;
+						for each  rq2 in newestFirst
+						{
+							if(toDispute > 0)
+							{
+								rid2 = rq2.ID + "";
+								rmLeft2 = roomById.get(rid2);
+								if(rmLeft2 != null && rmLeft2 > 0)
+								{
+									put = rmLeft2;
+									if(put > toDispute)
+									{
+										put = toDispute;
+									}
+									roomById.put(rid2,rmLeft2 - put);
+									toDispute = toDispute - put;
+									pKey = planById.get(rid2);
+									if(pKey != "")
+									{
+										if(shortByPlan.get(pKey) == null)
+										{
+											planKeys.add(pKey);
+											shortByPlan.put(pKey,0.0);
+											planItemForPlan.put(pKey,itemById.get(rid2));
+										}
+										shortByPlan.put(pKey,shortByPlan.get(pKey) + put);
+									}
+								}
+							}
+						}
+
+						// --- raise / update one Stock_Dispute per plan with a gap ---
+						for each  pKey2 in planKeys
+						{
+							pGap = shortByPlan.get(pKey2);
+							if(pGap != null && pGap > 0 && pKey2.isNumber() == true)
+							{
+								pmName = "";
+								pmUnit = "";
+								for each  ridN in idsOldest
+								{
+									if(pmName == "" && planById.get(ridN) == pKey2)
+									{
+										pmName = ifnull(reqNameById.get(ridN),"").toString();
+										pmUnit = ifnull(reqUnitById.get(ridN),"").toString();
+									}
+								}
+								if(pmName == "")
+								{
+									pmName = "Material " + matTxt;
+								}
+								pmSo = ifnull(soNoByPlan.get(pKey2),"").toString();
+
+								existDsp = "";
+								for each  exd in Stock_Dispute[Supervisor == supId && Plan == pKey2.toLong() && Material == matTxt.toLong() && Status == "Open"]
+								{
+									exDir = ifnull(exd.Direction,"Outbound").toString().trim();
+									if(exDir == "")
+									{
+										exDir = "Outbound";
+									}
+									if(existDsp == "" && exDir == "Outbound" && ifnull(exd.Is_Waste,false) == false)
+									{
+										existDsp = exd.ID + "";
+										exIq = ifnull(exd.Issued_Qty,"0").toString().trim();
+										if(exIq == "")
+										{
+											exIq = "0";
+										}
+										exDq = ifnull(exd.Disputed_Qty,"0").toString().trim();
+										if(exDq == "")
+										{
+											exDq = "0";
+										}
+										exd.Issued_Qty = exIq.toDecimal() + pGap;
+										exd.Disputed_Qty = exDq.toDecimal() + pGap;
+										if(ifnull(exd.Voucher_No,"").toString().trim() == "" && pmVoucher != "")
+										{
+											exd.Voucher_No = pmVoucher;
+										}
+									}
+								}
+
+								if(existDsp == "")
+								{
+									try
+									{
+										newDId = insert into Stock_Dispute
+										[
+											Material_Name=pmName
+											Unit=pmUnit
+											Is_Waste=false
+											Direction="Outbound"
+											Issued_Qty=pGap
+											Received_Qty=0
+											Disputed_Qty=pGap
+											Status="Open"
+											Raised_On=zoho.currentdate
+											Raised_Note=pmRemark
+											Added_User=zoho.loginuser
+										];
+										for each  nd0 in Stock_Dispute[ID == newDId.toLong()]
+										{
+											nd0.Material = matTxt.toLong();
+											nd0.Supervisor = supId;
+											nd0.Plan = pKey2.toLong();
+											if(pmVoucher != "")
+											{
+												nd0.Voucher_No = pmVoucher;
+											}
+											if(pmLot != "" && pmLot.isNumber() == true)
+											{
+												nd0.Lot = pmLot.toLong();
+											}
+											ditem = ifnull(planItemForPlan.get(pKey2),"").toString();
+											if(ditem != "" && ditem.isNumber() == true)
+											{
+												nd0.Plan_Item = ditem.toLong();
+											}
+										}
+										existDsp = newDId + "";
+									}
+									catch (edsp)
+									{
+										info "Stock_Dispute not raised for " + pmName + " plan " + pKey2 + ": " + edsp.toString();
+									}
+								}
+
+								if(existDsp != "")
+								{
+									if(newDispIdsJson != "")
+									{
+										newDispIdsJson = newDispIdsJson + ",";
+									}
+									newDispIdsJson = newDispIdsJson + "\"" + existDsp + "\"";
+								}
+
+								if(errJson != "")
+								{
+									errJson = errJson + ",";
+								}
+								errJson = errJson + "\"" + pmName + " (" + pmSo + "): " + pGap + " short - dispute raised\"";
+							}
+						}
+
+						//------------------------------------------------
+						// STAMP THE WATERMARKS. Everything this material had
+						// to fan has now been applied, so the lines record it:
+						// Fanned_Qty catches up to Received_Qty and
+						// Dispute_Raised_Qty to Disputed_Qty. A repeat of this
+						// receipt then computes 0 and does nothing.
+						//
+						// Written LAST, after the credits and the dispute, so a
+						// failure before this point leaves the lines unstamped
+						// and the next press redoes the work. Redoing is safe:
+						// the credit is capped by each requirement's own room,
+						// and the dispute upsert lands on the same open ticket.
+						//------------------------------------------------
+						for each  vStamp in vouchersScope
+						{
+							vstTxt = ifnull(vStamp,"").toString().trim();
+							if(vstTxt != "" && vstTxt.isNumber() == true)
+							{
+								for each  vstRec in Material_Issue[ID == vstTxt.toLong()]
+								{
+									for each  vstLn in vstRec.Issue_Lines
+									{
+										if(ifnull(vstLn.Material,"").toString().trim() == matTxt)
+										{
+											vstRcvS = ifnull(vstLn.Received_Qty,"0").toString().trim();
+											if(vstRcvS == "")
+											{
+												vstRcvS = "0";
+											}
+											vstDspS = ifnull(vstLn.Disputed_Qty,"0").toString().trim();
+											if(vstDspS == "")
+											{
+												vstDspS = "0";
+											}
+											vstLn.Fanned_Qty = vstRcvS.toDecimal();
+											vstLn.Dispute_Raised_Qty = vstDspS.toDecimal();
+										}
+									}
+								}
+							}
+						}
+					}
+					mProc = mProc + 1;
+				}
+				mc = mc + 1;
+			}
+
+			newMi = mi + mProc;
+			finalizeDone = false;
+			if(newMi >= perMatIn.size())
+			{
+				finalizeCursorJson = "{\"ph\":\"vouchers\",\"vi\":0}";
+			}
+			else
+			{
+				finalizeCursorJson = "{\"ph\":\"fan\",\"mi\":" + newMi + "}";
+			}
+		}
+		else if(ph == "vouchers")
+		{
+			//==========================================================
+			// Recheck Issue_Status from the lines' Line_Status.
+			//==========================================================
+			vouchersIn2 = ifnull(inp.get("vouchers"),"[]").toString().toJSONList();
+			vi = 0;
+			viS = ifnull(fnCur.get("vi"),"0").toString().trim();
+			if(viS != "" && viS.isNumber() == true)
+			{
+				vi = viS.toLong();
+			}
+			vc = 0;
+			vProc = 0;
+			for each  vRaw2 in vouchersIn2
+			{
+				if(vc >= vi && vProc < VOUCHER_BUDGET)
+				{
+					vt2 = ifnull(vRaw2,"").toString().trim();
+					if(vt2 != "" && vt2.isNumber() == true)
+					{
+						try
+						{
+							for each  vR2 in Material_Issue[ID == vt2.toLong()]
+							{
+								if(ifnull(vR2.Issue_Status,"").toString().trim() != "Received")
+								{
+									allR = true;
+									anyL = false;
+									for each  vL2 in vR2.Issue_Lines
+									{
+										anyL = true;
+										lst2 = ifnull(vL2.Line_Status,"").toString().trim();
+										if(lst2 != "")
+										{
+											if(lst2 != "Received")
+											{
+												allR = false;
+											}
+										}
+										else
+										{
+											q2L = ifnull(vL2.Qty,"0").toString().trim();
+											if(q2L == "")
+											{
+												q2L = "0";
+											}
+											s2L = ifnull(vL2.Settled_Qty,"0").toString().trim();
+											if(s2L == "")
+											{
+												s2L = "0";
+											}
+											if(s2L.toDecimal() < q2L.toDecimal())
+											{
+												allR = false;
+											}
+										}
+									}
+									if(anyL == true && allR == true)
+									{
+										vR2.Issue_Status = "Received";
+									}
+									else
+									{
+										vR2.Issue_Status = "Partially_Received";
+									}
+								}
+							}
+						}
+						catch (evs)
+						{
+							info "Issue_Status not set for voucher " + vt2 + ": " + evs.toString();
+						}
+					}
+					vProc = vProc + 1;
+				}
+				vc = vc + 1;
+			}
+			newVi = vi + vProc;
+			finalizeDone = false;
+			if(newVi >= vouchersIn2.size())
+			{
+				finalizeCursorJson = "{\"ph\":\"items\",\"pi\":0,\"ii\":0}";
+			}
+			else
+			{
+				finalizeCursorJson = "{\"ph\":\"vouchers\",\"vi\":" + newVi + "}";
+			}
+		}
+		else if(ph == "items")
+		{
+			//==========================================================
+			// READINESS SWEEP over plansTouched. Verbatim from the old
+			// receiveMaterials "items" finalize phase - reads
+			// Material_Requirement.Received_Qty, which the fan wrote.
+			//==========================================================
+			pi = 0;
+			piS = ifnull(fnCur.get("pi"),"0").toString().trim();
+			if(piS != "" && piS.isNumber() == true)
+			{
+				pi = piS.toLong();
+			}
+			ii = 0;
+			iiS = ifnull(fnCur.get("ii"),"0").toString().trim();
+			if(iiS != "" && iiS.isNumber() == true)
+			{
+				ii = iiS.toLong();
+			}
+			itemsThisCall = 0;
+			pc = 0;
+			nextPi = pi;
+			nextIi = ii;
+			stopped = false;
+			for each  ptRaw2 in plansTouchedIn
+			{
+				if(stopped == false && pc >= pi && itemsThisCall < ITEM_BUDGET)
+				{
+					pTxt2 = ifnull(ptRaw2,"").toString().trim();
+					if(pTxt2 != "" && pTxt2.isNumber() == true)
+					{
+						plId = pTxt2.toLong();
+						plSt = "";
+						for each  plH in Production_Planning[ID == plId]
+						{
+							plSt = ifnull(plH.Order_Status,"").toString();
+						}
+						skipN = 0;
+						if(pc == pi)
+						{
+							skipN = ii;
+						}
+						iC = 0;
+						sweptHere = 0;
+						for each  pItem in Plan_Item[Plan == plId]
+						{
+							if(iC >= skipN && itemsThisCall < ITEM_BUDGET)
+							{
+								iStat = ifnull(pItem.Item_Status,"").toString();
+								if(iStat == "Awaiting_Material")
+								{
+									itemReady = true;
+									reqCount = 0;
+									for each  row in Material_Requirement[Plan_Item == pItem.ID]
+									{
+										reqCount = reqCount + 1;
+										isFab = row.Is_Fabric;
+										issStr = ifnull(row.Issued_Qty,"0").toString().trim();
+										if(issStr == "")
+										{
+											issStr = "0";
+										}
+										recStr = ifnull(row.Received_Qty,"0").toString().trim();
+										if(recStr == "")
+										{
+											recStr = "0";
+										}
+										reqStr = ifnull(row.Required_Qty,"0").toString().trim();
+										if(reqStr == "")
+										{
+											reqStr = "0";
+										}
+										issQty = issStr.toDecimal();
+										recQty = recStr.toDecimal();
+										reqQty = reqStr.toDecimal();
+										if(recQty < issQty)
+										{
+											itemReady = false;
+										}
+										if(isFab == true)
+										{
+											reqPcs = ifnull(row.Required_Pieces,0);
+											issPcs = ifnull(row.Pieces_From_Waste,0) + ifnull(row.Pieces_From_Raw,0);
+											if(reqPcs <= 0 || issPcs < reqPcs)
+											{
+												itemReady = false;
+											}
+										}
+										else
+										{
+											if(reqQty <= 0 || issQty < reqQty)
+											{
+												itemReady = false;
+											}
+										}
+									}
+									if(reqCount == 0)
+									{
+										itemReady = false;
+									}
+									for each  wiR in Waste_Movement[Plan_Item == pItem.ID && Movement_Type == "Issued"]
+									{
+										wC = ifnull(wiR.Piece_Count,0);
+										wR = 0;
+										for each  rvR in Waste_Movement[Parent_Movement == wiR.ID && Movement_Type == "Received"]
+										{
+											wR = wR + ifnull(rvR.Piece_Count,0);
+										}
+										if(wR < wC)
+										{
+											itemReady = false;
+										}
+									}
+									if(itemReady == true)
+									{
+										pItem.Item_Status = "Ready_For_Production";
+									}
+								}
+								itemsThisCall = itemsThisCall + 1;
+								sweptHere = sweptHere + 1;
+							}
+							iC = iC + 1;
+						}
+						doneIi = skipN + sweptHere;
+						if(doneIi >= iC)
+						{
+							awC = Plan_Item[Plan == plId && Item_Status == "Awaiting_Material"].count();
+							if(iC > 0 && plSt != "In Progress" && plSt != "Production Complete")
+							{
+								if(awC == 0)
+								{
+									for each  pu in Production_Planning[ID == plId]
+									{
+										pu.Order_Status = "Material Ready";
+									}
+								}
+								else if(plSt == "Pending" && awC < iC)
+								{
+									for each  pu in Production_Planning[ID == plId]
+									{
+										pu.Order_Status = "Partially Received";
+									}
+								}
+							}
+							nextPi = pc + 1;
+							nextIi = 0;
+						}
+						else
+						{
+							nextPi = pc;
+							nextIi = doneIi;
+							stopped = true;
+						}
+					}
+					else
+					{
+						nextPi = pc + 1;
+						nextIi = 0;
+					}
+				}
+				pc = pc + 1;
+			}
+			finalizeDone = false;
+			if(nextPi >= plansTouchedIn.size())
+			{
+				finalizeCursorJson = "{\"ph\":\"transfer\"}";
+			}
+			else
+			{
+				finalizeCursorJson = "{\"ph\":\"items\",\"pi\":" + nextPi + ",\"ii\":" + nextIi + "}";
+			}
+		}
+		else if(ph == "transfer")
+		{
+			try
+			{
+				info "transfer after receipt -> " + thisapp.postTransferOrders("auto");
+			}
+			catch (eto)
+			{
+				info "postTransferOrders after receipt threw: " + eto.toString();
+			}
+			finalizeCursorJson = "{\"ph\":\"notify\"}";
+			finalizeDone = false;
+		}
+		else if(ph == "notify")
+		{
+			for each  didRaw in disputeIdsIn
+			{
+				didTxt = ifnull(didRaw,"").toString().trim();
+				if(didTxt != "" && didTxt.isNumber() == true)
+				{
+					for each  ndsp in Stock_Dispute[ID == didTxt.toLong()]
+					{
+						ndName = ifnull(ndsp.Material_Name,"").toString().replaceAll("\"","'");
+						if(ifnull(ndsp.Is_Waste,false) == true)
+						{
+							ndName = ndName + " (offcuts)";
+						}
+						ndUnit = ifnull(ndsp.Unit,"").toString();
+						ndIss = ifnull(ndsp.Issued_Qty,0);
+						ndRcv = ifnull(ndsp.Received_Qty,0);
+						ndShort = ifnull(ndsp.Disputed_Qty,0);
+						ndSo = "";
+						if(ndsp.Plan != null)
+						{
+							for each  npp in Production_Planning[ID == ndsp.Plan]
+							{
+								npSo = ifnull(npp.Sales_Order,"").toString().trim();
+								if(npSo != "")
+								{
+									for each  nso in Sales_Order[ID == npSo.toLong()]
+									{
+										ndSo = ifnull(nso.Sales_Order,"").toString().replaceAll("\"","'");
+									}
+								}
+							}
+						}
+						dispRows.add(ndName + "|" + ndSo + "|" + ndUnit + "|" + ndIss + "|" + ndRcv + "|" + ndShort);
+					}
+				}
+			}
+			finalizeCursorJson = "{\"ph\":\"done\"}";
+			finalizeDone = true;
+		}
+		else
+		{
+			finalizeCursorJson = "{\"ph\":\"done\"}";
+			finalizeDone = true;
+		}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"disputeIds\":[],\"finalizeCursor\":{\"ph\":\"done\"},\"finalizeDone\":true}";
+	}
+
+	//------------------------------------------------------------------------
+	// DISPUTE NOTIFICATIONS. dispRows is filled only by the "notify" phase.
+	// Its own try/catch - a mail failure must not turn a completed receipt into
+	// an error the supervisor retries.
+	//------------------------------------------------------------------------
+	adminTo = "gurdhian.helios@gmail.com";
+	storeTo = "gurdhian.helios@gmail.com";
+	try
+	{
+		if(dispRows.size() > 0)
+		{
+			dSupName = "";
+			for each  dEmp in Employee[ID == supId]
+			{
+				dSupName = ifnull(dEmp.Employee_Name,"").toString().replaceAll("\"","'");
+			}
+			if(dSupName == "")
+			{
+				dSupName = "Supervisor";
+			}
+			dTh = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:left;font-weight:600";
+			dThR = "padding:8px 12px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:#64748b;text-align:right;font-weight:600";
+			dTd = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a";
+			dTdR = "padding:10px 12px;border-bottom:1px solid #eef2f6;font-size:13px;color:#0f172a;text-align:right;font-weight:600";
+			dTdBad = "padding:10px 12px;border-bottom:1px solid #fee2e2;font-size:13px;color:#991b1b;text-align:right;font-weight:700";
+			dRowsHtml = "";
+			for each  dr in dispRows
+			{
+				dp = dr.toList("|");
+				dRowsHtml = dRowsHtml + "<tr><td style='" + dTd + "'>" + dp.get(0) + "</td><td style='" + dTd + ";white-space:nowrap'>" + dp.get(1) + "</td><td style='" + dTdR + "'>" + dp.get(3) + " <span style='color:#64748b;font-weight:400'>" + dp.get(2) + "</span></td><td style='" + dTdR + "'>" + dp.get(4) + "</td><td style='" + dTdBad + "'>" + dp.get(5) + "</td></tr>";
+			}
+			dTable = "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;margin-top:14px;border:1px solid #e2e8f0;border-radius:6px'>";
+			dTable = dTable + "<tr><th style='" + dTh + "'>Material</th><th style='" + dTh + "'>Order</th><th style='" + dThR + "'>Issued</th><th style='" + dThR + "'>Received</th><th style='" + dThR + "'>Short by</th></tr>";
+			dTable = dTable + dRowsHtml + "</table>";
+			dWord = "disputes";
+			if(dispRows.size() == 1)
+			{
+				dWord = "dispute";
+			}
+			dSubtitle = "Raised by " + dSupName + " &middot; " + zoho.currentdate.toString("dd MMM yyyy") + " " + zoho.currenttime.toString("HH:mm");
+			sInner = "<div style='font-size:14px;color:#0f172a'><b>" + dSupName + "</b> has confirmed his receipt and reported <b>" + dispRows.size() + " " + dWord + "</b>. The quantity below left the store but he says it did not reach him.</div>";
+			sInner = sInner + dTable;
+			sInner = sInner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>Check the shelf and answer on the <b>Disputes</b> tab. If the stock is still with the store, <b>Store correction</b> returns it and re-opens the requirement so it can be issued again. Until someone answers, this quantity is neither on the shelf nor with him.</div>";
+			sInner = sInner + "<div style='font-size:12px;color:#94a3b8;padding-top:10px'>Written for the store. No store mailbox is configured yet, so it is being sent here.</div>";
+			sendmail
+			[
+				from :zoho.adminuserid
+				to :storeTo
+				subject :"Action needed: " + dispRows.size() + " " + dWord + " raised by " + dSupName
+				message :thisapp.buildNotificationEmail("Material disputed on receipt",dSubtitle,"#dc2626",sInner)
+			]
+			aInner = "<div style='font-size:14px;color:#0f172a'><b>" + dispRows.size() + " " + dWord + "</b> raised by <b>" + dSupName + "</b> on receipt. Nobody has answered yet.</div>";
+			aInner = aInner + dTable;
+			aInner = aInner + "<div style='font-size:12px;color:#64748b;padding-top:14px'>Direction is <b>Outbound</b> - store to supervisor - so the store answers first. This is for visibility; no action is needed from you unless it stays open.</div>";
+			sendmail
+			[
+				from :zoho.adminuserid
+				to :adminTo
+				subject :"Dispute raised: " + dispRows.size() + " " + dWord + " - " + dSupName + " (outbound)"
+				message :thisapp.buildNotificationEmail("Dispute raised",dSubtitle,"#dc2626",aInner)
+			]
+			info "Dispute notifications sent: " + dispRows.size() + " row(s)";
+		}
+	}
+	catch (eMail)
+	{
+		info "Dispute notification not sent: " + eMail.toString();
+	}
+
+	return "{\"errors\":[" + errJson + "],\"disputeIds\":[" + newDispIdsJson + "],\"finalizeCursor\":" + finalizeCursorJson + ",\"finalizeDone\":" + finalizeDone + "}";
+}

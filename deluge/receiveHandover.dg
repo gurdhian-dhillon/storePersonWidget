@@ -1,0 +1,712 @@
+string receiveHandover(string supervisorId, string payloadJson)
+{
+	// SETTLE THE HANDOVER RECORD. Called ONCE per receipt. Walks the confirmed
+	// vouchers' Issue_Lines - MATERIAL x LOT grain, ~200 lines a voucher at
+	// worst - and settles each: Received_Qty += arrived, Disputed_Qty = Qty -
+	// Received_Qty, Line_Status. Drains Raw_Material / Raw_Material_Lot
+	// In_Transit_Qty. Confirms waste + printed pieces per physical piece.
+	//
+	// It does NOT touch Material_Requirement. The FAN to the requirement rows
+	// (for the readiness test) is receiveFanOut's job - it takes the per-material
+	// { arrived, short } totals this function returns.
+	//
+	// WHY A SEPARATE FUNCTION. The old receiveMaterials sliced its sweep across
+	// LINE_BUDGET-row chunks because Issue_Lines was per requirement - 10,000
+	// rows on one fat handover. Material x lot lines are ~200, so the whole
+	// settle is one call, no cursor, and the fan runs ONCE on complete totals
+	// instead of once per slice (which could over-credit / over-dispute a
+	// requirement whose material spanned two slices).
+	//
+	// IDEMPOTENT. owed = Qty - Received_Qty, so a re-run after the widget
+	// retried finds every settled line at owed 0 and does nothing.
+	//
+	// payloadJson:
+	// {
+	//   "vouchers":       ["77","78"],          // Material_Issue ids being confirmed
+	//   "shortMaterials": [ {"materialId":"123","received":9.5,"remark":"..."} ],
+	//   "waste":          [ {"rowId":"456","received":1,"remark":""} ],
+	//   "printedPieces":  [ {"issueLineId":"555","voucherId":"77","received":3,"remark":""} ]
+	// }
+	//
+	// RETURNS:
+	// {
+	//   "errors": [...],
+	//   "perMaterial": [ {"materialId":"123","arrived":9.5,"short":0.5,"voucher":"SIV-00042"} ],
+	//   "wasteDisputeIds": ["111"]              // raised here, for the notify phase
+	// }
+	//
+	// DISPUTE NETTING happens HERE and ONCE. The short figure the supervisor
+	// typed is already net of his open disputes, so an open dispute for this
+	// material reduces owed before it is settled. receiveFanOut must NOT re-net.
+	errJson = "";
+	pmJson = "";
+	wasteDispJson = "";
+	try
+	{
+		supId = supervisorId.trim().toLong();
+		inp = payloadJson.toMap();
+		vouchersIn = ifnull(inp.get("vouchers"),"[]").toString().toJSONList();
+		shortMatsIn = ifnull(inp.get("shortMaterials"),"[]").toString().toJSONList();
+		wastes = ifnull(inp.get("waste"),"[]").toString().toJSONList();
+		printed = ifnull(inp.get("printedPieces"),"[]").toString().toJSONList();
+		info "receiveHandover supId=" + supId + " vouchers=" + vouchersIn.size() + " short=" + shortMatsIn.size() + " waste=" + wastes.size() + " printed=" + printed.size();
+
+		// --- shortLeft: matId -> the typed "arrived" figure, drawn down as the
+		// sweep walks that material's lines oldest-line-first ---
+		shortLeft = Map();
+		shortRemarkByMat = Map();
+		for each  smRaw in shortMatsIn
+		{
+			sm = smRaw.toMap();
+			smId = ifnull(sm.get("materialId"),"").toString().trim();
+			if(smId != "")
+			{
+				smRcvS = ifnull(sm.get("received"),"0").toString().trim();
+				if(smRcvS == "")
+				{
+					smRcvS = "0";
+				}
+				shortLeft.put(smId,smRcvS.toDecimal());
+				shortRemarkByMat.put(smId,ifnull(sm.get("remark"),"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," "));
+			}
+		}
+
+		// NO OPEN-DISPUTE PREFETCH. The old receiveMaterials netted open disputes
+		// off each line's owed because pending was read from the requirement
+		// aggregate, where a disputed quantity inflated the gap. Every line now
+		// records its OWN Disputed_Qty, so that netting would suppress real
+		// pending metres and break Qty == Received + Disputed. Duplicate disputes
+		// are prevented in receiveFanOut instead - see the note at the settle.
+
+		// --- per-receipt accumulators ---
+		//
+		// TWO KINDS, AND THE DIFFERENCE IS LOAD-BEARING.
+		//
+		//   arrivedByMat / shortByMat are TOTALS - the whole settled state of
+		//   every line in scope, including lines a PREVIOUS call already
+		//   settled. They are what receiveFanOut fans, and it credits only the
+		//   DIFFERENCE against what the requirement rows already hold. That is
+		//   what makes the pair recoverable: if receiveFanOut dies, pressing
+		//   Confirm again re-runs this function, every line reports owed 0 but
+		//   still contributes its Received_Qty to the total, and the fan sees
+		//   the credit it never applied. Reporting deltas made a failed fan
+		//   unrecoverable - the second call returned an empty perMaterial and
+		//   Material_Requirement.Received_Qty was never credited, so the items
+		//   could never reach Ready_For_Production.
+		//
+		//   settledByMat / settledByLot / shortByLot are DELTAS - only what THIS
+		//   call settled. They drain In_Transit_Qty, and draining twice would
+		//   invent stock movement.
+		arrivedByMat = Map();
+		shortByMat = Map();
+		settledByMat = Map();
+		settledByLot = Map();
+		shortByLot = Map();
+		voucherByMat = Map();
+		// matId -> the lot carrying the largest shortfall for that material.
+		// receiveFanOut stamps it on the Stock_Dispute it raises, so
+		// resolveDispute can later find the exact Issue_Line to wind back.
+		dispLotByMat = Map();
+		dispLotShareByMat = Map();
+		matSeen = List();
+
+		//------------------------------------------------------------------
+		// 1. SETTLE THE REGULAR (non-printed) LINES.
+		//------------------------------------------------------------------
+		for each  vRaw in vouchersIn
+		{
+			vTxt = ifnull(vRaw,"").toString().trim();
+			if(vTxt != "" && vTxt.isNumber() == true)
+			{
+				for each  vRec in Material_Issue[ID == vTxt.toLong()]
+				{
+					vVoucherNo = ifnull(vRec.Voucher_No,"").toString().trim();
+					for each  miLn in vRec.Issue_Lines
+					{
+						lnNoteTxt = ifnull(miLn.Lot_Override_Note,"").toString();
+						if(lnNoteTxt.contains("PRINTED_PIECE") == false)
+						{
+							qS = ifnull(miLn.Qty,"0").toString().trim();
+							if(qS == "")
+							{
+								qS = "0";
+							}
+							rcS = ifnull(miLn.Received_Qty,"0").toString().trim();
+							if(rcS == "")
+							{
+								rcS = "0";
+							}
+							dspNowS = ifnull(miLn.Disputed_Qty,"0").toString().trim();
+							if(dspNowS == "")
+							{
+								dspNowS = "0";
+							}
+							setNowS = ifnull(miLn.Settled_Qty,"0").toString().trim();
+							if(setNowS == "")
+							{
+								setNowS = "0";
+							}
+							lnQ = qS.toDecimal();
+
+							// DUAL READ, because a supervisor can still be holding an
+							// unreceived LEGACY voucher at cutover.
+							//   NEW line (Line_Status set): owed is what receipt has
+							//     not accounted for AT ALL - Qty minus arrived minus
+							//     disputed. Qty - Received_Qty alone would make a
+							//     short line look unsettled for ever, and a second
+							//     Confirm would silently mark the missing metres
+							//     received.
+							//   LEGACY line: the old test, Qty - Settled_Qty. The old
+							//     receiveMaterials set Settled_Qty = Qty on any settle
+							//     (arrived AND short), so that is its accounts-for
+							//     figure. Its arrived part was never recorded per
+							//     line, so Settled_Qty stands in for it when reporting
+							//     totals - over-reporting is safe because the fan caps
+							//     every credit at the requirement's own room.
+							// A legacy line that this call settles is written with
+							// BOTH shapes, so it converges to the new model in place.
+							lnIsNew = (ifnull(miLn.Line_Status,"").toString().trim() != "");
+							if(lnIsNew == true)
+							{
+								rcvNow = rcS.toDecimal();
+								owed = lnQ - rcvNow - dspNowS.toDecimal();
+							}
+							else
+							{
+								rcvNow = rcS.toDecimal();
+								if(rcvNow <= 0)
+								{
+									rcvNow = setNowS.toDecimal();
+								}
+								owed = lnQ - setNowS.toDecimal();
+							}
+
+							matTxt = ifnull(miLn.Material,"").toString().trim();
+							lotTxt = ifnull(miLn.Lot,"").toString().trim();
+
+							// TOTALS FIRST, from what the line ALREADY holds, so a
+							// line settled by an earlier call still reports itself
+							// to the fan. The settle below adds only its own
+							// increment on top. See the accumulator note above.
+							if(matTxt != "")
+							{
+								if(rcvNow > 0 || dspNowS.toDecimal() > 0)
+								{
+									if(matSeen.contains(matTxt) == false)
+									{
+										matSeen.add(matTxt);
+									}
+									arrivedByMat.put(matTxt,ifnull(arrivedByMat.get(matTxt),0.0) + rcvNow);
+									if(dspNowS.toDecimal() > 0)
+									{
+										shortByMat.put(matTxt,ifnull(shortByMat.get(matTxt),0.0) + dspNowS.toDecimal());
+									}
+									if(voucherByMat.get(matTxt) == null && vVoucherNo != "")
+									{
+										voucherByMat.put(matTxt,vVoucherNo);
+									}
+								}
+							}
+
+							// NO DISPUTE NETTING HERE ANY MORE, AND THAT IS THE
+							// POINT OF THE NEW GRAIN.
+							//
+							// The old receiveMaterials had to net: pending was read
+							// off the requirement aggregate, where a disputed
+							// quantity inflated the gap, so a later handover of the
+							// same material would raise a SECOND dispute for cloth
+							// already disputed and drain In_Transit twice.
+							//
+							// Now every line records its OWN Disputed_Qty, so an
+							// earlier handover's shortfall is accounted on that
+							// line and this line's owed is genuinely this line's.
+							// Netting on top would suppress real pending metres and
+							// break Qty == Received + Disputed. Duplicate disputes
+							// are prevented in receiveFanOut instead, where
+							// toDispute is the short TOTAL minus what is already
+							// open for that material.
+							if(owed > 0)
+							{
+								conf = owed;
+								shortQ = 0.0;
+								slLeft = shortLeft.get(matTxt);
+								if(slLeft != null)
+								{
+									if(slLeft >= owed)
+									{
+										conf = owed;
+										shortLeft.put(matTxt,slLeft - owed);
+									}
+									else
+									{
+										conf = slLeft;
+										if(conf < 0)
+										{
+											conf = 0.0;
+										}
+										shortLeft.put(matTxt,0.0);
+									}
+									shortQ = owed - conf;
+								}
+
+								// Received and Disputed each grow by their own share of
+								// owed, so Qty == Received + Disputed holds exactly:
+								// owed was Qty - Received - Disputed, and
+								// conf + shortQ == owed.
+								//
+								// Settled_Qty is written too - it is what the legacy
+								// accounts-for test reads, so a legacy line settled
+								// here converges to the new shape in place and can
+								// never be settled a second time by either test.
+								newRcv = rcvNow + conf;
+								newDsp = dspNowS.toDecimal() + shortQ;
+								miLn.Received_Qty = newRcv;
+								miLn.Disputed_Qty = newDsp;
+								miLn.Settled_Qty = lnQ;
+								if(newDsp <= 0)
+								{
+									miLn.Line_Status = "Received";
+								}
+								else if(newRcv > 0)
+								{
+									miLn.Line_Status = "Partially_Received";
+								}
+								else
+								{
+									miLn.Line_Status = "Disputed";
+								}
+
+								if(matSeen.contains(matTxt) == false)
+								{
+									matSeen.add(matTxt);
+								}
+								arrivedByMat.put(matTxt,ifnull(arrivedByMat.get(matTxt),0.0) + conf);
+								if(shortQ > 0)
+								{
+									shortByMat.put(matTxt,ifnull(shortByMat.get(matTxt),0.0) + shortQ);
+								}
+								settledByMat.put(matTxt,ifnull(settledByMat.get(matTxt),0.0) + owed);
+								if(voucherByMat.get(matTxt) == null && vVoucherNo != "")
+								{
+									voucherByMat.put(matTxt,vVoucherNo);
+								}
+								if(lotTxt != "")
+								{
+									settledByLot.put(lotTxt,ifnull(settledByLot.get(lotTxt),0.0) + owed);
+									if(shortQ > 0)
+									{
+										shortByLot.put(lotTxt,ifnull(shortByLot.get(lotTxt),0.0) + shortQ);
+										if(shortQ > ifnull(dispLotShareByMat.get(matTxt),0.0))
+										{
+											dispLotShareByMat.put(matTxt,shortQ);
+											dispLotByMat.put(matTxt,lotTxt);
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// 2. PRINTED PIECES - per issueLineId, same settle. The widget names
+		// each one it is confirming; a line not named is left owed.
+		//------------------------------------------------------------------
+		for each  pRaw in printed
+		{
+			pm = pRaw.toMap();
+			pIdTxt = ifnull(pm.get("issueLineId"),"").toString().trim();
+			pVTxt = ifnull(pm.get("voucherId"),"").toString().trim();
+			pGotStr = ifnull(pm.get("received"),"0").toString().trim();
+			if(pGotStr == "")
+			{
+				pGotStr = "0";
+			}
+			pGot = pGotStr.toDecimal();
+			if(pIdTxt == "" || pVTxt == "" || pGot < 0)
+			{
+				if(errJson != "")
+				{
+					errJson = errJson + ",";
+				}
+				errJson = errJson + "\"Printed piece: invalid received quantity\"";
+			}
+			else
+			{
+				foundLn = false;
+				for each  miRec in Material_Issue[ID == pVTxt.toLong()]
+				{
+					pVoucherNo = ifnull(miRec.Voucher_No,"").toString().trim();
+					for each  miLn in miRec.Issue_Lines
+					{
+						if(miLn.ID == pIdTxt.toLong())
+						{
+							foundLn = true;
+							lnQtyS = ifnull(miLn.Qty,"0").toString().trim();
+							if(lnQtyS == "")
+							{
+								lnQtyS = "0";
+							}
+							lnRcS = ifnull(miLn.Received_Qty,"0").toString().trim();
+							if(lnRcS == "")
+							{
+								lnRcS = "0";
+							}
+							lnDspS = ifnull(miLn.Disputed_Qty,"0").toString().trim();
+							if(lnDspS == "")
+							{
+								lnDspS = "0";
+							}
+							lnQ2 = lnQtyS.toDecimal();
+							// Same accounts-for test as the regular lines above -
+							// Qty minus arrived minus disputed - so a printed piece
+							// already settled short is not re-settled on a retry.
+							lnRemain = lnQ2 - lnRcS.toDecimal() - lnDspS.toDecimal();
+							takeP = pGot;
+							if(takeP > lnRemain)
+							{
+								takeP = lnRemain;
+							}
+							if(takeP < 0)
+							{
+								takeP = 0.0;
+							}
+							pMatTxt = ifnull(miLn.Material,"").toString().trim();
+							pLotTxt = ifnull(miLn.Lot,"").toString().trim();
+
+							// TOTALS from what the line ALREADY holds, so a retry
+							// after a failed fan still reports it. See the
+							// accumulator note at the top of this function.
+							if(pMatTxt != "" && (lnRcS.toDecimal() > 0 || lnDspS.toDecimal() > 0))
+							{
+								if(matSeen.contains(pMatTxt) == false)
+								{
+									matSeen.add(pMatTxt);
+								}
+								arrivedByMat.put(pMatTxt,ifnull(arrivedByMat.get(pMatTxt),0.0) + lnRcS.toDecimal());
+								if(lnDspS.toDecimal() > 0)
+								{
+									shortByMat.put(pMatTxt,ifnull(shortByMat.get(pMatTxt),0.0) + lnDspS.toDecimal());
+								}
+								if(voucherByMat.get(pMatTxt) == null && pVoucherNo != "")
+								{
+									voucherByMat.put(pMatTxt,pVoucherNo);
+								}
+							}
+
+							if(lnRemain > 0)
+							{
+								newRcvP = lnRcS.toDecimal() + takeP;
+								stillOutP = lnRemain - takeP;
+								newDspP = lnDspS.toDecimal() + stillOutP;
+								miLn.Received_Qty = newRcvP;
+								miLn.Disputed_Qty = newDspP;
+								if(newDspP <= 0)
+								{
+									miLn.Line_Status = "Received";
+								}
+								else if(newRcvP > 0)
+								{
+									miLn.Line_Status = "Partially_Received";
+								}
+								else
+								{
+									miLn.Line_Status = "Disputed";
+								}
+
+								if(pMatTxt != "")
+								{
+									if(matSeen.contains(pMatTxt) == false)
+									{
+										matSeen.add(pMatTxt);
+									}
+									arrivedByMat.put(pMatTxt,ifnull(arrivedByMat.get(pMatTxt),0.0) + takeP);
+									if(stillOutP > 0)
+									{
+										shortByMat.put(pMatTxt,ifnull(shortByMat.get(pMatTxt),0.0) + stillOutP);
+									}
+									settledByMat.put(pMatTxt,ifnull(settledByMat.get(pMatTxt),0.0) + lnRemain);
+									if(pLotTxt != "")
+									{
+										settledByLot.put(pLotTxt,ifnull(settledByLot.get(pLotTxt),0.0) + lnRemain);
+										if(stillOutP > 0)
+										{
+											shortByLot.put(pLotTxt,ifnull(shortByLot.get(pLotTxt),0.0) + stillOutP);
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+				if(foundLn == false)
+				{
+					if(errJson != "")
+					{
+						errJson = errJson + ",";
+					}
+					errJson = errJson + "\"Printed piece " + pIdTxt + " not found\"";
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// 3. DRAIN In_Transit -> (production / Disputed), once per material and
+		// once per lot the receipt touched. Never below zero.
+		//------------------------------------------------------------------
+		for each  mk in settledByMat.keys()
+		{
+			drainM = settledByMat.get(mk);
+			shM = ifnull(shortByMat.get(mk),0.0);
+			for each  rmS in Raw_Material[ID == mk.toLong()]
+			{
+				itS = ifnull(rmS.In_Transit_Qty,"0").toString().trim();
+				if(itS == "")
+				{
+					itS = "0";
+				}
+				dpS = ifnull(rmS.Disputed_Qty,"0").toString().trim();
+				if(dpS == "")
+				{
+					dpS = "0";
+				}
+				itV = itS.toDecimal();
+				offM = drainM;
+				if(offM > itV)
+				{
+					offM = itV;
+				}
+				rmS.In_Transit_Qty = itV - offM;
+				if(shM > 0)
+				{
+					rmS.Disputed_Qty = dpS.toDecimal() + shM;
+				}
+			}
+		}
+		for each  lk in settledByLot.keys()
+		{
+			drainL = settledByLot.get(lk);
+			shL = ifnull(shortByLot.get(lk),0.0);
+			for each  ltS in Raw_Material_Lot[ID == lk.toLong()]
+			{
+				litS = ifnull(ltS.In_Transit_Qty,"0").toString().trim();
+				if(litS == "")
+				{
+					litS = "0";
+				}
+				ldpS = ifnull(ltS.Disputed_Qty,"0").toString().trim();
+				if(ldpS == "")
+				{
+					ldpS = "0";
+				}
+				litV = litS.toDecimal();
+				offL = drainL;
+				if(offL > litV)
+				{
+					offL = litV;
+				}
+				ltS.In_Transit_Qty = litV - offL;
+				if(shL > 0)
+				{
+					ltS.Disputed_Qty = ldpS.toDecimal() + shL;
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// 4. WASTE PIECES - received per physical piece. Verbatim from the old
+		// receiveMaterials waste block: a Received movement child, Waste_Master
+		// counts drained In_Transit -> (rack / Disputed), an Inbound-style
+		// Outbound dispute for the gap.
+		//------------------------------------------------------------------
+		for each  wRaw in wastes
+		{
+			wm = wRaw.toMap();
+			rowId = ifnull(wm.get("rowId"),"").toString().trim();
+			wrStr = ifnull(wm.get("received"),"0").toString().trim();
+			if(wrStr == "")
+			{
+				wrStr = "0";
+			}
+			gotPcs = wrStr.toDecimal().toLong();
+			wRemark = ifnull(wm.get("remark"),"").toString();
+			if(rowId != "" && rowId.isNumber() == true)
+			{
+				for each  wi in Waste_Movement[ID == rowId.toLong() && Movement_Type == "Issued"]
+				{
+					issuedW = ifnull(wi.Piece_Count,0);
+					alreadyW = 0;
+					for each  rv in Waste_Movement[Parent_Movement == wi.ID && Movement_Type == "Received"]
+					{
+						alreadyW = alreadyW + ifnull(rv.Piece_Count,0);
+					}
+					takePcs = gotPcs;
+					if(alreadyW + takePcs > issuedW)
+					{
+						takePcs = issuedW - alreadyW;
+					}
+					if(takePcs < 0)
+					{
+						takePcs = 0;
+					}
+					if(takePcs > 0)
+					{
+						newRvId = insert into Waste_Movement
+						[
+							Movement_Type="Received"
+							Piece_Width=ifnull(wi.Piece_Width,0)
+							Piece_Length=ifnull(wi.Piece_Length,0)
+							Piece_Count=takePcs
+							Cut_Size_Width=ifnull(wi.Cut_Size_Width,0)
+							Cut_Size_Length=ifnull(wi.Cut_Size_Length,0)
+							Moved_On=zoho.currentdate
+							Added_User=zoho.loginuser
+						];
+						for each  rvNew in Waste_Movement[ID == newRvId.toLong()]
+						{
+							rvNew.Parent_Movement = wi.ID;
+							rvNew.Waste_Piece = wi.Waste_Piece;
+							rvNew.Plan = wi.Plan;
+							rvNew.Plan_Item = wi.Plan_Item;
+							rvNew.Moved_By = supId;
+						}
+					}
+					stillOut = issuedW - (alreadyW + takePcs);
+					if(stillOut < 0)
+					{
+						stillOut = 0;
+					}
+					for each  wmStock in Waste_Master[ID == wi.Waste_Piece]
+					{
+						witStr = ifnull(wmStock.In_Transit_Count,"0").toString().trim();
+						if(witStr == "")
+						{
+							witStr = "0";
+						}
+						wdispStr = ifnull(wmStock.Disputed_Count,"0").toString().trim();
+						if(wdispStr == "")
+						{
+							wdispStr = "0";
+						}
+						witCount = witStr.toDecimal().toLong();
+						wdispCount = wdispStr.toDecimal().toLong();
+						settlePcs = takePcs + stillOut;
+						if(settlePcs > witCount)
+						{
+							settlePcs = witCount;
+						}
+						wmStock.In_Transit_Count = witCount - settlePcs;
+						if(stillOut > 0)
+						{
+							wmStock.Disputed_Count = wdispCount + stillOut;
+						}
+						restStr = ifnull(wmStock.Piece_Count,"0").toString().trim();
+						if(restStr == "")
+						{
+							restStr = "0";
+						}
+						if(restStr.toDecimal().toLong() <= 0 && (witCount - settlePcs) <= 0 && (wdispCount + stillOut) <= 0)
+						{
+							wmStock.Status = "Consumed";
+						}
+					}
+					if(stillOut > 0)
+					{
+						try
+						{
+							wNoteTxt = "";
+							if(wRemark != "")
+							{
+								wNoteTxt = " - " + wRemark.replaceAll("\"","'");
+							}
+							wDispMat = null;
+							for each  wmRec2 in Waste_Master[ID == wi.Waste_Piece]
+							{
+								wDispMat = wmRec2.SKU;
+							}
+							wDispName = "Waste";
+							for each  rmw2 in Raw_Material[ID == wDispMat]
+							{
+								wDispName = ifnull(rmw2.Material_Display_Name,"").toString().trim();
+								if(wDispName == "")
+								{
+									wDispName = ifnull(rmw2.Name,"").toString().trim();
+								}
+								wDispName = wDispName.replaceAll("\"","'");
+							}
+							newWDispId = insert into Stock_Dispute
+							[
+								Material_Name=wDispName
+								Unit="pcs"
+								Is_Waste=true
+								Direction="Outbound"
+								Issued_Qty=issuedW
+								Received_Qty=alreadyW + takePcs
+								Disputed_Qty=stillOut
+								Status="Open"
+								Raised_On=zoho.currentdate
+								Raised_Note=wRemark.replaceAll("\"","'")
+								Added_User=zoho.loginuser
+							];
+							for each  wdsp in Stock_Dispute[ID == newWDispId.toLong()]
+							{
+								wdsp.Waste_Piece = wi.Waste_Piece;
+								wdsp.Supervisor = supId;
+								if(wDispMat != null)
+								{
+									wdsp.Material = wDispMat;
+								}
+								if(wi.Plan != null)
+								{
+									wdsp.Plan = wi.Plan;
+								}
+								if(wi.Plan_Item != null)
+								{
+									wdsp.Plan_Item = wi.Plan_Item;
+								}
+							}
+							if(wasteDispJson != "")
+							{
+								wasteDispJson = wasteDispJson + ",";
+							}
+							wasteDispJson = wasteDispJson + "\"" + newWDispId + "\"";
+						}
+						catch (e3)
+						{
+							info "Stock_Dispute not raised for waste piece " + wi.Waste_Piece + ": " + e3.toString();
+						}
+						if(errJson != "")
+						{
+							errJson = errJson + ",";
+						}
+						errJson = errJson + "\"Waste piece " + ifnull(wi.Piece_Width,0) + "x" + ifnull(wi.Piece_Length,0) + ": " + stillOut + " of " + issuedW + " not received" + wNoteTxt + " - dispute raised\"";
+					}
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// 5. Build perMaterial for receiveFanOut.
+		//------------------------------------------------------------------
+		for each  mk2 in matSeen
+		{
+			if(pmJson != "")
+			{
+				pmJson = pmJson + ",";
+			}
+			pmArr = ifnull(arrivedByMat.get(mk2),0.0);
+			pmShort = ifnull(shortByMat.get(mk2),0.0);
+			pmVou = ifnull(voucherByMat.get(mk2),"").toString().replaceAll("\"","'");
+			pmRemark = ifnull(shortRemarkByMat.get(mk2),"").toString();
+			pmLot = ifnull(dispLotByMat.get(mk2),"").toString();
+			pmJson = pmJson + "{\"materialId\":\"" + mk2 + "\",\"arrived\":" + pmArr + ",\"short\":" + pmShort + ",\"voucher\":\"" + pmVou + "\",\"lot\":\"" + pmLot + "\",\"remark\":\"" + pmRemark + "\"}";
+		}
+	}
+	catch (e)
+	{
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"perMaterial\":[],\"wasteDisputeIds\":[]}";
+	}
+	return "{\"errors\":[" + errJson + "],\"perMaterial\":[" + pmJson + "],\"wasteDisputeIds\":[" + wasteDispJson + "]}";
+}

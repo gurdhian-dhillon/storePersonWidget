@@ -1205,6 +1205,112 @@ string resolveDispute(string payloadJson)
 				}
 
 				//------------------------------------------------------
+				// 3a. THE HANDOVER RECORD - wind the Issue_Line back too.
+				//
+				// receiveHandover / receiveFanOut settle the material x lot
+				// Issue_Line (Received_Qty / Disputed_Qty / Line_Status) and
+				// stamp the SIV + lot on this dispute. So the exact line is
+				// Material_Issue[Voucher_No == dsp.Voucher_No].Issue_Lines where
+				// Material (and Lot, when the dispute carries one) match.
+				//
+				//   Found            - the disputed part reached production after
+				//                      all. Received_Qty += take, Disputed_Qty
+				//                      -= take on the line, and the voucher's
+				//                      Transfer_Status is pulled back to Pending
+				//                      so postTransferOrders moves the newly
+				//                      confirmed metres (it skips Done vouchers).
+				//   Correction/Lost  - the metres never arrived. The line keeps
+				//                      its recorded Received/Disputed split (a
+				//                      historical fact) but Line_Status goes to
+				//                      "Received" - the dispute is closed, nothing
+				//                      more is coming, and postTransferOrders must
+				//                      not read it as still owed.
+				//
+				// OUTBOUND, non-waste only, and only when the dispute carries a
+				// voucher (a pre-migration dispute has none - its line is the
+				// legacy per-requirement shape and Section 3 already handled it).
+				//------------------------------------------------------
+				if(inbound == false && isWaste == false && dsp.Material != null)
+				{
+					dspVoucherTxt = ifnull(dsp.Voucher_No,"").toString().trim();
+					if(dspVoucherTxt != "")
+					{
+						dspLotMatch = ifnull(dsp.Lot,"").toString().trim();
+						ilTake = take;
+						for each  miH in Material_Issue[Voucher_No == dspVoucherTxt]
+						{
+							anyLineHit = false;
+							for each  ilH in miH.Issue_Lines
+							{
+								ilMatTxt = ifnull(ilH.Material,"").toString().trim();
+								ilLotTxt = ifnull(ilH.Lot,"").toString().trim();
+								lotOk = true;
+								if(dspLotMatch != "" && ilLotTxt != dspLotMatch)
+								{
+									lotOk = false;
+								}
+								if(ilTake > 0 && ilMatTxt == dsp.Material.toString() && lotOk == true)
+								{
+									anyLineHit = true;
+									ilQtyS = ifnull(ilH.Qty,"0").toString().trim();
+									if(ilQtyS == "")
+									{
+										ilQtyS = "0";
+									}
+									ilRcvS = ifnull(ilH.Received_Qty,"0").toString().trim();
+									if(ilRcvS == "")
+									{
+										ilRcvS = "0";
+									}
+									ilDspS = ifnull(ilH.Disputed_Qty,"0").toString().trim();
+									if(ilDspS == "")
+									{
+										ilDspS = "0";
+									}
+									ilQ = ilQtyS.toDecimal();
+									ilRcv = ilRcvS.toDecimal();
+									ilDsp = ilDspS.toDecimal();
+									if(applyKind == "Found")
+									{
+										put = ilDsp;
+										if(put > ilTake)
+										{
+											put = ilTake;
+										}
+										ilH.Received_Qty = ilRcv + put;
+										ilH.Disputed_Qty = ilDsp - put;
+										if((ilDsp - put) <= 0)
+										{
+											ilH.Line_Status = "Received";
+										}
+										else
+										{
+											ilH.Line_Status = "Partially_Received";
+										}
+										ilTake = ilTake - put;
+									}
+									else
+									{
+										ilH.Line_Status = "Received";
+									}
+								}
+							}
+							if(anyLineHit == true && applyKind == "Found")
+							{
+								// postTransferOrders only looks at vouchers whose
+								// Transfer_Status is not "Done", so a found metre
+								// on an already-transferred voucher would never
+								// move without this.
+								if(ifnull(miH.Transfer_Status,"").toString().trim() == "Done")
+								{
+									miH.Transfer_Status = "Pending";
+								}
+							}
+						}
+					}
+				}
+
+				//------------------------------------------------------
 				// 3b. Whether the item can now be started - or can no longer be.
 				//
 				// Item_Status is what the production screen gates on, and until

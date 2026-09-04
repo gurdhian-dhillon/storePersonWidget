@@ -380,12 +380,15 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 	// handover on a one-day view shares an Issue_Date, so only the insert stamp
 	// can order them.
 	//
-	// ONE PRESS = ONE ROW. A big issue is chunked by the widget into several
-	// Material_Issue records (each its own SIV), all sharing Batch_Voucher, and
-	// chunk 1 carries Batch_Head == true. This walks HEAD rows only and merges
-	// each head's siblings' Issue_Lines - the supervisor pressed nothing, the
-	// store did, and he saw one handover arrive.
-	issues = Material_Issue[Issued_To == supId && Issue_Date == dDay && Batch_Head == true] sort by Added_Time desc;
+	// ONE PRESS = ONE ROW, both eras.
+	//   NEW  - Source_System == "JS_API": issueMaterialsHandover writes one
+	//          Material_Issue per press, Issue_Lines at material x lot grain
+	//          (NO Plan_Item on the line - the per-item split is gone; those
+	//          lines fold into the widget's "unassigned" bucket, same as a
+	//          legacy line that never resolved an item).
+	//   OLD  - Batch_Head == true: first chunk, siblings merged by Batch_Voucher.
+	// Two positive == matches OR'd - an empty field just fails to match.
+	issues = Material_Issue[Issued_To == supId && Issue_Date == dDay && (Batch_Head == true || Source_System == "JS_API")] sort by Added_Time desc;
 	info "handover batches on day: " + issues.count();
 
 	// The material catalogue, fetched ONCE, rather than a Raw_Material query per
@@ -436,15 +439,20 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 
 	for each  mi in issues
 	{
-		// This press's chunks - head plus siblings, oldest first. The head's
-		// Batch_Voucher is its own SIV even for a one-chunk press, so this query
-		// returns the head too.
-		batchKey = ifnull(mi.Batch_Voucher,"").toString().trim();
-		if(batchKey == "")
+		// NEW: one row = one press. OLD: head + Batch_Voucher siblings.
+		if(ifnull(mi.Source_System,"").toString().trim() == "JS_API")
 		{
-			batchKey = ifnull(mi.Voucher_No,"").toString().trim();
+			batchChunks = Material_Issue[ID == mi.ID];
 		}
-		batchChunks = Material_Issue[Batch_Voucher == batchKey] sort by Added_Time;
+		else
+		{
+			batchKey = ifnull(mi.Batch_Voucher,"").toString().trim();
+			if(batchKey == "")
+			{
+				batchKey = ifnull(mi.Voucher_No,"").toString().trim();
+			}
+			batchChunks = Material_Issue[Batch_Voucher == batchKey] sort by Added_Time;
+		}
 
 		rLines = "";
 		rSiv = "";

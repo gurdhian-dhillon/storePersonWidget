@@ -21,14 +21,17 @@ string postTransferOrders(string dryRun)
 	// "Received" the moment an older one is confirmed. Triggering on that would
 	// transfer cloth still sitting on the store counter.
 	//
-	// Issue_Lines.Settled_Qty is per line and is only ever written by an actual
-	// receipt, oldest line first. So what moves is Settled_Qty - Transferred_Qty:
-	// what the supervisor has confirmed, minus what has already gone across.
+	// WHAT MOVES is the CONFIRMED amount minus what has already gone across.
+	//   NEW-model line (Line_Status set): Received_Qty - Transferred_Qty. Only
+	//     what the supervisor actually confirmed transfers; a short receipt
+	//     leaves the disputed metres behind, and they never move unless a
+	//     dispute resolves "Found" and bumps Received_Qty.
+	//   LEGACY line (no Line_Status): Settled_Qty - Transferred_Qty, exactly as
+	//     before - the old receiveMaterials set Settled_Qty = Qty on receipt.
 	//
-	// PARTIAL RECEIPTS FALL OUT OF THAT FOR FREE. Receive 8 of 10 today and 8
-	// transfer; receive the last 2 tomorrow and 2 transfer, on a second order
-	// against the same voucher. Same shape receiveMaterials already uses to
-	// settle Settled_Qty against Qty.
+	// PARTIAL RECEIPTS FALL OUT FOR FREE. Receive 8 of 10 today and 8 transfer;
+	// receive the last 2 tomorrow and 2 transfer, on a second order against the
+	// same voucher.
 	//
 	// STOCK IS CONSUMED AT RECEIPT, NOT ISSUE - the rule this whole app is built
 	// on - and this is the Inventory half of it. Nothing moves warehouse when
@@ -265,6 +268,22 @@ string postTransferOrders(string dryRun)
 
 				for each  ln in mi.Issue_Lines
 				{
+					// DUAL READ. A NEW-model line (one per material x lot, written
+					// by issueMaterialsHandover) carries Line_Status and
+					// Received_Qty - what the supervisor actually confirmed, which
+					// is what transfers. A LEGACY line (one per requirement, from
+					// the old issueMaterials) has neither; it used Settled_Qty as
+					// "the whole owed amount, received or disputed". So:
+					//   new    -> move Received_Qty - Transferred_Qty
+					//   legacy -> move Settled_Qty  - Transferred_Qty
+					lnStatus = ifnull(ln.Line_Status,"").toString().trim();
+					isNewLine = (lnStatus != "");
+
+					rcvS = ifnull(ln.Received_Qty,"0").toString().trim();
+					if(rcvS == "")
+					{
+						rcvS = "0";
+					}
 					setS = ifnull(ln.Settled_Qty,"0").toString().trim();
 					if(setS == "")
 					{
@@ -281,13 +300,28 @@ string postTransferOrders(string dryRun)
 						qtyS = "0";
 					}
 
-					setVal = setS.toDecimal();
 					trfVal = trfS.toDecimal();
-					moveVal = setVal - trfVal;
+					if(isNewLine == true)
+					{
+						confVal = rcvS.toDecimal();
+					}
+					else
+					{
+						confVal = setS.toDecimal();
+					}
+					moveVal = confVal - trfVal;
 
-					// Not everything on the voucher has been confirmed yet, so
-					// this voucher stays Pending after this run whatever moves.
-					if(setVal < qtyS.toDecimal())
+					// This line has not been through receipt yet, so the voucher
+					// stays Pending after this run whatever moves. NEW: the line
+					// is still "Issued". LEGACY: Settled_Qty < Qty.
+					if(isNewLine == true)
+					{
+						if(lnStatus == "Issued")
+						{
+							stillOwed = true;
+						}
+					}
+					else if(confVal < qtyS.toDecimal())
 					{
 						stillOwed = true;
 					}

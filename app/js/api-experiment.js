@@ -68,17 +68,27 @@ var ApiExperiment = (function () {
             var rows = [];
             var calls = 0;
 
-            // Creator returns code 9280 ("No records found matching the given
-            // criteria") as an HTTP 400 rather than an empty list. That is a
-            // valid empty result for us — an org with no available waste, no
-            // open exceptions, etc. — so it resolves to [], not rejects.
+            // Creator signals "nothing to return" from getRecords as an HTTP 400
+            // with one of several codes, NOT as an empty list. All of them are a
+            // valid empty result for us — an org with no available waste, no open
+            // exceptions, a report whose form has no rows yet — so they resolve
+            // to [], not reject:
+            //   9280 — no records match the given criteria
+            //   9220 — no records exist in this report at all
+            //   3100 — no data available (older builds)
             function isNoRecords(err) {
                 if (!err) return false;
                 var s = '';
                 try { s = JSON.stringify(err); } catch (e) { s = String(err); }
-                s = (s + ' ' + (err.message || '') + ' ' + (err.responseText || '')).toLowerCase();
-                return err.code === 9280 || s.indexOf('9280') !== -1 ||
-                    s.indexOf('no records found') !== -1;
+                s = (s + ' ' + (err.message || '') + ' ' + (err.responseText || '') +
+                    ' ' + (err.responseJSON ? JSON.stringify(err.responseJSON) : '')).toLowerCase();
+                var code = err.code;
+                if (code == null && err.responseJSON) code = err.responseJSON.code;
+                return code === 9280 || code === 9220 || code === 3100 ||
+                    s.indexOf('9280') !== -1 || s.indexOf('9220') !== -1 ||
+                    s.indexOf('no records found') !== -1 ||
+                    s.indexOf('no records exist') !== -1 ||
+                    s.indexOf('no data available') !== -1;
             }
 
             function page(cursor) {
@@ -657,7 +667,34 @@ var ApiExperiment = (function () {
         });
     }
 
-    return { run: run, compare: compare, assemble: assemble, _getAll: getAll, _reports: RPT };
+    // ---- raw-key inspector -------------------------------------------------
+    // Dumps the first record of every report so the EXACT keys getRecords
+    // returns can be compared against what assemble() reads. A report can
+    // expose a column under a name that differs from its form field link
+    // (renamed column, a duplicate re-added as Cut_Size_Width1, a label with
+    // spaces) and every mismatch silently reads as undefined -> 0.
+    //   ApiExperiment.keys()               all reports
+    //   ApiExperiment.keys('reqs')         one, by RPT key
+    function keys(which) {
+        if (!have()) { console.warn('[api-experiment] getRecords not available'); return; }
+        var names = which ? [which] : Object.keys(RPT);
+        return Promise.all(names.map(function (n) {
+            return getAll(RPT[n], null).then(function (r) {
+                var row = r.rows[0];
+                console.log('%c[' + n + '] ' + RPT[n] + ' — ' + r.rows.length + ' rows',
+                    'font-weight:bold');
+                if (!row) { console.log('  (empty)'); return { report: n, keys: [], sample: null }; }
+                console.log('  keys:', Object.keys(row).sort().join(', '));
+                console.log('  sample:', row);
+                return { report: n, keys: Object.keys(row).sort(), sample: row };
+            });
+        }));
+    }
+
+    return {
+        run: run, compare: compare, assemble: assemble, keys: keys,
+        _getAll: getAll, _reports: RPT
+    };
 })();
 
 if (typeof window !== 'undefined') window.ApiExperiment = ApiExperiment;

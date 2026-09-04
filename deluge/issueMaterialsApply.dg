@@ -1,0 +1,506 @@
+string issueMaterialsApply(string supervisorId, string issuesJson, string applyKey)
+{
+	// FAN-OUT ONLY. This is issueMaterials with the Material_Issue write REMOVED.
+	// It applies the allocation to the requirement rows and moves stock; it does
+	// NOT create the handover record. issueMaterialsHandover does that, once,
+	// after every chunk of a press has been applied.
+	//
+	// WHY SPLIT. A big press touches 1000+ Material_Requirement rows - chunked by
+	// the widget for payload size and statement safety, exactly as before. But
+	// the handover record is only ~200 material-x-lot lines and wants to be ONE
+	// Material_Issue, not one per chunk with Batch_Voucher glue. Splitting the
+	// apply from the record write is what lets both be true: the apply stays
+	// chunked, the record is a single separate call.
+	//
+	// applyKey is a client-generated id for one press (timestamp + random). It is
+	// echoed back in the response but not stored here - the caller collects the
+	// wasteMvIds this function returns and hands them to issueMaterialsHandover,
+	// which stamps the SIV on them once the voucher exists.
+	//
+	// Sections 1-4 (allocation apply, remnant picks, lot stock, parent stock) are
+	// a VERBATIM copy of issueMaterials. The only removals are: the Material_Issue
+	// insert, the Issue_Lines gather/insert, the voucher numbering, the
+	// Batch_Voucher block, the Waste_Movement Voucher back-fill (moved to
+	// issueMaterialsHandover), and the notification mail (moved there too).
+	//
+	// An issue line is (unchanged from issueMaterials):
+	//
+	//   { "materialId":"123", "source":"Plan"|"Reissue", "isFabric":true,
+	//     "cutWidth":55, "cutLength":55,
+	//     "allocations":[
+	//       { "mrqId":"777", "planId":"50", "planItemId":"888",
+	//         "giveQty":5.50, "giveRaw":10, "giveWaste":4, "issuedLot":"901" } ],
+	//     "lotMoves":[
+	//       { "lotId":"901", "qty":11.00, "isPieces":false,
+	//         "pieces":[ {"pieceId":"abc","count":3,"cutLengthCm":300} ] } ],
+	//     "wastePicks":[
+	//       { "wasteId":"456", "pieces":3, "planId":"50", "planItemId":"888",
+	//         "yieldPer":2, "pieceWidth":300, "pieceLength":400 } ],
+	//     "issueLines":[ ... ] }   -- issueLines is IGNORED here, it is for the
+	//                                 handover call
+	//
+	// WRITE-CONTRACT (unchanged):
+	//  - Material_Requirement: Issued_Qty, Pieces_From_Raw, Pieces_From_Waste,
+	//    Issued_Lot (written only when empty - the tone pin).
+	//  - Waste_Master: Piece_Count down, In_Transit_Count up, Status="Issued" when
+	//    emptied.
+	//  - Waste_Movement "Issued": Piece_Count/Width/Length, Cut_Size_Width/Length,
+	//    Pieces_Yielded, Waste_Piece, Plan, Plan_Item, Moved_By, Carton_Number.
+	//    Voucher is left BLANK - issueMaterialsHandover fills it.
+	//  - Raw_Material_Lot: Wash_Quantity down, In_Transit_Qty up.
+	//  - Raw_Material: Wash_Quantity/Quantity down, In_Transit_Qty up.
+	errJson = "";
+	okJson = "";
+	// DEBUG WRAPPER: Creator reports every runtime failure as a generic
+	// "code 9430 - There is an error while executing Custom API." Catching it
+	// here surfaces the real Deluge message in the widget console instead.
+	try
+	{
+		supId = supervisorId.trim().toLong();
+		issues = issuesJson.toJSONList();
+		keyTxt = ifnull(applyKey,"").toString().trim();
+		info "issueMaterialsApply supId=" + supId + " issueCount=" + issues.size() + " applyKey=" + keyTxt;
+		// The Waste_Movement "Issued" rows this chunk writes (one per waste pick,
+		// across every material). Their Voucher is filled by
+		// issueMaterialsHandover once the SIV exists - the caller unions these
+		// ids across chunks and passes them there.
+		wasteMvIds = List();
+		for each  issue in issues
+		{
+			// toJSONList() yields JSON objects, NOT Deluge Maps - .get() silently
+			// returns null on those. .toMap() converts to a real Map first.
+			im = issue.toMap();
+			matId = im.get("materialId").toString();
+			cwStr = ifnull(im.get("cutWidth"),"0").toString().trim();
+			if(cwStr == "")
+			{
+				cwStr = "0";
+			}
+			clStr = ifnull(im.get("cutLength"),"0").toString().trim();
+			if(clStr == "")
+			{
+				clStr = "0";
+			}
+			cutW = cwStr.toDecimal();
+			cutL = clStr.toDecimal();
+			allocs = ifnull(im.get("allocations"),"[]").toString().toJSONList();
+			lotMoves = ifnull(im.get("lotMoves"),"[]").toString().toJSONList();
+			picks = ifnull(im.get("wastePicks"),"[]").toString().toJSONList();
+			matRec = Raw_Material[ID == matId.toLong()];
+			if(matRec.count() == 0)
+			{
+				if(errJson != "")
+				{
+					errJson = errJson + ",";
+				}
+				errJson = errJson + "\"Material " + matId + " not found\"";
+			}
+			else
+			{
+				matName = ifnull(matRec.SKU,"").toString();
+				isFab = matRec.Is_Fabric;
+				if(isFab == true)
+				{
+					stkStr = ifnull(matRec.Wash_Quantity,"0").toString().trim();
+				}
+				else
+				{
+					stkStr = ifnull(matRec.Quantity,"0").toString().trim();
+				}
+				if(stkStr == "")
+				{
+					stkStr = "0";
+				}
+				available = stkStr.toDecimal();
+				//--------------------------------------------------------------
+				// 1. APPLY EACH ALLOCATION - one point lookup per requirement.
+				//--------------------------------------------------------------
+				issuedTotal = 0.0;
+				piecesFromWasteTot = 0;
+				piecesFromRawTot = 0;
+				for each  alloc in allocs
+				{
+					a = alloc.toMap();
+					mrqId = ifnull(a.get("mrqId"),"").toString().trim();
+					gqStr = ifnull(a.get("giveQty"),"0").toString().trim();
+					if(gqStr == "")
+					{
+						gqStr = "0";
+					}
+					grStr = ifnull(a.get("giveRaw"),"0").toString().trim();
+					if(grStr == "")
+					{
+						grStr = "0";
+					}
+					gwStr = ifnull(a.get("giveWaste"),"0").toString().trim();
+					if(gwStr == "")
+					{
+						gwStr = "0";
+					}
+					giveQty = gqStr.toDecimal();
+					giveRaw = grStr.toDecimal().toLong();
+					giveWaste = gwStr.toDecimal().toLong();
+					issLotStr = ifnull(a.get("issuedLot"),"").toString().trim();
+					mrqRecs = Material_Requirement[ID == mrqId.toLong()];
+					if(mrqId == "" || mrqRecs.count() == 0)
+					{
+						if(errJson != "")
+						{
+							errJson = errJson + ",";
+						}
+						errJson = errJson + "\"" + matName + ": requirement " + mrqId + " not found\"";
+					}
+					else
+					{
+						for each  mrq in mrqRecs
+						{
+							mrq.Issued_Qty=ifnull(mrq.Issued_Qty,0) + giveQty;
+							if(isFab == true)
+							{
+								mrq.Pieces_From_Raw=ifnull(mrq.Pieces_From_Raw,0) + giveRaw;
+								mrq.Pieces_From_Waste=ifnull(mrq.Pieces_From_Waste,0) + giveWaste;
+								// WRITTEN ONLY WHEN EMPTY. The first lot decides the
+								// tone; a second write would rewrite history, and the
+								// widget reads this back to pin the next issue.
+								if(issLotStr != "" && ifnull(mrq.Issued_Lot,"").toString().trim() == "")
+								{
+									mrq.Issued_Lot=issLotStr.toLong();
+								}
+							}
+						}
+						issuedTotal = issuedTotal + giveQty;
+						piecesFromWasteTot = piecesFromWasteTot + giveWaste;
+						piecesFromRawTot = piecesFromRawTot + giveRaw;
+					}
+				}
+				//--------------------------------------------------------------
+				// 2. CONSUME REMNANT PICKS. One point lookup per Waste_Master.
+				//--------------------------------------------------------------
+				physicalPcs = 0;
+				for each  pkRaw in picks
+				{
+					pk = pkRaw.toMap();
+					wId = ifnull(pk.get("wasteId"),"").toString().trim();
+					pcStr = ifnull(pk.get("pieces"),"0").toString().trim();
+					if(pcStr == "")
+					{
+						pcStr = "0";
+					}
+					takePcs = pcStr.toDecimal().toLong();
+					ypStr = ifnull(pk.get("yieldPer"),"0").toString().trim();
+					if(ypStr == "")
+					{
+						ypStr = "0";
+					}
+					yieldPer = ypStr.toDecimal().toLong();
+					pwStr = ifnull(pk.get("pieceWidth"),"0").toString().trim();
+					if(pwStr == "")
+					{
+						pwStr = "0";
+					}
+					plStr = ifnull(pk.get("pieceLength"),"0").toString().trim();
+					if(plStr == "")
+					{
+						plStr = "0";
+					}
+					// PER-PICK CUT SIZE. A SKU issue line no longer carries one
+					// cut - it spans several - so the Waste_Movement's Cut_Size_*
+					// comes from the pick's own target item. Falls back to the
+					// wrapper cutW/cutL for an older widget that did not send it.
+					pkCwStr = ifnull(pk.get("cutW"),"").toString().trim();
+					if(pkCwStr == "")
+					{
+						pkCutW = cutW;
+					}
+					else
+					{
+						pkCutW = pkCwStr.toDecimal();
+					}
+					pkClStr = ifnull(pk.get("cutL"),"").toString().trim();
+					if(pkClStr == "")
+					{
+						pkCutL = cutL;
+					}
+					else
+					{
+						pkCutL = pkClStr.toDecimal();
+					}
+					pkPlanStr = ifnull(pk.get("planId"),"").toString().trim();
+					pkItemStr = ifnull(pk.get("planItemId"),"").toString().trim();
+					wRecs = Waste_Master[ID == wId.toLong()];
+					if(wId == "" || wRecs.count() == 0)
+					{
+						if(errJson != "")
+						{
+							errJson = errJson + ",";
+						}
+						errJson = errJson + "\"" + matName + ": waste piece " + wId + " not found\"";
+					}
+					else if(takePcs <= 0)
+					{
+						info "issueMaterialsApply: waste pick " + wId + " asked 0 pieces - skipped";
+					}
+					else
+					{
+						pkCarton = "";
+						for each  wRec in wRecs
+						{
+							haveStr = ifnull(wRec.Piece_Count,"0").toString().trim();
+							if(haveStr == "")
+							{
+								haveStr = "0";
+							}
+							transStr2 = ifnull(wRec.In_Transit_Count,"0").toString().trim();
+							if(transStr2 == "")
+							{
+								transStr2 = "0";
+							}
+							// The carton the store racked this offcut in, captured
+							// here where the Waste_Master row is already open, and
+							// stamped onto the Issued movement below so History
+							// shows "where it was" with no hop back to the master.
+							pkCarton = ifnull(wRec.Carton_Number,"").toString().trim();
+							leftPcs = haveStr.toDecimal().toLong() - takePcs;
+							if(leftPcs < 0)
+							{
+								if(errJson != "")
+								{
+									errJson = errJson + ",";
+								}
+								errJson = errJson + "\"" + matName + ": waste piece " + wId + " only has " + haveStr.toDecimal().toLong() + ", asked " + takePcs + " - clamped\"";
+								info "issueMaterialsApply: waste " + wId + " would go negative - clamped to 0";
+								leftPcs = 0;
+							}
+							wRec.Piece_Count=leftPcs;
+							wRec.In_Transit_Count=transStr2.toDecimal().toLong() + takePcs;
+							if(leftPcs <= 0)
+							{
+								wRec.Status="Issued";
+							}
+						}
+						physicalPcs = physicalPcs + takePcs;
+						// An Issued movement replaces the Waste_Issued subform row.
+						// No Received_Count here - receipt is its own movement
+						// pointing back at this one. Voucher is left blank and
+						// filled by issueMaterialsHandover.
+						newMvId = insert into Waste_Movement
+						[
+							Movement_Type="Issued"
+							Piece_Width=pwStr.toDecimal()
+							Piece_Length=plStr.toDecimal()
+							Piece_Count=takePcs
+							Cut_Size_Width=pkCutW
+							Cut_Size_Length=pkCutL
+							Pieces_Yielded=takePcs * yieldPer
+							Moved_On=zoho.currentdate
+							Added_User=zoho.loginuser
+						];
+						for each  mv in Waste_Movement[ID == newMvId.toLong()]
+						{
+							mv.Waste_Piece=wId.toLong();
+							if(pkPlanStr != "")
+							{
+								mv.Plan=pkPlanStr.toLong();
+							}
+							if(pkItemStr != "")
+							{
+								mv.Plan_Item=pkItemStr;
+							}
+							mv.Moved_By=supId;
+							if(pkCarton != "")
+							{
+								mv.Carton_Number=pkCarton;
+							}
+						}
+						wasteMvIds.add(newMvId.toString());
+					}
+				}
+				//--------------------------------------------------------------
+				// 3. MOVE LOT STOCK. One point lookup per lot, per piece.
+				//--------------------------------------------------------------
+				for each  lmRaw in lotMoves
+				{
+					lm = lmRaw.toMap();
+					lotId = ifnull(lm.get("lotId"),"").toString().trim();
+					lqStr = ifnull(lm.get("qty"),"0").toString().trim();
+					if(lqStr == "")
+					{
+						lqStr = "0";
+					}
+					moveQty = lqStr.toDecimal();
+					isPieces = ifnull(lm.get("isPieces"),"false").toString().trim() == "true";
+					lotRecs = Raw_Material_Lot[ID == lotId.toLong()];
+					if(lotId == "" || lotRecs.count() == 0)
+					{
+						if(errJson != "")
+						{
+							errJson = errJson + ",";
+						}
+						errJson = errJson + "\"" + matName + ": lot " + lotId + " not found\"";
+					}
+					else
+					{
+						for each  lotMv in lotRecs
+						{
+							lmwS = ifnull(lotMv.Wash_Quantity,"0").toString().trim();
+							if(lmwS == "")
+							{
+								lmwS = "0";
+							}
+							lmtS = ifnull(lotMv.In_Transit_Qty,"0").toString().trim();
+							if(lmtS == "")
+							{
+								lmtS = "0";
+							}
+							newWash = lmwS.toDecimal() - moveQty;
+							if(newWash < 0)
+							{
+								if(errJson != "")
+								{
+									errJson = errJson + ",";
+								}
+								errJson = errJson + "\"" + matName + ": lot " + ifnull(lotMv.Lot_Number,lotId).toString() + " has " + lmwS.toDecimal() + " washed, asked " + moveQty + " - clamped\"";
+								info "issueMaterialsApply: lot " + lotId + " Wash_Quantity would go negative - clamped to 0";
+								newWash = 0;
+							}
+							lotMv.Wash_Quantity=newWash;
+							lotMv.In_Transit_Qty=lmtS.toDecimal() + moveQty;
+						}
+						if(isPieces == true)
+						{
+							pcList = ifnull(lm.get("pieces"),"[]").toString().toJSONList();
+							for each  pcRaw in pcList
+							{
+								pcM = pcRaw.toMap();
+								pcId = ifnull(pcM.get("pieceId"),"").toString().trim();
+								pcCntS = ifnull(pcM.get("count"),"0").toString().trim();
+								if(pcCntS == "")
+								{
+									pcCntS = "0";
+								}
+								pcTake = pcCntS.toDecimal().toLong();
+								pcCutS = ifnull(pcM.get("cutLengthCm"),"0").toString().trim();
+								if(pcCutS == "")
+								{
+									pcCutS = "0";
+								}
+								pcCutLen = pcCutS.toDecimal();
+								pcRecs = Fabric_Piece[ID == pcId.toLong()];
+								if(pcId == "" || pcRecs.count() == 0)
+								{
+									if(errJson != "")
+									{
+										errJson = errJson + ",";
+									}
+									errJson = errJson + "\"" + matName + ": fabric piece " + pcId + " not found\"";
+								}
+								else if(pcTake > 0)
+								{
+									for each  fpMv in pcRecs
+									{
+										fpMvS = ifnull(fpMv.Piece_Count,"0").toString().trim();
+										if(fpMvS == "")
+										{
+											fpMvS = "0";
+										}
+										fpOrigLenS = ifnull(fpMv.Piece_Length_Cm,"0").toString().trim();
+										if(fpOrigLenS == "")
+										{
+											fpOrigLenS = "0";
+										}
+										if(pcCutLen <= 0)
+										{
+											pcCutLen = fpOrigLenS.toDecimal();
+										}
+										fpMvLeft = fpMvS.toDecimal().toLong() - pcTake;
+										isClamped = false;
+										if(fpMvLeft < 0)
+										{
+											if(errJson != "")
+											{
+												errJson = errJson + ",";
+											}
+											errJson = errJson + "\"" + matName + ": piece " + pcId + " only has " + fpMvS.toDecimal().toLong() + ", asked " + pcTake + " - clamped\"";
+											info "issueMaterialsApply: piece " + pcId + " would go negative - clamped";
+											fpMvLeft = 0;
+											isClamped = true;
+										}
+										fpMv.Piece_Count=fpMvLeft;
+										fpMvRemainder = fpOrigLenS.toDecimal() - pcCutLen;
+										if(fpMvRemainder > 0 && isClamped == false)
+										{
+											insert into Fabric_Piece
+											[
+												Added_User=zoho.loginuser
+												Material=fpMv.Material
+												Lot=fpMv.Lot
+												Piece_Length_Cm=fpMvRemainder
+												Piece_Width_Cm=fpMv.Piece_Width_Cm
+												Piece_Count=pcTake
+												State=fpMv.State
+												Piece_Status="Available"
+												Carton_Number=fpMv.Carton_Number
+												Print_Job=fpMv.Print_Job
+											]
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+				//--------------------------------------------------------------
+				// 4. MOVE PARENT Raw_Material STOCK - once per material line.
+				//
+				// Move the stock, do NOT consume it. The shelf figure drops so the
+				// same cloth cannot be promised to a second supervisor, but the
+				// company still owns it - it is on a trolley, not in a garment. It
+				// is consumed only when the supervisor confirms receipt.
+				//--------------------------------------------------------------
+				balance = available - issuedTotal;
+				if(isFab == true)
+				{
+					matRec.Wash_Quantity=balance;
+					qU = ifnull(matRec.Unwash_Quantity,"0").toString().trim();
+					qA = ifnull(matRec.Unallocated_Qty,"0").toString().trim();
+					matRec.Quantity=balance + if(qU == "",0.0,qU.toDecimal()) + if(qA == "",0.0,qA.toDecimal());
+				}
+				else
+				{
+					matRec.Quantity=balance;
+				}
+				transStr = ifnull(matRec.In_Transit_Qty,"0").toString().trim();
+				if(transStr == "")
+				{
+					transStr = "0";
+				}
+				matRec.In_Transit_Qty=transStr.toDecimal() + issuedTotal;
+				if(okJson != "")
+				{
+					okJson = okJson + ",";
+				}
+				// IDs forced to string - 18-digit ids break JSON.parse otherwise.
+				okJson = okJson + "{\"materialId\":\"" + matId + "\",\"sku\":\"" + matName + "\",\"qty\":" + issuedTotal + ",\"balance\":" + balance + ",\"wastePiecesIssued\":" + physicalPcs + ",\"piecesFromWaste\":" + piecesFromWasteTot + ",\"piecesFromRaw\":" + piecesFromRawTot + "}";
+			}
+		}
+	}
+	catch (e)
+	{
+		// Surfaces as an alert in the widget via the existing errors[] handling.
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"issued\":[],\"wasteMvIds\":[]}";
+	}
+	// Built by hand - List.toString() does not reliably wrap in [].
+	// wasteMvIds: the Waste_Movement rows this chunk created. The caller unions
+	// them across chunks and passes them to issueMaterialsHandover, which stamps
+	// the SIV on each once the voucher record exists.
+	wmJson = "";
+	for each  w in wasteMvIds
+	{
+		if(wmJson != "")
+		{
+			wmJson = wmJson + ",";
+		}
+		wmJson = wmJson + "\"" + w + "\"";
+	}
+	return "{\"errors\":[" + errJson + "],\"issued\":[" + okJson + "],\"wasteMvIds\":[" + wmJson + "]}";
+}

@@ -142,11 +142,16 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	// handovers costs what counting 4 does. It is what lets the pager say "of
 	// 137" without fetching anything it will not show.
 	//
-	// COUNTS HEAD ROWS - one per press, so the pager total is presses, not
-	// chunks. Batch_Head is written explicitly true/false by issueMaterials
-	// (never left empty, because a Creator criteria drops an empty field in both
-	// directions), so this == true is safe.
-	total = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo && Batch_Head == true].count();
+	// ONE ROW PER PRESS, both eras:
+	//   NEW  - Source_System == "JS_API": issueMaterialsHandover writes ONE
+	//          Material_Issue per press, Issue_Lines at material x lot grain, no
+	//          Batch_Voucher / Batch_Head. It is its own card.
+	//   OLD  - Batch_Head == true: the chunked press's first chunk; its siblings
+	//          are pulled by Batch_Voucher and merged.
+	// Both are POSITIVE == matches OR'd, so an empty field simply fails to match
+	// (the "criteria drops empty" rule works FOR us here) - a legacy sibling
+	// (neither flag) is excluded, which is right, it was merged into its head.
+	total = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo && (Batch_Head == true || Source_System == "JS_API")].count();
 
 	// range is 1-BASED and INCLUSIVE at both ends, so page 1 of 10 is 1 to 10
 	// and page 2 is 11 to 20 - not 10 to 20, which repeats a handover on every
@@ -154,10 +159,9 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 	rFrom = offset + 1;
 	rTo = offset + limit;
 
-	// HEAD ROWS ONLY, so the paged loop runs at most `limit` times whatever the
-	// range holds - the same bound the record-paged version had. Siblings are
-	// fetched per head below, unpaged, because a press is only ever a few chunks.
-	issues = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo && Batch_Head == true] sort by Added_Time desc range from rFrom to rTo;
+	// One row per press, so the paged loop runs at most `limit` times whatever
+	// the range holds. Legacy siblings are fetched per head below, unpaged.
+	issues = Material_Issue[Issue_Date >= dFrom && Issue_Date <= dTo && (Batch_Head == true || Source_System == "JS_API")] sort by Added_Time desc range from rFrom to rTo;
 
 	//--------------------------------------------------------------------------
 	// The material catalogue, fetched ONCE, as two id-keyed maps.
@@ -275,24 +279,24 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 		}
 
 		//----------------------------------------------------------------------
-		// THE CHUNKS OF THIS PRESS. The head plus its siblings, oldest first so
-		// the SIV list on the card reads in the order they were minted. A press
-		// is a few chunks at most, so this is unpaged - and Batch_Voucher is an
-		// exact string match, not a scan.
-		//
-		// The head's own Batch_Voucher is its own SIV (issueMaterials sets it
-		// even for a single-chunk press), so this query returns the head too and
-		// there is no separate "add the head" step.
+		// THE CHUNKS OF THIS PRESS.
+		//   NEW (Source_System == "JS_API"): one row = one press. batchChunks is
+		//   just [mi] - the code below already handles a one-element list.
+		//   OLD: the head plus its Batch_Voucher siblings, oldest first.
 		//----------------------------------------------------------------------
-		batchKey = ifnull(mi.Batch_Voucher,"").toString().trim();
-		if(batchKey == "")
+		if(ifnull(mi.Source_System,"").toString().trim() == "JS_API")
 		{
-			// Defensive: a row that somehow missed Batch_Voucher is its own
-			// one-chunk batch rather than being dropped from History.
-			batchKey = ifnull(mi.Voucher_No,"").toString().trim();
+			batchChunks = Material_Issue[ID == mi.ID];
 		}
-
-		batchChunks = Material_Issue[Batch_Voucher == batchKey] sort by Added_Time;
+		else
+		{
+			batchKey = ifnull(mi.Batch_Voucher,"").toString().trim();
+			if(batchKey == "")
+			{
+				batchKey = ifnull(mi.Voucher_No,"").toString().trim();
+			}
+			batchChunks = Material_Issue[Batch_Voucher == batchKey] sort by Added_Time;
+		}
 
 		// No plan or sales order resolved here any more.
 		//

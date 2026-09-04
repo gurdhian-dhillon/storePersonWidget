@@ -844,6 +844,7 @@ function submitReceipt() {
 
     var FINALIZE_PHASE_LABEL = {
         '': 'Updating handover status…',
+        fan: 'Updating your orders…',
         vouchers: 'Updating handover status…',
         items: 'Updating your orders…',
         transfer: 'Moving stock to production…',
@@ -886,6 +887,77 @@ function submitReceipt() {
         });
     }
 
+    // ---- SPLIT RECEIVE PATH ----
+    // receiveHandover (one call — settle the material×lot Issue_Lines + waste +
+    // printed, drain stock, return perMaterial {arrived,short}) then loop
+    // receiveFanOut (fan to Material_Requirement, dispute, readiness, transfer,
+    // notify). The legacy receiveMaterials sweep/finalize below is the fallback.
+    var USE_SPLIT_RECEIVE = true;
+    var perMaterial = [];
+
+    function splitInvoke(apiName, payloadObj, onOk) {
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: apiName,
+            http_method: 'POST',
+            payload: { supervisorId: supId, payloadJson: JSON.stringify(payloadObj) }
+        }).then(function (response) {
+            var parsed;
+            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+            if (parsed && parsed.errors && parsed.errors.length > 0) {
+                if (parsed.errors.some(function (e) { return isRateLimited({ message: e }); })) {
+                    scheduleRetry({ message: parsed.errors.join(' ') });
+                    return;
+                }
+                collectedErrors = collectedErrors.concat(parsed.errors);
+            }
+            retryCount = 0;
+            onOk(parsed || {});
+        }).catch(function (err) {
+            if (isRateLimited(err)) { scheduleRetry(err); return; }
+            abortRun(err);
+        });
+    }
+
+    function handoverStep() {
+        stage = 'sweep';
+        btn.textContent = 'Saving…';
+        showRcvProgress('Receiving materials', 'Confirming your handover…');
+        splitInvoke('receiveHandover', {
+            vouchers: vouchers,
+            shortMaterials: shortMaterials,
+            waste: wasteRows,
+            printedPieces: printedRows
+        }, function (parsed) {
+            perMaterial = parsed.perMaterial || [];
+            (parsed.wasteDisputeIds || []).forEach(function (d) { disputeIds[String(d)] = 1; });
+            finalizeCursor = {};
+            fanStep();
+        });
+    }
+
+    function fanStep() {
+        stage = 'finalize';
+        finalizeN++;
+        var ph = (finalizeCursor && finalizeCursor.ph) || 'fan';
+        btn.textContent = 'Finishing…';
+        showRcvProgress('Finishing', FINALIZE_PHASE_LABEL[ph] || 'Finishing up…');
+        splitInvoke('receiveFanOut', {
+            perMaterial: perMaterial,
+            vouchers: vouchers,
+            plansTouched: plansTouchedArr,
+            disputeIds: Object.keys(disputeIds),
+            finalizeCursor: finalizeCursor
+        }, function (parsed) {
+            (parsed.disputeIds || []).forEach(function (d) { disputeIds[String(d)] = 1; });
+            if (parsed.finalizeDone === true) {
+                finishOk();
+            } else {
+                finalizeCursor = parsed.finalizeCursor || {};
+                setTimeout(fanStep, 250);
+            }
+        });
+    }
+
     function scheduleRetry(err) {
         if (retryCount >= RETRY_WAITS_MS.length) { abortRun(err); return; }
         var waitMs = RETRY_WAITS_MS[retryCount];
@@ -895,7 +967,13 @@ function submitReceipt() {
         btn.textContent = 'Rate limited — retrying…';
         showRcvProgress(stage === 'sweep' ? 'Receiving materials' : 'Finishing',
             'Store is busy — retrying in ' + Math.round(waitMs / 1000) + 's…');
-        setTimeout(stage === 'sweep' ? sweepStep : finalizeStep, waitMs);
+        var resume;
+        if (USE_SPLIT_RECEIVE) {
+            resume = stage === 'sweep' ? handoverStep : fanStep;
+        } else {
+            resume = stage === 'sweep' ? sweepStep : finalizeStep;
+        }
+        setTimeout(resume, waitMs);
     }
 
     function abortRun(err) {
@@ -1021,7 +1099,11 @@ function submitReceipt() {
         });
     }
 
-    sweepStep();
+    if (USE_SPLIT_RECEIVE) {
+        handoverStep();
+    } else {
+        sweepStep();
+    }
 }
 
 // ---- Load ----
@@ -1137,7 +1219,54 @@ function mergeReceiptPages(target, page) {
     (page.planFed || []).forEach(function (pid) { target._planFed[String(pid)] = 1; });
 }
 
+// JS-Data-API receive read. When on, the list is assembled from flat
+// getRecords (ReceiveRead.run) instead of the paged getSupervisorMaterials
+// walk. Same output shape, so render()/submitReceipt() are unchanged. The
+// Deluge path stays below as the fallback.
+var USE_JS_RECEIVE_READ = true;
+
 function loadMaterials() {
+    var content = document.getElementById('rcv-content');
+    var emptyState = document.getElementById('rcv-empty');
+    var refreshBtn = document.getElementById('refresh-btn');
+    var supId = document.getElementById('sup-select').value;
+
+    emptyState.classList.add('hidden');
+    refreshBtn.disabled = true;
+    LoadProgress.start(content, 'Loading your deliveries…',
+        'Reading the handovers the store has made to you.');
+
+    if (USE_JS_RECEIVE_READ && typeof ReceiveRead !== 'undefined') {
+        ReceiveRead.run(supId || '').then(function (data) {
+            refreshBtn.disabled = false;
+            LoadProgress.finish();
+            // Empty supId: only the picker was populated. Default one in, restart.
+            if ((!supId || supId === '') && fillSupervisors(data.supervisors)) {
+                loadMaterials();
+                return;
+            }
+            console.log('receive list (js):', data);
+            if (data.errors && data.errors.length) {
+                console.warn('ReceiveRead errors:', data.errors);
+            }
+            try {
+                render(data);
+            } catch (e) {
+                console.error('render failed:', e, data);
+                content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Could not read the list</h2><p>Check the browser console for details.</p></div>';
+            }
+        }).catch(function (err) {
+            console.error('ReceiveRead failed, falling back to getSupervisorMaterials:', err);
+            LoadProgress.finish();
+            loadMaterialsDeluge();
+        });
+        return;
+    }
+
+    loadMaterialsDeluge();
+}
+
+function loadMaterialsDeluge() {
     var content = document.getElementById('rcv-content');
     var emptyState = document.getElementById('rcv-empty');
     var refreshBtn = document.getElementById('refresh-btn');
