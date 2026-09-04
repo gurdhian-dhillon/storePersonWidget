@@ -2677,7 +2677,7 @@ th.col-num {
 /* Mobile Compatibility (Mobile View Only: Max-Width 768px) */
 @media (max-width: 768px) {
     .app-container {
-        padding: 0.2rem !important;
+        padding: 0.35rem !important;
     }
     .app-header {
         flex-direction: column !important;
@@ -2703,7 +2703,7 @@ th.col-num {
         -webkit-overflow-scrolling: touch !important;
         padding-bottom: 0.25rem !important;
         margin-bottom: 0.5rem !important;
-        gap: 0.2rem !important;
+        gap: 0.25rem !important;
         scrollbar-width: none !important;
     }
     .tab-strip::-webkit-scrollbar { display: none !important; }
@@ -2714,15 +2714,33 @@ th.col-num {
         font-size: 0.8125rem !important;
         min-height: 36px !important;
     }
+
+    /* Professional Search Bar on Mobile */
+    .search-bar-container {
+        padding: 0 0 0.6rem 0 !important;
+    }
+    .professional-search {
+        padding: 0.55rem 0.85rem 0.55rem 2.4rem !important;
+        font-size: 0.875rem !important;
+    }
+    .search-icon {
+        left: 0.75rem !important;
+        width: 16px !important;
+        height: 16px !important;
+    }
+
+    /* Item Card & Header on Mobile */
     .item-card {
         margin-bottom: 0.5rem !important;
-        border-radius: 6px !important;
+        border-radius: 8px !important;
     }
     .item-header {
-        flex-direction: column !important;
-        align-items: stretch !important;
-        gap: 0.4rem !important;
-        padding: 0.6rem 0.65rem !important;
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: flex-start !important;
+        justify-content: space-between !important;
+        gap: 0.5rem !important;
+        padding: 0.65rem 0.75rem !important;
     }
     .item-title-row {
         width: 100% !important;
@@ -2731,40 +2749,223 @@ th.col-num {
         gap: 0.5rem !important;
     }
     .item-header-info {
-        width: 100% !important;
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
     }
     .item-header-info h2 {
-        font-size: 1rem !important;
-        line-height: 1.25 !important;
+        font-size: 0.95rem !important;
+        line-height: 1.3 !important;
         word-break: break-word !important;
     }
-    .item-header-right {
-        width: 100% !important;
+    .item-meta-line {
         display: flex !important;
-        align-items: center !important;
-        justify-content: space-between !important;
         flex-wrap: wrap !important;
+        gap: 0.25rem 0.6rem !important;
+        font-size: 0.78rem !important;
+        margin-top: 0.25rem !important;
+        color: var(--text-muted) !important;
+    }
+    .item-header-right {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: flex-end !important;
         gap: 0.35rem !important;
-        margin-top: 0.2rem !important;
+        margin-top: 0 !important;
     }
     .item-header-right .chevron {
-        margin-left: auto !important;
+        margin-left: 0 !important;
     }
+    .item-body {
+        padding: 0.5rem 0.65rem !important;
+    }
+
+    /* Tables & Container on Mobile */
     .tables-container {
-        padding: 0.4rem 0.5rem !important;
+        padding: 0.35rem 0.4rem !important;
     }
-    .table-wrapper {
+    .table-wrapper,
+    .print-form + .table-wrapper {
+        margin: 0.35rem 0 !important;
+        width: 100% !important;
         overflow-x: auto !important;
         -webkit-overflow-scrolling: touch !important;
         border-radius: 6px !important;
-        margin-top: 0.25rem !important;
+        border: 1px solid #e2e8f0 !important;
+        scrollbar-width: thin !important;
+    }
+    .table-wrapper table {
+        width: 100% !important;
     }
     table th, table td {
-        padding: 0.5rem 0.65rem !important;
-        font-size: 0.8125rem !important;
+        padding: 0.4rem 0.25rem !important;
+        font-size: 0.78rem !important;
     }
-    .item-body {
-        padding: 0.5rem !important;
+    table th {
+        font-size: 0.65rem !important;
+        letter-spacing: 0.01em !important;
+        padding: 0.4rem 0.2rem !important;
+        white-space: normal !important;
+        line-height: 1.15 !important;
+        text-align: center !important;
+    }
+
+    /* Table Inputs on Mobile (Cut size & quantity) */
+    .item-body table .issue-input,
+    .item-body table .note-input {
+        min-width: 0 !important;
+        width: 100% !important;
+        padding: 0.25rem 0.15rem !important;
+        font-size: 0.8rem !important;
+        text-align: center !important;
+        border-radius: 4px !important;
+        height: 30px !important;
+    }
+    .table-wrapper .col-num {
+        text-align: right !important;
+        white-space: nowrap !important;
+    }
+    .table-wrapper .col-num.print-derived {
+        font-size: 0.75rem !important;
+        font-weight: 600 !important;
+        color: var(--primary) !important;
+        text-align: center !important;
+    }
+    .table-wrapper .status-pill {
+        padding: 0.15rem 0.4rem !important;
+        font-size: 0.68rem !important;
+        white-space: nowrap !important;
+    }
+    .table-wrapper .raise-btn.is-stale {
+        padding: 0.2rem 0.4rem !important;
+        font-size: 0.7rem !important;
+        border-radius: 4px !important;
+        min-height: 26px !important;
+        white-space: nowrap !important;
+    }
+
+    /* Form Fields on Mobile (Print & Stock In forms) */
+    .print-form,
+    .stockin-form {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: 0.45rem 0.45rem !important;
+        padding: 0.4rem 0 0.25rem 0 !important;
+        align-items: flex-end !important;
+    }
+    .print-form .si-field,
+    .stockin-form .si-field {
+        flex: 1 1 calc(50% - 0.25rem) !important;
+        min-width: 120px !important;
+    }
+    .si-field span {
+        font-size: 0.68rem !important;
+        letter-spacing: 0.02em !important;
+    }
+    .si-field .note-input,
+    .si-field .issue-input,
+    .print-form .note-input,
+    .print-form .issue-input {
+        min-width: 0 !important;
+        width: 100% !important;
+        height: 36px !important;
+        font-size: 0.82rem !important;
+        padding: 0.35rem 0.5rem !important;
+    }
+
+    /* + Another size button on Mobile (Compact, secondary action) */
+    .item-body .table-wrapper + .raise-btn {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: auto !important;
+        margin: 0.35rem 0 0.5rem 0 !important;
+        padding: 0.35rem 0.85rem !important;
+        font-size: 0.8rem !important;
+        font-weight: 600 !important;
+        border-radius: 6px !important;
+        min-height: 32px !important;
+        background: #eff6ff !important;
+        color: var(--primary, #2563eb) !important;
+        border: 1px solid #bfdbfe !important;
+        box-shadow: none !important;
+        cursor: pointer !important;
+        transition: all 0.15s ease !important;
+    }
+    .item-body .table-wrapper + .raise-btn:hover,
+    .item-body .table-wrapper + .raise-btn:active {
+        background: #dbeafe !important;
+        border-color: var(--primary, #2563eb) !important;
+    }
+
+    /* Card Footer & Action Buttons on Mobile (Organized, balanced row) */
+    .card-footer {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        gap: 0.5rem !important;
+        padding: 0.5rem 0 0.25rem 0 !important;
+        margin-top: 0.25rem !important;
+        border-top: 1px solid #f1f5f9 !important;
+        flex-wrap: wrap !important;
+    }
+    .card-footer .hint,
+    .card-footer .sel-count {
+        margin-right: 0 !important;
+        flex: 1 1 auto !important;
+        width: auto !important;
+        text-align: left !important;
+        font-size: 0.78rem !important;
+        padding: 0.35rem 0.55rem !important;
+        background: #f8fafc !important;
+        border-radius: 6px !important;
+        border: 1px solid #e2e8f0 !important;
+        line-height: 1.3 !important;
+    }
+    .card-footer .sel-count.is-short {
+        background: var(--status-danger-bg, #fee2e2) !important;
+        border-color: #fca5a5 !important;
+        color: var(--status-danger, #ef4444) !important;
+    }
+    .card-footer .primary-btn {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        padding: 0.42rem 1rem !important;
+        font-size: 0.82rem !important;
+        font-weight: 600 !important;
+        min-height: 35px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        white-space: nowrap !important;
+        border-radius: 6px !important;
+        box-shadow: 0 1px 2px rgba(37, 99, 235, 0.15) !important;
+    }
+    .card-footer .primary-btn:hover {
+        transform: none !important;
+    }
+    .card-footer .primary-btn.is-danger {
+        order: 2 !important;
+        background: #fff !important;
+        color: var(--status-danger, #ef4444) !important;
+        border: 1px solid #fca5a5 !important;
+        box-shadow: none !important;
+    }
+
+    /* SKU note / warning box */
+    .item-body .sel-count {
+        font-size: 0.78rem !important;
+        padding: 0.4rem 0.6rem !important;
+        border-radius: 6px !important;
+        margin: 0.25rem 0 !important;
+        line-height: 1.35 !important;
+    }
+
+    /* Hide throwaway WF test button on mobile so it never obstructs UI */
+    #wf-test-btn {
+        display: none !important;
     }
 }
 

@@ -267,13 +267,45 @@ var PackingScreen = (function () {
             SUPERVISORS = parsed.supervisors || [];
             STAFF_LIST = (parsed.staff && parsed.staff.length) ? parsed.staff : SUPERVISORS.slice();
             if (STAFF_LIST.length) SELECTED_STAFF = STAFF_LIST[0].name;
+            syncSupervisorsFromQueue();
             renderSupervisorPicker();
-            renderBody();
+            renderQueue();
+            if (HISTORY_LOADED) renderHistory();
         }).catch(function (err) {
             console.error('getStorePackingStaff failed:', err);
             var sel = el('sup-select');
-            if (sel) sel.innerHTML = '<option value="">Could not load staff</option>';
+            if (sel) sel.innerHTML = '<option value="all">All Supervisors</option>';
+            syncSupervisorsFromQueue();
+            renderQueue();
         });
+    }
+
+    function syncSupervisorsFromQueue() {
+        if (!QUEUE || !QUEUE.length) return;
+        var existingIds = {};
+        var existingNames = {};
+        SUPERVISORS.forEach(function (s) {
+            existingIds[String(s.id)] = true;
+            if (s.name) existingNames[s.name.toLowerCase()] = true;
+        });
+        var added = false;
+        QUEUE.forEach(function (o) {
+            var sId = o.supervisorId ? String(o.supervisorId) : '';
+            var sName = o.supervisorName ? String(o.supervisorName).trim() : '';
+            if (sId && !existingIds[sId]) {
+                existingIds[sId] = true;
+                if (sName) existingNames[sName.toLowerCase()] = true;
+                SUPERVISORS.push({ id: sId, name: sName || ('Supervisor #' + sId) });
+                added = true;
+            } else if (sName && !existingNames[sName.toLowerCase()]) {
+                existingNames[sName.toLowerCase()] = true;
+                SUPERVISORS.push({ id: sId || sName, name: sName });
+                added = true;
+            }
+        });
+        if (added) {
+            renderSupervisorPicker();
+        }
     }
 
     function renderSupervisorPicker() {
@@ -281,27 +313,25 @@ var PackingScreen = (function () {
         if (!sel) return;
 
         if (!SUPERVISORS.length) {
-            sel.innerHTML = '<option value="">No supervisors found</option>';
+            sel.innerHTML = '<option value="all">All Supervisors</option>';
             return;
         }
 
-        // The first supervisor is selected on load rather than a placeholder,
-        // so the screen opens on work instead of on an empty list. Same as the
-        // supervisor and finishing screens.
-        if (!SELECTED_SUP) SELECTED_SUP = String(SUPERVISORS[0].id);
+        if (!SELECTED_SUP) SELECTED_SUP = 'all';
 
-        sel.innerHTML = SUPERVISORS.map(function (sup) {
+        var opts = '<option value="all"' + (SELECTED_SUP === 'all' ? ' selected' : '') + '>All Supervisors</option>';
+        opts += SUPERVISORS.map(function (sup) {
             return '<option value="' + esc(sup.id) + '"' +
                 (String(sup.id) === String(SELECTED_SUP) ? ' selected' : '') +
                 '>' + esc(sup.name) + '</option>';
         }).join('');
+        sel.innerHTML = opts;
 
         sel.onchange = function () {
             SELECTED_SUP = sel.value;
             ACTIVE_ORDER_ID = null;
             ACTIVE_ORDER = null;
-            // Both lists are his. Re-rendered, not re-fetched - every row already
-            // carries the supervisor it belongs to, so the filter is free.
+            // Both lists are re-rendered, not re-fetched.
             OPEN_PACKING_ID = null;
             renderQueue();
             renderHistory();
@@ -326,6 +356,7 @@ var PackingScreen = (function () {
                 { id: '9002', orderNo: 'SO-00002', source: 'Shopify', supervisorId: '11', supervisorName: 'Harpreet Kaur', itemCount: 2, totalPieces: 44 }
             ];
             INCLUSIONS = [{ id: '1', name: 'Thank-you card' }, { id: '2', name: 'Care card' }, { id: '3', name: 'Fabric swatch' }];
+            syncSupervisorsFromQueue();
             renderQueue();
             return;
         }
@@ -335,6 +366,7 @@ var PackingScreen = (function () {
         callApi('getPackingQueue', {}).then(function (parsed) {
             QUEUE = parsed.orders || [];
             INCLUSIONS = parsed.inclusions || [];
+            syncSupervisorsFromQueue();
             renderQueue();
         }).catch(function (err) {
             console.error('getPackingQueue failed:', err);
@@ -343,8 +375,21 @@ var PackingScreen = (function () {
     }
 
     function visibleOrders() {
-        if (!SELECTED_SUP) return [];
-        return QUEUE.filter(function (o) { return String(o.supervisorId) === String(SELECTED_SUP); });
+        if (!SELECTED_SUP || SELECTED_SUP === 'all') return QUEUE;
+        var supObj = null;
+        for (var i = 0; i < SUPERVISORS.length; i++) {
+            if (String(SUPERVISORS[i].id) === String(SELECTED_SUP)) {
+                supObj = SUPERVISORS[i];
+                break;
+            }
+        }
+        var targetName = (supObj && supObj.name) ? supObj.name.toLowerCase() : '';
+
+        return QUEUE.filter(function (o) {
+            if (String(o.supervisorId) === String(SELECTED_SUP)) return true;
+            if (targetName && o.supervisorName && o.supervisorName.toLowerCase() === targetName) return true;
+            return false;
+        });
     }
 
     function renderQueue() {
@@ -923,7 +968,9 @@ var PackingScreen = (function () {
                         (box.imagePreviewUrls || []).map(function (url, k) {
                             return '<div class="photo-thumb">' +
                                 '<img src="' + esc(url) + '" alt="Box photo" title="View full size" onclick="window.open(this.src, \'_blank\')">' +
-                                '<button type="button" class="photo-thumb-x" title="Remove photo" onclick="PackingScreen.removeBoxImage(' + i + ', ' + k + ')">✕</button>' +
+                                '<button type="button" class="photo-thumb-x" title="Remove photo" aria-label="Remove photo" onclick="event.stopPropagation(); PackingScreen.removeBoxImage(' + i + ', ' + k + ')">' +
+                                    '<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>' +
+                                '</button>' +
                             '</div>';
                         }).join('') +
                         '<label class="photo-add" for="pack-image-' + i + '">' +
@@ -1401,9 +1448,20 @@ var PackingScreen = (function () {
     }
 
     function visibleHistory() {
-        if (!SELECTED_SUP) return [];
+        if (!SELECTED_SUP || SELECTED_SUP === 'all') return HISTORY;
+        var supObj = null;
+        for (var i = 0; i < SUPERVISORS.length; i++) {
+            if (String(SUPERVISORS[i].id) === String(SELECTED_SUP)) {
+                supObj = SUPERVISORS[i];
+                break;
+            }
+        }
+        var targetName = (supObj && supObj.name) ? supObj.name.toLowerCase() : '';
+
         return HISTORY.filter(function (p) {
-            return String(p.supervisorId) === String(SELECTED_SUP);
+            if (String(p.supervisorId) === String(SELECTED_SUP)) return true;
+            if (targetName && p.supervisorName && p.supervisorName.toLowerCase() === targetName) return true;
+            return false;
         });
     }
 

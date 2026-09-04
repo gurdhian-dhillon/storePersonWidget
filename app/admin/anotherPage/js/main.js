@@ -444,6 +444,9 @@ function renderItemDrawer(order) {
         } else if (isItemFinComplete) {
             pillCls = 'pill-ok';
             stageLabel = (st === 'Finishing Complete' || stgName === 'Finishing Complete' || stgName === 'Finishing Complete (Awaiting Packing)') ? 'Finishing Complete (Awaiting Packing)' : (stgName ? stgName + ' (Awaiting Packing)' : 'Finishing Complete (Awaiting Packing)');
+        } else if (activeSub === 'Checking Passed' || getItemCategory(it) === 'Checking Passed') {
+            pillCls = 'pill-done';
+            stageLabel = 'Checking Passed (Wait for Finishing)';
         } else if (stgState === 'Passed' || stgState === 'Completed' || st === 'Complete') {
             pillCls = 'pill-done';
         } else if (isAlt) {
