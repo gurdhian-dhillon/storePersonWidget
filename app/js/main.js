@@ -1248,22 +1248,22 @@ function summaryEntry(kind, idx) {
 //   1. enough greige AND already has washed cloth
 //   2. enough greige
 //   3. most greige, washed cloth as the tie-break
-// A PRINTED LOT CANNOT BE WASHED YET, so it is never a candidate.
+// A PRINTED LOT CANNOT BE WASHED YET, so it is never a candidate. Pre-rolls,
+// its metres were the maintained sum of its Fabric_Piece rows, and a wash
+// request moved a metres figure between two columns on the header without
+// touching a single piece — washing one left the header claiming washed metres
+// while every piece behind it still said Unwash. Under the rolls model a
+// printed lot is a lot with short `Lot_Rolls`, same as any other, and washing
+// is still lot-level-only (see lot-rolls-model.md: "what washing does to a
+// roll") — there is still no way to wash a subset of a lot's physical rolls, so
+// the same "would leave part of it claiming a state it does not have" problem
+// applies and printed lots stay excluded here on the same `l.form !== 'Pieces'`
+// guard below (the legacy field, still populated on the lot payload).
 //
-// Its metres are the maintained sum of its Fabric_Piece rows, and a wash request
-// moves a metres figure between two columns on the header without touching a
-// single piece — so washing one leaves the header claiming washed metres while
-// every piece behind it still says Unwash. The allocator reads the pieces and
-// takes only State === 'Wash', and lotFill zeroes a Pieces lot's metres budget,
-// so the cloth ends up real, on the rack, and permanently unissuable.
-//
-// The allocator already excludes greige pieces from the after-washing simulation
-// for exactly this reason (see lotPieces), so a Pieces lot never reaches
-// `washLots`. This picker read `e.lots` directly instead — every lot the server
-// sent — which is how a printed one could still be chosen by hand.
-//
-// Refused here AND in raiseMaterialException. This is the courtesy; that is the
-// guard.
+// This picker read `e.lots` directly instead of going through the allocator —
+// every lot the server sent — which is how a printed one could still be chosen
+// by hand. Refused here AND in raiseMaterialException. This is the courtesy;
+// that is the guard.
 function washableLots(e) {
     // Blocked lots excluded too: washing quarantined greige converts it into
     // quarantined washed cloth, which still cannot be issued. The wash team would

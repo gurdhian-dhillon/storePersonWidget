@@ -1,20 +1,36 @@
-# Lot → Rolls model — the store person is told which roll to cut
+# Store issue allocation — rolls, and priority reservation
 
-> **Status: IN BUILD.** The allocator port (Step 3) is landing in pieces —
-> Pieces 1–3 (`lotFill`, `spend()` ledger, `applyFabricOverride`,
-> `shortReasonFor`) are done and on `main`, parity 31/31 vs a frozen baseline.
-> See **BUILD LOG** below the build-order table for what actually landed and how
-> it differs from the design. The Deluge side (Steps 4–9) is not started.
+**Two changes to the same mechanism, planned and built as one workstream**
+because they touch the same function (`applyLotAllocation`), the same screen,
+and the same numbers:
+
+| Phase | What | Status |
+|---|---|---|
+| **A — Lot → Rolls** | A lot is a set of physical rolls, not a metres pool. The store person is told **which roll** to cut. | Allocator done (Pieces 1–4); Deluge side not started |
+| **B — Priority reservation** | Stock is **reserved down a priority order** the store person controls, instead of every card seeing the full rack. | Piece 1 done (payload fields) |
+
+They are **not independent**. Phase B changes the scoping of the very ledgers
+Phase A rewrote (`lotLeft` / `rollLeft` / `greigeLeft` / `wasteLeft`), so B must
+land on top of a finished, tested A — and both share one parity discipline: a
+frozen `git show` baseline, piece-by-piece, tests between every step.
+
+> **Status: IN BUILD.**
+> **Phase A** — Pieces 1–4 done and on `main` (`lotFill` per-roll drain,
+> `spend()` roll ledger, `applyFabricOverride` multi-roll, `shortReasonFor`,
+> dead-code removal). Parity 31/31 vs frozen baseline; 65/65 across all suites.
+> Deluge side (Steps 4–9) not started.
+> **Phase B** — Piece 1 done (`priorityKey` + `planStartDate` on the payload,
+> both read paths). Pieces 2–4 not started.
 >
-> **Revision 6.** Revs 2–5 were self-review + three external gap-analysis passes,
-> each finding verified against the code. Rev 6 records the decisions made
-> *during* the build (Pieces 1–3): the `applyFabricOverride` rule is editable
-> multi-roll, not read-only; OQ1 (fixed SKU width) and OQ5 (no split tool) are
-> resolved; the width field is `Width1`; no standalone `Lot_Rolls_Report`; the
-> parity harness uses a frozen `git show` baseline. Full table at the end
-> ("Rev 5 → Rev 6").
+> **Revision 7.** Revs 2–5 were self-review + three external gap-analysis passes.
+> Rev 6 recorded the decisions made during the Phase A build. Rev 7 **merges the
+> priority-reservation work into this doc as Phase B** — it was briefly a
+> separate plan, which would have let the two drift apart while both edit
+> `applyLotAllocation`. Full table at the end.
 
 ---
+
+# PHASE A — Lot → Rolls
 
 ## Why
 
@@ -501,14 +517,14 @@ last.
 
 ---
 
-## Build order
+## Build order — Phase A
 
 | Step | What | Ships when |
 |---|---|---|
 | **0** | **DONE.** Creator, additive: `Lot_Rolls` subform (`Roll_Label`, `Roll_Length`, `Roll_Status`, `Origin`, `Source_Receipt`); `Raw_Material_Lot.Width` — Creator named it **`Width1`**. **No standalone `Lot_Rolls_Report`** — the subform comes back nested in `All_Material_Lots` records. Still owed for later steps: `Issue_Lines.Roll_Label`, `Print_Job.Source_Roll`, `Waste_Master.Source_Roll`; delete `resolveStockDispute` before Step 5. | fields exist |
 | **1** | **DONE (dummy data).** `deluge/seedLotRolls.dg`, run in Execute: per lot with no `Lot_Rolls`, sets `Width1 = Fabric_Width_Inches × 2.54`, creates one seed roll `Roll_Length = Wash + Unwash + In_Wash`, `Roll_Label = "<Lot>-R1"`, `Origin="Purchased"`, `Source_Receipt="BACKFILL"`. Idempotent, dry-run flag, self-checks `Σ Roll_Length == Wash+Unwash+In_Wash`. **No rack labelling / seed-roll splitting** — OQ5 resolved (dummy data). `Fabric_Piece` migration deferred with the printed-fabric project. | `seedLotRolls` invariant check clean on every lot |
 | **2** | Read path exposes `rolls[]` (`getStoreMaterialRequirements`, `api-experiment.js`). No behaviour change. | one-roll parity identical |
-| **3** | `lot-allocator.js` — **DONE (Pieces 1–3), see BUILD LOG.** `lotFill` per-roll shortest-first drain + wash-gate budget (P1); `spend()` roll ledger + `lotLines[].rolls` + `allocateMaterial` forwards rolls (P2); `applyFabricOverride` multi-roll edit-down/edit-up, `shortReasonFor` longest-roll (P3). Still to do: Piece 4 delete dead `lotIsPieces`/`lotPieces`/`lotGreigePieces`; Piece 5 `api-experiment.js` + `getStoreMaterialRequirements` read path + `main.js`/admin roll display. | allocator parity: 31/31 byte-identical vs frozen `e000519` baseline; continuity + two-orders-race + multi-roll override hand-verified |
+| **3** | `lot-allocator.js` — **DONE (Pieces 1–4), see BUILD LOG.** `lotFill` per-roll shortest-first drain + wash-gate budget (P1); `spend()` roll ledger + `lotLines[].rolls` + `allocateMaterial` forwards rolls (P2); `applyFabricOverride` multi-roll edit-down/edit-up + `shortReasonFor` longest-roll (P3); dead Pieces-lot code removed, superseded suites retired (P4). Still to do: the roll DISPLAY on the issue row + admin audit (`main.js`, `getAdminCalculation` payload). | 65/65 across all suites; allocator parity 31/31 byte-identical vs frozen `e000519` baseline |
 | **4** | `getExpectedWaste.dg` **and `getProductionWidgetData.dg`'s inline copy** per-roll tails, same pass; `saveWasteFromCutting.dg` roll stamp. | waste parity: one-roll identical for both; multi-roll hand-worked; `getProductionWidgetData` inline == `getExpectedWaste` no-lot path (8 cases) |
 | **5** | **`issueMaterialsApply.dg`** decrements the named roll (re-read length inside the execution, cap-and-error); **`issueMaterialsHandover.dg`** stamps `Issue_Lines.Roll_Label` from the handover payload. **First write — both, same pass.** | full lifecycle test, conservation invariants after every step; concurrent-issue race test; `Issue_Lines` carries the label |
 | **6** | `saveStockInward`, `receiveFromPrint` create roll rows on receipt (`receiveFromPrint`: one row per printed run). | roll sum holds after each receipt |
@@ -527,7 +543,7 @@ before they run.
 
 ---
 
-## BUILD LOG — the allocator port, done in pieces
+## BUILD LOG — Phase A allocator port, done in pieces
 
 Actual work, as landed. Commits on `main`: `4e9bae4` (Piece 1),
 Piece 2 and Piece 3 committed after.
@@ -574,27 +590,38 @@ now reports the longest single roll, not the lot's washed sum. **Parity: 31/31.*
 Multi-roll override hand-verified against four cases (down-to-6, down-to-3,
 up-to-10, up-over-cap).
 
-**Still open (`tools/allocator-rolls.test.js` — the new multi-roll suite):**
-5 of 9 cases fail on **test-suite bugs, not code**:
-- B2/B3/B4: `assertInvariants` **C3** reads `.status` off plain fixture objects
-  (→ garbled math) and asserts `m.lots[]` payload mutation the allocator has
-  never done for any field. Its **C1** (`Σ ln.rolls[].metres == freshMeters`) is
-  the right check and passes.
-- B5: asserts `lot.rolls[0].length` on the payload drains to 0.5 — same
-  "allocator doesn't mutate the input" issue. Behaviour (order 2 skipped) is
-  correct.
-- B8: asserts multi-roll override is *refused* — contradicts the built rule
-  (editable). `got 8` is correct (edit-up to cap).
-Fix these in the test suite: drop the C3 `m.lots`-mutation assertion, assert the
-ledger via `orderOutcomes`, flip B8's expectation to editable.
+**Piece 3 aftermath — a review pass reverted it.** An external AI code review
+run against the working tree reverted Piece 3's `applyFabricOverride` /
+`shortReasonFor` edits before auditing, then reported the resulting failures as
+new bugs. Restored, then re-audited: of five reported findings, **three were
+real and are fixed** (`rollLeft` seeded `Consumed`/zero rolls; `owedBy` built on
+`mrqId` but read on `mrqId || planItemId`; `+0.5` vs `+0.0001` epsilon
+mismatch), **one was not reachable** (`rollTook` "cross-lot collision" — it is
+function-call-scoped per lot, proven by a direct two-lot-same-rollId test), and
+**one was the specified design** (edit-up clamps at cap, no spill).
 
-**Next: Piece 4** — delete `lotIsPieces` / `lotPieces` / `lotGreigePieces` /
-`hasOwnStock`'s pieces branch (dead, not called). **Piece 5** — `api-experiment.js`
-+ `getStoreMaterialRequirements.dg` roll read, `main.js` + admin roll display.
+**Piece 4 — dead-code removal + test-suite consolidation.**
+`lotIsPieces` / `lotPieces` / `lotGreigePieces` deleted (dead since Piece 1 —
+printed cloth is short rolls, no branch), `hasOwnStock`'s `l.pieces` fallback
+removed (always `[]` since Piece 2), and the stale `main.js` `washableLots`
+comment corrected (it cited the removed allocator internals; the still-active
+`l.form !== 'Pieces'` guard on that picker is unrelated and untouched).
+**Two suites retired** as superseded: `tools/allocator.test.js` (31 scalar-lot
+cases — every one re-run with seed rolls by `allocator-rolls-parity.test.js`
+against a frozen baseline, which is the stronger check) and
+`tools/allocator-rolls.test.js` (B1–B9 — fully covered by the three
+`allocator-edgecases-*` suites, more rigorously; its own known failures were the
+broken `assertInvariants` C3 and the B8 refuse-rule that Piece 3 overturned).
+The two remaining edge-case harnesses had their exposed-symbol lists trimmed to
+match. **Final: 65/65** — parity 31, lotfill 12, ledger 10, override 12.
+
+**Next (Phase A):** the roll DISPLAY — `main.js` issue row showing
+`L2-R2 · 8 m`, and `getAdminCalculation`'s payload carrying `rolls[]` so the
+audit widget's shared `applyLotAllocation` call sees them.
 
 ---
 
-## Testing infrastructure (before Step 2)
+## Testing infrastructure — Phase A
 
 - **`tools/rolls-model.js`** — **NEW, to be built.** Node reference model:
   `{ width, washQty, unwashQty, inWashQty, inTransit, disputed,
@@ -612,7 +639,7 @@ ledger via `orderOutcomes`, flip B8's expectation to editable.
 
 ---
 
-## Open questions
+## Open questions — Phase A
 
 **RESOLVED:**
 
@@ -637,7 +664,7 @@ ledger via `orderOutcomes`, flip B8's expectation to editable.
 
 ---
 
-## Not covered (follow-up)
+## Not covered (follow-up) — Phase A
 
 - **Printed-fabric creation** — the print flow writing `Lot_Rolls` rows
   (`Origin = "Printed"`, one per table run). This doc only makes the
@@ -648,6 +675,177 @@ ledger via `orderOutcomes`, flip B8's expectation to editable.
   the roll, so a roll's length is state-agnostic and the lot's columns stay the
   single source of truth. Revisit only if the floor starts holding one lot
   half-washed for long periods.
+
+---
+
+# PHASE B — Priority reservation
+
+## Why
+
+100 m of a fabric, four supervisors who all need it. Today **every card shows
+the full 100 m**, because the allocator gives each supervisor his own ledger,
+seeded from the whole rack:
+
+> *"ONE LEDGER PER SUPERVISOR — NEVER ONE SHARED BETWEEN THEM. Shared, these
+> three stopped being a working total and became a RESERVATION… the first
+> supervisor spent the rack and the last was measured against what he left…
+> A hard reservation ledger was considered for this app and rejected; this was
+> it, rebuilt by accident inside the allocator."*
+> — `lot-allocator.js`, the comment on `applyLotAllocation`
+
+So the shortfall only exists in the whole-screen total, never on a card, and
+contested stock is **said** ("Also needed by …") rather than **counted**.
+
+**That is now being deliberately reversed.** The client wants the numbers to
+answer "how much is actually short" per supervisor, which a per-card view of the
+same 100 m cannot do.
+
+### Why the old rejection does not apply any more
+
+The rejected version failed because a low-priority card could read "no lot holds
+enough" over cloth nobody had claimed, **with no way to see why and no way to
+act on it**. Two things change that:
+
+1. **The store person sets the order himself, on the screen.** A short card is
+   short *because he put someone else first* — and he can move them up.
+2. **It re-runs live.** Reordering recomputes the whole screen; there is no
+   stale reservation to fight.
+
+Priority stops being an invisible sort key and becomes the control.
+
+## The model
+
+**Reservation is a pure client-side view.** Nothing is written to Creator, no
+lock, no reserved-quantity field. It is a function:
+
+```
+(raw rack from the server, priority order) → per-card numbers
+```
+
+recomputed on every reorder and every refresh. Two people with different orders
+would see different numbers, and that is correct — each is looking at their own
+*plan*, and only pressing Issue makes anything real (`issueMaterials` re-checks
+every lot server-side regardless).
+
+### Default order
+
+One supervisor usually holds one order source, but a manual reassignment can
+give them several. So the default rank is, per supervisor, over their open plans:
+
+1. **Best `Priority_Key` they hold** (Shopify > Faire > Custom > PR). Any Shopify
+   order ranks them at Shopify's level.
+2. **Tie → more plans at that best level wins.**
+3. **Tie → earliest `Plan_Start_Date` among their plans at that level wins.**
+   (Matches the plan-age tiebreak the server already applies inside one level.)
+
+Fully deterministic. `Priority_Key` is `rank * 1000000 + sequence`, stamped at
+plan creation; `Plan_Start_Date` is a date, written once, never rewritten.
+
+### What the store person can change
+
+The order, on the issue screen. Changing it re-runs the allocation and redraws.
+The cards render **in** priority order, so position and priority never disagree
+— the card already prints "Priority N · highest/lowest" off its array index
+(`main.js`), and that stays true by construction.
+
+**No "reserved by whom" label.** The number is the answer: short means short
+given the order he set. He set it; he can change it.
+
+## What changes
+
+**1. Payload — `priorityKey` + `planStartDate` per line.** Both read paths
+(`api-experiment.js`, `getStoreMaterialRequirements.dg`) carry them the same way
+`salesOrder` is already carried. Additive; nothing server-side reads them.
+
+**2. Default-order function (`main.js`) — pure, unit-testable.** Takes the
+supervisor blocks, returns an ordered array of supervisor ids per the three-rung
+rule. Replaces the existing min-key-only sort as the *default*; the session's
+chosen order overrides it.
+
+**3. `applyLotAllocation` — hoist the ledgers.** The five ledgers
+(`wasteLeft`, `lotLeft`, `greigeLeft`, `pieceLeft`, `rollLeft`) move **out** of
+the per-supervisor loop: declared once, seeded once from the raw rack, drained
+across every card in order. This is the whole behaviour change, and it is the
+exact scoping the file's own comment warns about — deliberately, now.
+
+*Phase A already made every one of those ledgers correct and tested at the
+per-card level. Phase B only changes their scope.* That is why A had to land
+first.
+
+**4. `render()` — order the data.** Before `applyLotAllocation(data)`, sort
+`data` by `window.__priorityOrder` (session-local; defaults to the computed
+rank). Everything downstream already respects array order — the allocation walk,
+the `actionable` filter, the card render, the "Priority N" label — so nothing
+else needs to know this feature exists.
+
+**5. Reorder UI.** Control shape **not yet decided** (arrows vs numeric rank).
+The mechanism must exist and be callable first; the control swaps in without
+touching the allocator or `render()`.
+
+### What does NOT change
+
+- **`buildShortfallSummary` / the D11 PO logic.** It already drives off
+  `orderOutcomes` and sums true demand vs what could be placed. A reserved-away
+  card correctly reports `skipped`, which is exactly the signal it already turns
+  into a PO. No edit.
+- **The server.** Still sends the true, unreserved rack. Ordering is a view.
+- **The admin audit** (`app/admin/`) — calls `applyLotAllocation(LIVE)` with no
+  order, so it keeps showing the underlying truth. The audit's job is what the
+  rack really holds, not one store person's plan for the day.
+
+## Build order — Phase B
+
+| Piece | What | Ships when |
+|---|---|---|
+| **B1** | **DONE.** `priorityKey` + `planStartDate` on the payload — `api-experiment.js` (`openPlan` + every line) and `getStoreMaterialRequirements.dg` (`lnMap` + `linesJson`, numeric/free-text handled per repo rules). Additive, nothing reads them yet. | both paths syntax-clean; no behaviour change |
+| **B2** | Default-order function in `main.js` — pure, the three-rung rule. Unit-tested against hand-worked cases before it is wired to anything. | its own test suite green |
+| **B3** | **The behaviour change.** Hoist the five ledgers out of the per-supervisor loop in `applyLotAllocation`; walk in array order (which `render` will set). | see "How B3 is tested" |
+| **B4** | `render()` sorts `data` by `window.__priorityOrder`; reorder UI (shape TBD) mutates it and re-renders through the existing `render(window.__rawData)` path. | reorder changes the numbers, live |
+
+### How B3 is tested — NOT a frozen-baseline parity check
+
+This is the one step where "identical to before" is the **wrong** goal: sharing
+the ledger *is* the feature, and it *will* change card 2+'s numbers whenever
+there is contention. So B3's tests assert two things instead:
+
+1. **No contention → identical to today.** When every material has enough for
+   everyone, hoisting the ledger changes nothing. This case *can* be checked
+   against the frozen baseline, and must be.
+2. **Contention → correctly reserved.** Hand-worked cases: 100 m, three
+   supervisors wanting 60/50/40; assert card 1 gets 60, card 2 sees 40 and is
+   short 10, card 3 sees 0 and is short 40 — and that reordering flips who is
+   short, deterministically.
+3. **Conservation.** Σ allocated across all cards ≤ rack, per material and per
+   roll. Never over-promise, which is the entire point.
+
+## BUILD LOG — Phase B
+
+**B1 — payload fields.** `priorityKey` and `planStartDate` threaded through both
+read paths, additive, nothing consumes them yet:
+- `api-experiment.js` — `openPlan` gains `planStartDate` (raw string; the widget
+  only ever compares two of these as sortable text, never does date maths).
+  Every `lines[]` entry gains both, the same way `salesOrder` is already carried.
+- `getStoreMaterialRequirements.dg` — `lnMap` gains both from the `plan` loop
+  variable in scope; `linesJson` emits them with this repo's rules applied
+  (`priorityKey` normalised to `"0"` when empty/non-numeric so it lands as a
+  JSON number; `planStartDate` flattened for quotes/CR/LF/tab).
+
+Verified: `node --check` clean on the JS; `dgscan` clean on the Deluge except
+one **pre-existing** `sort by` inline finding in the `Fabric_Piece` printed-cloth
+loop ~550 lines away — confirmed present on the unmodified file via `git stash`,
+not introduced here.
+
+## Open questions — Phase B
+
+- **Reorder UI shape** — up/down arrows vs numeric rank input. Deferred; does
+  not block B2/B3.
+- **Does the shortfall summary need to distinguish "short because reserved" from
+  "short because the rack is empty"?** Decided **no** for now — the number is
+  the answer, and reordering is the way to interrogate it. Revisit if the store
+  person finds PO figures confusing (a PO for cloth that is only "short" because
+  of ordering would be wrong, but `orderOutcomes` already reports the *true*
+  unseated demand across the whole screen, so this should be safe — **verify in
+  B3's tests**).
 
 ---
 
@@ -714,6 +912,16 @@ ledger via `orderOutcomes`, flip B8's expectation to editable.
 | Standalone `Lot_Rolls_Report` in Step 0 | Not created. `All_Material_Lots` returns `Lot_Rolls` nested in each record (`field_config: 'all'`). | Subforms come back inside the parent — no separate report needed. |
 | Parity guard = "one-roll = today's output" | Guard is enforced against a **frozen `git show e000519:` baseline** loaded into the harness, not a live re-read of the working file. | A live second copy runs the new code both sides and proves nothing. |
 | `spend()` roll ledger + wash gate as a note | Both built. Wash gate is a running **`gateBudget`** that bounds the drain loop, not just a post-check. | Piece 1/2 implementation detail worth recording. |
+
+### Rev 6 → Rev 7 (priority reservation merged in as Phase B)
+
+| Change | Why |
+|---|---|
+| Doc retitled **"Store issue allocation — rolls, and priority reservation"**; the rolls work becomes **Phase A**, priority becomes **Phase B**. | They edit the same function (`applyLotAllocation`), the same screen, the same numbers. Two docs would have let them drift while both in flight. User: *"both are linked to store issue part, so merge this priority thing in that migration so that we can go with proper plan testing each step."* |
+| Phase A Piece 4 recorded (dead-code removal) | `lotIsPieces` / `lotPieces` / `lotGreigePieces` and `hasOwnStock`'s pieces branch deleted; `allocator.test.js` and `allocator-rolls.test.js` retired as superseded; the two edge-case harnesses fixed. 65/65 green. |
+| Phase B B1 recorded (payload fields) | `priorityKey` + `planStartDate` threaded through both read paths, additive, nothing reads them yet. |
+| **B3 is explicitly NOT a frozen-baseline parity step** | Sharing the ledger across cards *is* the feature — it must change card 2+'s numbers under contention. Its tests assert no-contention-identical, contention-correctly-reserved, and conservation instead. Written down so nobody later "fixes" B3 back to parity. |
+| Phase A's "ONE LEDGER PER SUPERVISOR — NEVER ONE SHARED" comment will be **contradicted** by B3 | The comment records a real past failure. Phase B is that same mechanism rebuilt *with the two things that were missing*: user-controlled order and live recompute. The comment must be rewritten at B3, not silently violated. |
 
 ---
 

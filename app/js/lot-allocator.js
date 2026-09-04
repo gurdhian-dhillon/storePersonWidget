@@ -101,52 +101,14 @@ function perRowFor(fab, cutW) {
 // becomes scrap; cloth on the roll keeps.
 //
 // Demands are {cutW, cutL, pieces}. Nothing passed in is mutated.
-// IS THIS LOT HELD AS DISCRETE PIECES? An EMPTY form means Roll — every lot
-// that existed before printing has the field blank, and reading blank as
-// anything else would send the whole rack down the piece path with no pieces,
-// making every roll in the building uncuttable.
-function lotIsPieces(lot) {
-    return lot && lot.form === 'Pieces';
-}
-
-// The pieces of a Pieces lot that can go out TODAY, in the same shape the
-// remnant scorer uses.
 //
-// GREIGE PIECES ARE EXCLUDED EVEN FROM THE "AFTER WASHING" SIMULATION, which is
-// deliberately not what a Roll lot does, and it is a phase-2 limitation rather
-// than a rule.
-//
-// A roll's greige counts towards "this lot could cover the order once washed",
-// and the row then offers a wash. There is no way to wash a PIECE yet: a
-// Wash_Request moves a lot's metres between two columns and would leave
-// Fabric_Piece.State saying Unwash while the lot claimed washed metres — the
-// header and its pieces disagreeing, which is the fault this whole design is
-// built to avoid. Offering a wash the store cannot perform is worse than saying
-// the row is short.
-//
-// So greige pieces are counted by the caller and NAMED on the row instead of
-// being silently invisible. When piece washing lands, take the greige flag here.
-function lotPieces(lot) {
-    return (lot.pieces || []).filter(function (p) {
-        return (Number(p.count) || 0) > 0 && p.state === 'Wash';
-    }).map(function (p) {
-        return { pieceId: p.pieceId, width: p.widthCm, length: p.lengthCm,
-                 pieces: Number(p.count) || 0 };
-    });
-}
-
-// Greige pieces sitting on a lot, in pieces. Not allocatable, but real cloth —
-// a row that is short because its printed stock has not been washed has to be
-// able to say so.
-function lotGreigePieces(lot) {
-    var n = 0;
-    if (lotIsPieces(lot)) {
-        (lot.pieces || []).forEach(function (p) {
-            if (p.state === 'Unwash') n += Number(p.count) || 0;
-        });
-    }
-    return n;
-}
+// RETIRED: lotIsPieces / lotPieces / lotGreigePieces. Printed cloth was once a
+// discrete-pieces special case (Fabric_Piece rows, a `form === 'Pieces'`
+// branch) with its own least-waste-area cut scorer and its own greige
+// exclusion. Under the rolls model a printed lot is just a lot whose rolls are
+// short — same `lot.rolls[]`, same shortest-first drain in lotFill, no branch.
+// The functions and the Pieces-only code paths in lotFill/spend/allocateMaterial
+// were removed in Pieces 1-2 of the rolls migration (docs/lot-rolls-model.md).
 
 // ---- Printed cloth, and the plain cloth behind it ----
 //
@@ -171,9 +133,7 @@ function hasOwnStock(m) {
         if ((Number(l.wash) || 0) > 0) return true;
         if ((Number(l.unwash) || 0) > 0) return true;
         if ((Number(l.inWash) || 0) > 0) return true;
-        return (l.pieces || []).some(function (p) {
-            return (Number(p.count) || 0) > 0;
-        });
+        return false;
     });
 }
 

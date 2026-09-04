@@ -198,12 +198,19 @@ var ApiExperiment = (function () {
             // Re-filter by Order_Status HERE, not just in the getRecords
             // criteria: the Deluge's plan query is the gate, so assemble()
             // must be that gate too regardless of what the caller passed.
-            var openPlan = {};   // planId -> { salesOrder, priorityKey }
+            var openPlan = {};   // planId -> { salesOrder, priorityKey, planStartDate }
             plans.forEach(function (p) {
                 if (OPEN_STATUSES.indexOf(str(p.Order_Status).trim()) === -1) return;
                 openPlan[String(p.ID)] = {
                     salesOrder: lookupText(p.Sales_Order, 'Sales_Order'),
-                    priorityKey: num(p.Priority_Key)
+                    priorityKey: num(p.Priority_Key),
+                    // Store-screen default supervisor ORDER, tie-break rung.
+                    // Plan_Start_Date is a date (no time), set once at plan
+                    // creation (zoho.currentdate) and never rewritten — the same
+                    // field getAdminCalculation / getExpectedWaste already read.
+                    // Kept as the raw string; the widget only ever compares two
+                    // of these as ISO-sortable text, never does date arithmetic.
+                    planStartDate: str(p.Plan_Start_Date).trim()
                 };
             });
 
@@ -401,6 +408,13 @@ var ApiExperiment = (function () {
                     mrqId: String(mr.ID),
                     planId: planId,
                     salesOrder: (openPlan[planId] || {}).salesOrder || '',
+                    // The plan's Priority_Key and Plan_Start_Date, carried onto
+                    // every line of every material. Store-screen default
+                    // supervisor ORDER needs both per plan (best source rank,
+                    // then plan age) — computed in main.js, not here; this only
+                    // hands over the raw ingredients, same as salesOrder above.
+                    priorityKey: (openPlan[planId] || {}).priorityKey,
+                    planStartDate: (openPlan[planId] || {}).planStartDate || '',
                     planItemId: piId,
                     item: flat(pi.name),
                     isRemake: pi.isRemake,
