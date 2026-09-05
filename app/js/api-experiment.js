@@ -286,7 +286,13 @@ var ApiExperiment = (function () {
                 var out = [];
                 raw.forEach(function (rr) {
                     var status = str(rr.Roll_Status).trim() || 'Available';
-                    if (status === 'Consumed') return; // off the shelf, not cuttable
+                    // Consumed is off the shelf; Blocked is quarantined cloth on
+                    // a roll — the lot-level `blocked` flag one roll at a time.
+                    // Only Consumed was excluded, so a blocked roll was sent to
+                    // the allocator as ordinary stock, cut, and named on the issue
+                    // line. The allocator refuses both now (rollUsable); this stops
+                    // it being sent at all, so the two sides cannot drift.
+                    if (status === 'Consumed' || status === 'Blocked') return;
                     var len = num(rr.Roll_Length);
                     if (len <= 0) return;
                     out.push({

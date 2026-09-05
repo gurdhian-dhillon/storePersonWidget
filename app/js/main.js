@@ -240,7 +240,11 @@ function openLotOverride(supIdx, matIdx) {
     var sup = window.__reqData && window.__reqData[supIdx];
     if (!sup) return;
     var m = sup.materials[matIdx];
-    if (!m || !m.pinnedDry) return;
+    // `pinnedDry` is empty once an override has been ACCEPTED — the row is being
+    // served off the substitute and no longer says the original lot is dry — but
+    // the orders are still carried, and revising that choice is exactly what this
+    // dialog is for. Gate on having something to write an override FOR.
+    if (!m || (!m.pinnedDry && !(m.pinnedDryOrders || []).length)) return;
 
     // Anything with cloth on it, greige behind it or cloth at the washer, and not
     // quarantined. The dry lot itself is not on the list — that is the whole
@@ -832,6 +836,39 @@ function reallocateInPlace(supIdx, matIdx, opts) {
     if (!data) return;
 
     applyLotAllocation(data);
+
+    // EVERY FABRIC ROW ON THE SCREEN, NOT JUST THE ONE HE TOUCHED.
+    //
+    // The ledgers are shared across cards in priority order, so a remnant given
+    // back here is stock the next card down has just been offered — the comment
+    // above says exactly that, and then only this material was repainted. Every
+    // other row went on displaying figures from before the change while the model
+    // underneath it had moved: the screen and the payload disagreed, and the
+    // payload wins silently at Issue.
+    //
+    // Cheap enough to do unconditionally — it is three innerHTML writes per
+    // fabric row against an allocation that has already re-run for all of them.
+    (data || []).forEach(function (s2, si) {
+        (s2.materials || []).forEach(function (m2, mi) {
+            if (!m2.isFabric) return;
+            if (si === supIdx && mi === matIdx) return;
+            var r2 = document.getElementById(rowId(si, mi));
+            if (!r2) return;
+            var c2 = lotLinesHtml(m2, si, mi, !isFullyIssued(m2));
+            var lc = r2.querySelector('.col-lot-issue');
+            var sc = r2.querySelector('.col-lot-stock');
+            var ic = r2.querySelector('.col-issue');
+            if (lc) lc.innerHTML = c2.lot + lotShortHtml(m2, si, mi);
+            if (sc) sc.innerHTML = c2.stock;
+            if (ic) ic.innerHTML = c2.issue ||
+                '<span class="is-zero issue-cell-empty">&mdash;</span>';
+            var h2 = r2.querySelector('.col-num.col-strong .qty-big');
+            if (h2) {
+                h2.innerHTML = fmt(m2.remaining) +
+                    '<span class="unit">' + escapeHtml(m2.unit) + '</span>';
+            }
+        });
+    });
 
     var material = data[supIdx] && data[supIdx].materials[matIdx];
     if (!material) return;
@@ -1963,11 +2000,24 @@ function lotLinesHtml(m, supIdx, matIdx, editable) {
         var canEdit = editable;
 
         // LOT: roll name + recommended metres (fixed).
+        //
+        // AND, WHEN HE HAS ASKED FOR MORE THAN THE ROLL HAS, WHAT HE IS ACTUALLY
+        // GETTING. applyFabricOverride clamps an edit-up at the free length of
+        // the last roll used and the box he is typing in is deliberately never
+        // repainted (it would eat the caret) — so the figure in the box and the
+        // figure in the payload disagreed, silently, in the direction that made
+        // him think more cloth was going out than was. This column IS repainted
+        // on every keystroke, so the correction lands under his finger.
+        var clamped = (m.lotEditShort || {})[String(info.lotId)];
+        var clampNote = clamped
+            ? '<div class="lot-dry">Only ' + fmt(clamped.placed) + ' ' +
+              escapeHtml(m.unit) + ' left on this roll</div>'
+            : '';
         lotCol +=
             '<div class="lot-from lot-line-row">' +
             '<span class="lot-line-name"><b>' + lotName(k) + '</b></span>' +
             '<span class="lot-line-rec">' + fmt(auto) + ' ' + escapeHtml(m.unit) + '</span>' +
-            '</div>' + rollLineHtml(k);
+            '</div>' + rollLineHtml(k) + clampNote;
 
         // TOTAL STOCK: this lot's washed metres.
         stockCol += '<div class="lot-line-cell">' + qty(washed, m.unit) + '</div>';
@@ -2076,15 +2126,45 @@ function lotShortHtml(m, supIdx, matIdx) {
             'Print&hellip;</button>';
     }
     if (why.kind === 'pinnedDry' || why.kind === 'pinnedBlocked') {
+        // HIS LAST ANSWER WAS REFUSED, AND THE DIALOG IS ABOUT TO OPEN LOOKING
+        // IDENTICAL. The allocator re-checks an override against the live rack on
+        // every pass, so a substitute that has since been quarantined or emptied
+        // is dropped — and without this line the row reverts to the original
+        // sentence and he picks the same lot again.
+        var again = why.refused
+            ? '<div class="lot-dry">' + escapeHtml(why.refused) +
+              ' cannot take it either</div>'
+            : '';
         return '<div class="lot-dry">' +
             (why.kind === 'pinnedBlocked'
                 ? 'Cut from <b>' + escapeHtml(why.lot) + '</b>, which is blocked'
                 : '<b>' + escapeHtml(why.lot) + '</b> is empty &mdash; this was cut from ' +
                 escapeHtml(why.lot)) +
-            '</div>' +
+            '</div>' + again +
             '<button type="button" class="lot-override-btn" ' +
             'onclick="openLotOverride(' + supIdx + ',' + matIdx + ')">' +
             'Use another lot&hellip;</button>';
+    }
+    // THE SHADE IS THERE AND THERE IS NOT ENOUGH OF IT.
+    //
+    // No button, because there is nothing on this screen to press: the order is
+    // already cut in this tone, the tone has nothing left to wash and nothing at
+    // the washer, and more of it has to be bought or printed. What this line has
+    // to do is stop the row saying "None of this shade left" — which is what it
+    // said, over the lot it names, with the pieces it is short sitting in the
+    // allocator and never reaching the screen.
+    if (why.kind === 'pinnedShort') {
+        return (why.lots || []).map(function (w) {
+            return '<div class="lot-dry"><b>' + escapeHtml(w.lotNumber || '') +
+                '</b> &middot; ' + w.pieces + ' pcs short of this shade</div>';
+        }).join('') +
+            // Only where a tone override is already in force — see the reason
+            // itself for why it is not offered on an ordinary pinned row.
+            (why.canOverride
+                ? '<button type="button" class="lot-override-btn" ' +
+                  'onclick="openLotOverride(' + supIdx + ',' + matIdx + ')">' +
+                  'Use another lot&hellip;</button>'
+                : '');
     }
     if (why.kind === 'nofit') {
         return '<div class="lot-dry">' + fmt(why.have) + ' ' + u + ' on <b>' +
@@ -3556,6 +3636,7 @@ function buildFabricIssueLine(m, picks) {
     // for a row with no lotLine at all (offcut-complete) — otherwise the
     // allocator's per-line fromWaste above is authoritative.
     var wasteYieldByMrq = {};
+    var lotByWasteMrq = {};
     var wastePicksOut = [];
     picks.forEach(function (pk) {
         var src2 = (m.wastePicks || []).filter(function (x) {
@@ -3576,6 +3657,10 @@ function buildFabricIssueLine(m, picks) {
             ? remnantYield({ width: w, length: l }, ic.w, ic.l)
             : 0;
         wasteYieldByMrq[q] = (wasteYieldByMrq[q] || 0) + pk.pieces * yieldPer;
+        // The lot this remnant was cut from — the allocator stamps it on the pick
+        // and the ticked box carries it here.
+        var pkLot = String(pk.lotId || src2.lotId || '');
+        if (pkLot && !lotByWasteMrq[q]) lotByWasteMrq[q] = pkLot;
         wastePicksOut.push({
             wasteId: pk.wasteId,
             pieces: pk.pieces,
@@ -3599,6 +3684,14 @@ function buildFabricIssueLine(m, picks) {
             qtyByMrq[q] = 0; rawByMrq[q] = 0;
             wasteByMrq[q] = wasteYieldByMrq[q];
         }
+        // AND THE PIN COMES OFF THE REMNANT WHEN NOTHING ELSE CARRIES IT.
+        //
+        // `lotByMrq` is built from the lot lines, and a row served entirely by
+        // offcuts has none — so `issuedLot` went out empty on the one path where
+        // a real tone decision had just been made and written down nowhere.
+        // Only ever FILLS a gap: a row with fresh cloth on it keeps the lot its
+        // metres came off, which is the same lot anyway.
+        if (!lotByMrq[q] && lotByWasteMrq[q]) lotByMrq[q] = lotByWasteMrq[q];
     });
 
     var allocations = mrqOrder.filter(function (q) {
@@ -3876,10 +3969,17 @@ function issueForSupervisor(supIdx) {
             // exact requirement row this remnant was allocated to (one item can
             // have two rows for this fabric), not the oldest row that happens to
             // match on material and cut size.
+            // lotId travels too. A remnant carries the tone of the lot it was
+            // cut from, so on an order covered ENTIRELY by offcuts this is the
+            // only record of which shade it was made in — there are no fresh
+            // metres, so no lotLine, so `issuedLot` came back empty and the
+            // order shipped unpinned. Its remake was then free to be cut off any
+            // lot on the rack.
             if (pieces > 0) picks.push({
                 wasteId: p.wasteId, pieces: pieces,
                 planItemId: p.planItemId || '',
-                mrqId: p.mrqId || ''
+                mrqId: p.mrqId || '',
+                lotId: p.lotId || ''
             });
         });
 

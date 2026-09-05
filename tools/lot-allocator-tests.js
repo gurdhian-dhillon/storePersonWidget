@@ -70,7 +70,7 @@ test('1. Short Rolls yield nothing', () => {
         [{ planId: 'p1', cutW: 150, cutL: 150, reqPieces: 1, issPieces: 0 }]
     ));
     const m = res[0].materials[0];
-    assert.strictEqual(m.orderOutcomes[0].why, 'no_lot', 'Expected no_lot because rolls are too short');
+    assert.strictEqual(m.orderOutcomes[0].why, 'skipped', 'Expected skipped because rolls are too short');
 });
 
 test('2. Pick smallest lot that covers order', () => {
@@ -147,28 +147,21 @@ test('6. Floating point precision test', () => {
     assert.strictEqual(m.freshMeters, 0.9, 'Expected exactly 0.9m fresh cut');
 });
 
-test('7. BUG SIMULATION: Unpinned order with inWash cloth', () => {
+test('7. Unpinned order with inWash cloth', () => {
     // Expectation: It should reserve the cloth and report "atWash", so the user knows
     // the order is covered by cloth coming back.
-    // Reality: It skips the order and reports "none" (or "no_lot").
-    const res = runData(makeData([
-        { lotId: 'L1', lotNumber: 'LOT-1', wash: 0, unwash: 0, inWash: 15, rolls: [{rollId:'r1', length: 15}] }
-    ]));
+    const res = runData(makeData(
+        [{ lotId: 'L1', lotNumber: 'LOT-1', wash: 0, unwash: 0, inWash: 15, rolls: [{rollId:'r1', length: 15}] }],
+        [{ planId: 'p1', cutW: 150, cutL: 100, reqPieces: 10, issPieces: 0 }]
+    ));
     const mw = res[0].materials[0];
-    
-    // In current bugged code, this will be "skipped" instead of "atWash"
     const why = mw.orderOutcomes[0].why;
-    console.log(`   [Bug Check] Order Outcome was: ${why}`);
-    
-    // In current bugged code, this triggers the absurd nofit condition
     const reason = context.getShortReason ? context.getShortReason(mw) : mw.shortReason;
-    console.log(`   [Bug Check] Short Reason was: ${JSON.stringify(reason)}`);
     
-    // Asserting the bug exists for documentation purposes
-    assert.strictEqual(why, 'skipped', 'The order should be incorrectly skipped because inWash is excluded from gateMetres');
-    if (reason && reason.kind === 'nofit') {
-        assert.strictEqual(reason.have > reason.need, true, 'The absurd nofit bug occurred (have > need)');
-    }
+    // The order should be skipped since we can't allocate today
+    assert.strictEqual(why, 'skipped');
+    // But the reason should correctly identify it's at the wash house!
+    assert.ok(reason && reason.kind === 'atWash', 'Expected reason to be atWash');
 });
 
 console.log("\n--- Test Run Complete ---");

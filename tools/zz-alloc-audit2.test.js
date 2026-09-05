@@ -56,15 +56,18 @@ function M(mid, o) {
 function S(sid, mats) { return { supervisorId: sid, supervisorName: sid, materials: mats }; }
 
 console.log('\n=== AUDIT I: roll Blocked status ===');
-ok('I1 BUG: roll with status Blocked is STILL allocated', () => {
-  // BUG 5 in audit report. lotFill / allocateMaterial / seeding only exclude
-  // 'Consumed'; a 'Blocked' roll is treated as usable.
+ok('I1 FIXED: a roll with status Blocked is not cuttable', () => {
+  // BUG 5 in the audit report, now fixed. lotFill, the ledger seeding, the
+  // per-card working copy and the nofit scanner all go through rollUsable, which
+  // excludes Consumed AND Blocked — and api-experiment.js stops sending a
+  // blocked roll at all, so the two sides cannot drift.
   const fab = { fabricWidthCm: 150 };
   const lot = { wash: 10, unwash: 0, inWash: 0, blocked: false,
     rolls: [{ rollId: 'R1', label: 'L-R1', length: 10, status: 'Blocked' }], waste: [] };
   const f = A.lotFill(lot, [{ cutW: 55, cutL: 100, pieces: 4 }], fab, false);
   console.log('      Blocked-roll fill covers=' + f.covers + ' fresh=' + f.freshMetres);
-  assert.strictEqual(f.covers, true, 'proves Blocked rolls treated as usable');
+  assert.strictEqual(f.covers, false, 'a Blocked roll must yield nothing');
+  assert.strictEqual(f.freshMetres, 0);
 });
 
 console.log('\n=== AUDIT J: nofit need vs waste ===');
@@ -92,9 +95,12 @@ ok('K1 override pointing at non-existent lot safely ignored (stays dry)', () => 
 });
 
 console.log('\n=== AUDIT L: metre-edit volatility ===');
-ok('L1 BUG: metre edit wiped by re-allocation', () => {
-  // BUG 4 in audit report. A hand-typed edit is discarded the next time the
-  // allocation re-runs (waste change / reorder / full render) with no notice.
+ok('L1 FIXED: metre edit survives re-allocation', () => {
+  // BUG 4 in the audit report, now fixed. Edits live in m.metresEditByLot and
+  // are re-applied after every pass; only divergences are kept, so putting a
+  // lot back to auto deletes the entry and an untouched screen re-applies
+  // nothing. Lifetime is the material object: re-renders keep it, refetch drops
+  // it (a new allocation may answer a different number).
   const l1 = L('L1', { rolls: [{ length: 20 }], wash: 20 });
   const w = W('W1', 200, 200, 2, 'L1');
   const ln = LN('A', 20, 0, 'P1', 55, 100);
@@ -109,7 +115,9 @@ ok('L1 BUG: metre edit wiped by re-allocation', () => {
   A._setDeclined('W1', 0);
   A.applyLotAllocation(data);
   const out2 = data[0].materials[0];
-  console.log('      after realloc lotTotal=' + out2.lotLines.reduce((s, l) => s + l.qty, 0) + ' metresEdited=' + out2.metresEdited + ' (edit lost)');
+  console.log('      after realloc lotTotal=' + out2.lotLines.reduce((s, l) => s + l.qty, 0) + ' metresEdited=' + out2.metresEdited);
+  approx(out2.lotLines.reduce((s, l) => s + l.qty, 0), edited, 0.02);
+  assert.strictEqual(out2.metresEdited, true);
 });
 
 console.log('\n=== AUDIT M: waste-only lot (no rolls) ===');

@@ -133,7 +133,7 @@ One row = one physical roll the store person can walk to and identify.
 |---|---|---|---|
 | `Roll_Label` | Single Line | receive (system-assigned) | **What the store writes on the roll.** Short and human — `L2-R1`, `L2-R2`. This is what the issue screen names, and what he matches at the rack. Unique within the lot. |
 | `Roll_Length` | Decimal (m) | receive; issue (decrement); dispute (wind back); waste (remnant) | Physical length on the shelf, at the lot's `Width`. **Washing never changes this.** |
-| `Roll_Status` | Dropdown | receive; issue | `Available`, `Consumed`. `Consumed` when `Roll_Length` reaches 0. Never deleted — history holds. |
+| `Roll_Status` | Dropdown | receive; issue | `Available`, `Consumed`, `Blocked` — the same three Step 0 lists. `Consumed` when `Roll_Length` reaches 0; `Blocked` is quarantined cloth on one roll, the lot-level `blocked` flag one roll at a time. Never deleted — history holds. **Only `Available` is cuttable**: `rollUsable` in the allocator and `readRolls` in api-experiment.js both exclude the other two, and this row said `Available, Consumed` while Step 0 said all three, which is how a Blocked roll came to be allocated like any other. |
 | `Origin` | Dropdown | receive / waste / dispute | `Purchased`, `Printed`, `Remnant`, `Returned`. |
 | `Source_Receipt` | Single Line | receive | GRN / print job / backfill marker. Provenance. |
 

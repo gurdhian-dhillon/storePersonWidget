@@ -153,9 +153,12 @@ ok('C3 override rescues dry pin', () => {
   A.applyLotAllocation(d2);
   assert.strictEqual(d2[0].materials[0].lotLines[0].lotId, 'L2');
 });
-ok('C4 BUG: override to BLOCKED lot honoured (quarantined cloth issued)', () => {
-  // BUG 1 in audit report. Currently PASSES (= bug present): blocked lot LB is allocated.
-  // After the fix this test must be flipped to expect 0 lotLines + a blocked reason.
+ok('C4 FIXED: override to a BLOCKED lot is refused, nothing is issued', () => {
+  // BUG 1 in the audit report, now fixed and flipped as that report said to.
+  // The override is re-validated against the live rack on every pass, so a lot
+  // quarantined AFTER he chose it is refused; the row falls back to pinnedDry so
+  // the "Use another lot..." button stays on screen, and names the lot it
+  // refused so he does not pick the same one again.
   const lb = L('LB', { rolls: [{ length: 50 }], wash: 50, blocked: true });
   const ln = LN('IT1', 10, 2, 'P1', 55, 55, { issuedLot: 'L9', issuedLotNo: 'L9-GONE' });
   const m = M('M1', { fabricWidthCm: 150, lines: [ln], lots: [lb] });
@@ -164,11 +167,15 @@ ok('C4 BUG: override to BLOCKED lot honoured (quarantined cloth issued)', () => 
   A.applyLotAllocation(data);
   const out = data[0].materials[0];
   console.log('      lotLines=' + JSON.stringify(out.lotLines.map(l => l.lotId)) + ' reason=' + JSON.stringify(out.shortReason));
-  assert.strictEqual(out.lotLines.length > 0 && out.lotLines[0].lotId, 'LB');
+  assert.strictEqual(out.lotLines.length, 0, 'quarantined cloth must not be issued');
+  assert.strictEqual(out.shortReason.kind, 'pinnedDry');
+  assert.strictEqual(out.shortReason.refused, 'LB', 'the row must name the refused lot');
 });
-ok('C5 pinned PARTIAL short: reason is misleading empty', () => {
-  // BUG 2 in audit report. Pinned L1 gives 1 of 10m; other lots full but unusable.
-  // Currently reason.kind === 'empty' ("rack simply empty") — should be a pinned-short reason.
+ok('C5 FIXED: pinned PARTIAL short reports pinnedShort, not empty', () => {
+  // BUG 2 in the audit report, now fixed. Pinned L1 gives 1 of 10m; other lots
+  // full but unusable. Used to fall through to 'empty'; now records
+  // pinnedShortLots on the allocate path and shortReasonFor ranks it below
+  // wash/atWash (nothing actionable) and above nofit/empty.
   const l1 = L('L1', { rolls: [{ length: 1 }], wash: 1 });
   const l2 = L('L2', { rolls: [{ length: 50 }], wash: 50 });
   const ln = LN('IT1', 20, 0, 'P1', 55, 100, { issuedLot: 'L1', issuedLotNo: 'L1' });
@@ -179,6 +186,10 @@ ok('C5 pinned PARTIAL short: reason is misleading empty', () => {
   console.log('      lotLines=' + JSON.stringify(out.lotLines) + ' remaining=' + out.remaining + ' reason=' + JSON.stringify(out.shortReason));
   assert.strictEqual(out.lotLines[0].lotId, 'L1');
   approx(out.lotLines.reduce((s, l) => s + l.qty, 0), 1);
+  assert.strictEqual(out.shortReason.kind, 'pinnedShort');
+  assert.strictEqual(out.shortReason.lots[0].lotNumber, 'L1');
+  assert.strictEqual(out.shortReason.lots[0].pieces, 18);
+  assert.strictEqual(out.shortReason.canOverride, false);
 });
 
 console.log('\n=== AUDIT D: atom/greige ===');
@@ -291,9 +302,11 @@ ok('G1 edit DOWN halves total', () => {
   const tot = out.lotLines.filter(l => l.lotId === 'L1').reduce((s, l) => s + l.qty, 0);
   approx(tot, auto / 2, 0.02);
 });
-ok('G2 BUG: edit UP over cap silently drops excess (box 50, payload 5)', () => {
-  // BUG 3 in audit report. Ask 50m with an 11m cap: payload carries ~5m,
-  // the UI box keeps 50. Must clamp the box or warn.
+ok('G2 FIXED: edit UP over cap clamps AND records the shortfall for the UI', () => {
+  // BUG 3 in the audit report, now fixed on both sides: the allocator still
+  // clamps (no spill onto a fresh roll) but records m.lotEditShort, and the lot
+  // column renders "Only X left on this roll" beside the box (main.js), which
+  // is repainted on every keystroke while the box itself keeps the caret.
   const l1 = L('L1', { rolls: [{ label: 'L1-R1', rollId: 'R1', length: 5 }, { label: 'L1-R2', rollId: 'R2', length: 6 }], wash: 11 });
   const ln = LN('A', 8, 0, 'P1', 55, 100);
   const m = M('M1', { fabricWidthCm: 150, lines: [ln], lots: [l1] });
@@ -304,6 +317,9 @@ ok('G2 BUG: edit UP over cap silently drops excess (box 50, payload 5)', () => {
   const tot = out.lotLines.filter(l => l.lotId === 'L1').reduce((s, l) => s + l.qty, 0);
   console.log('      asked 50 -> got ' + tot);
   assert.ok(tot < 50 && tot <= 11 + 1e-6);
+  assert.ok(out.lotEditShort && out.lotEditShort.L1, 'clamp must be recorded for the UI');
+  approx(out.lotEditShort.L1.typed, 50);
+  approx(out.lotEditShort.L1.placed, tot);
 });
 
 console.log('\n=== AUDIT H: misc ===');
