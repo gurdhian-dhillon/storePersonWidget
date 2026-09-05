@@ -2354,7 +2354,7 @@ th.col-num {
 .lot-line-row,
 .lot-line-cell,
 .col-lot-issue .waste-where,
-.col-lot-issue .lot-pieces {
+.col-lot-issue .lot-rolls {
     min-height: 2.4rem;
     box-sizing: border-box;
 }
@@ -2490,11 +2490,15 @@ th.col-num {
     color: var(--text-muted);
 }
 
-/* Which physical pieces to fetch, under the lot line that names them. Only ever
-   on a Pieces lot — printed cloth is a stack, not a roll he can measure off, so
-   "9 Mtr off P1" is not an instruction anyone can follow. Indented under its lot
-   because it belongs to that line and not to the row. */
-.lot-pieces {
+/* WHICH ROLL TO CUT, under the lot line that names the lot. One line per roll,
+   in the order the allocator drained them — shortest first — so the first line
+   is the roll he is meant to finish off. Indented under its lot because it
+   belongs to that line and not to the row.
+
+   The roll label is the only bold thing on the line: it is what he reads down the
+   column looking for, and the metres beside it are what he measures once he has
+   found it. */
+.lot-rolls {
     font-size: 0.72rem;
     color: var(--text-muted);
     text-align: left;
@@ -2502,6 +2506,10 @@ th.col-num {
     white-space: nowrap;
     background: #f1f5f9;
     border-left: 2px solid var(--primary);
+}
+.lot-rolls b {
+    color: var(--text-main);
+    font-weight: 700;
 }
 
 /* Only when a split was forced, so it is worth a colour. */

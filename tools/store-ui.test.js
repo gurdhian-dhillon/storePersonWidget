@@ -54,13 +54,27 @@ function makeWorld() {
     wastePicks: [],
     lines: [{ planId: 'PL1', salesOrder: 'SO-1', planItemId: 'IT1', item: 'X', isRemake: false,
               required: 5.5, issued: 0, reqPieces: 10, issPieces: 0, issuedLot: '', issuedLotNo: '', reason: '' }],
-    lots: [{ lotId: 'L1', lotNumber: 'L1', blocked: false, wash: 5, unwash: 0, inWash: 0, form: 'Roll', pieces: [] }],
+    // THE LOT NEEDS A PHYSICAL ROLL, and this fixture went a whole migration
+    // without one. `wash: 5` used to be all a lot needed to yield fresh cloth;
+    // since the rolls migration a lot is a SET OF ROLLS and the metres are a
+    // wash-state budget over them, so a lot with `rolls: []` yields nothing
+    // however much it is washed.
+    //
+    // That is what broke U3, and it broke it INDIRECTLY, which is why it read as
+    // an allocator bug. Decline W1 to 2 and the remnants cover 8 of the 10
+    // pieces; with no roll to cut the last 2 off, the lot no longer `covers` the
+    // order, `chooseLotForOrder` returns null, and the ATOM RULE skips the order
+    // whole — taking the 2 perfectly good remnants down with it. So a PARTIAL
+    // decline behaved exactly like a total one, and the box read 0 after he
+    // typed 2. The allocator was right at every step; the lot was impossible.
+    lots: [{ lotId: 'L1', lotNumber: 'L1', blocked: false, wash: 5, unwash: 0, inWash: 0, form: 'Roll', pieces: [],
+             rolls: [{ rollId: 'r1', label: 'L1-R1', length: 5, status: 'Available' }] }],
   };
   const els = {};
   const documentStub = {
     getElementById: function (id) { return els[id] || null; },
   };
-  const state = { renderCalls: 0, refreshCalls: 0 };
+  const state = { renderCalls: 0, refreshCalls: 0, reallocCalls: 0 };
   const sandbox = {
     document: documentStub,
     console,
@@ -87,6 +101,23 @@ function makeWorld() {
       });
     },
     refreshCardState: function () { state.refreshCalls++; },
+    // onWasteInputChange no longer calls the full render() on a decline - it
+    // re-runs the allocation and repaints just this material's sub-lines, so the
+    // caret survives the keystroke. The observable contract is identical
+    // (allocate, then paint the checkbox and pcs box from the result), so this
+    // stub reuses the render mirror above and records the call separately.
+    reallocateInPlace: function (supIdx, matIdx, opts) {
+      state.reallocCalls++;
+      sandbox.render(sandbox.window.__reqData);
+      // The real one restores the value of the box being typed in rather than
+      // leaving the repaint's figure in it.
+      if (opts && opts.skipWastePick !== undefined) {
+        const m = sandbox.window.__reqData[supIdx].materials[matIdx];
+        const pk = wastePicksFn(m)[opts.skipWastePick];
+        const box = els[wasteInputIdFn(supIdx, matIdx, opts.skipWastePick)];
+        if (box && pk) box.value = pk.pieces;
+      }
+    },
   };
   vm.createContext(sandbox);
   vm.runInContext(allocSrc + '\n' + fns, sandbox);

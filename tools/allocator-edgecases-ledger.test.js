@@ -252,7 +252,25 @@ test('6 AfterWash commitment drains rolls but emits no lotLines', () => {
   assert.strictEqual(ob.why, 'skipped');
 });
 
-test('7 InWash lot with zero wash+unwash: gate includes inWash only when greige true', () => {
+// INVERTED - this case pinned a REGRESSION I introduced in Piece 1.
+//
+// It was written to lock in the behaviour the rewritten lotFill happened to
+// have, without checking it against the frozen e000519 baseline. The baseline
+// widens the greige gate by `unwash` ALONE (`if (greige) metres = metres +
+// lot.unwash`), and it is right:
+//
+//   The greige gate asks "could this lot cover the order if somebody went and
+//   WASHED its greige" - an action the store person can take, and the one the
+//   `wash` shortReason puts a button on. Cloth already AT the wash house is not
+//   that. Nobody can send it again; it has to come back.
+//
+// Counting inWash here made a committed lot report `wash` - "send 40 Mtr to
+// wash" - over cloth that was already at the washer, which BURIED the `atWash`
+// reason ("P4 is at the wash house, wait") that exists to say exactly this. It
+// was caught by print-shortreason C5, which asserts that ranking directly.
+//
+// So the gate must NOT include inWash, and this case now pins that.
+test('7 InWash lot with zero wash+unwash: inWash is NOT in the greige gate', () => {
   const lot = {
     lotId: 'L1', lotNumber: 'L1', blocked: false,
     wash: 0, unwash: 0, inWash: 10, form: 'Roll', pieces: [],
@@ -264,9 +282,18 @@ test('7 InWash lot with zero wash+unwash: gate includes inWash only when greige 
   const fFalse = A.lotFill(lot, demand, fab, false);
   approx(fFalse.freshMetres, 0);
   assert.strictEqual(fFalse.covers, false);
+  // Greige true changes NOTHING here: there is no greige to wash, only cloth
+  // already at the washer, and washing is not an action anyone can take on it.
   const fTrue = A.lotFill(lot, demand, fab, true);
-  approx(fTrue.freshMetres, 5);
-  assert.strictEqual(fTrue.covers, true, 'inWash should count only when greige true');
+  approx(fTrue.freshMetres, 0);   // cloth at the wash house is not washable stock
+  assert.strictEqual(fTrue.covers, false,
+    'a lot whose only cloth is AT the washer cannot be committed - it reads atWash instead');
+
+  // And the gate DOES still widen for real greige, which is the half that works.
+  const greigeLot = Object.assign({}, lot, { unwash: 10, inWash: 0 });
+  const g = A.lotFill(greigeLot, demand, fab, true);
+  approx(g.freshMetres, 5);      // unwash still widens the gate
+  assert.strictEqual(g.covers, true);
 });
 
 test('8 Roll exactly one marker row: yields 1 row not 0', () => {

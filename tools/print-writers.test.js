@@ -725,8 +725,30 @@ function fixture(opts) {
     Unwash_Quantity: opts.lotUnwash === undefined ? 8 : opts.lotUnwash,
     Status: opts.lotStatus || 'Active',
   });
+  // THE PRINTED SKU MUST ALREADY EXIST. sendToPrint no longer mints one -
+  // "Creating new printed SKUs is disabled - choose an existing one"
+  // (sendToPrint.dg:468) - so the pair (Print_Base, Pattern) has to be on the
+  // form before a send can resolve it. The port mirrors that guard and its
+  // minting block is commented out; the fixture had not caught up, which is why
+  // every send in this suite was refused and 72 of 84 cases failed on one line.
+  //
+  // Its counters start at zero: it is a SKU that exists, not stock that does.
+  // `noPrinted` builds the world without it, for the cases that test the guard.
+  let printed = null;
+  if (!opts.noPrinted) {
+    printed = addMaterial(W, {
+      Name: 'Grey Sheeting', Design_Name: 'Plain', Color: 'Grey',
+      Material_Display_Name: 'Grey Sheeting / Plain / Grey / ' + (opts.printedPattern || 'BP Flower'),
+      SKU: 'RM-00112-BPF', Is_Fabric: true, Pattern: opts.printedPattern || 'BP Flower',
+      Type_field: 'Cotton', Fabric_Width_Inches: '60', Fabric_Gsm: '140',
+      Quality: 'A', Unit: 'Mtr',
+      Quantity: 0, Wash_Quantity: 0, Unwash_Quantity: 0, In_Wash_Qty: 0,
+      In_Print_Qty: 0, Unallocated_Qty: 0,
+    });
+    printed.Print_Base = plain.ID;
+  }
   const printer = addPrinter(W, 'Ace Printers');
-  return { W, plain, lot, printer };
+  return { W, plain, lot, printer, printed };
 }
 const LINES = [{ lengthCm: 300, count: 3 }, { lengthCm: 275, count: 4 }];
 function send(f, over) {
@@ -886,18 +908,45 @@ test('S15 the budget is checked BEFORE the mint - an over-draw must not leave a 
 });
 
 // ===============================================================================
-console.log('\nsendToPrint - minting the printed SKU');
+console.log('\nsendToPrint - resolving the printed SKU (minting is DISABLED)');
 // ===============================================================================
+//
+// MINTING IS OFF, and this section used to be almost entirely about it.
+// sendToPrint once created the printed SKU on first use, composing its display
+// name and allocating the next free RM- code. That block is commented out in
+// deluge/sendToPrint.dg (:469 onward) behind
+//   "Creating new printed SKUs is disabled - choose an existing one"
+// so the pair (Print_Base, Pattern) must exist on the form before anyone can
+// print into it.
+//
+// ELEVEN CASES WERE DELETED rather than left failing or quietly inverted,
+// because there is nothing left for them to exercise: M1 (mints), M4/M6
+// (display-name composition), M12-M16 (the RM- sequence scan and its padding,
+// gap and collision rules), and three GAP-DOCs that described defects reachable
+// only THROUGH minting. Testing commented-out code proves only that the comment
+// is still there, which M-DISABLED below does honestly and in one line.
+//
+// IF MINTING IS EVER RE-ENABLED, those cases are worth restoring from git rather
+// than rewriting - they encode the padding-width and skip-non-matching rules,
+// which are easy to get subtly wrong. `git log -S "the next free RM- number"
+// -- tools/print-writers.test.js` finds them.
+//
+// The M2/M3/M5/M7/M8/M17 cases below now describe the fixture's PRE-EXISTING
+// printed SKU rather than a minted one. They are kept because the properties
+// they assert are still contract - the width invariant especially - but note
+// they no longer exercise a code path that composes anything.
 
-test('M1 a new (Print_Base, Pattern) pair MINTS, and the pair is what identifies it', () => {
-  const f = fixture();
+test('M-DISABLED sendToPrint refuses a pair that does not exist, and mints nothing', () => {
+  const f = fixture({ noPrinted: true });
+  const before = f.W.Raw_Material.length;
   const out = send(f);
-  assert.strictEqual(out.minted, true);
-  const minted = f.W.Raw_Material.filter(r => String(r.ID) === String(out.printedMaterialId))[0];
-  assert.ok(minted, 'the record exists');
-  assert.strictEqual(String(minted.Print_Base), String(f.plain.ID));
-  assert.strictEqual(minted.Pattern, 'BP Flower');
-  assert.strictEqual(minted.Is_Fabric, true);
+  assert.strictEqual(out.success, false, 'a send into a non-existent pair must be refused');
+  assert.ok(/Creating new printed SKUs is disabled/.test(out.error), out.error);
+  assert.strictEqual(f.W.Raw_Material.length, before, 'and absolutely nothing is created');
+  // The ledger must be untouched too - a refusal that had already moved metres
+  // would strand cloth in In_Print_Qty with no job to bring it back.
+  assert.strictEqual(f.plain.Wash_Quantity, 42.6, 'no metres moved by a refused send');
+  assert.strictEqual(f.W.Print_Job.length, 0, 'and no job row');
 });
 
 test('M2 Fabric_Width_Inches is COPIED from the plain SKU - the width invariant', () => {
@@ -919,38 +968,10 @@ test('M3 Design_Name is INHERITED, not replaced by the pattern', () => {
   assert.strictEqual(minted.Name, 'Grey Sheeting', 'Name is the name part alone, never the composed string');
 });
 
-test('M4 two prints off ONE base compose to DIFFERENT display names (what replacing the design broke)', () => {
-  const f = fixture();
-  const a = send(f, { pattern: 'BP Flower' });
-  const b = send(f, { pattern: 'BP Leaf', lines: [{ lengthCm: 100, count: 1 }] });
-  const na = f.W.Raw_Material.filter(r => String(r.ID) === String(a.printedMaterialId))[0].Material_Display_Name;
-  const nb = f.W.Raw_Material.filter(r => String(r.ID) === String(b.printedMaterialId))[0].Material_Display_Name;
-  assert.strictEqual(na, 'Grey Sheeting / Plain / Grey / BP Flower');
-  assert.strictEqual(nb, 'Grey Sheeting / Plain / Grey / BP Leaf');
-  assert.notStrictEqual(na, nb, 'the SKUs must be tellable apart on any screen');
-});
-
 test('M5 the display name is the plain one plus the print, four parts joined by " / "', () => {
   const f = fixture();
   const out = send(f);
   assert.strictEqual(out.printedName, f.plain.Material_Display_Name + ' / BP Flower');
-});
-
-test('M6 a missing part leaves NO dangling separator', () => {
-  const f = fixture();
-  f.plain.Design_Name = '';                              // no design on file
-  const a = send(f, { pattern: 'BP Flower' });
-  assert.strictEqual(a.printedName, 'Grey Sheeting / Grey / BP Flower');
-
-  const g = fixture();
-  g.plain.Color = '';
-  const b = send(g, { pattern: 'BP Leaf' });
-  assert.strictEqual(b.printedName, 'Grey Sheeting / Plain / BP Leaf');
-
-  const h = fixture();
-  h.plain.Design_Name = ''; h.plain.Color = '';
-  const c = send(h, { pattern: 'BP Vine' });
-  assert.strictEqual(c.printedName, 'Grey Sheeting / BP Vine');
 });
 
 test('M7 Name falls back to the FIRST segment of the display name only when Name was never filled', () => {
@@ -974,7 +995,12 @@ test('M8 every quantity field on the minted SKU is 0 - stock only arrives throug
 test('M9 an EXISTING pair is reused and never duplicated', () => {
   const f = fixture();
   const a = send(f);
-  assert.strictEqual(a.minted, true);
+  // `minted` is false on EVERY send now - minting is disabled (see the block
+  // comment above M1). What this case still asserts, and what it was always
+  // really about, is that two sends of one pair resolve to the SAME record and
+  // add no second one.
+  assert.strictEqual(a.minted, false, 'nothing is minted any more');
+  assert.strictEqual(String(a.printedMaterialId), String(f.printed.ID), 'resolved the existing pair');
   const count = f.W.Raw_Material.length;
   const b = send(f, { lines: [{ lengthCm: 100, count: 1 }] });
   assert.strictEqual(b.minted, false, 'second run of the same pair must not mint');
@@ -993,60 +1019,22 @@ test('M10 a pair that is ALREADY duplicated refuses rather than picking one arbi
 
 test('M11 a stale screen sending a printedMaterialId that is not the pair is refused', () => {
   const f = fixture();
-  // The pair DOES resolve - but the screen is holding the SKU of another pattern.
-  addMaterial(f.W, { SKU: 'RM-00113', Print_Base: f.plain.ID, Pattern: 'BP Flower', Is_Fabric: true });
+  // The pair DOES resolve - the fixture's own printed SKU IS the BP Flower pair,
+  // so adding a second one here would trip the duplicate guard (M10's case)
+  // before this one could be reached. Only the wrong-pattern decoy is added.
   const wrong = addMaterial(f.W, { SKU: 'RM-00500', Print_Base: f.plain.ID, Pattern: 'BP Leaf', Is_Fabric: true });
   const out = send(f, { pattern: 'BP Flower', printedMaterialId: wrong.ID });
   assert.strictEqual(out.success, false);
   assert.ok(/does not match/.test(out.error), out.error);
 
   // And a screen holding a SKU for a pair that does not exist at all is told so,
-  // rather than being allowed to mint under an id it made up.
-  const g = fixture();
+  // rather than being allowed to mint under an id it made up. `noPrinted` is
+  // what makes the pair genuinely absent now that the fixture supplies one.
+  const g = fixture({ noPrinted: true });
   const out2 = send(g, { printedMaterialId: '4242' });
   assert.strictEqual(out2.success, false);
   assert.ok(/No printed material exists/.test(out2.error), out2.error);
   assert.strictEqual(g.W.Raw_Material.length, 1, 'no mint behind a stale screen');
-});
-
-test('M12 the SKU code is the next free RM- number, zero-padded to the existing width', () => {
-  const f = fixture();                                    // RM-00112 exists
-  assert.strictEqual(send(f).printedSku, 'RM-00113');
-});
-
-test('M13 a WIDER existing code widens the padding', () => {
-  const f = fixture();
-  addMaterial(f.W, { SKU: 'RM-000123', Name: 'Wide' });
-  assert.strictEqual(send(f).printedSku, 'RM-000124');
-});
-
-test('M14 codes that do not match the RM-<digits> pattern are SKIPPED, never guessed at', () => {
-  const f = fixture();
-  addMaterial(f.W, { SKU: 'FAB-9999', Name: 'Hand typed' });
-  addMaterial(f.W, { SKU: 'RM-ABC', Name: 'Hand typed 2' });
-  addMaterial(f.W, { SKU: 'RM-', Name: 'Hand typed 3' });
-  addMaterial(f.W, { SKU: '', Name: 'No code' });
-  assert.strictEqual(send(f).printedSku, 'RM-00113', 'one oddity must not invent a sequence number');
-});
-
-test('M15 the maximum wins, not the count - a gap in the sequence does not get refilled', () => {
-  const f = fixture();
-  addMaterial(f.W, { SKU: 'RM-00007', Name: 'A' });
-  addMaterial(f.W, { SKU: 'RM-00400', Name: 'B' });
-  assert.strictEqual(send(f).printedSku, 'RM-00401');
-});
-
-test('M16 a collision that appeared between the scan and the insert is refused, not overwritten', () => {
-  const f = fixture();
-  // Somebody else took RM-00113 with a code the scan skips as a duplicate source
-  // of truth: the re-check is against the FORM, so it still sees it.
-  addMaterial(f.W, { SKU: 'RM-00113', Name: 'Taken', Pattern: 'Something else' });
-  addMaterial(f.W, { SKU: 'RM-00112x', Name: 'noise' });
-  const out = send(f);
-  // maxSeq is 113 here, so the next free is RM-00114 and the re-check passes.
-  assert.strictEqual(out.printedSku, 'RM-00114');
-  assert.strictEqual(f.W.Raw_Material.filter(r => r.SKU === 'RM-00113').length, 1,
-    'the taken code is never reissued');
 });
 
 test('M17 the mint response is valid JSON with every id as a STRING', () => {
@@ -1069,44 +1057,6 @@ test('M18 Send_Lines is written exactly as given - it is the evidence the return
   assert.strictEqual(job.Source_State, 'Wash');
   assert.strictEqual(dec(job.Metres_Returned), 0, 'starts at 0 so the loss reads as a real number');
   assert.strictEqual(String(job.Plain_Lot), String(f.lot.ID));
-});
-
-test('GAP-DOC S-own-pattern: sendToPrint accepts the plain material\'s OWN pattern and mints a nonsense SKU', () => {
-  // docs/printing.md:647 - "plain carries its own pattern so the send form can
-  // drop it from the options: offering to print Grey Sheeting / Plain / Grey in
-  // Plain would mint a nonsense SKU." That drop is WIDGET-ONLY (patternsFor,
-  // main.js:5262). sendToPrint has no equivalent guard, and the doc's own rule
-  // (printing.md:274 "A Custom API is callable from anywhere") says a guard that
-  // matters cannot live only in the widget.
-  const f = fixture({ plainPattern: 'Plain' });
-  const out = send(f, { pattern: 'Plain' });
-  assert.strictEqual(out.success, true, 'CURRENT behaviour - no server guard');
-  assert.strictEqual(out.printedName, 'Grey Sheeting / Plain / Grey / Plain',
-    'pins the nonsense name the guard would prevent');
-});
-
-test('GAP-DOC S-pattern-case: the (Print_Base, Pattern) pair resolves CASE-SENSITIVELY server-side', () => {
-  // The widget's printedFor()/patternsFor() (main.js:5259, 5280) fold case; the
-  // Deluge query at sendToPrint.dg:424 does not. Two spellings of one pattern
-  // therefore mint two SKUs - the exact split guard 1 exists to prevent.
-  const f = fixture();
-  const a = send(f, { pattern: 'BP Flower' });
-  const b = send(f, { pattern: 'bp flower', lines: [{ lengthCm: 100, count: 1 }] });
-  assert.strictEqual(a.minted, true);
-  assert.strictEqual(b.minted, true, 'CURRENT behaviour - a second SKU for the same pattern');
-  assert.notStrictEqual(String(a.printedMaterialId), String(b.printedMaterialId));
-});
-
-test('GAP-DOC S-empty-name: a material with neither Name nor Material_Display_Name composes a LEADING separator', () => {
-  // sendToPrint.dg:549 starts wantName at inhName unguarded, so an empty name
-  // part yields " / Plain / Grey / BP Flower". Every OTHER part is guarded
-  // (:550, :554, :558) exactly to avoid this, which is what makes it a slip
-  // rather than a decision.
-  const f = fixture();
-  f.plain.Name = '';
-  f.plain.Material_Display_Name = '';
-  const out = send(f);
-  assert.strictEqual(out.printedName, ' / Plain / Grey / BP Flower', 'CURRENT behaviour');
 });
 
 test('GAP-DOC S-pieces-lot: sending off a Form=Pieces lot moves metres and leaves the Fabric_Piece rows behind', () => {
@@ -1370,6 +1320,12 @@ test('R21 the same lot number on a DIFFERENT material is fine - unique within th
   const f = sent();
   recv(f);                                             // P1 on the printed SKU
   addLot(f.W, { Material: f.plain.ID, Lot_Number: 'P1' });   // does not collide
+  // The SECOND pattern needs its own printed SKU on the form - minting is
+  // disabled, so a send into a pair that does not exist is refused outright.
+  const leaf = addMaterial(f.W, { SKU: 'RM-00112-BPL', Pattern: 'BP Leaf', Is_Fabric: true,
+    Name: 'Grey Sheeting', Material_Display_Name: 'Grey Sheeting / Plain / Grey / BP Leaf',
+    Unit: 'Mtr', Wash_Quantity: 0, Unwash_Quantity: 0, In_Wash_Qty: 0, In_Print_Qty: 0 });
+  leaf.Print_Base = f.plain.ID;
   const send2 = send(f, { pattern: 'BP Leaf', lines: [{ lengthCm: 400, count: 2 }] });
   const job2 = f.W.Print_Job.filter(j => String(j.ID) === String(send2.jobId))[0];
   const out = receiveFromPrint(f.W, { jobId: job2.ID, lotId: '', lotNumber: 'P1',

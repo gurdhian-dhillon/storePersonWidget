@@ -487,9 +487,23 @@ var ApiExperiment = (function () {
                             pieces: lrPieces,
                             // Physical rolls, shelf only. Σ length should equal
                             // wash+unwash+inWash for a healthy lot (verifyLotSync
-                            // checks this server-side). A lot with no Lot_Rolls
-                            // rows yet (pre-backfill) gets [] and the allocator
-                            // falls back to the scalar path — see lot-allocator.
+                            // checks this server-side).
+                            //
+                            // A LOT WITH NO Lot_Rolls ROWS YIELDS NOTHING, and
+                            // there is NO scalar fallback any more — Piece 4
+                            // deleted it, because "a lot is a set of rolls" stops
+                            // being true the moment a second code path can serve
+                            // cloth without them.
+                            //
+                            // So an un-backfilled lot reads as EMPTY on the store
+                            // screen ("nothing on the rack") no matter how many
+                            // metres its wash columns hold, and the row goes
+                            // short over cloth he is looking at. That is loud
+                            // rather than silent, which is the right failure —
+                            // but it means seedLotRolls.dg MUST have been run
+                            // over every lot before this screen is trusted, and
+                            // any lot created afterwards needs its rolls too
+                            // (Step 6 makes the receipt writers do that).
                             rolls: lrRolls,
                             width1: num(l.Width1)
                         });

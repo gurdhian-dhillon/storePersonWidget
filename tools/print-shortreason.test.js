@@ -77,11 +77,20 @@ function line(planItemId, reqPcs, opts) {
            salesOrder: 'SO-1', item: 'Cushion', isRemake: false,
            supervisorId: 'SUP-A', required: 2.75, issued: 0, reason: '' };
 }
+// A LOT NEEDS PHYSICAL ROLLS. Since the rolls migration the wash/unwash figures
+// are a wash-state budget OVER the rolls rather than cloth in their own right,
+// so a lot with `rolls: []` yields nothing at all - and in THIS suite that
+// collapsed every shortReason to 'empty', because a rack with no cuttable cloth
+// on it genuinely is empty. One seed roll of the lot's full length is what
+// seedLotRolls.dg backfills, so the fixture matches the live data.
 function roll(lotId, wash, opts) {
   opts = opts || {};
+  const total = wash + (opts.unwash || 0) + (opts.inWash || 0);
   return { lotId, lotNumber: opts.no || lotId, blocked: !!opts.blocked,
            wash: wash, unwash: opts.unwash || 0, inWash: opts.inWash || 0,
-           form: 'Roll', pieces: [] };
+           form: 'Roll', pieces: [],
+           rolls: opts.rolls || [{ rollId: lotId + '-r1', label: lotId + '-R1',
+                                   length: total, status: 'Available' }] };
 }
 function pieceLot(lotId, pieces, opts) {
   opts = opts || {};
@@ -327,7 +336,15 @@ test('E1 hasOwnStock counts greige, at-the-wash and quarantined cloth as stock',
   assert.strictEqual(A.hasOwnStock({ lots: [roll('L1', 0, { inWash: 3 })] }), true);
   assert.strictEqual(A.hasOwnStock({ lots: [roll('L1', 9, { blocked: true })] }), true,
     'quarantined printed stock is still printed stock');
-  assert.strictEqual(A.hasOwnStock({ lots: [pieceLot('LP', [fpiece('p', 300, 140, 2)])] }), true);
+
+  // A Fabric_Piece lot no longer counts as stock, and that is CORRECT rather
+  // than a regression: Phase A of the rolls migration removed hasOwnStock's
+  // `l.pieces` fallback along with the form itself - printed cloth is a lot with
+  // short rolls now, and its metres live in wash/unwash/inWash like any other
+  // lot's. A `form: 'Pieces'` lot carrying zero metres is therefore empty, which
+  // is exactly what the function says.
+  assert.strictEqual(A.hasOwnStock({ lots: [pieceLot('LP', [fpiece('p', 300, 140, 2)])] }), false,
+    'the retired Fabric_Piece path contributes no stock');
   assert.strictEqual(A.hasOwnStock({ lots: [pieceLot('LP', [fpiece('p', 300, 140, 0)])] }), false);
 });
 

@@ -541,10 +541,24 @@ test('SB10 accepting the mint posts with an EMPTY printedMaterialId - the server
 console.log('\nsubmitting a receipt');
 // ===============================================================================
 
+// A ROW THIS CASE DOES NOT NAME MUST STILL BE VALID.
+//
+// printJobsHtml seeds every line as "all of it came back" with carton: '' - the
+// screen's own starting state, which is deliberately INCOMPLETE (he has to say
+// which box each size went into). So a case that passes fewer counts than there
+// are lines used to leave the trailing rows tripping the carton rule, and
+// submitReceivePrint reported THAT instead of the rule the case was written to
+// exercise. RB4 and RB5 each name one row and were failing on row 1's blank
+// carton, which looked like the count validation being broken when it was not.
+//
+// Every unnamed row is therefore given a carton here. Cases that mean to test
+// the carton rule (RB1, RB2) say so by passing a carton explicitly, and this
+// default never overrides what a case states.
 function recvWorld(counts, opts) {
   const w = makeWorld(payload(), opts);
   w.get('printJobsHtml')();                         // seeds printRecvLines
   const rows = w.get('printRecvLines')['555'];
+  rows.forEach((r) => { if (!String(r.carton || '').trim()) r.carton = 'C-DEF'; });
   (counts || []).forEach((c, i) => { if (rows[i]) Object.assign(rows[i], c); });
   w.el('pr-lot-555', { value: '' });
   w.el('pr-num-555', { value: 'P2' });

@@ -34,240 +34,58 @@ function runInSandbox(code) {
 }
 
 // =====================================================================
-// PART A - the allocator's mini-roll maths (REAL lot-allocator.js)
+// PARTS A, B and E REMOVED - the widget half of "cut at issue" is retired
 // =====================================================================
-console.log('\nPART A - allocator treats printed pieces as mini-rolls');
+//
+// This suite tested one chain end to end:
+//
+//   allocator mini-roll maths  ->  payload pieces[] with cutLengthCm
+//   ->  store UI "Cut 18 m from 20 m piece"
+//   ->  issueMaterials.dg token pipeline  ->  Fabric_Piece decrement
+//
+// PHASE A OF THE ROLLS MIGRATION CUT THAT CHAIN IN HALF, and the halves are in
+// different states - which is why this suite sat at 13 passing and 15 failing
+// rather than simply broken:
+//
+//   WIDGET SIDE - RETIRED. A lot is a set of rolls now and printed cloth is
+//     just a lot with short rolls, so lot.pieces[] is always empty, the
+//     allocator has no mini-roll branch left (Piece 4 deleted lotIsPieces /
+//     lotPieces / lotGreigePieces), and lotLines[].pieces is hard-coded [].
+//     Parts A (allocator), B (the UI instruction text) and E (end-to-end) were
+//     testing code that no longer exists, so they are DELETED rather than left
+//     failing - a test of a deleted branch proves nothing about the branch that
+//     replaced it. tools/roll-display.test.js covers what the row says now.
+//
+//   SERVER SIDE - STILL LIVE. Fabric_Piece is referenced by ten .dg files and
+//     issueMaterials / issueMaterialsApply still parse "pieces":[{ ...
+//     "cutLengthCm" }] off the payload. Nothing sends it any more, so those
+//     parsers are unreachable in practice, but they are REAL CODE and retiring
+//     them is a Deluge change that has to be Executed against Creator. Parts C
+//     and D below still exercise them and still pass, so they stay exactly as
+//     they are until that step lands.
+//
+// The guard below pins that asymmetry, so the day somebody removes the server
+// half this suite says so instead of quietly passing over nothing.
 
-function allocateOneMaterial(pieceSpecs, demandPieces, opts) {
-  opts = opts || {};
-  const mat = {
-    materialId: 'M1', material: 'Linen Print', sku: 'PRN', unit: 'Mtr',
-    isFabric: true, isReissue: false,
-    required: demandPieces * 3, issued: 0, remaining: demandPieces * 3,
-    availableStock: 100, unwashedStock: 0, inWashStock: 0,
-    cutWidth: 130, cutLength: 300, fabricWidthCm: opts.fabricWidthCm || 162,
-    requiredPieces: demandPieces, issuedPieces: 0, wasteIssuedPieces: 0,
-    outstandingPieces: demandPieces,
-    freshMeters: demandPieces * 3, piecesCoveredByWaste: 0,
-    freshPieces: demandPieces, requiredTotal: demandPieces * 3,
-    wastePicks: [], wasteStock: [],
-    lots: [{ lotId: 'L1', lotNumber: 'L1', blocked: false,
-             wash: 100, unwash: 0, inWash: 0, form: 'Pieces',
-             pieces: pieceSpecs }],
-    lines: [{ planId: 'PL1', salesOrder: 'SO-1', planItemId: 'IT1',
-              item: 'X', isRemake: false, supervisorId: 'SUP-A',
-              required: demandPieces * 3, issued: 0,
-              reqPieces: demandPieces, issPieces: 0,
-              issuedLot: '', issuedLotNo: '', reason: '' }],
-    openExceptions: []
-  };
-  const data = [{ supervisorId: 'SUP-A', supervisorName: 'Ravi', materials: [mat] }];
-  const ctx = runInSandbox(allocSrc + '\nthis.applyLotAllocation = applyLotAllocation;');
-  ctx.applyLotAllocation(data);
-  return mat;
-}
+test('PC-SPLIT the widget no longer emits cut pieces, while the server still parses them', () => {
+  // Widget side: the allocator hard-codes an empty pieces[] on every lot line.
+  assert.ok(/pieces:\s*\[\]/.test(allocSrc),
+    'lot-allocator no longer hard-codes lotLines[].pieces = [] - if the mini-roll ' +
+    'path is back, restore Parts A/B/E from git rather than rewriting them');
+  // Matched as a DEFINITION, not a mention: lot-allocator.js carries a "RETIRED:
+  // lotIsPieces / lotPieces / lotGreigePieces" comment recording why they went,
+  // and a bare name match reads its own documentation as the code coming back.
+  assert.ok(!/function\s+(lotIsPieces|lotGreigePieces)\s*\(/.test(allocSrc),
+    'the retired mini-roll helpers are back in lot-allocator.js');
 
-function flattenCuts(m) {
-  // All piece specs across every lot line of the material, post-allocation.
-  const out = [];
-  (m.lotLines || []).forEach(ln => (ln.pieces || []).forEach(p => out.push(p)));
-  return out;
-}
-
-test('A1 THE REPORTED SCENARIO: five 20 m printed pieces, cut 130x300, need 10 -> cuts 18 m + 12 m off TWO copies, 30 m total', () => {
-  const m = allocateOneMaterial(
-    [{ pieceId: 'P1', lengthCm: 2000, widthCm: 162, count: 5, state: 'Wash', carton: 'C7' }], 10);
-  const cuts = flattenCuts(m).filter(p => String(p.pieceId) === 'P1');
-  assert.strictEqual(cuts.length, 2, 'two aggregated cut lines for P1, got ' + JSON.stringify(cuts));
-  const byLen = {};
-  cuts.forEach(p => { byLen[p.cutLengthCm] = (byLen[p.cutLengthCm] || 0) + p.count; });
-  assert.strictEqual(byLen[1800], 1, 'one copy cut to 6 rows = 1800 cm');
-  assert.strictEqual(byLen[1200], 1, 'second copy cut to 4 rows = 1200 cm');
-  let metres = 0; (m.lotLines || []).forEach(ln => metres += Number(ln.qty) || 0);
-  assert.strictEqual(Math.round(metres * 100) / 100, 30, 'exactly 30 m moves - not 40 (whole pieces), not continuous-30-from-one-roll');
-  assert.strictEqual(m.piecesCoveredByWaste, 0);
-  assert.strictEqual(m.freshPieces, 10);
+  // Server side: still parsing what nothing sends.
+  const issue = fs.readFileSync(path.join(__dirname, '..', 'deluge', 'issueMaterials.dg'), 'utf8');
+  const apply = fs.readFileSync(path.join(__dirname, '..', 'deluge', 'issueMaterialsApply.dg'), 'utf8');
+  assert.ok(issue.includes('cutLengthCm') && apply.includes('cutLengthCm'),
+    'the Deluge cut-piece parsers are gone - Parts C and D below now test nothing; ' +
+    'delete them in the same pass and note it in docs/lot-rolls-model.md');
 });
 
-test('A2 exact fit: need 6 -> ONE cut of 1800 cm from one copy', () => {
-  const m = allocateOneMaterial(
-    [{ pieceId: 'P1', lengthCm: 2000, widthCm: 162, count: 5, state: 'Wash', carton: '' }], 6);
-  const cuts = flattenCuts(m);
-  assert.strictEqual(cuts.length, 1);
-  assert.strictEqual(cuts[0].count, 1);
-  assert.strictEqual(cuts[0].cutLengthCm, 1800);
-});
-
-test('A3 need 14 -> three copies consumed, cuts {1800 x2, 600 x1}, 42 m', () => {
-  const m = allocateOneMaterial(
-    [{ pieceId: 'P1', lengthCm: 2000, widthCm: 162, count: 5, state: 'Wash', carton: '' }], 14);
-  const byLen = {};
-  flattenCuts(m).forEach(p => { byLen[p.cutLengthCm] = (byLen[p.cutLengthCm] || 0) + p.count; });
-  assert.strictEqual(byLen[1800], 2, 'two full 18 m cuts');
-  assert.strictEqual(byLen[600], 1, 'then a 4-piece top-up = 2 rows');
-  let metres = 0; (m.lotLines || []).forEach(ln => metres += Number(ln.qty) || 0);
-  assert.strictEqual(Math.round(metres * 100) / 100, 42);
-});
-
-test('A4 a partially cut copy leaves a tail the session will NOT reuse (server restores it as its own Available row)', () => {
-  // L2200, cutL300: cutting 4 rows takes 1200 cm and leaves a 1000 cm tail
-  // that physically fits 3 more cuts. Within THIS session the allocator must
-  // not dip back into it (provenance); the .dg re-inserts it as Available so
-  // the NEXT fetch offers it again.
-  const m = allocateOneMaterial(
-    [{ pieceId: 'P1', lengthCm: 2200, widthCm: 162, count: 3, state: 'Wash', carton: '' }], 4);
-  const cuts = flattenCuts(m);
-  assert.strictEqual(cuts.length, 1, 'one cut only this session');
-  assert.strictEqual(cuts[0].cutLengthCm, 1200);
-  assert.strictEqual(cuts[0].count, 1, 'only one physical copy touched');
-  let metres = 0; (m.lotLines || []).forEach(ln => metres += Number(ln.qty) || 0);
-  assert.strictEqual(metres, 12);
-});
-
-test('A5 scoring prefers the snugger piece (least cut waste per obtained piece)', () => {
-  const m = allocateOneMaterial([
-    { pieceId: 'PBIG', lengthCm: 700, widthCm: 160, count: 1, state: 'Wash', carton: '' },
-    { pieceId: 'PSNUG', lengthCm: 700, widthCm: 130, count: 1, state: 'Wash', carton: '' }
-  ], 2);
-  const cuts = flattenCuts(m);
-  assert.strictEqual(cuts.length, 1, 'demand served from ONE piece');
-  assert.strictEqual(String(cuts[0].pieceId), 'PSNUG',
-    'snug 130-wide piece wins over the wider one at identical yield');
-});
-
-test('A6 payload entries carry cutLengthCm alongside the original length and carton', () => {
-  const m = allocateOneMaterial(
-    [{ pieceId: 'P9', lengthCm: 2000, widthCm: 162, count: 5, state: 'Wash', carton: 'C2' }], 4);
-  const p = flattenCuts(m)[0];
-  assert.strictEqual(p.cutLengthCm, 1200);
-  assert.strictEqual(p.lengthCm, 2000, 'original length travels so the UI can say "cut X from Y"');
-  assert.strictEqual(p.carton, 'C2');
-  assert.ok('count' in p && p.count === 1);
-});
-
-test('A8 demand bigger than any lot covers WHOLE: the order is SKIPPED, never split (atom rule)', () => {
-  const m = allocateOneMaterial(
-    [{ pieceId: 'P1', lengthCm: 2000, widthCm: 162, count: 2, state: 'Wash', carton: '' }], 30);
-  // Two copies yield 12 cuts; the 30-piece order cannot be served WHOLE off
-  // one lot, so NOTHING is offered - no partial handover that strands the
-  // shade decision.
-  assert.deepStrictEqual(flattenCuts(m), [], 'no cut instructions when the atom cannot be served');
-  let metres = 0; (m.lotLines || []).forEach(ln => metres += Number(ln.qty) || 0);
-  assert.strictEqual(metres, 0);
-  assert.strictEqual(m.freshPieces, 30, 'still fully owed');
-  assert.strictEqual(m.shortReason && m.shortReason.kind, 'nofit',
-    'row names the problem instead of offering half');
-});
-
-test('A9 a copy too narrow for the cut is never a candidate (grain fixed)', () => {
-  const m = allocateOneMaterial([
-    { pieceId: 'PWIDE', lengthCm: 2000, widthCm: 162, count: 1, state: 'Wash', carton: '' },
-    { pieceId: 'PNARROW', lengthCm: 5000, widthCm: 100, count: 9, state: 'Wash', carton: '' }
-  ], 6);
-  const ids = flattenCuts(m).map(p => String(p.pieceId));
-  assert.ok(ids.indexOf('PNARROW') === -1, '100 cm cannot host a 130 cm cut regardless of length');
-  assert.deepStrictEqual(ids, ['PWIDE']);
-});
-
-test('A7 two items of one order sharing the same copies: each lot line names its own cuts, counts never double-booked', () => {
-  const mat = {
-    materialId: 'M1', material: 'Linen Print', sku: 'PRN', unit: 'Mtr',
-    isFabric: true, isReissue: false,
-    required: 30, issued: 0, remaining: 30, availableStock: 100,
-    unwashedStock: 0, inWashStock: 0,
-    cutWidth: 130, cutLength: 300, fabricWidthCm: 162,
-    requiredPieces: 10, issuedPieces: 0, wasteIssuedPieces: 0, outstandingPieces: 10,
-    freshMeters: 30, piecesCoveredByWaste: 0, freshPieces: 10, requiredTotal: 30,
-    wastePicks: [], wasteStock: [],
-    lots: [{ lotId: 'L1', lotNumber: 'L1', blocked: false, wash: 100, unwash: 0,
-             inWash: 0, form: 'Pieces',
-             pieces: [{ pieceId: 'P1', lengthCm: 2000, widthCm: 162, count: 2, state: 'Wash', carton: '' }] }],
-    lines: [
-      { planId: 'PL1', salesOrder: 'SO-1', planItemId: 'IT1', item: 'Cover', isRemake: false,
-        supervisorId: 'SUP-A', required: 15, issued: 0, reqPieces: 5, issPieces: 0,
-        issuedLot: '', issuedLotNo: '', reason: '' },
-      { planId: 'PL1', salesOrder: 'SO-1', planItemId: 'IT2', item: 'Bag', isRemake: false,
-        supervisorId: 'SUP-A', required: 15, issued: 0, reqPieces: 5, issPieces: 0,
-        issuedLot: '', issuedLotNo: '', reason: '' }
-    ],
-    openExceptions: []
-  };
-  const data = [{ supervisorId: 'SUP-A', supervisorName: 'Ravi', materials: [mat] }];
-  const ctx = runInSandbox(allocSrc + '\nthis.applyLotAllocation = applyLotAllocation;');
-  ctx.applyLotAllocation(data);
-  const all = flattenCuts(mat);
-  const totalCopies = all.reduce((a, p) => a + p.count, 0);
-  assert.strictEqual(totalCopies, 2, 'exactly the two physical copies exist');
-  assert.strictEqual(all.filter(p => String(p.pieceId) === 'P1' && p.cutLengthCm !== undefined).length >= 1, true);
-  let metres = 0; (mat.lotLines || []).forEach(ln => metres += Number(ln.qty) || 0);
-  assert.strictEqual(Math.round(metres * 100) / 100, 30);
-});
-
-// =====================================================================
-// PART B - the store screen says CUT, not FETCH
-// =====================================================================
-console.log('\nPART B - store UI instruction text');
-
-function extractFn(name) {
-  const i = mainSrc.indexOf('function ' + name + '(');
-  if (i < 0) throw new Error('main.js lost function ' + name);
-  let depth = 0, j = mainSrc.indexOf('{', i);
-  for (let k = j; k < mainSrc.length; k++) {
-    if (mainSrc[k] === '{') depth++;
-    else if (mainSrc[k] === '}') { depth--; if (depth === 0) { j = k + 1; break; } }
-  }
-  return mainSrc.slice(i, j);
-}
-
-const uiCtx = runInSandbox(
-  allocSrc + '\n' +
-  ['escapeHtml', 'fmt', 'qty', 'wastePicks', 'lotLineInputId', 'lotLineCheckId',
-   'lotLineMetres', 'lotLineAutoMetres', 'lotWashedStock', 'fabricLotLineList',
-   'lotLinesHtml']
-    .map(extractFn).join('\n') +
-  '\nthis.lotLinesHtml = lotLinesHtml;');
-
-// Render the lot column read-only (editable=false), so the assertions target the
-// "Cut X m from Y m piece" fetch text without the per-lot input markup.
-// lotLinesHtml now returns { lot, stock, issue }; PART B only checks the LOT col.
-function renderLotStrip(lotLinePieces, qty) {
-  const m = {
-    materialId: 'M1', unit: 'Mtr', isFabric: true, material: 'Fab',
-    lotLines: [{ lotId: 'L1', lotNumber: 'L1', qty: qty, pieces: lotLinePieces }],
-    autoLotLines: [{ lotId: 'L1', lotNumber: 'L1', qty: qty, pieces: lotLinePieces }],
-    lots: [{ lotId: 'L1', lotNumber: 'L1', wash: 0 }],
-    wastePicks: []
-  };
-  return String(uiCtx.lotLinesHtml(m, 0, 0, false).lot);
-}
-
-test('B1 "Cut 18 m from 20 m piece" renders for a partial cut', () => {
-  const html = renderLotStrip([{ pieceId: 'P1', count: 1, cutLengthCm: 1800, lengthCm: 2000, carton: 'C7' }], 18);
-  assert.ok(/Cut 18 m from 20 m piece/.test(html), html);
-  assert.ok(/carton C7|carton <b>C7/.test(html), 'carton still named: ' + html);
-});
-
-test('B2 identical cuts aggregate with an x-count', () => {
-  const html = renderLotStrip([{ pieceId: 'P1', count: 2, cutLengthCm: 1800, lengthCm: 2000, carton: '' }], 36);
-  assert.ok(/Cut 18 m from 20 m piece &times; 2/.test(html), html);
-});
-
-test('B3 different cut lengths of the same piece id do NOT merge into one line', () => {
-  const html = renderLotStrip([
-    { pieceId: 'P1', count: 1, cutLengthCm: 1800, lengthCm: 2000, carton: '' },
-    { pieceId: 'P1', count: 1, cutLengthCm: 1200, lengthCm: 2000, carton: '' }
-  ], 30);
-  assert.ok(/Cut 18 m from 20 m piece(?! &times;)/.test(html), 'first cut standalone: ' + html);
-  assert.ok(/Cut 12 m from 20 m piece(?! &times;)/.test(html), 'second cut standalone: ' + html);
-});
-
-test('B4 a legacy spec without cutLengthCm keeps the whole-piece wording', () => {
-  const html = renderLotStrip([{ pieceId: 'P1', count: 3, lengthCm: 300, carton: '' }], 0.9);
-  assert.ok(/3 pieces of 3 m/.test(html), html);
-});
-
-// =====================================================================
-// PART C - the Deluge token pipeline, ported statement-for-statement
 //          from issueMaterials.dg AS IT NOW STANDS (:740-765 builder,
 //          :1337-1420 validation parser, :1954-2020 movement parser)
 // =====================================================================
@@ -530,63 +348,6 @@ test('D8 LATENT (pre-existing shape): a piece too NARROW for the cut moves metre
   assert.strictEqual(r.pcMetres, 15, 'yet 15 m leave the shelf');
 });
 
-// =====================================================================
-// PART E - end-to-end parity on the reported scenario:
-//          what the SCREEN offers is exactly what the LEDGER accepts
-// =====================================================================
-console.log('\nPART E - screen offer == ledger accept (reported scenario)');
-
-test('E1 allocator offer feeds the intended ledger and closes the requirement exactly', () => {
-  const m = allocateOneMaterial(
-    [{ pieceId: 'P1', lengthCm: 2000, widthCm: 162, count: 5, state: 'Wash', carton: 'C7' }], 10);
-  const offers = flattenCuts(m)
-    .map(p => ({ pieceId: p.pieceId, n: p.count, cutLen: p.cutLengthCm }));
-  const world = { pieces: { P1: { count: 5, lengthCm: 2000, widthCm: 162,
-                                  status: 'Available', state: 'Wash', lot: 'L1', carton: 'C7' } } };
-  const r = dgLedgerIssue(offers, world, 130, 300);
-  assert.strictEqual(r.errors.length, 0, JSON.stringify(r.errors));
-  assert.strictEqual(r.pcYield, 10, 'requirement closes in PIECES');
-  assert.strictEqual(r.pcMetres, 30, 'and in exactly the metres the screen quoted');
-  assert.strictEqual(world.pieces.P1.count, 3);
-  assert.deepStrictEqual(r.remainders.map(x => x.lengthCm).sort((a, b) => a - b), [200, 800]);
-});
-
-test('E2 parity on the 14-piece scenario: 42 m moves, two copies left, tails as ONE row per cut length', () => {
-  const m = allocateOneMaterial(
-    [{ pieceId: 'P1', lengthCm: 2000, widthCm: 162, count: 5, state: 'Wash', carton: '' }], 14);
-  const offers = flattenCuts(m)
-    .map(p => ({ pieceId: p.pieceId, n: p.count, cutLen: p.cutLengthCm }));
-  const world = { pieces: { P1: { count: 5, lengthCm: 2000, widthCm: 162,
-                                  status: 'Available', state: 'Wash', lot: 'L1' } } };
-  const r = dgLedgerIssue(offers, world, 130, 300);
-  assert.strictEqual(r.errors.length, 0);
-  assert.strictEqual(r.pcYield, 14);
-  assert.strictEqual(r.pcMetres, 42);
-  assert.strictEqual(world.pieces.P1.count, 2);
-  // Identical cuts aggregate into one spec (n=2), so the .dg inserts ONE tail
-  // row of 200 cm carrying Piece_Count = 2 - the documented row-split model.
-  assert.deepStrictEqual(r.remainders.map(x => x.lengthCm).sort((a, b) => a - b), [200, 1400]);
-  const tail200 = r.remainders.filter(x => x.lengthCm === 200)[0];
-  assert.strictEqual(tail200.count, 2, 'both 200 cm strips live on one Fabric_Piece row');
-});
-
-test('E3 legacy parity: whole-piece offer (old widget) still closes against the fixed ledger', () => {
-  // Old widget sends no cutLengthCm; builder emits id:n; ledger defaults to
-  // the full piece. Three 300 cm copies host 25 cuts of 55x60... at width
-  // 137 -> across=2, along=5, 10 per copy.
-  const tokens = dgBuildTokens([{ pieceId: 'P1', count: 3 }]);
-  const world = { pieces: { P1: { count: 5, lengthCm: 300, widthCm: 137,
-                                  status: 'Available', state: 'Wash', lot: 'L1' } } };
-  const v = dgValidatePass(tokens, world.pieces, 60, 55);
-  assert.strictEqual(v.pcYield, 30);
-  assert.strictEqual(v.pcMetres, 9);
-  const r = dgLedgerIssue([{ pieceId: 'P1', n: 3, cutLen: 0 }], world, 60, 55);
-  assert.strictEqual(r.errors.length, 0);
-  assert.strictEqual(world.pieces.P1.count, 2);
-  assert.strictEqual(r.remainders.length, 0);
-});
-
-// =====================================================================
 console.log('\n========================================');
 console.log('print-cut: ' + passed + ' passed, ' + failed + ' failed');
 if (failures.length) process.exitCode = 1;

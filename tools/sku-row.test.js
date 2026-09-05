@@ -132,9 +132,17 @@ function line(planItemId, planId, salesOrder, reqPcs, issPcs, cutW, cutL, issued
            supervisorId: 'S1', required: 0, issued: 0, reqPieces: reqPcs, issPieces: issPcs || 0,
            cutW: cutW, cutL: cutL, issuedLot: issuedLot || '', issuedLotNo: issuedLot || '', reason: '' };
 }
-function roll(lotId, wash) {
+// THE LOT NEEDS A PHYSICAL ROLL. Since the rolls migration `wash` is only a
+// wash-state budget OVER the rolls, not cloth in its own right, so a lot with
+// `rolls: []` yields nothing however much of it is washed - the row then gets no
+// lotLines at all, which is what emptied this suite. One seed roll of the lot's
+// full length is exactly what seedLotRolls.dg backfills onto a pre-migration
+// lot, so the fixture stays equivalent to the live data.
+function roll(lotId, wash, rolls) {
   return { lotId: lotId, lotNumber: lotId, blocked: false, wash: wash, unwash: 0, inWash: 0,
-           form: 'Roll', pieces: [], waste: [] };
+           form: 'Roll', pieces: [], waste: [],
+           rolls: rolls || [{ rollId: lotId + '-r1', label: lotId + '-R1',
+                              length: wash, status: 'Available' }] };
 }
 function skuMat(lines, lots, cuts, opts) {
   opts = opts || {};

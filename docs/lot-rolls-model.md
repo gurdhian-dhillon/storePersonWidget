@@ -480,7 +480,7 @@ touch pieces*. The real code:
 | `getStoreMaterialRequirements.dg` | **reader** — `piecesByLot` (`:612`) | read `Lot_Rolls` |
 | `app/js/api-experiment.js` | **reader** — `Fabric_Piece_Report` (`:55`) | read `Lot_Rolls_Report` |
 | `app/js/lot-allocator.js` | **reader** — `lotPieces` / `lotGreigePieces` / `lot.pieces` | delete those, read `lot.rolls` |
-| `app/js/main.js` | **reader** — piece display | read rolls |
+| `app/js/main.js` | **reader** — piece display | **DONE (P5)** — reads `lotLines[].rolls`, one named roll per sub-line in drain order |
 | `cancelPrintJob`, `completeWashRequest`, `raiseMaterialException`, `resolveDispute`, `sendToPrint` | **comment-only** — explain why they don't touch pieces | comments updated, no code change |
 
 So: **3 writers, 5 readers, 5 comment-only.**
@@ -524,7 +524,7 @@ last.
 | **0** | **DONE.** Creator, additive: `Lot_Rolls` subform (`Roll_Label`, `Roll_Length`, `Roll_Status`, `Origin`, `Source_Receipt`); `Raw_Material_Lot.Width` — Creator named it **`Width1`**. **No standalone `Lot_Rolls_Report`** — the subform comes back nested in `All_Material_Lots` records. Still owed for later steps: `Issue_Lines.Roll_Label`, `Print_Job.Source_Roll`, `Waste_Master.Source_Roll`; delete `resolveStockDispute` before Step 5. | fields exist |
 | **1** | **DONE (dummy data).** `deluge/seedLotRolls.dg`, run in Execute: per lot with no `Lot_Rolls`, sets `Width1 = Fabric_Width_Inches × 2.54`, creates one seed roll `Roll_Length = Wash + Unwash + In_Wash`, `Roll_Label = "<Lot>-R1"`, `Origin="Purchased"`, `Source_Receipt="BACKFILL"`. Idempotent, dry-run flag, self-checks `Σ Roll_Length == Wash+Unwash+In_Wash`. **No rack labelling / seed-roll splitting** — OQ5 resolved (dummy data). `Fabric_Piece` migration deferred with the printed-fabric project. | `seedLotRolls` invariant check clean on every lot |
 | **2** | Read path exposes `rolls[]` (`getStoreMaterialRequirements`, `api-experiment.js`). No behaviour change. | one-roll parity identical |
-| **3** | `lot-allocator.js` — **DONE (Pieces 1–4), see BUILD LOG.** `lotFill` per-roll shortest-first drain + wash-gate budget (P1); `spend()` roll ledger + `lotLines[].rolls` + `allocateMaterial` forwards rolls (P2); `applyFabricOverride` multi-roll edit-down/edit-up + `shortReasonFor` longest-roll (P3); dead Pieces-lot code removed, superseded suites retired (P4). Still to do: the roll DISPLAY on the issue row + admin audit (`main.js`, `getAdminCalculation` payload). | 65/65 across all suites; allocator parity 31/31 byte-identical vs frozen `e000519` baseline |
+| **3** | `lot-allocator.js` — **DONE (Pieces 1–4), see BUILD LOG.** `lotFill` per-roll shortest-first drain + wash-gate budget (P1); `spend()` roll ledger + `lotLines[].rolls` + `allocateMaterial` forwards rolls (P2); `applyFabricOverride` multi-roll edit-down/edit-up + `shortReasonFor` longest-roll (P3); dead Pieces-lot code removed, superseded suites retired (P4). the roll DISPLAY on the issue row, dedupe-by-largest across the two `ln.rolls` writers, `isPiecesLot` retired (P5). **Step 3 COMPLETE.** Admin audit still roll-blind — it runs the Deluge path; decided it moves to the JS path instead. | 132/133 across all suites; allocator parity 31/31 byte-identical vs frozen `e000519` baseline; roll-display 10/10 |
 | **4** | `getExpectedWaste.dg` **and `getProductionWidgetData.dg`'s inline copy** per-roll tails, same pass; `saveWasteFromCutting.dg` roll stamp. | waste parity: one-roll identical for both; multi-roll hand-worked; `getProductionWidgetData` inline == `getExpectedWaste` no-lot path (8 cases) |
 | **5** | **`issueMaterialsApply.dg`** decrements the named roll (re-read length inside the execution, cap-and-error); **`issueMaterialsHandover.dg`** stamps `Issue_Lines.Roll_Label` from the handover payload. **First write — both, same pass.** | full lifecycle test, conservation invariants after every step; concurrent-issue race test; `Issue_Lines` carries the label |
 | **6** | `saveStockInward`, `receiveFromPrint` create roll rows on receipt (`receiveFromPrint`: one row per printed run). | roll sum holds after each receipt |
@@ -615,9 +615,56 @@ broken `assertInvariants` C3 and the B8 refuse-rule that Piece 3 overturned).
 The two remaining edge-case harnesses had their exposed-symbol lists trimmed to
 match. **Final: 65/65** — parity 31, lotfill 12, ledger 10, override 12.
 
-**Next (Phase A):** the roll DISPLAY — `main.js` issue row showing
-`L2-R2 · 8 m`, and `getAdminCalculation`'s payload carrying `rolls[]` so the
-audit widget's shared `applyLotAllocation` call sees them.
+**Piece 5 — the roll DISPLAY.** The lot line on the store issue row now names
+the physical roll under it: one `lot-rolls` sub-line per roll, in **drain order**
+(shortest first, the order the allocator used them, which is the order to cut
+them in). It replaces `pieceLineHtml`, which described a `Fabric_Piece` stack
+that no longer exists. A **single** roll is still named — the row above prints
+the lot and the metres, so on a one-roll lot this repeats the figure, and that is
+the point: the metres and the roll they come off are one instruction.
+
+> **The dedupe is the whole of the difficulty, and it is not obvious from either
+> writer alone.** `applyLotAllocation` splits a lot's rolls **per requirement
+> line**; `applyFabricOverride` stamps the lot's **entire** `rollAlloc` onto
+> **every** line of that lot (see its own `ln.rolls = rollAlloc` comment — the
+> handover payload's `qty` and `rolls[]` must not disagree). So the display
+> dedupes by `rollId` **keeping the largest**, never summing: a sum
+> double-counts every overridden lot by exactly the number of lines it serves.
+> `tools/roll-display.test.js` D2/D3 pin this, and were confirmed to fail against
+> a summing implementation.
+
+`isPiecesLot` went with it — it locked the issue box on a lot held as pieces,
+and Phase A retired that form, so the guard had nothing left to exclude. Every
+lot is editable. **`tools/roll-display.test.js`, 10/10; full sweep 132/133**
+(the one failure is `store-ui.test.js` U3, pre-existing at HEAD — a waste-decline
+fixture, unrelated to rolls; see the open questions).
+
+**Deluge debt this sweep surfaced (all recorded, none fixed here — each needs an
+Execute against Creator):**
+
+1. **`Fabric_Piece` is retired on the widget side only.** Ten `.dg` files still
+   reference it, and `issueMaterials` / `issueMaterialsApply` still parse
+   `"pieces":[{…"cutLengthCm"}]` off the payload. Nothing sends it, so those
+   parsers are unreachable — real code with no caller. Pinned by `print-cut`'s
+   `PC-SPLIT`.
+2. **Two dead `PRINTED_PIECE` branches.** `getSupervisorMaterials` and
+   `getExpectedWaste` still branch on a marker no writer emits — `issueMaterials`
+   lost the literal, `receiveMaterials` lost its reader in `1acf01a`. Pinned by
+   `receive-print` M3b, which fails if the set changes without this doc changing.
+
+**Still unreachable, deliberately left:** `main.js`'s `PRINTED_PIECE` branch in
+the issue-payload builder (`ln.pieces && ln.pieces.length && ln.cutSummary`).
+`ln.pieces` has been `[]` since Piece 2, so the branch is dead — but removing it
+changes the **handover payload**, which belongs with Step 5's
+`issueMaterialsApply` roll decrement and `issueMaterialsHandover` roll-label
+stamp. Cut it there, in one pass with the server side that reads it.
+
+**Next (Phase A):** the Deluge side, Steps 4–9 — and note the admin audit widget
+(`app/admin/`) still calls the **Deluge** `getStoreMaterialRequirements`, so its
+lots carry no `rolls[]` and its shared `applyLotAllocation` call sees none.
+Decided: rather than teach the Deluge function to emit rolls, **the admin widget
+moves to the JS path** the store screen already runs on. Until it does, the audit
+screen's allocation replay is roll-blind.
 
 ---
 
@@ -635,6 +682,20 @@ audit widget's shared `applyLotAllocation` call sees them.
 - **The regression guard is the same everywhere:** seed one roll = the old
   scalar, assert byte-identical output against today. Only then add multi-roll
   cases, each with a hand-verified expected number.
+- **`tools/roll-display.test.js`** — **BUILT (P5), 10/10.** Renders the real
+  `lotLinesHtml` in a `vm` sandbox over the real `lot-allocator.js` (which owns
+  `round2` / `lotsFor` / `perRowFor`, called as globals because `widget.html`
+  loads it first), pulling the needed `main.js` functions out by name with a
+  brace-balanced `extract()` — the same trick `tools/store-ui.test.js` uses, and
+  it fails loudly if a function is renamed rather than silently testing nothing.
+  Covers both `ln.rolls` writers' grains (D1 per-line, D2 whole-lot-per-line),
+  dedupe-keeps-largest (D3), lot isolation and sub-line placement (D4), the
+  single-roll case (D5), a zeroed roll dropping out (D6), an unseeded lot
+  degrading gracefully (D7), escaping (D8), a blank label (D9), and every lot
+  being editable (D10).
+  > **A suite that passes on its first run has proven nothing yet.** These did,
+  > so the summing bug was reintroduced deliberately — D2 and D3 both failed,
+  > which is what makes the other eight worth reading.
 - `tools/dgscan.js` (exists) on every touched `.dg`.
 
 ---
@@ -661,6 +722,17 @@ audit widget's shared `applyLotAllocation` call sees them.
   Pin the number when Step 4 lands.
 - **OQ4 — roll label scheme (cosmetic).** `<Lot_Number>-R<n>` in use. Fine for
   now; revisit if lots ever split/merge for real.
+- **OQ6 — the admin audit widget is roll-blind.** `app/admin/` still calls the
+  Deluge `getStoreMaterialRequirements`, whose lots carry no `rolls[]`, so the
+  shared `applyLotAllocation` it runs (deliberately the same file as the store
+  screen, so the audit shows what the store person is offered *by construction*)
+  sees none. **Decided: move the admin widget onto the JS path** the store screen
+  already runs — `ApiExperiment.run()` — rather than teaching the Deluge function
+  to emit rolls, which would build a second roll reader needing to stay in step
+  with `api-experiment.js` for as long as it takes to retire it. Note the admin
+  screen needs the **full** picture, not one budget-worth of plans (it exists to
+  catch discrepancies, so auditing a prefix is actively misleading) — check
+  `ApiExperiment.run()` pages everything before swapping. Not blocking Steps 4–9.
 
 ---
 
@@ -1070,6 +1142,37 @@ casualty like the `shortfall-summary` ones. Not touched here.)*
 | Phase B B1 recorded (payload fields) | `priorityKey` + `planStartDate` threaded through both read paths, additive, nothing reads them yet. |
 | **B3 is explicitly NOT a frozen-baseline parity step** | Sharing the ledger across cards *is* the feature — it must change card 2+'s numbers under contention. Its tests assert no-contention-identical, contention-correctly-reserved, and conservation instead. Written down so nobody later "fixes" B3 back to parity. |
 | Phase A's "ONE LEDGER PER SUPERVISOR — NEVER ONE SHARED" comment will be **contradicted** by B3 | The comment records a real past failure. Phase B is that same mechanism rebuilt *with the two things that were missing*: user-controlled order and live recompute. The comment must be rewritten at B3, not silently violated. |
+
+### Rev 9 → Rev 10 (live edit — the row answers the keystroke)
+
+| Change | Why |
+|---|---|
+| **The lot box now repaints the roll lines on every keystroke.** | `applyFabricOverride` re-spreads the edited metres across the lot's rolls as he types — unwinding newest-roll-first going down, extending the last roll going up — so `A-1 · 2.2 Mtr` under the lot name was stale the instant he typed. He is being told to cut a **named roll to a length**; leaving the length behind while the box says something else is the one thing that column must never do. Only the LOT column repaints; the ISSUE column holds the box he is in, so the caret survives. |
+| **Editing a waste pcs box moves the fresh metres live**, via a new `reallocateInPlace`. | Declining a remnant does not shrink the job — the pieces it would have covered come off the roll instead. The allocator always did that arithmetic correctly (`2.2 → 3.3 → 4.4 → 5.5` as three remnants are handed back); what was missing was **showing** it. This previously called the full `render()`, which recomputed right but repainted the whole screen: the box being typed in was destroyed and rebuilt, so the caret jumped to the end and the page scrolled to the top on every digit. |
+| `reallocateInPlace` re-runs the allocation over the **whole screen**, not one card | The ledgers are shared across cards in priority order, so a remnant this supervisor gives back is stock the **next card down** can now be offered. Re-allocating one card would leave every card below it quoting pre-change figures. Safe because the allocator is a pure function of (raw payload, declines, overrides) and rebuilds every ledger from scratch — the same property the priority reorder relies on. Pinned by `Y2` (three passes == one). |
+| **THE WASTE BOX CEILING IS THE ALLOCATOR'S OFFER, NOT THE RACK** — new `pick.autoPieces`, read by `rackCountFor`. | The rack says how many remnants **exist**; the offer says how many **this job needs**, and they differ constantly: a demand of 4 cuts takes ONE remnant off a row holding three. A rack ceiling of 3 invited the store person to hand over two more against a requirement that cannot credit them — issued, gone from the rack, off the screen, with nothing anywhere saying why. |
+| The ceiling is the **undeclined** pick, never the current one | A ceiling read off the current pick drops to 1 the moment he types 1, **trapping him there** with no way back up to the 3 he was offered. `applyLotAllocation` now runs the allocation once with declines suspended to record the baseline, then again for real. Verified side-effect free: the raw lots and `wasteStock` are untouched, and the double-pass result is byte-identical to a single pass. Exact mirror of `m.autoMetres` on the lot side, and for the same reason. |
+| `tools/waste-live-edit.test.js` — **NEW, 14 cases** | Both ceiling guarantees mutation-tested independently: reverting to the rack fails W1/W2/Z2, and following the current pick fails W3/Y3. X3 also pins the roll model doing its job — a 2 m roll gives **three** whole 0.55 m rows (1.65 m) and strands 0.35 m, so the fourth row opens the next roll; a metres-pool model would have said "2.20 off A-1" and sent him to a roll that cannot deliver it. |
+
+### Rev 8 → Rev 9 (green sweep — one real bug found)
+
+| Change | Why |
+|---|---|
+| **`inWash` removed from the greige gate in `lotFill` — a REGRESSION I introduced in Piece 1.** | The frozen `e000519` baseline widens the gate by `unwash` **alone**. The greige gate asks *"could this lot cover the order if somebody went and **washed** its greige"* — an action the store person can take, and the one the `wash` reason puts a button on. Cloth already **at** the wash house is not that: nobody can send it again, it has to come back. Counting it made a committed lot report **"send 40 Mtr to wash" over cloth already at the washer**, burying the `atWash` reason that exists to say exactly this. Caught by `print-shortreason` C5. |
+| Ledger edge-case 7 **inverted** | I had written it during Piece 1 to pin the behaviour the rewrite happened to have, without checking it against the baseline. It was pinning the bug. It now pins the correct gate, and asserts real greige still widens it. |
+| **Seed rolls added to five test fixtures** (`store-ui`, `pipeline`, `sku-row`, `print-shortreason`, and `print-writers`' printed SKU) | Same root cause every time: since the migration a lot's metres are a **wash-state budget over its rolls**, so `rolls: []` yields nothing however much is washed. The failures were **indirect** and read as allocator bugs — the lot stops covering its order, and the **atom rule then skips the order whole**, taking perfectly good remnants with it. `store-ui` U3 was exactly this: a partial waste decline behaved like a total one. |
+| `print-cut` Parts A/B/E deleted; `print-writers`' 11 minting cases deleted; `receive-print` M1 inverted | All tested **removed** behaviour. A test of a deleted branch proves nothing about the branch that replaced it. Each deletion left a guard test in its place pinning the retirement, so re-enabling any of it fails loudly. |
+| **The `Fabric_Piece` retirement is HALF DONE, and that is now written down** | Widget side retired (Piece 4); **server side still live in ten `.dg` files** — `issueMaterials` / `issueMaterialsApply` still parse `"pieces":[{…"cutLengthCm"}]` that nothing sends. `print-cut`'s `PC-SPLIT` guard pins the asymmetry in both directions. |
+| `getSupervisorMaterials` / `getExpectedWaste` still branch on `PRINTED_PIECE`, which nothing writes | `issueMaterials` lost the literal and `receiveMaterials` lost its reader (commit `1acf01a`), so those two branches are unreachable. `receive-print` M3b pins the exact set, and fails if it changes without this doc changing too. |
+
+### Rev 7 → Rev 8 (Phase A Piece 5 — the roll display)
+
+| Change | Why |
+|---|---|
+| Phase A **Step 3 marked COMPLETE**; Piece 5 recorded. | The lot line names its roll now. `pieceLineHtml` → `rollLineHtml`, `.lot-pieces` → `.lot-rolls` in the CSS, `isPiecesLot` deleted. |
+| **Dedupe by `rollId` keeping the LARGEST** written down as a rule, not an implementation detail. | The two `ln.rolls` writers disagree on grain and neither one's code says so on its own — `applyLotAllocation` splits per line, `applyFabricOverride` stamps the whole lot onto every line. A reader who checks only one concludes summing is correct, and summing double-counts every overridden lot by the number of lines it serves. |
+| `PRINTED_PIECE` payload branch left in place though unreachable | Removing it changes the **handover payload**, which is Step 5's business (`issueMaterialsApply` roll decrement + `issueMaterialsHandover` roll-label stamp). Cut it there, in one pass with the server side that reads it — not as display cleanup. |
+| **Admin audit widget moves to the JS path** (new open question OQ6) | It still calls the Deluge `getStoreMaterialRequirements`, so the lots it feeds to the shared `applyLotAllocation` carry no `rolls[]`. The alternative — teaching the Deluge function to emit rolls — builds a second roll reader that has to stay in step with `api-experiment.js` for exactly as long as it takes to retire it. User: *"don't care about deluge we will change admin too."* |
 
 ---
 

@@ -173,9 +173,19 @@ function lotFill(lot, demands, fab, greige) {
     // LOT-LEVEL question — washing moves a metres figure between the lot's wash
     // columns and never changes a roll's length. So `greige` here only widens
     // the wash-state gate below; it does NOT add cloth to any roll.
+    //
+    // `inWash` IS NOT PART OF THIS GATE, and adding it was a real regression.
+    // The greige gate answers "could this lot cover the order if somebody went
+    // and washed its greige" - an action the store person can take, and the one
+    // the `wash` shortReason offers a button for. Cloth already AT the wash house
+    // is not that: nobody can send it again, it simply has to come back. Counting
+    // it here made a committed lot report `wash` - "send N metres to wash" - over
+    // cloth that was already there, burying the `atWash` reason ("it is at the
+    // washer, wait") which exists precisely to say so. The frozen e000519
+    // baseline adds `unwash` only; this now matches it again.
     var washMetres = round2(Number(lot.wash) || 0);
     var gateMetres = greige
-        ? round2(washMetres + (Number(lot.unwash) || 0) + (Number(lot.inWash) || 0))
+        ? round2(washMetres + (Number(lot.unwash) || 0))
         : washMetres;
 
     // THE PHYSICAL ROLLS — a working copy, drained as this fill places rows so
@@ -453,7 +463,77 @@ function lotOverrideFor(supId, materialId, orderId) {
 // getStoreMaterialRequirements. It moved here with the allocation itself,
 // because whether a remnant is usable depends on which lot the fresh cloth is
 // coming off, and only this side knows that.
+// THE CEILING ON A WASTE BOX IS THE ALLOCATOR'S OWN PICK, NOT THE RACK.
+//
+// The rack figure is how many remnants EXIST; the pick is how many this job
+// needs. They are usually different, and offering the rack lets the store person
+// hand over remnants nothing asked for: a demand of 4 cuts takes ONE remnant of
+// a 3-remnant row, and a box capped at 3 invites him to send the other two out
+// against a requirement that cannot credit them. Once issued they are gone from
+// the rack and off the screen, with no row anywhere saying why.
+//
+// SO THE CEILING IS THE UNDECLINED PICK — what the allocator offered before he
+// touched anything. It cannot be the CURRENT pick: typing 1 would drop the
+// ceiling to 1 and trap him there, unable to go back up to the 3 he was offered.
+//
+// This runs the allocation once with declines suspended and records the result
+// per pick as `autoPieces`. That is only safe because applyLotAllocation is a
+// pure function of (raw payload, declines, overrides) and rebuilds every ledger
+// from scratch on each call — the same property that lets the priority reorder
+// re-run it with no reset step. It never mutates the payload's lots.
+//
+// It is the exact mirror of `m.autoMetres` on the lot side, and exists for the
+// same reason: an edit needs a fixed baseline to be measured against, and the
+// live figure moves as he edits.
 function applyLotAllocation(data) {
+    var declineBackup = {};
+    var hadDecline = false;
+    for (var dk in wasteDeclined) {
+        if (Object.prototype.hasOwnProperty.call(wasteDeclined, dk)) {
+            declineBackup[dk] = wasteDeclined[dk];
+            hadDecline = true;
+        }
+    }
+    if (hadDecline) {
+        for (var ck in declineBackup) delete wasteDeclined[ck];
+        allocateEveryCard(data);
+        var autoByMat = {};
+        (data || []).forEach(function (sup) {
+            (sup.materials || []).forEach(function (m, mi) {
+                var key = String(sup.supervisorId) + '|' + mi;
+                var byId = {};
+                (m.wastePicks || []).forEach(function (p) {
+                    byId[String(p.wasteId)] = Number(p.pieces) || 0;
+                });
+                autoByMat[key] = byId;
+            });
+        });
+        for (var rk in declineBackup) wasteDeclined[rk] = declineBackup[rk];
+        allocateEveryCard(data);
+        (data || []).forEach(function (sup) {
+            (sup.materials || []).forEach(function (m, mi) {
+                var byId = autoByMat[String(sup.supervisorId) + '|' + mi] || {};
+                (m.wastePicks || []).forEach(function (p) {
+                    var a = byId[String(p.wasteId)];
+                    p.autoPieces = a === undefined ? (Number(p.pieces) || 0) : a;
+                });
+            });
+        });
+        return;
+    }
+
+    // No declines in force, so the pass below IS the undeclined pass.
+    allocateEveryCard(data);
+    (data || []).forEach(function (sup) {
+        (sup.materials || []).forEach(function (m) {
+            (m.wastePicks || []).forEach(function (p) {
+                p.autoPieces = Number(p.pieces) || 0;
+            });
+        });
+    });
+}
+
+function allocateEveryCard(data) {
     // ONE LEDGER ACROSS EVERY CARD — a real reservation, walked in priority
     // order. This REVERSES a previous decision, deliberately, and the reversal
     // is the whole feature. What the old comment said, and why it no longer
