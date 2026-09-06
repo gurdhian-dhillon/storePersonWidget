@@ -1426,8 +1426,20 @@ th.col-num {
    lines and took the row to 400px tall, pushing the next fabric row off screen.
    The material column beside it is the greedy one and can spare this. */
 .col-lot-issue {
-    width: 14rem;
-    min-width: 11rem;
+    width: 11rem;
+    min-width: 9rem;
+    vertical-align: top;
+    padding-top: 0.75rem;
+    white-space: normal;
+}
+
+/* ROLL column — which physical roll to cut off the lot named beside it, and how
+   much off it. Split out of the LOT column so the figure reads down its own
+   column rather than as a second line buried under the lot name; a card is read
+   roll-by-roll as often as lot-by-lot once picking starts. */
+.col-roll {
+    width: 11rem;
+    min-width: 9rem;
     vertical-align: top;
     padding-top: 0.75rem;
     white-space: normal;
@@ -1480,10 +1492,15 @@ th.col-num {
     color: #b45309;
 }
 
-/* When waste-where lines appear in the LOT column, give them a clean card-like
-   appearance so they visually belong to the lot info beside the fresh-fabric
-   lot lines. */
-.col-lot-issue .waste-where {
+/* A remnant's LOT and CARTON lines, one in each of the two columns a
+   fresh-cloth row splits the same way — a clean card-like appearance so they
+   visually belong beside the fresh-fabric lot/roll lines rather than reading
+   as a special case. Green accent throughout: an offcut is green on every
+   screen in this app, reuse is the good outcome.
+   ONE SHORT LINE EACH now that the two are split apart (used to be one
+   wrapped "Lot X · Carton Y" line, hence the old fixed height) — natural
+   height off the shared min-height rule above is enough. */
+.waste-where {
     margin-top: 0.35rem;
     padding: 0.3rem 0.5rem;
     background: #f8fafb;
@@ -1492,7 +1509,6 @@ th.col-num {
     font-size: 0.72rem;
     line-height: 1.3;
     white-space: normal;
-    height: 3rem;
     box-sizing: border-box;
     display: flex;
     gap: 0.25rem;
@@ -2348,15 +2364,34 @@ th.col-num {
     font-weight: 700;
 }
 
-/* THREE STACKED COLUMNS on a fabric SKU row — LOT, TOTAL STOCK, ISSUE NOW — one
-   sub-line per lot (and per waste pick). The sub-lines must line up across the
-   three <td>s, so every sub-line cell is the same fixed height in all three. */
+/* FOUR STACKED COLUMNS on a fabric SKU row — LOT, ROLL, TOTAL STOCK, ISSUE NOW
+   — one BLOCK per lot (and per waste pick), aligned across all four <td>s.
+   A lot cut off two rolls prints two lines in ROLL but only one in the other
+   three, so `.lot-block` is the unit that has to line up, not the bare line:
+   LOT / TOTAL STOCK / ISSUE NOW pad themselves out with blank `.lot-line-filler`
+   rows to match ROLL's line count for that lot, so every sub-line cell is the
+   same fixed height and lot N+1 starts at the same place in every column. */
 .lot-line-row,
 .lot-line-cell,
+.lot-line-filler,
 .col-lot-issue .waste-where,
-.col-lot-issue .lot-rolls {
+.col-roll .waste-where,
+.col-roll .lot-rolls {
     min-height: 2.4rem;
     box-sizing: border-box;
+}
+
+/* THE SEPARATOR — BETWEEN TWO LOTS ONLY, an explicit class rather than
+   `:not(:last-child)`. That pseudo-class fired between the LAST lot and a
+   FOLLOWING WASTE PICK line too (the waste line is just the next sibling in
+   the same column), adding extra height to LOT/ROLL/TOTAL STOCK/ISSUE NOW that
+   the "To be issued" column's plain spacer/badge structure never gained —
+   so the badge ended up sitting a few pixels higher than its own row instead
+   of level with it. Applied only when lotLinesHtml knows there IS a next lot. */
+.lot-block-divider {
+    padding-bottom: 0.35rem;
+    margin-bottom: 0.35rem;
+    border-bottom: 1px dashed var(--border);
 }
 .lot-line-row {
     display: flex;
@@ -2416,8 +2451,13 @@ th.col-num {
     font-weight: 600;
     color: #047857;
     background: var(--status-success-bg);
-    border-radius: 4px 0 0 4px;
+    /* A self-contained pill, not a shape that reads as flowing into the LOT
+       column beside it — square right corners flush against the cell edge
+       made sense when this was the rightmost thing on the row, but the ROLL
+       and TOTAL WASH STOCK columns sit between this and anything else now. */
+    border-radius: 4px;
     padding: 0 0.5rem;
+    margin-right: 0.5rem;
     white-space: nowrap;
 }
 
@@ -2490,26 +2530,35 @@ th.col-num {
     color: var(--text-muted);
 }
 
-/* WHICH ROLL TO CUT, under the lot line that names the lot. One line per roll,
-   in the order the allocator drained them — shortest first — so the first line
-   is the roll he is meant to finish off. Indented under its lot because it
-   belongs to that line and not to the row.
+/* WHICH ROLL TO CUT, in its own column beside the lot that names it. One line
+   per roll, in the order the allocator drained them — shortest first — so the
+   first line is the roll he is meant to finish off.
 
-   The roll label is the only bold thing on the line: it is what he reads down the
-   column looking for, and the metres beside it are what he measures once he has
-   found it. */
+   The roll label is the only bold thing on the line: it is what he reads down
+   the column looking for, and the metres beside it are what he measures once
+   he has found it. */
 .lot-rolls {
     font-size: 0.72rem;
     color: var(--text-muted);
     text-align: left;
-    padding: 0.1rem 0.5rem 0.25rem 1.1rem;
+    padding: 0.1rem 0.5rem 0.25rem 0.6rem;
     white-space: nowrap;
     background: #f1f5f9;
     border-left: 2px solid var(--primary);
+    border-radius: 0 4px 4px 0;
 }
 .lot-rolls b {
     color: var(--text-main);
     font-weight: 700;
+}
+
+/* No roll to name — a fully-declined lot, or an override that stamped no
+   breakdown. Plain, not a card: there is nothing here to read down to. */
+.lot-rolls.roll-empty {
+    background: none;
+    border-left: none;
+    color: var(--text-muted);
+    padding-left: 0.5rem;
 }
 
 /* Only when a split was forced, so it is worth a colour. */

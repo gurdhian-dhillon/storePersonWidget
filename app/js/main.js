@@ -379,13 +379,33 @@ function lotLineAutoMetres(m, lotId) {
     }, 0));
 }
 
-// Total WASHED metres on the rack for one lot of this material — the TOTAL STOCK
-// column. issueMaterials moves Wash_Quantity, so this is the issuable figure.
+// Total WASHED metres left for THIS CARD, for one lot of this material — the
+// TOTAL STOCK column. NOT the raw rack figure: `allocateEveryCard` walks every
+// card in priority order and spends a shared ledger as it goes, and
+// `m.lotWashLeft[lotId]` is that ledger's value at the moment just before THIS
+// card took its own share — the same number the LOT recommendation beside it
+// was measured against. A higher-priority card can genuinely leave this at 0
+// while cloth still sits on the rack; that is the hard reservation the store
+// person asked for, and reordering priority on this screen is how he unlocks
+// it for whoever should have it first.
+//
+// READ FROM `m` (THE MATERIAL), NEVER FROM THE LOT ITSELF. A lot is shared by
+// reference across every supervisor's copy of the same material — harmless
+// for a read-only figure like `wash`, but a live per-card reservation cannot
+// live there: card B's stamp would silently overwrite what card A was about
+// to render, since they point at the very same object. `m` is per-card and
+// per-row, so `lotWashLeft` living there cannot leak between cards.
+//
+// Falls back to the raw `wash` figure when `lotWashLeft` is absent — a
+// payload that predates this field, or a caller (the admin audit) that never
+// ran allocateEveryCard's priority pass at all.
 function lotWashedStock(m, lotId) {
     var lots = lotsFor(m);
     for (var i = 0; i < lots.length; i++) {
         if (String(lots[i].lotId) === String(lotId)) {
-            return round2(Number(lots[i].wash) || 0);
+            var l = lots[i];
+            var reserved = (m.lotWashLeft || {})[String(lotId)];
+            return round2(Number(reserved !== undefined ? reserved : l.wash) || 0);
         }
     }
     return 0;
@@ -459,15 +479,25 @@ function wasteRowsFor(sup) {
 //
 // The piece SIZE is shown in the "To be issued" column, on the same sub-line as
 // this pick — not here. This line stays the where: which lot, which carton.
-function wasteWhereHtml(p) {
-    var bits = [];
-    if (p.lot) bits.push('Lot <b>' + escapeHtml(p.lot) + '</b>');
+// SPLIT ACROSS THE SAME TWO COLUMNS A FRESH LOT USES — LOT gets the bare lot
+// number (matching "L1" / "L2" on every fresh-cloth row above it, not a wordy
+// "Lot L1" that repeats what the column heading already says), ROLL gets the
+// carton, because "which physical thing to walk to" is exactly what the ROLL
+// column already answers for fresh cloth. A remnant has no roll, but it does
+// have an address on the rack, and that address belongs in the same column a
+// roll label would.
+function wasteLotOnlyHtml(p) {
+    if (!p.lot) return '';
+    return '<div class="qty-sub waste-where waste-lot-only"><b>' +
+        escapeHtml(p.lot) + '</b></div>';
+}
+function wasteCartonOnlyHtml(p) {
     if (p.carton) {
-        bits.push('Carton <b>' + escapeHtml(p.carton) + '</b>');
-    } else {
-        bits.push('<span class="waste-nocarton">Carton not recorded</span>');
+        return '<div class="qty-sub waste-where waste-carton-only">Carton <b>' +
+            escapeHtml(p.carton) + '</b></div>';
     }
-    return '<div class="qty-sub waste-where">' + bits.join(' &middot; ') + '</div>';
+    return '<div class="qty-sub waste-where waste-carton-only">' +
+        '<span class="waste-nocarton">Carton not recorded</span></div>';
 }
 
 function wasteCheckboxId(supIdx, matIdx, pickIdx) {
@@ -653,14 +683,21 @@ function refreshFabricRowLots(supIdx, matIdx, fullRepaint) {
     if (!row) return;
     var material = window.__reqData[supIdx].materials[matIdx];
 
+    // Computed either way — both branches need it fresh, and the "To be
+    // issued" cell below needs `.freshLines` regardless of which branch ran,
+    // or its spacer count (built from whichever `cols` is in scope) would
+    // silently keep using a stale roll-count from before this edit.
+    var colsNow = lotLinesHtml(material, supIdx, matIdx, true);
+
     if (fullRepaint) {
-        var cols = lotLinesHtml(material, supIdx, matIdx, true);
         var lotCell = row.querySelector('.col-lot-issue');
+        var rollCell = row.querySelector('.col-roll');
         var stockCell = row.querySelector('.col-lot-stock');
         var issueCell = row.querySelector('.col-issue');
-        if (lotCell) lotCell.innerHTML = cols.lot + lotShortHtml(material, supIdx, matIdx);
-        if (stockCell) stockCell.innerHTML = cols.stock;
-        if (issueCell) issueCell.innerHTML = cols.issue ||
+        if (lotCell) lotCell.innerHTML = colsNow.lot + lotShortHtml(material, supIdx, matIdx);
+        if (rollCell) rollCell.innerHTML = colsNow.roll;
+        if (stockCell) stockCell.innerHTML = colsNow.stock;
+        if (issueCell) issueCell.innerHTML = colsNow.issue ||
             '<span class="is-zero issue-cell-empty">&mdash;</span>';
     } else {
         // Keystroke: keep this lot's checkbox in step with 0 / non-0.
@@ -669,32 +706,34 @@ function refreshFabricRowLots(supIdx, matIdx, fullRepaint) {
             if (chk) chk.checked = lotLineMetres(material, info.lotId) > 0;
         });
 
-        // AND REDRAW THE ROLL LINES, because the roll breakdown is exactly what
+        // AND REDRAW THE ROLL COLUMN, because the roll breakdown is exactly what
         // a typed figure changes.
         //
         // applyFabricOverride re-spreads the edited metres across the lot's
         // rolls on every keystroke — unwinding newest-roll-first on the way down,
-        // extending the last roll on the way up — so "A-1 · 2.2 Mtr" under the
-        // lot name is stale the moment he types. He is being told to cut a roll
-        // and a length; leaving the length behind while the box says something
-        // else is the one thing this column must never do.
+        // extending the last roll on the way up — so "A-1 · 2.2 Mtr" is stale the
+        // moment he types. He is being told to cut a roll and a length; leaving
+        // the length behind while the box says something else is the one thing
+        // this column must never do.
         //
-        // The LOT column only — the box he is typing in lives in the ISSUE
-        // column, which is deliberately left alone so the caret survives. The
-        // stock column does not move on an edit either.
+        // The LOT and ROLL columns only — the box he is typing in lives in the
+        // ISSUE column, which is deliberately left alone so the caret survives.
+        // The stock column does not move on an edit either.
         var lotOnly = row.querySelector('.col-lot-issue');
+        var rollOnly = row.querySelector('.col-roll');
         if (lotOnly) {
-            lotOnly.innerHTML = lotLinesHtml(material, supIdx, matIdx, true).lot +
-                lotShortHtml(material, supIdx, matIdx);
+            lotOnly.innerHTML = colsNow.lot + lotShortHtml(material, supIdx, matIdx);
         }
+        if (rollOnly) rollOnly.innerHTML = colsNow.roll;
     }
 
-    // Headline "To be issued" — pinned to the auto figure today, but repaint so
-    // a future change stays consistent.
-    var head = row.querySelector('.col-num.col-strong .qty-big');
-    if (head) {
-        head.innerHTML = fmt(material.remaining) +
-            '<span class="unit">' + escapeHtml(material.unit) + '</span>';
+    // Headline "To be issued" — the WHOLE cell, not just the figure, so a
+    // waste pick's size badge stays lined up against its own row even when
+    // this edit just changed how many rolls a lot spans (and so how tall the
+    // fresh-lot section above the badges now is).
+    var toIssueCell = row.querySelector('.col-num.col-strong');
+    if (toIssueCell) {
+        toIssueCell.innerHTML = toIssueHtml(material, colsNow);
     }
 }
 
@@ -856,17 +895,19 @@ function reallocateInPlace(supIdx, matIdx, opts) {
             if (!r2) return;
             var c2 = lotLinesHtml(m2, si, mi, !isFullyIssued(m2));
             var lc = r2.querySelector('.col-lot-issue');
+            var rc = r2.querySelector('.col-roll');
             var sc = r2.querySelector('.col-lot-stock');
             var ic = r2.querySelector('.col-issue');
             if (lc) lc.innerHTML = c2.lot + lotShortHtml(m2, si, mi);
+            if (rc) rc.innerHTML = c2.roll;
             if (sc) sc.innerHTML = c2.stock;
             if (ic) ic.innerHTML = c2.issue ||
                 '<span class="is-zero issue-cell-empty">&mdash;</span>';
-            var h2 = r2.querySelector('.col-num.col-strong .qty-big');
-            if (h2) {
-                h2.innerHTML = fmt(m2.remaining) +
-                    '<span class="unit">' + escapeHtml(m2.unit) + '</span>';
-            }
+            // The WHOLE "To be issued" cell, not just the figure inside it — a
+            // waste pick's size badge has to stay aligned with its own row even
+            // when this re-allocation just changed how many rolls a lot spans.
+            var h2 = r2.querySelector('.col-num.col-strong');
+            if (h2) h2.innerHTML = toIssueHtml(m2, c2);
         });
     });
 
@@ -878,9 +919,11 @@ function reallocateInPlace(supIdx, matIdx, opts) {
 
     var cols = lotLinesHtml(material, supIdx, matIdx, true);
     var lotCell = row.querySelector('.col-lot-issue');
+    var rollCell = row.querySelector('.col-roll');
     var stockCell = row.querySelector('.col-lot-stock');
     var issueCell = row.querySelector('.col-issue');
     if (lotCell) lotCell.innerHTML = cols.lot + lotShortHtml(material, supIdx, matIdx);
+    if (rollCell) rollCell.innerHTML = cols.roll;
     if (stockCell) stockCell.innerHTML = cols.stock;
     if (issueCell) {
         issueCell.innerHTML = cols.issue ||
@@ -899,11 +942,12 @@ function reallocateInPlace(supIdx, matIdx, opts) {
         }
     }
 
-    // The headline "To be issued" moves with the allocation too.
-    var head = row.querySelector('.col-num.col-strong .qty-big');
+    // The headline "To be issued" moves with the allocation too — the WHOLE
+    // cell, so a waste pick's size badge stays aligned with its own row (see
+    // toIssueHtml's comment for why the plain figure was not enough).
+    var head = row.querySelector('.col-num.col-strong');
     if (head) {
-        head.innerHTML = fmt(material.remaining) +
-            '<span class="unit">' + escapeHtml(material.unit) + '</span>';
+        head.innerHTML = toIssueHtml(material, cols);
     }
 }
 
@@ -1886,8 +1930,9 @@ function shortPill(m) {
 //   TOTAL STOCK — that lot's washed metres on the rack, read-only.
 //   ISSUE NOW   — the editable metres box + checkbox for that lot alone.
 //
-// Returns { lot, stock, issue } — three HTML fragments, each a vertical stack
-// aligned sub-line for sub-line. renderFabricRows drops them into three <td>s.
+// Returns { lot, roll, stock, issue } — four HTML fragments, each a vertical
+// stack aligned sub-line for sub-line. renderFabricRows drops them into four
+// <td>s.
 //
 // editable is false for the read-only receipt (a fully-issued row) and for a
 // Pieces lot, where a free metres figure has no physical meaning.
@@ -1896,7 +1941,12 @@ function lotLinesHtml(m, supIdx, matIdx, editable) {
     var lotLineList = fabricLotLineList(m);
     var picks = wastePicks(m);
     if (lotLineList.length === 0 && picks.length === 0) {
-        return { lot: '', stock: '', issue: '' };
+        // No fresh lot chosen and no waste pick — a row this short of its
+        // shade with nothing to name. Every fragment must come back as an
+        // empty string, never `undefined`: `renderFabricRows` concatenates
+        // these straight into a <td>, and `'<td>' + undefined + '</td>'`
+        // prints the literal word "undefined" in the ROLL column.
+        return { lot: '', roll: '', stock: '', issue: '' };
     }
 
     var lotName = function (k) {
@@ -1939,22 +1989,39 @@ function lotLinesHtml(m, supIdx, matIdx, editable) {
     // which is the order to cut them in. Shortest first, so the first line is the
     // roll he is meant to finish off.
     //
-    // DEDUPED BY rollId, KEEPING THE LARGEST — never summed. The two writers
-    // disagree on grain: applyLotAllocation splits rolls per requirement line,
-    // while applyFabricOverride stamps the LOT's whole breakdown onto every line
-    // of that lot (see its `ln.rolls = rollAlloc` — the comment there says why).
-    // Summing across lines therefore double-counts every overridden lot, by
-    // exactly the number of lines it serves.
+    // SUMMED ACROSS LINES OF ONE LOT — UNLESS THE LOT WAS HAND-EDITED.
+    //
+    // The two writers disagree on grain. applyLotAllocation gives each
+    // requirement line ONLY the rolls IT cut, so when a lot's roll is big
+    // enough to serve several separate orders, several lines legitimately
+    // share a rollId with DIFFERENT metres each — a roll draining across many
+    // orders, not one order counted twice — and the true total off that roll
+    // is their SUM. Taking the largest of them (the old rule) quoted a single
+    // order's slice as if it were the whole draw: a lot recommending 1,296 m
+    // read as "13.5 m off this roll" because that was the biggest of dozens of
+    // per-order slices, off by two orders of magnitude from what was actually
+    // being asked for.
+    //
+    // applyFabricOverride is the one exception: editing a lot's box stamps the
+    // SAME breakdown onto EVERY line of that lot (`ln.rollsShared = true` —
+    // the comment there says why), so its lines are not independent draws to
+    // add up, they are one draw written out several times. Take the first such
+    // line for a lot and ignore the rest — summing would multiply an edited
+    // lot's figure by the number of lines it serves.
     var rollsByLot = {};
     (m.lotLines || []).forEach(function (ln) {
         var lk = String(ln.lotId);
-        if (!rollsByLot[lk]) rollsByLot[lk] = { order: [], by: {} };
+        if (!rollsByLot[lk]) rollsByLot[lk] = { order: [], by: {}, sharedSeen: false };
         var bucket = rollsByLot[lk];
+        if (ln.rollsShared) {
+            if (bucket.sharedSeen) return;   // already have the lot's one true copy
+            bucket.sharedSeen = true;
+        }
         (ln.rolls || []).forEach(function (rl) {
             var rid = String(rl.rollId);
             var mtr = round2(Number(rl.metres) || 0);
             if (bucket.by[rid]) {
-                if (mtr > bucket.by[rid].metres) bucket.by[rid].metres = mtr;
+                bucket.by[rid].metres = round2(bucket.by[rid].metres + mtr);
             } else {
                 bucket.by[rid] = { label: String(rl.label || ''), metres: mtr };
                 bucket.order.push(rid);
@@ -1968,27 +2035,52 @@ function lotLinesHtml(m, supIdx, matIdx, editable) {
     // instruction, and splitting them across two places is what made the old
     // "9 Mtr off L1" unfollowable. It costs one short line and removes the
     // question "which of these is it".
-    var rollLineHtml = function (k) {
+    //
+    // Returns an ARRAY, one string per roll — not joined — because the caller
+    // needs the COUNT: a lot split across two rolls prints two lines here but
+    // only one in LOT / TOTAL STOCK / ISSUE NOW, and those three columns have
+    // to pad themselves out to the same height or the next lot down prints
+    // against the wrong roll line. See the padding block below.
+    var rollLinesFor = function (k) {
         var l = lots[Number(k)];
         var bucket = l ? rollsByLot[String(l.lotId)] : null;
-        if (!bucket || !bucket.order.length) return '';
-        return bucket.order.map(function (rid) {
+        if (!bucket || !bucket.order.length) return [];
+        var out = [];
+        bucket.order.forEach(function (rid) {
             var e = bucket.by[rid];
-            if (e.metres <= 0) return '';
-            return '<div class="lot-rolls">' +
+            if (e.metres <= 0) return;
+            out.push('<div class="lot-rolls">' +
                 '<b>' + escapeHtml(e.label || '—') + '</b> &middot; ' +
                 fmt(e.metres) + ' ' + escapeHtml(m.unit) +
-                '</div>';
-        }).join('');
+                '</div>');
+        });
+        return out;
     };
 
     var lotCol = '';
+    var rollCol = '';
     var stockCol = '';
     var issueCol = '';
+    // TOTAL LINES THE FRESH-LOT SECTION TAKES, summed across every lot's block
+    // (1 per lot, or more when a lot spans several rolls — see `lineCount`
+    // below). renderFabricRows uses this to size the "To be issued" column's
+    // blank spacers ahead of the waste-pick size badges: a spacer count that
+    // only knew "one lot = one line" left a waste pick's badge sitting against
+    // whichever roll line the fresh section happened to end on, not against
+    // its own row.
+    var freshBlockLines = 0;
 
     // ---- one sub-line per lot ----
-    lotLineList.forEach(function (info) {
+    lotLineList.forEach(function (info, lotIdx0) {
         var k = info.lotIdx;
+        // SEPARATOR ONLY BETWEEN TWO LOTS, never before a following waste
+        // pick — that line has no `.lot-block` wrapper and no matching height
+        // in the "To be issued" column, so a divider fired against it (via
+        // `:not(:last-child)`, which just means "any following sibling") added
+        // height nothing else on the row was accounting for. An explicit
+        // per-lot check is unambiguous where a CSS structural selector is not.
+        var blockClass = 'lot-block' +
+            (lotIdx0 < lotLineList.length - 1 ? ' lot-block-divider' : '');
         var cur = lotLineMetres(m, info.lotId);
         var auto = lotLineAutoMetres(m, info.lotId);
         var washed = lotWashedStock(m, info.lotId);
@@ -2013,18 +2105,50 @@ function lotLinesHtml(m, supIdx, matIdx, editable) {
             ? '<div class="lot-dry">Only ' + fmt(clamped.placed) + ' ' +
               escapeHtml(m.unit) + ' left on this roll</div>'
             : '';
+
+        // ONE LOT IS ONE BLOCK, THE SAME HEIGHT IN ALL FOUR COLUMNS.
+        //
+        // LOT / TOTAL STOCK / ISSUE NOW each print exactly one line for this
+        // lot; ROLL prints one line PER ROLL. A two-roll lot therefore made
+        // ROLL two lines taller than the other three — and because every
+        // lot's lines are just appended, one after another, down each <td>,
+        // the NEXT lot's LOT box ended up sitting beside this lot's second
+        // roll line instead of its own. Filler lines below pad the shorter
+        // columns out to the roll count, so lot N is always a block of the
+        // same height in every column and lot N+1 starts at the same place
+        // in all four.
+        var rollLines = rollLinesFor(k);
+        var lineCount = Math.max(rollLines.length, 1);
+        freshBlockLines += lineCount;
+        var filler = '';
+        for (var fillI = 1; fillI < lineCount; fillI++) {
+            filler += '<div class="lot-line-filler"></div>';
+        }
+
         lotCol +=
+            '<div class="' + blockClass + '">' +
             '<div class="lot-from lot-line-row">' +
             '<span class="lot-line-name"><b>' + lotName(k) + '</b></span>' +
             '<span class="lot-line-rec">' + fmt(auto) + ' ' + escapeHtml(m.unit) + '</span>' +
-            '</div>' + rollLineHtml(k) + clampNote;
+            '</div>' + filler +
+            '</div>';
+
+        // ROLL: which physical roll(s) to cut off this lot, in drain order.
+        rollCol += '<div class="' + blockClass + '">' +
+            (rollLines.length ? rollLines.join('') :
+                '<div class="lot-rolls roll-empty">&mdash;</div>') +
+            clampNote +
+            '</div>';
 
         // TOTAL STOCK: this lot's washed metres.
-        stockCol += '<div class="lot-line-cell">' + qty(washed, m.unit) + '</div>';
+        stockCol += '<div class="' + blockClass + '">' +
+            '<div class="lot-line-cell">' + qty(washed, m.unit) + '</div>' + filler +
+            '</div>';
 
         // ISSUE NOW: editable box + checkbox (or static text when not editable).
+        var issueLine;
         if (canEdit) {
-            issueCol +=
+            issueLine =
                 '<div class="lot-line-cell issue-cell">' +
                 '<span class="issue-input-group lot-line-box">' +
                 '<input type="number" step="0.01" min="0" ' +
@@ -2040,16 +2164,21 @@ function lotLinesHtml(m, supIdx, matIdx, editable) {
                 'onchange="onLotLineCheck(' + supIdx + ',' + matIdx + ',' + k + ')" />' +
                 '</div>';
         } else {
-            issueCol += '<div class="lot-line-cell"><span class="lot-line-static">' +
+            issueLine = '<div class="lot-line-cell"><span class="lot-line-static">' +
                 fmt(cur) + ' ' + escapeHtml(m.unit) + '</span></div>';
         }
+        issueCol += '<div class="' + blockClass + '">' + issueLine + filler + '</div>';
     });
 
     // ---- one sub-line per waste pick ----
-    // Waste has a lot + carton too (shown in LOT); no washed-stock figure for a
-    // remnant, so TOTAL STOCK is blank. ISSUE NOW is a pcs box + checkbox.
+    // Lot in the LOT column, carton in the ROLL column — the same split a
+    // fresh-cloth row makes between "which tone" and "which physical thing to
+    // find", so a remnant reads as one more row of the same table rather than
+    // a special case bolted on. No washed-stock figure for a remnant, so TOTAL
+    // STOCK is blank. ISSUE NOW is a pcs box + checkbox.
     picks.forEach(function (p, pickIdx) {
-        lotCol += wasteWhereHtml(p);
+        lotCol += wasteLotOnlyHtml(p);
+        rollCol += wasteCartonOnlyHtml(p);
         stockCol += '<div class="lot-line-cell"><span class="is-zero">&mdash;</span></div>';
         if (editable) {
             issueCol +=
@@ -2071,7 +2200,8 @@ function lotLinesHtml(m, supIdx, matIdx, editable) {
         }
     });
 
-    return { lot: lotCol, stock: stockCol, issue: issueCol };
+    return { lot: lotCol, roll: rollCol, stock: stockCol, issue: issueCol,
+             freshLines: freshBlockLines };
 }
 
 // WHY THE FIGURE IS SHORT, and only when it is.
@@ -2167,9 +2297,20 @@ function lotShortHtml(m, supIdx, matIdx) {
                 : '');
     }
     if (why.kind === 'nofit') {
-        return '<div class="lot-dry">' + fmt(why.have) + ' ' + u + ' on <b>' +
-            escapeHtml(why.lot) + '</b>, smallest job needs ' + fmt(why.need) +
-            '</div>';
+        // ONE FACT, NOT TWO NUMBERS HE CANNOT USE. `have` (the longest piece
+        // left) and `need` (the smallest job's length) exist so a developer
+        // can audit the allocator's arithmetic — they used to be printed here
+        // too, and all they did on the floor was raise a question nobody could
+        // answer: "17.3 Mtr" measured against what, "smallest waiting order
+        // needs 29.2" waiting for which order? He cannot go measure a roll to
+        // check it and would not know which of several pending orders it
+        // meant. The one thing he can act on, and the one thing this screen
+        // owes him, is the shortfall itself and that the shelf cannot cover
+        // it — the actual why (this lot's cloth is in short pieces) belongs on
+        // the allocator's audit screen, not here.
+        return '<div class="lot-dry">Still short ' + fmt(why.short) + ' ' + u +
+            ' of this shade &mdash; the cloth left on <b>' + escapeHtml(why.lot) +
+            '</b> is not in one piece long enough to cut. Needs fresh stock.</div>';
     }
     if (why.kind === 'blocked') {
         return '<div class="lot-dry">' + fmt(why.qty) + ' ' + u + ' on <b>' +
@@ -2265,27 +2406,29 @@ function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
 // order line either way. Combining them makes the row read as the job it is:
 // "cut 2.1m off the roll AND take that one offcut".
 //
-// Every input keeps the id it had, so all the checkbox, validation and payload
-// logic works untouched — only the markup around them moved.
-function renderFabricRows(m, supIdx, matIdx) {
+// "TO BE ISSUED" CELL CONTENT — the SKU total fresh metres, then one green
+// sub-line per waste pick carrying that remnant's size, aligned with the same
+// pick's row in LOT / TOTAL STOCK / ISSUE NOW. Length × Width, the order used
+// everywhere in these widgets; a piece with no size recorded falls back to its
+// pcs count. A remnant is a specific piece he has to find, its size is how he
+// identifies it, and green is the offcut colour used on every screen.
+//
+// EXTRACTED so every repaint path rebuilds it the SAME way — this used to live
+// only inline in renderFabricRows, and the live-update paths (a waste pick's
+// pcs box, a lot-line checkbox) only ever repainted the plain figure inside it,
+// never the spacer count below. A live edit that changed how many rolls a lot
+// spans left the spacers built at the last full render — correct then, stale
+// the moment the roll count changed without a full repaint.
+//
+// `cols.freshLines` is the height lotLinesHtml's LOT/ROLL/TOTAL STOCK/ISSUE NOW
+// columns actually take (see its own comment) — one spacer per line, not one
+// per lot, or the first waste pick's size badge lands against the fresh
+// section's last roll line instead of its own row.
+function toIssueHtml(m, cols) {
     var done = isFullyIssued(m);
     var picks = wastePicks(m);
     var wantsFresh = done || needsFreshFabric(m);
 
-    // Fresh cloth has to come off a named lot. A row covered entirely by waste
-    // needs none, so it gets no lot strip — there is no fresh fabric to source.
-    var byLot = !done && wantsFresh;
-
-    // ---- "To be issued" ----
-    //
-    // The SKU total fresh metres on the head line, then ONE GREEN SUB-LINE PER
-    // WASTE PICK carrying that remnant's size — aligned with the same pick's row
-    // in LOT / TOTAL STOCK / ISSUE NOW. A remnant is a specific piece he has to
-    // find, its size is how he identifies it, and green is the offcut colour
-    // used on every screen. Blank spacers stand in for the fresh lot lines above
-    // the picks so pick N lines up with pick N across all four columns.
-    // Length × Width, the order used everywhere in these widgets; a piece with
-    // no size recorded falls back to its pcs count.
     var toIssue = '';
     if (wantsFresh) {
         toIssue =
@@ -2296,9 +2439,16 @@ function renderFabricRows(m, supIdx, matIdx) {
         toIssue = '<span class="is-zero">&mdash;</span>';
     }
     if (!done && picks.length > 0) {
-        var freshLineCount = fabricLotLineList(m).length;
+        // `tbi-head` FILLS THE FIRST LINE of the fresh-lot block itself — it is
+        // not an extra line stacked in front of it, which is why the spacer
+        // count is `freshLines - 1`, not `freshLines`. Using the full count
+        // pushed every waste pick's badge one row too low, sitting against the
+        // fresh section's LAST line instead of level with its own row — most
+        // visible once a lot's roll count made that section more than one line
+        // tall, but present even at one lot / one roll.
         var tbi = '<div class="tbi-head">' + toIssue + '</div>';
-        for (var si = 0; si < freshLineCount; si++) {
+        var spacerCount = Math.max(0, (cols.freshLines || 0) - 1);
+        for (var si = 0; si < spacerCount; si++) {
             tbi += '<div class="tbi-spacer"></div>';
         }
         picks.forEach(function (p) {
@@ -2312,13 +2462,29 @@ function renderFabricRows(m, supIdx, matIdx) {
         });
         toIssue = tbi;
     }
+    return toIssue;
+}
+
+// Every input keeps the id it had, so all the checkbox, validation and payload
+// logic works untouched — only the markup around them moved.
+function renderFabricRows(m, supIdx, matIdx) {
+    var done = isFullyIssued(m);
+    var picks = wastePicks(m);
+    var wantsFresh = done || needsFreshFabric(m);
+
+    // Fresh cloth has to come off a named lot. A row covered entirely by waste
+    // needs none, so it gets no lot strip — there is no fresh fabric to source.
+    var byLot = !done && wantsFresh;
 
     // Three stacked columns: LOT (roll · recommended), TOTAL STOCK (lot washed),
     // ISSUE NOW (editable box + checkbox). One sub-line per lot and per waste
-    // pick, aligned across the three <td>s.
+    // pick, aligned across the three <td>s. Computed BEFORE "To be issued"
+    // below, which needs `cols.freshLines` to size its own spacers to match.
     var cols = done
-        ? { lot: '', stock: '', issue: '' }
+        ? { lot: '', roll: '', stock: '', issue: '', freshLines: 0 }
         : lotLinesHtml(m, supIdx, matIdx, true);
+
+    var toIssue = toIssueHtml(m, cols);
 
     var issueCell;
     if (done) {
@@ -2342,10 +2508,12 @@ function renderFabricRows(m, supIdx, matIdx) {
         reissueWhy(m) +
         '</td>' +
         '<td class="col-num col-strong">' + toIssue + '</td>' +
-        // LOT: roll name + the recommended metres for that roll (fixed).
+        // LOT: which tone is leaving the shelf, and why it is short (if it is).
         '<td class="col-lot-issue">' +
         (done ? '' : cols.lot + lotShortHtml(m, supIdx, matIdx)) +
         '</td>' +
+        // ROLL: which physical roll to cut, and how much off it.
+        '<td class="col-roll">' + (done ? '' : cols.roll) + '</td>' +
         // TOTAL STOCK: that lot's washed metres on the rack.
         '<td class="col-num col-lot-stock">' + (done ? '' : cols.stock) + '</td>' +
         // ISSUE NOW: the editable box + checkbox per lot / per waste pick.
@@ -3225,6 +3393,7 @@ function renderSupervisorCard(sup, idx, arr) {
         '<th>Material</th>' +
         '<th class="col-num">To be issued</th>' +
         '<th class="col-lot-issue">Lot</th>' +
+        '<th class="col-roll">Roll</th>' +
         '<th class="col-num col-lot-stock">Total wash stock</th>';
 
     var otherHead =

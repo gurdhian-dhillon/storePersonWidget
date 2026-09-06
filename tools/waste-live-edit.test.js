@@ -48,7 +48,7 @@ function extract(name) {
 
 const NEEDED = ['rackCountFor', 'wastePicks', 'wasteCheckedFor',
                 'lotLinesHtml', 'fabricLotLineList', 'lotLineMetres', 'lotLineAutoMetres',
-                'lotWashedStock', 'wasteWhereHtml', 'escapeHtml', 'fmt', 'qty',
+                'lotWashedStock', 'wasteLotOnlyHtml', 'wasteCartonOnlyHtml', 'escapeHtml', 'fmt', 'qty',
                 'lotLineInputId', 'lotLineCheckId', 'wasteCheckboxId', 'wasteInputId',
                 'wasteRowId'];
 
@@ -274,16 +274,17 @@ test('Y4 with no declines at all, autoPieces equals the pick', function () {
 
 console.log('\n-- Z: what the row actually renders --');
 
-test('Z1 the LOT column shows the roll and its metres, and both move on a decline', function () {
+test('Z1 the ROLL column shows the roll and its metres, and both move on a decline', function () {
+  // The roll breakdown lives in its own column now, split out of LOT.
   clearDeclines();
   CTX.__m = matOf(allocate(world(20)));
-  const full = vm.runInContext('lotLinesHtml(__m, 0, 0, true).lot', CTX);
+  const full = vm.runInContext('lotLinesHtml(__m, 0, 0, true).roll', CTX);
   assert.ok(/A-1<\/b> &middot; 2\.2/.test(full), 'took the remnants: 2.20 m off A-1\n' + full);
 
   clearDeclines();
   decline('W1', 0);
   CTX.__m = matOf(allocate(world(20)));
-  const none = vm.runInContext('lotLinesHtml(__m, 0, 0, true).lot', CTX);
+  const none = vm.runInContext('lotLinesHtml(__m, 0, 0, true).roll', CTX);
   assert.ok(/A-1<\/b> &middot; 5\.5/.test(none), 'gave them back: 5.50 m off A-1\n' + none);
 });
 

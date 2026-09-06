@@ -717,6 +717,7 @@ function allocateEveryCard(data) {
     // THE ALLOCATION PASS — cards in priority order, spending the shared
     // ledgers. `data`'s array order IS the priority order; the caller
     // (render()) arranges it before calling.
+    var DEBUG_TOP = (typeof window !== 'undefined' && window.DEBUG_ALLOCATOR);
     (data || []).forEach(function (sup) {
         var done = {};
         (sup.materials || []).forEach(function (m) {
@@ -724,6 +725,48 @@ function allocateEveryCard(data) {
             var key = String(m.materialId);
             if (done[key]) return;
             done[key] = true;
+
+            // WHAT IS LEFT FOR THIS CARD, BEFORE IT TAKES ANY OF IT — the same
+            // reservation the LOT recommendation is about to be measured
+            // against, stamped onto every row of this material on this card so
+            // TOTAL WASH STOCK shows that number instead of the raw rack figure
+            // every card carries (the server sends the full rack to everybody;
+            // it does not divide it up).
+            //
+            // Taken BEFORE allocateMaterial spends this card's own share, or a
+            // card would appear to eat its own total — only what HIGHER-priority
+            // cards already claimed should show as gone. Priority 1 therefore
+            // still reads the full rack; priority 2 reads whatever priority 1
+            // left; and so on down the order the store person set on this
+            // screen, which he can always reshuffle to unlock stock for
+            // whoever he decides should have it first.
+            //
+            // WRITTEN ONTO `m2` (THE MATERIAL), NEVER ONTO `l` (THE LOT). A lot
+            // is shared by reference across every supervisor's copy of the same
+            // material — the payload hands the same lot record to everyone who
+            // mentions it, harmless as long as nothing writes to it. Stamping
+            // `l.washLeft` directly did exactly that: Suraj's card and Aniket's
+            // card were pointing at the SAME lot object, so Aniket's stamp
+            // (processed second) silently overwrote the figure Suraj's card was
+            // about to render, and Suraj's own "Total Wash Stock" ended up
+            // showing what was left for Aniket instead. `m2.lotWashLeft` is a
+            // fresh map on the material, and `m2` is per-card and per-row —
+            // never shared — so this cannot leak between cards the same way.
+            (sup.materials || []).forEach(function (m2) {
+                if (!m2.isFabric || String(m2.materialId) !== key) return;
+                var wl = {};
+                (m2.lots || []).forEach(function (l) {
+                    var lk = key + '|' + String(l.lotId);
+                    wl[String(l.lotId)] = lotLeft[lk] !== undefined
+                        ? round2(lotLeft[lk]) : round2(Number(l.wash) || 0);
+                });
+                m2.lotWashLeft = wl;
+                if (DEBUG_TOP) {
+                    console.log('[reserve] card=' + (sup.supervisorName || sup.supervisorId) +
+                        ' material=' + (m2.material || key) + ' lotWashLeft=' + JSON.stringify(wl));
+                }
+            });
+
             allocateMaterial(sup, key, wasteLeft, lotLeft, greigeLeft, pieceLeft, rollLeft);
         });
     });
@@ -835,6 +878,14 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
 
     var m0 = rows[0].m;
     var fab = { fabricWidthCm: m0.fabricWidthCm };
+
+    // DEBUG AID, OFF BY DEFAULT. Set window.DEBUG_ALLOCATOR = true in the
+    // console and reload to see, per material, every order that could not be
+    // served and why — the exact question "which of the 100+ orders are still
+    // waiting, and how much does each one need" that the screen has no room to
+    // answer. Guarded so normal use pays nothing for it.
+    var DEBUG = (typeof window !== 'undefined' && window.DEBUG_ALLOCATOR);
+    var debugSkips = [];
 
     // EACH LOT CARRIES ONLY ITS OWN REMNANTS. This is the whole change: an
     // offcut cut from L2 is L2's tone, so it is part of what L2 can offer and of
@@ -1430,6 +1481,17 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                 needMetres: want, metres: 0, wastePieces: 0, greige: 0,
                 pin: ord.pin ? String(ord.pinNo || ord.pin) : '', override: ''
             });
+            if (DEBUG) {
+                debugSkips.push({
+                    order: ord.oid,
+                    neededMetres: round2(want),
+                    pin: ord.pin ? String(ord.pinNo || ord.pin) : '',
+                    cuts: ord.demands.map(function (d) {
+                        return { cutW: Number(d.cutW) || 0, cutL: Number(d.cutL) || 0,
+                                 pieces: Number(d.pieces) || 0 };
+                    })
+                });
+            }
             return;
         }
 
@@ -1588,6 +1650,33 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
         // No lots at all on this material: nothing to allocate, and the Lot
         // column says so rather than leaving an empty cell.
     });
+
+    if (DEBUG && debugSkips.length) {
+        console.group('[allocator] ' + (m0.material || materialId) +
+            ' (' + (m0.sku || '') + ') — ' + debugSkips.length +
+            ' order(s) could not be served');
+        console.log('Rolls left (after this pass):');
+        console.table(lots.reduce(function (out, l) {
+            (l.rolls || []).forEach(function (rr) {
+                out.push({ lot: l.lotNumber, roll: rr.label,
+                           metresLeft: rr.length, status: rr.status });
+            });
+            if (!(l.rolls || []).length) {
+                out.push({ lot: l.lotNumber, roll: '(none)', metresLeft: 0,
+                           status: l.blocked ? 'Blocked' : '—' });
+            }
+            return out;
+        }, []));
+        console.log('Orders still waiting on this material:');
+        console.table(debugSkips.map(function (s) {
+            return { order: s.order, neededMetres: s.neededMetres,
+                     pin: s.pin || '(unpinned)',
+                     cuts: s.cuts.map(function (c) {
+                         return c.cutW + 'x' + c.cutL + ' × ' + c.pieces + 'pc';
+                     }).join(', ') };
+        }));
+        console.groupEnd();
+    }
 
     // ---- write back, in the shape the rest of the screen already reads ----
     rows.forEach(function (rw) {
@@ -2107,6 +2196,17 @@ function applyFabricOverride(m, lotId, editedMetres) {
         // fromWaste is the physical-pick credit and is not a function of metres.
         // The roll breakdown is the LOT's — every line of this lot carries it,
         // so the handover payload's qty and rolls[] cannot disagree.
+        //
+        // `rollsShared` marks that: EVERY line of this lot now carries the
+        // SAME array, byte for byte. A display reading `.rolls` across several
+        // lines of one lot has to know that — the ordinary (unedited) case has
+        // each line carry only the rolls IT cut, and several lines of one lot
+        // genuinely sharing a roll (a big roll serving many separate orders)
+        // must be SUMMED to get the roll's true total draw. Once this stamp is
+        // in force that sum would be wrong: it would count the same breakdown
+        // once per line instead of once for the lot. See `rollsByLot` in
+        // main.js, which reads this flag to tell the two cases apart.
+        ln.rollsShared = true;
         ln.rolls = rollAlloc.map(function (r) {
             return { rollId: r.rollId, label: r.label, metres: r.metres };
         });
@@ -2324,8 +2424,14 @@ function shortReasonFor(m, r, lots) {
             }
         });
         if (big) {
+            // `short` is what THIS ROW is still missing, the same figure the
+            // top of this function used to decide the row is short at all —
+            // carried through so the screen can say "issuing most of it today,
+            // still short N" instead of leaving him to read a lot box showing
+            // real progress right next to a warning and work out for himself
+            // that they are both true at once.
             return { kind: 'nofit', lot: big.lotNumber, have: big.qty,
-                     need: round2(r.noFitSmallest) };
+                     need: round2(r.noFitSmallest), short: round2(want - got) };
         }
     }
 

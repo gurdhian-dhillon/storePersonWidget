@@ -2,9 +2,13 @@
 // PHASE A — THE ROLL DISPLAY on the store issue row.
 //
 // A lot is a set of physical rolls, not a metres pool, so the row has to name
-// WHICH ROLL to cut. This exercises lotLinesHtml's LOT column against real
+// WHICH ROLL to cut. This exercises lotLinesHtml's ROLL column against real
 // allocator output — the same shapes applyLotAllocation and applyFabricOverride
 // actually produce, not hand-written ideals.
+//
+// The roll breakdown lives in its OWN column now (`.roll`), split out of `.lot`
+// so the figure reads down a column of its own rather than as a second line
+// buried under the lot name.
 //
 // The case that matters most is D1/D2: the two writers disagree on grain.
 // applyLotAllocation splits a lot's rolls per requirement line; applyFabricOverride
@@ -46,7 +50,8 @@ function extract(name) {
 }
 
 const NEEDED = ['lotLinesHtml', 'fabricLotLineList', 'lotLineMetres', 'lotLineAutoMetres',
-                'lotWashedStock', 'wastePicks', 'wasteWhereHtml', 'escapeHtml', 'fmt', 'qty',
+                'lotWashedStock', 'wastePicks', 'wasteLotOnlyHtml', 'wasteCartonOnlyHtml',
+                'escapeHtml', 'fmt', 'qty',
                 'lotLineInputId', 'lotLineCheckId', 'wasteCheckboxId', 'wasteInputId',
                 'wasteRowId', 'wasteCheckedFor', 'rackCountFor'];
 
@@ -69,6 +74,10 @@ const CTX = makeCtx();
 function lotHtml(m) {
   CTX.__m = m;
   return vm.runInContext('lotLinesHtml(__m, 0, 0, true).lot', CTX);
+}
+function rollHtml(m) {
+  CTX.__m = m;
+  return vm.runInContext('lotLinesHtml(__m, 0, 0, true).roll', CTX);
 }
 
 // One fabric SKU with two lots. L1 has three rolls (2, 5, 9 m), L2 has one (12 m).
@@ -93,10 +102,10 @@ function material(lotLines, opts) {
   };
 }
 
-function line(lotId, lotNumber, qty, rolls, mrqId) {
+function line(lotId, lotNumber, qty, rolls, mrqId, rollsShared) {
   return { lotId: lotId, lotNumber: lotNumber, qty: qty, mrqId: mrqId || 'Q1',
            planItemId: 'IT1', planId: 'PL1', cutW: 55, cutL: 55,
-           rolls: rolls, pieces: [], fromRaw: 0, fromWaste: 0 };
+           rolls: rolls, rollsShared: !!rollsShared, pieces: [], fromRaw: 0, fromWaste: 0 };
 }
 
 // Count the roll sub-lines and read back what they say.
@@ -118,7 +127,7 @@ test('D1 auto path — rolls split per line render once each, in drain order', f
     line('L1', 'LOT-A', 2, [{ rollId: 'r1', label: 'A-1', metres: 2 }], 'Q1'),
     line('L1', 'LOT-A', 3, [{ rollId: 'r2', label: 'A-2', metres: 3 }], 'Q2'),
   ]);
-  const rl = rollLines(lotHtml(m));
+  const rl = rollLines(rollHtml(m));
   assert.strictEqual(rl.length, 2, 'two distinct rolls, two lines');
   assert.strictEqual(rl[0].label, 'A-1');
   assert.ok(/^2\b/.test(rl[0].text), 'A-1 shows 2, got ' + rl[0].text);
@@ -126,48 +135,66 @@ test('D1 auto path — rolls split per line render once each, in drain order', f
   assert.ok(/^3\b/.test(rl[1].text), 'A-2 shows 3, got ' + rl[1].text);
 });
 
-test('D2 override path — the SAME breakdown on every line is NOT summed', function () {
+test('D2 override path — the SAME breakdown stamped on every line is NOT summed', function () {
   // applyFabricOverride grain: it stamps the lot's whole rollAlloc onto every
-  // line of that lot. Three lines x (A-1 2m + A-2 3m) must still read 2 and 3,
-  // not 6 and 9.
+  // line of that lot, and marks each with rollsShared. Three lines x (A-1 2m +
+  // A-2 3m) must still read 2 and 3, not 6 and 9 — it is one draw written out
+  // three times, not three draws.
   const alloc = [{ rollId: 'r1', label: 'A-1', metres: 2 },
                  { rollId: 'r2', label: 'A-2', metres: 3 }];
   const m = material([
-    line('L1', 'LOT-A', 2, alloc.map(function (r) { return Object.assign({}, r); }), 'Q1'),
-    line('L1', 'LOT-A', 2, alloc.map(function (r) { return Object.assign({}, r); }), 'Q2'),
-    line('L1', 'LOT-A', 1, alloc.map(function (r) { return Object.assign({}, r); }), 'Q3'),
+    line('L1', 'LOT-A', 2, alloc.map(function (r) { return Object.assign({}, r); }), 'Q1', true),
+    line('L1', 'LOT-A', 2, alloc.map(function (r) { return Object.assign({}, r); }), 'Q2', true),
+    line('L1', 'LOT-A', 1, alloc.map(function (r) { return Object.assign({}, r); }), 'Q3', true),
   ]);
-  const rl = rollLines(lotHtml(m));
+  const rl = rollLines(rollHtml(m));
   assert.strictEqual(rl.length, 2, 'two rolls despite three lines, got ' + rl.length);
   assert.ok(/^2\b/.test(rl[0].text), 'A-1 must read 2, not 6 - got ' + rl[0].text);
   assert.ok(/^3\b/.test(rl[1].text), 'A-2 must read 3, not 9 - got ' + rl[1].text);
 });
 
-test('D3 mixed grain — dedupe keeps the LARGEST, never the first seen', function () {
-  // A line carrying the partial figure ahead of one carrying the lot total must
-  // not leave the display quoting the partial.
+test('D3 two SEPARATE auto orders drawing off the SAME roll are SUMMED, not maxed', function () {
+  // Neither line is override-stamped (rollsShared unset) — these are two
+  // genuinely different orders, each independently allocated its own slice of
+  // one big roll. The roll's true draw is 1 + 2 = 3, not the larger of the two.
+  // Reporting only the larger slice is exactly the production bug: a lot
+  // recommending ~1,300 m read as "13.5 m off this roll" because that was the
+  // single largest of dozens of per-order slices sharing the one roll.
   const m = material([
     line('L1', 'LOT-A', 1, [{ rollId: 'r1', label: 'A-1', metres: 1 }], 'Q1'),
     line('L1', 'LOT-A', 2, [{ rollId: 'r1', label: 'A-1', metres: 2 }], 'Q2'),
   ]);
-  const rl = rollLines(lotHtml(m));
+  const rl = rollLines(rollHtml(m));
   assert.strictEqual(rl.length, 1);
-  assert.ok(/^2\b/.test(rl[0].text), 'kept the larger figure, got ' + rl[0].text);
+  assert.ok(/^3\b/.test(rl[0].text), 'summed both orders\' draws, got ' + rl[0].text);
 });
 
-test('D4 two lots — each lot renders only its OWN rolls', function () {
+test('D3b many auto orders sharing one roll sum to the roll\'s true total', function () {
+  const lines = [];
+  for (var i = 0; i < 20; i++) {
+    lines.push(line('L1', 'LOT-A', 1, [{ rollId: 'r1', label: 'A-1', metres: 64.8 }], 'Q' + i));
+  }
+  const m = material(lines);
+  const rl = rollLines(rollHtml(m));
+  assert.strictEqual(rl.length, 1);
+  assert.ok(/^1,296\b/.test(rl[0].text), '20 x 64.8 = 1,296, got ' + rl[0].text);
+});
+
+test('D4 two lots — each lot renders only its OWN rolls, in lot order', function () {
   const m = material([
     line('L1', 'LOT-A', 5, [{ rollId: 'r2', label: 'A-2', metres: 5 }], 'Q1'),
     line('L2', 'LOT-B', 7, [{ rollId: 'r9', label: 'B-1', metres: 7 }], 'Q2'),
   ]);
-  const html = lotHtml(m);
-  const rl = rollLines(html);
+  const lotH = lotHtml(m);
+  const rollH = rollHtml(m);
+  const rl = rollLines(rollH);
   assert.strictEqual(rl.length, 2);
   assert.deepStrictEqual(rl.map(function (r) { return r.label; }), ['A-2', 'B-1']);
-  // The roll line must sit UNDER its own lot's name, not be collected at the end.
-  assert.ok(html.indexOf('LOT-A') < html.indexOf('A-2'), 'A-2 under LOT-A');
-  assert.ok(html.indexOf('A-2') < html.indexOf('LOT-B'), 'A-2 before LOT-B');
-  assert.ok(html.indexOf('LOT-B') < html.indexOf('B-1'), 'B-1 under LOT-B');
+  // The LOT column still lists LOT-A before LOT-B ...
+  assert.ok(lotH.indexOf('LOT-A') < lotH.indexOf('LOT-B'), 'LOT-A before LOT-B');
+  // ... and the ROLL column, aligned sub-line for sub-line, lists A-2 (LOT-A's
+  // roll) before B-1 (LOT-B's roll) in the SAME order.
+  assert.ok(rollH.indexOf('A-2') < rollH.indexOf('B-1'), 'A-2 before B-1');
 });
 
 test('D5 a single roll is STILL named', function () {
@@ -175,7 +202,7 @@ test('D5 a single roll is STILL named', function () {
   const m = material([
     line('L2', 'LOT-B', 8, [{ rollId: 'r9', label: 'B-1', metres: 8 }], 'Q1'),
   ]);
-  const rl = rollLines(lotHtml(m));
+  const rl = rollLines(rollHtml(m));
   assert.strictEqual(rl.length, 1, 'one roll, one named line');
   assert.strictEqual(rl[0].label, 'B-1');
 });
@@ -185,26 +212,29 @@ test('D6 a roll driven to zero by an edit-down drops out', function () {
     line('L1', 'LOT-A', 2, [{ rollId: 'r1', label: 'A-1', metres: 2 },
                             { rollId: 'r2', label: 'A-2', metres: 0 }], 'Q1'),
   ]);
-  const rl = rollLines(lotHtml(m));
+  const rl = rollLines(rollHtml(m));
   assert.strictEqual(rl.length, 1, 'the 0 m roll is not an instruction');
   assert.strictEqual(rl[0].label, 'A-1');
 });
 
-test('D7 no rolls on the line — the lot line still renders, no roll sub-line', function () {
-  // Legacy / not-yet-seeded lot. Must degrade to the old behaviour rather than
-  // throwing or printing an empty bold tag.
+test('D7 no rolls on the line — the lot line still renders; ROLL gets a placeholder, not a gap', function () {
+  // Legacy / not-yet-seeded lot. Must degrade gracefully rather than throwing
+  // or printing an empty bold tag — and the ROLL column must not go visually
+  // blank, which would read as a rendering fault next to a populated LOT line.
   const m = material([line('L1', 'LOT-A', 4, [], 'Q1')]);
-  const html = lotHtml(m);
-  assert.strictEqual(rollLines(html).length, 0);
-  assert.ok(html.indexOf('LOT-A') >= 0, 'the lot itself still shows');
-  assert.ok(html.indexOf('lot-rolls') < 0, 'no empty roll block emitted');
+  const lotH = lotHtml(m);
+  const rollH = rollHtml(m);
+  assert.strictEqual(rollLines(rollH).length, 0, 'no roll to name');
+  assert.ok(lotH.indexOf('LOT-A') >= 0, 'the lot itself still shows');
+  assert.ok(lotH.indexOf('lot-rolls') < 0, 'roll markup never leaks into the LOT column');
+  assert.ok(rollH.indexOf('roll-empty') >= 0, 'ROLL column shows an explicit placeholder');
 });
 
 test('D8 a roll label is HTML-escaped', function () {
   const m = material([
     line('L1', 'LOT-A', 2, [{ rollId: 'r1', label: 'A<script>&', metres: 2 }], 'Q1'),
   ]);
-  const html = lotHtml(m);
+  const html = rollHtml(m);
   assert.ok(html.indexOf('<script>') < 0, 'no raw script tag reaches the DOM');
   assert.ok(html.indexOf('&lt;script&gt;') >= 0, 'escaped instead');
 });
@@ -213,7 +243,7 @@ test('D9 a blank label renders a dash, not an empty bold', function () {
   const m = material([
     line('L1', 'LOT-A', 2, [{ rollId: 'r1', label: '', metres: 2 }], 'Q1'),
   ]);
-  const rl = rollLines(lotHtml(m));
+  const rl = rollLines(rollHtml(m));
   assert.strictEqual(rl.length, 1);
   assert.strictEqual(rl[0].label, '—', 'placeholder rather than a bare <b></b>');
 });
