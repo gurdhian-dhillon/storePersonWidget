@@ -4267,12 +4267,26 @@ function issueForSupervisor(supIdx) {
     var USE_SPLIT_ISSUE = true;
     var ISSUE_API = USE_SPLIT_ISSUE ? 'issueMaterialsApply' : 'issueMaterials';
     // The handover summary is NOT built here - sendHandover builds it from the
-    // chunks that actually landed (see appliedIssues), so a press that dies
-    // part-way records exactly what left the shelf and no more.
-    // One id for this whole press — echoed on every apply chunk. Not stored
-    // server-side; only carried so a log line can tie the chunks together.
+    // requirement rows that actually fanned out, so a press that dies part-way
+    // records exactly what left the shelf and no more.
+    //
+    // ONE ID FOR THIS WHOLE PRESS, AND IT IS STORED SERVER-SIDE NOW.
+    // issueMaterialsApply stamps it on every Material_Requirement row and every
+    // Waste_Movement it writes, so getIssueApplyStatus can be asked, after the
+    // fact, exactly what this press moved. That matters because the statement
+    // limit is not catchable: it kills a chunk mid-way and returns NO response,
+    // so "the call failed" says nothing about how many of its rows landed.
     var applyKey = 'P' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
     var collectedWasteMvIds = [];
+    // Requirement row ids this press is CONFIRMED to have applied - unioned from
+    // each chunk's own reply on the happy path, and re-read from the server by
+    // reconcileApplied() when a chunk gave no reply at all.
+    var confirmedMrqIds = {};
+    var reconcileFailed = false;
+
+    function noteApplied(ids) {
+        (ids || []).forEach(function (id) { confirmedMrqIds[String(id)] = 1; });
+    }
 
     var allErrors = [];
     var chunkIndex = 0;
@@ -4329,12 +4343,72 @@ function issueForSupervisor(supIdx) {
     //
     // The old per-chunk Material_Issue got this for free (a dead press just
     // left fewer vouchers); one-record-per-press has to do it deliberately.
+    //
+    // ROW GRANULARITY, NOT CHUNK GRANULARITY, and that is the whole point of
+    // the apply key. Counting whole chunks answered "which calls came back",
+    // which is not the same question: a chunk killed by the statement limit
+    // returns nothing at all yet may have applied 90 of its 100 rows. Those 90
+    // moved stock, and excluding the whole chunk left every one of them with no
+    // Issue_Line - unreceivable, stranded in In_Transit_Qty, silently. Filtering
+    // the allocations by the rows the SERVER confirms it stamped records exactly
+    // what fanned out, however the press died.
     function appliedIssues() {
         var out = [];
-        for (var i = 0; i < chunkIndex && i < issueChunks.length; i++) {
-            (issueChunks[i] || []).forEach(function (line) { out.push(line); });
-        }
+        (issueChunks || []).forEach(function (chunk) {
+            (chunk || []).forEach(function (line) {
+                var keep = (line.allocations || []).filter(function (a) {
+                    return confirmedMrqIds[String(a.mrqId)];
+                });
+                if (!keep.length) return;
+                // Same line, only the confirmed allocations. issueLines is
+                // sliced to match so buildHandoverSummary's per-piece printed
+                // rows still pair with their allocation.
+                var keptMrq = {};
+                keep.forEach(function (a) { keptMrq[String(a.mrqId)] = 1; });
+                out.push({
+                    materialId: line.materialId,
+                    source: line.source,
+                    isFabric: line.isFabric,
+                    unit: line.unit,
+                    cutWidth: line.cutWidth,
+                    cutLength: line.cutLength,
+                    allocations: keep,
+                    issueLines: (line.issueLines || []).filter(function (il) {
+                        return keptMrq[String(il.mrqId)];
+                    })
+                });
+            });
+        });
         return out;
+    }
+
+    // ASK THE SERVER WHAT IT ACTUALLY STAMPED. Only needed when a chunk gave no
+    // usable reply - on the happy path every chunk reported its own applied ids
+    // and this adds nothing. Failure here is not fatal: we fall back to whatever
+    // the chunks did manage to report, and say so.
+    function reconcileApplied(done) {
+        if (!USE_SPLIT_ISSUE) { done(); return; }
+        ZOHO.CREATOR.DATA.invokeCustomApi({
+            api_name: 'getIssueApplyStatus',
+            http_method: 'POST',
+            payload: { applyKey: applyKey }
+        }).then(function (response) {
+            var parsed;
+            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
+            if (parsed && parsed.mrqIds) noteApplied(parsed.mrqIds);
+            if (parsed && parsed.wasteMvIds && parsed.wasteMvIds.length) {
+                var seen = {};
+                collectedWasteMvIds.forEach(function (w) { seen[String(w)] = 1; });
+                parsed.wasteMvIds.forEach(function (w) {
+                    if (!seen[String(w)]) collectedWasteMvIds.push(String(w));
+                });
+            }
+            done();
+        }).catch(function (err) {
+            console.error('getIssueApplyStatus failed:', err);
+            reconcileFailed = true;
+            done();
+        });
     }
 
     var handoverSent = false;
@@ -4470,6 +4544,12 @@ function issueForSupervisor(supIdx) {
                     collectedWasteMvIds = collectedWasteMvIds.concat(
                         parsed.wasteMvIds.map(String));
                 }
+                // And the requirement rows it stamped. A chunk that answers is
+                // its own reconciliation — getIssueApplyStatus is only needed
+                // for the ones that never answer.
+                if (parsed && parsed.appliedMrqIds) {
+                    noteApplied(parsed.appliedMrqIds);
+                }
             } else if (parsed && !batchVoucher) {
                 // Legacy: capture the batch key off chunk 0's landed reply.
                 batchVoucher = parsed.batchVoucher || parsed.voucher || '';
@@ -4517,22 +4597,40 @@ function issueForSupervisor(supIdx) {
     // a Material_Issue for them the supervisor can never receive that material
     // and it is stranded in In_Transit_Qty. sendHandover writes the record for
     // the applied chunks only, then the abort is reported as before.
+    //
+    // RECONCILE FIRST. The chunk that just died is the one we know least about —
+    // it returned no reply, so its own applied ids are lost with it. Asking the
+    // server which rows carry this press's apply key is the only way to record
+    // the part of it that did land.
     function abortRun(err) {
         console.error('issueMaterials error on chunk ' + chunkIndex + ':', err);
-        sendHandover(function () {
-            closeProgressModal();
-            var batchNum = chunkIndex + 1;
-            var msg = 'Issue stopped at batch ' + batchNum + ' of ' + issueChunks.length + '.\n\n' +
-                'Batches before this one went through and have been recorded as a handover. ' +
-                'Press Issue again to send the rest — it will pick up where it stopped.';
-            if (allErrors.length > 0) {
-                msg += '\n\n' + allErrors.join('\n');
-            }
-            alert(msg);
-            delete btn.dataset.busy;
-            btn.disabled = false;
-            btn.textContent = 'Issue to ' + sup.supervisorName;
-            loadRequirements();
+        showProgressModal('Issuing to ' + sup.supervisorName,
+            'Checking what was issued before the error…');
+        reconcileApplied(function () {
+            sendHandover(function () {
+                closeProgressModal();
+                var batchNum = chunkIndex + 1;
+                var msg = 'Issue stopped at batch ' + batchNum + ' of ' + issueChunks.length + '.\n\n' +
+                    'Everything that actually left the shelf — including any part of batch ' +
+                    batchNum + ' that went through before the error — has been recorded as a ' +
+                    'handover. Press Issue again to send the rest; it will only ask for what is ' +
+                    'still outstanding.';
+                if (reconcileFailed) {
+                    msg = 'Issue stopped at batch ' + batchNum + ' of ' + issueChunks.length +
+                        ', and the check for what had already been issued ALSO failed.\n\n' +
+                        'Some material may have left the shelf without being recorded on a ' +
+                        'handover. Do NOT press Issue again — tell an admin to check ' +
+                        sup.supervisorName + "'s outstanding quantities first.";
+                }
+                if (allErrors.length > 0) {
+                    msg += '\n\n' + allErrors.join('\n');
+                }
+                alert(msg);
+                delete btn.dataset.busy;
+                btn.disabled = false;
+                btn.textContent = 'Issue to ' + sup.supervisorName;
+                loadRequirements();
+            });
         });
     }
 

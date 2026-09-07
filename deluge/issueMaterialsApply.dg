@@ -12,10 +12,13 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 	// apply from the record write is what lets both be true: the apply stays
 	// chunked, the record is a single separate call.
 	//
-	// applyKey is a client-generated id for one press (timestamp + random). It is
-	// echoed back in the response but not stored here - the caller collects the
-	// wasteMvIds this function returns and hands them to issueMaterialsHandover,
-	// which stamps the SIV on them once the voucher exists.
+	// applyKey is a client-generated id for one press (timestamp + random). It IS
+	// stored here - stamped onto every Material_Requirement and Waste_Movement
+	// row this call touches, so getIssueApplyStatus can find them again if this
+	// call's own response is lost (statement-limit kill, network drop). The
+	// caller also collects the wasteMvIds this function returns directly and
+	// hands them to issueMaterialsHandover, which stamps the SIV on them once
+	// the voucher exists.
 	//
 	// Sections 1-4 (allocation apply, remnant picks, lot stock, parent stock) are
 	// a VERBATIM copy of issueMaterials. The only removals are: the Material_Issue
@@ -51,6 +54,20 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 	//  - Raw_Material: Wash_Quantity/Quantity down, In_Transit_Qty up.
 	errJson = "";
 	okJson = "";
+	// The Waste_Movement "Issued" rows this chunk writes (one per waste pick,
+	// across every material). Their Voucher is filled by
+	// issueMaterialsHandover once the SIV exists - the caller unions these
+	// ids across chunks and passes them there.
+	//
+	// Declared HERE, above the try, not inside it. Both lists must exist and be
+	// readable from the catch block even if the function throws before a single
+	// row is touched (e.g. a bad supervisorId) - the catch below reads them
+	// unconditionally to report exactly what applied before any failure.
+	wasteMvIds = List();
+	// Requirement rows this call actually applied. Echoed back so the happy
+	// path needs no reconcile query at all - the widget only has to ask
+	// getIssueApplyStatus when a chunk gave it no answer.
+	appliedMrq = List();
 	// DEBUG WRAPPER: Creator reports every runtime failure as a generic
 	// "code 9430 - There is an error while executing Custom API." Catching it
 	// here surfaces the real Deluge message in the widget console instead.
@@ -60,11 +77,6 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 		issues = issuesJson.toJSONList();
 		keyTxt = ifnull(applyKey,"").toString().trim();
 		info "issueMaterialsApply supId=" + supId + " issueCount=" + issues.size() + " applyKey=" + keyTxt;
-		// The Waste_Movement "Issued" rows this chunk writes (one per waste pick,
-		// across every material). Their Voucher is filled by
-		// issueMaterialsHandover once the SIV exists - the caller unions these
-		// ids across chunks and passes them there.
-		wasteMvIds = List();
 		for each  issue in issues
 		{
 			// toJSONList() yields JSON objects, NOT Deluge Maps - .get() silently
@@ -154,23 +166,67 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 					{
 						for each  mrq in mrqRecs
 						{
-							mrq.Issued_Qty=ifnull(mrq.Issued_Qty,0) + giveQty;
-							if(isFab == true)
+							// RETRY GUARD. If this exact row already carries THIS
+							// press's Apply_Key, the counters below already ran for
+							// it - a rate-limit retry replays the same chunk under
+							// the same applyKey when the first attempt's response
+							// was lost but its writes landed. Re-adding giveQty a
+							// second time would double Issued_Qty and every stock
+							// move that follows. Skip the counters, still count the
+							// row as applied so the response (and appliedMrq) stay
+							// correct.
+							alreadyApplied = keyTxt != "" && ifnull(mrq.Apply_Key,"").toString().trim() == keyTxt;
+							if(alreadyApplied == false)
 							{
-								mrq.Pieces_From_Raw=ifnull(mrq.Pieces_From_Raw,0) + giveRaw;
-								mrq.Pieces_From_Waste=ifnull(mrq.Pieces_From_Waste,0) + giveWaste;
-								// WRITTEN ONLY WHEN EMPTY. The first lot decides the
-								// tone; a second write would rewrite history, and the
-								// widget reads this back to pin the next issue.
-								if(issLotStr != "" && ifnull(mrq.Issued_Lot,"").toString().trim() == "")
+								// THE FAN-OUT WATERMARK, WRITTEN FIRST ON PURPOSE.
+								//
+								// This row now carries the id of the press that moved it, so
+								// getIssueApplyStatus can tell the handover EXACTLY which rows
+								// fanned out - instead of the widget inferring it from which
+								// HTTP calls came back. The statement limit is NOT catchable:
+								// it kills the script mid-chunk with no response at all, so a
+								// chunk that "failed" may still have applied most of its rows.
+								// Without this they move stock and get no Issue_Line, and that
+								// material can never be received - it sits in In_Transit_Qty
+								// for ever with nothing anywhere saying so.
+								//
+								// FIRST, BEFORE THE COUNTERS, and the order is the whole
+								// argument. Dying between them loses one row either way.
+								// Key-then-counters leaves a row STAMPED but not yet counted:
+								// getIssueApplyStatus and the handover pick it up, the
+								// supervisor sees it as issued, and if the stock in fact never
+								// moved he disputes it on receipt - which is what the dispute
+								// flow exists for. Counters-then-key is the invisible outcome:
+								// stock already moved OUT of the row but no key means
+								// getIssueApplyStatus never finds it and it is silently
+								// stranded in In_Transit_Qty for ever. A visible disagreement
+								// beats an invisible one.
+								if(keyTxt != "")
 								{
-									mrq.Issued_Lot=issLotStr.toLong();
+									mrq.Apply_Key=keyTxt;
+								}
+								mrq.Issued_Qty=ifnull(mrq.Issued_Qty,0) + giveQty;
+								if(isFab == true)
+								{
+									mrq.Pieces_From_Raw=ifnull(mrq.Pieces_From_Raw,0) + giveRaw;
+									mrq.Pieces_From_Waste=ifnull(mrq.Pieces_From_Waste,0) + giveWaste;
+									// WRITTEN ONLY WHEN EMPTY. The first lot decides the
+									// tone; a second write would rewrite history, and the
+									// widget reads this back to pin the next issue.
+									if(issLotStr != "" && ifnull(mrq.Issued_Lot,"").toString().trim() == "")
+									{
+										mrq.Issued_Lot=issLotStr.toLong();
+									}
 								}
 							}
 						}
-						issuedTotal = issuedTotal + giveQty;
-						piecesFromWasteTot = piecesFromWasteTot + giveWaste;
-						piecesFromRawTot = piecesFromRawTot + giveRaw;
+						appliedMrq.add(mrqId);
+						if(alreadyApplied == false)
+						{
+							issuedTotal = issuedTotal + giveQty;
+							piecesFromWasteTot = piecesFromWasteTot + giveWaste;
+							piecesFromRawTot = piecesFromRawTot + giveRaw;
+						}
 					}
 				}
 				//--------------------------------------------------------------
@@ -283,6 +339,15 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 						// No Received_Count here - receipt is its own movement
 						// pointing back at this one. Voucher is left blank and
 						// filled by issueMaterialsHandover.
+						//
+						// Apply_Key is stamped INSIDE this insert, not in a follow-up
+						// update loop - same watermark as the requirement rows above,
+						// same reason. A statement-limit kill right after the insert
+						// would otherwise leave the row created with a blank key,
+						// findable by nothing: getIssueApplyStatus filters on
+						// Apply_Key, so an un-stamped movement never reaches the
+						// handover and its SIV is never filled in. Stamping it in the
+						// same statement as the insert removes that window entirely.
 						newMvId = insert into Waste_Movement
 						[
 							Movement_Type="Issued"
@@ -294,6 +359,7 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 							Pieces_Yielded=takePcs * yieldPer
 							Moved_On=zoho.currentdate
 							Added_User=zoho.loginuser
+							Apply_Key=keyTxt
 						];
 						for each  mv in Waste_Movement[ID == newMvId.toLong()]
 						{
@@ -487,7 +553,35 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 	catch (e)
 	{
 		// Surfaces as an alert in the widget via the existing errors[] handling.
-		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"issued\":[],\"wasteMvIds\":[]}";
+		//
+		// appliedMrq / wasteMvIds are NOT reset here - Deluge has no block scope,
+		// so whatever this call accumulated before the throw is still sitting in
+		// those two lists, declared at the top of the outer try. A caught
+		// exception (a bad record, a type surprise) after N rows already applied
+		// must still report those N: hardcoding empty arrays here was the exact
+		// silent-stranding bug the applyKey watermark exists to close, on a
+		// second path - the widget saw zero applied, moved on, and never asked
+		// getIssueApplyStatus because the response looked complete, not missing.
+		errTxt = "DELUGE: " + e.toString().replaceAll("\"","'");
+		wmJson2 = "";
+		for each  w in wasteMvIds
+		{
+			if(wmJson2 != "")
+			{
+				wmJson2 = wmJson2 + ",";
+			}
+			wmJson2 = wmJson2 + "\"" + w + "\"";
+		}
+		amJson2 = "";
+		for each  am in appliedMrq
+		{
+			if(amJson2 != "")
+			{
+				amJson2 = amJson2 + ",";
+			}
+			amJson2 = amJson2 + "\"" + am + "\"";
+		}
+		return "{\"errors\":[\"" + errTxt + "\"],\"issued\":[],\"wasteMvIds\":[" + wmJson2 + "],\"appliedMrqIds\":[" + amJson2 + "]}";
 	}
 	// Built by hand - List.toString() does not reliably wrap in [].
 	// wasteMvIds: the Waste_Movement rows this chunk created. The caller unions
@@ -502,5 +596,14 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 		}
 		wmJson = wmJson + "\"" + w + "\"";
 	}
-	return "{\"errors\":[" + errJson + "],\"issued\":[" + okJson + "],\"wasteMvIds\":[" + wmJson + "]}";
+	amJson = "";
+	for each  am in appliedMrq
+	{
+		if(amJson != "")
+		{
+			amJson = amJson + ",";
+		}
+		amJson = amJson + "\"" + am + "\"";
+	}
+	return "{\"errors\":[" + errJson + "],\"issued\":[" + okJson + "],\"wasteMvIds\":[" + wmJson + "],\"appliedMrqIds\":[" + amJson + "]}";
 }
