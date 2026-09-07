@@ -3756,35 +3756,110 @@ function buildFabricIssueLine(m, picks) {
     });
 
     // ---- lotMoves: m.lotLines grouped by lot ----
+    // rolls[] is WHICH PHYSICAL ROLLS this lot's cut came off and how many
+    // metres off each, summed the same way qty is — several lotLines entries
+    // can share a roll (a roll draining across two orders on this card), and
+    // the true total off that roll is their SUM, never the largest single line.
+    // issueMaterialsApply reads this to decrement Lot_Rolls.Roll_Length; without
+    // it the server has only the lot-level total and no roll to charge it to.
+    //
+    // ROLLSSHARED IS THE SAME EXCEPTION rollLinesFor (above, the display
+    // reader) already carries a guard for: applyFabricOverride stamps EVERY
+    // line of an edited lot with the SAME rolls[] array, byte for byte
+    // (ln.rollsShared = true — see its own comment in lot-allocator.js).
+    // Those lines are not independent draws to sum, they are one draw written
+    // out several times — summing them here would charge Lot_Rolls that many
+    // times over for one edit. Take the first such line's array once per lot,
+    // skip the rest, exactly as the display does.
+    //
+    // ASSUMES ALL-OR-NOTHING PER LOT: every lotLines row of a given lot is
+    // EITHER rollsShared or none of them are — applyFabricOverride stamps the
+    // WHOLE lot uniformly when it edits it (lot-allocator.js's own comment:
+    // "every line of THIS LOT"), and no other writer sets the flag. A mixed
+    // lot (some rows shared, some not) is not reachable via the current
+    // allocator, and the "first line wins" guard below is order-dependent if
+    // it ever were — the first-seen shared line's array would be taken as the
+    // lot's answer even if an earlier non-shared line had already contributed
+    // its own (correct, per-row) rolls into the same bucket.
     var moveByLot = {};
     var moveOrder = [];
     lotLines.forEach(function (ln) {
         var k = String(ln.lotId);
         if (!moveByLot[k]) {
-            moveByLot[k] = { lotId: ln.lotId, qty: 0, isPieces: false, pieces: [] };
+            moveByLot[k] = { lotId: ln.lotId, qty: 0, isPieces: false, pieces: [], rolls: [], rollsSharedSeen: false };
             moveOrder.push(k);
         }
-        moveByLot[k].qty = round2(moveByLot[k].qty + (Number(ln.qty) || 0));
+        var bucket = moveByLot[k];
+        bucket.qty = round2(bucket.qty + (Number(ln.qty) || 0));
         (ln.pieces || []).forEach(function (p) {
-            moveByLot[k].isPieces = true;
-            moveByLot[k].pieces.push({
+            bucket.isPieces = true;
+            bucket.pieces.push({
                 pieceId: p.pieceId,
                 count: Number(p.count) || 0,
                 cutLengthCm: Number(p.cutLengthCm) || 0
             });
         });
+        if (ln.rollsShared) {
+            if (bucket.rollsSharedSeen) return;   // already have the lot's one true copy
+            bucket.rollsSharedSeen = true;
+        }
+        var rollById = {};
+        bucket.rolls.forEach(function (r) { rollById[String(r.rollId)] = r; });
+        (ln.rolls || []).forEach(function (rl) {
+            var rid = String(rl.rollId);
+            var mtr = round2(Number(rl.metres) || 0);
+            if (rollById[rid]) {
+                rollById[rid].metres = round2(rollById[rid].metres + mtr);
+            } else {
+                var r = { rollId: rid, label: String(rl.label || ''), metres: mtr };
+                rollById[rid] = r;
+                bucket.rolls.push(r);
+            }
+        });
     });
-    var lotMoves = moveOrder.map(function (k) { return moveByLot[k]; });
+    var lotMoves = moveOrder.map(function (k) {
+        var bucket = moveByLot[k];
+        delete bucket.rollsSharedSeen;
+        return bucket;
+    });
 
     // ---- allocations: one per REQUIREMENT ROW the allocator served ----
     // giveQty / giveRaw / giveWaste come STRAIGHT off the allocator's lotLines
     // (fromRaw / fromWaste added in spend()) — never recomputed here. A demand
     // covered entirely by offcuts has no lotLine, so its waste credit is
     // recovered from the physical picks instead.
+    //
+    // rollsByMrq carries the SAME per-roll breakdown lotMoves does, but keyed to
+    // this requirement row rather than the whole lot — issueMaterialsHandover
+    // stamps Issue_Lines.Roll_Label from it. Summed across every lotLine this
+    // mrq drew from, same reasoning as lotMoves: a roll can serve two lines.
+    //
+    // EXCEPT ON A ROLLSSHARED LOT (applyFabricOverride, the hand-edit path).
+    // There, EVERY line of the lot carries the SAME full-lot rolls[] array —
+    // it is one draw written out several times, not each row's own share (see
+    // the comment on `ln.rollsShared` in lot-allocator.js). Attributing that
+    // whole-lot array to a single mrqId would claim every row cut the lot's
+    // entire draw, and the handover merge below would then sum it again across
+    // every allocation of the lot — a compounding double-count on top of a
+    // wrong attribution. So a rollsShared row gets NO per-mrq roll list; the
+    // handover merge falls back to the lot-level answer (lotMoves, already
+    // deduped above) for those lines instead.
+    //
+    // sharedLotByMrq[q] IS OVERWRITTEN, NOT FIRST-WINS, unlike lotByMrq[q]
+    // beside it — relies on the one-order-one-lot atom rule (see
+    // lot-rolls-model.md) holding for a SINGLE mrq: applyFabricOverride edits
+    // one lot's box at a time, so a shared line for one mrqId cannot name two
+    // different lots in practice. If that rule is ever relaxed, the handover
+    // merge below would resolve the label from whichever lot this overwrites
+    // to last, not necessarily the lot the line's OWN qty/lot key point at —
+    // label-only (the server-side decrement stays correct, keyed per lot in
+    // lotMoves independently of this), but worth re-checking here first.
     var qtyByMrq = {};
     var rawByMrq = {};
     var wasteByMrq = {};
     var lotByMrq = {};
+    var rollsByMrq = {};
+    var sharedLotByMrq = {};
     var mrqOrder = [];
     var seenMrq = {};
     lotLines.forEach(function (ln) {
@@ -3792,12 +3867,29 @@ function buildFabricIssueLine(m, picks) {
         if (!q) return;
         if (!seenMrq[q]) {
             seenMrq[q] = true; mrqOrder.push(q);
-            qtyByMrq[q] = 0; rawByMrq[q] = 0; wasteByMrq[q] = 0;
+            qtyByMrq[q] = 0; rawByMrq[q] = 0; wasteByMrq[q] = 0; rollsByMrq[q] = [];
         }
         qtyByMrq[q] = round2(qtyByMrq[q] + (Number(ln.qty) || 0));
         rawByMrq[q] += Number(ln.fromRaw) || 0;
         wasteByMrq[q] += Number(ln.fromWaste) || 0;
         if (!lotByMrq[q]) lotByMrq[q] = ln.lotId;
+        if (ln.rollsShared) {
+            sharedLotByMrq[q] = String(ln.lotId);
+            return;   // no per-row attribution — see the note above
+        }
+        var rollById2 = {};
+        rollsByMrq[q].forEach(function (r) { rollById2[String(r.rollId)] = r; });
+        (ln.rolls || []).forEach(function (rl) {
+            var rid = String(rl.rollId);
+            var mtr = round2(Number(rl.metres) || 0);
+            if (rollById2[rid]) {
+                rollById2[rid].metres = round2(rollById2[rid].metres + mtr);
+            } else {
+                var r2 = { rollId: rid, label: String(rl.label || ''), metres: mtr };
+                rollById2[rid] = r2;
+                rollsByMrq[q].push(r2);
+            }
+        });
     });
 
     // ---- wastePicks payload, and the offcut-only credit fallback ----
@@ -3880,7 +3972,16 @@ function buildFabricIssueLine(m, picks) {
             giveQty: round2(qtyByMrq[q] || 0),
             giveRaw: raw,
             giveWaste: wst,
-            issuedLot: String(lotByMrq[q] || '')
+            issuedLot: String(lotByMrq[q] || ''),
+            // Which physical roll(s) this row's fresh cloth came off — empty
+            // for a row served entirely by offcuts, and ALSO empty on a
+            // rollsShared (hand-edited) lot, where no row-level share exists
+            // to report. issueMaterialsHandover reads this to stamp
+            // Issue_Lines.Roll_Label; sharedLot tells buildHandoverSummary to
+            // fall back to the lot-level answer instead of this row's (empty)
+            // one for those lines.
+            rolls: rollsByMrq[q] || [],
+            sharedLot: sharedLotByMrq[q] || ''
         };
     });
 
@@ -3997,7 +4098,12 @@ function buildHandoverSummary(issues) {
                         unit: unit,
                         cutW: Number(il.cutW) || 0,
                         cutL: Number(il.cutL) || 0,
-                        printed: true
+                        printed: true,
+                        // Printed cloth is short rolls too, but this widget
+                        // does not yet resolve which one a given piece came
+                        // off (see lot-rolls-model.md's Fabric_Piece
+                        // retirement note) - left blank rather than guessed.
+                        rolls: {}, rollOrder: []
                     };
                     order.push(key);
                 });
@@ -4012,7 +4118,7 @@ function buildHandoverSummary(issues) {
                     materialId: matId, lot: lot,
                     qty: 0, piecesFromRaw: 0, piecesFromWaste: 0,
                     unit: unit, cutW: Number(a.cutW) || 0, cutL: Number(a.cutL) || 0,
-                    printed: false
+                    printed: false, rolls: {}, rollOrder: [], sharedLotSeen: false
                 };
                 byKey[k] = cur;
                 order.push(k);
@@ -4022,12 +4128,63 @@ function buildHandoverSummary(issues) {
             cur.qty += giveQty;
             cur.piecesFromRaw += giveRaw;
             cur.piecesFromWaste += giveWaste;
+            // Merge this allocation's roll breakdown into the material×lot
+            // line's own — a handover line can span several rolls (drained
+            // across several allocations of the same material+lot), and the
+            // true metres off one roll is the sum across all of them, same
+            // reasoning as lotMoves / rollsByMrq above.
+            //
+            // ON A ROLLSSHARED (hand-edited) LOT, a.rolls is deliberately empty
+            // (buildFabricIssueLine skips per-row attribution for exactly the
+            // reason lotMoves does — the lot stamps every row with its WHOLE
+            // draw, so no row has its own share to report). The true answer
+            // lives on this issue's own lotMoves entry for that lot, already
+            // deduped once per lot there. Pull it in ONCE per handover line,
+            // never once per allocation, or a lot edited and split across
+            // several allocations would have its rolls added again for each.
+            if (a.sharedLot) {
+                if (!cur.sharedLotSeen) {
+                    cur.sharedLotSeen = true;
+                    var lm = (line.lotMoves || []).filter(function (x) {
+                        return String(x.lotId) === String(a.sharedLot);
+                    })[0];
+                    ((lm && lm.rolls) || []).forEach(function (rl) {
+                        var rid = String(rl.rollId);
+                        if (!cur.rolls[rid]) {
+                            cur.rolls[rid] = { rollId: rid, label: String(rl.label || ''), metres: round2(Number(rl.metres) || 0) };
+                            cur.rollOrder.push(rid);
+                        }
+                    });
+                }
+            } else {
+                (a.rolls || []).forEach(function (rl) {
+                    var rid = String(rl.rollId);
+                    var mtr = round2(Number(rl.metres) || 0);
+                    if (cur.rolls[rid]) {
+                        cur.rolls[rid].metres = round2(cur.rolls[rid].metres + mtr);
+                    } else {
+                        cur.rolls[rid] = { rollId: rid, label: String(rl.label || ''), metres: mtr };
+                        cur.rollOrder.push(rid);
+                    }
+                });
+            }
         });
     });
 
     var lines = order.map(function (k) {
         var r = byKey[k];
         r.qty = round2(r.qty);
+        var rollList = (r.rollOrder || []).map(function (rid) { return r.rolls[rid]; });
+        delete r.rolls;
+        delete r.rollOrder;
+        delete r.sharedLotSeen;
+        // Roll_Label on the Issue_Line: the single roll's label, or every
+        // roll this line drew from joined the same way the allocator's own
+        // cutSummary reads on screen — one string a person can read at a
+        // glance, not a structure they have to unpack.
+        r.rollLabel = rollList.length === 1
+            ? rollList[0].label
+            : rollList.map(function (rl) { return rl.label + ' ' + round2(rl.metres) + 'm'; }).join(', ');
         return r;
     }).filter(function (r) {
         // Drop a genuinely empty bucket (no qty, no pieces).
@@ -4375,7 +4532,17 @@ function issueForSupervisor(supIdx) {
                     allocations: keep,
                     issueLines: (line.issueLines || []).filter(function (il) {
                         return keptMrq[String(il.mrqId)];
-                    })
+                    }),
+                    // buildHandoverSummary's rollsShared fallback reads THIS
+                    // line's lotMoves to resolve Roll_Label on a hand-edited
+                    // lot (see allocations[].sharedLot). Dropping it here left
+                    // that fallback looking at undefined on the one path that
+                    // actually matters — every real press runs through
+                    // appliedIssues, not the raw issueChunks. On a split line
+                    // this rides the FIRST slice only, same as every other
+                    // slice-riding field in this object; an edited lot spread
+                    // across slices resolves to whichever slice landed first.
+                    lotMoves: line.lotMoves || []
                 });
             });
         });

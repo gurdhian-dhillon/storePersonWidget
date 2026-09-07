@@ -35,9 +35,15 @@ string issueMaterialsHandover(string supervisorId, string handoverJson)
 	//   "lines": [
 	//     { "materialId":"123", "lot":"901", "qty":45.50,
 	//       "piecesFromRaw":120, "piecesFromWaste":8,
-	//       "unit":"Mtr", "cutW":55, "cutL":55 }
+	//       "unit":"Mtr", "cutW":55, "cutL":55,
+	//       "rollLabel":"L2-R1" }
 	//   ]
 	// }
+	//
+	// rollLabel - the physical roll(s) this line's fresh cloth came off, lot-
+	// rolls-model.md Step 5. One label, or several joined "L2-R1 5m, L2-R2
+	// 1.05m" when the line drained more than one roll. Empty for a trim, an
+	// offcut-only line, or a printed piece.
 	//
 	// One "lines" entry per (material, lot) the press issued. The widget builds
 	// it by summing what it sent to the apply calls. A trim with no lot uses
@@ -50,8 +56,9 @@ string issueMaterialsHandover(string supervisorId, string handoverJson)
 	//    Source_System="JS_API", Line_Count, Total_Qty, Plan_Count.
 	//    NO Batch_Voucher, NO Batch_Head - one row per press.
 	//  - Issue_Lines: Material, Material_Name, Lot, Qty, Pieces_From_Raw,
-	//    Pieces_From_Waste, Unit, Cut_Size_Width/Length, Received_Qty=0,
-	//    Disputed_Qty=0, Settled_Qty=0, Transferred_Qty unset, Line_Status="Issued".
+	//    Pieces_From_Waste, Unit, Cut_Size_Width/Length, Roll_Label (when the
+	//    payload carries one), Received_Qty=0, Disputed_Qty=0, Settled_Qty=0,
+	//    Transferred_Qty unset, Line_Status="Issued".
 	//  - Waste_Movement "Issued": Voucher set to the new SIV.
 	errJson = "";
 	voucherOut = "";
@@ -241,6 +248,18 @@ string issueMaterialsHandover(string supervisorId, string handoverJson)
 				if(lotTxt != "" && lotTxt.isNumber() == true)
 				{
 					liRow.Lot=lotTxt.toLong();
+				}
+				// THE ROLL, lot-rolls-model.md Step 5. Empty for a trim, an
+				// offcut-only line, or a printed piece (no roll resolution
+				// yet - see the note on the widget side). One roll's label,
+				// or every roll this line drew from joined the same way the
+				// allocator's own on-screen summary reads - what the
+				// supervisor's receive card and history show is exactly what
+				// the store person was told to cut.
+				rlLabelTxt = ifnull(ln.get("rollLabel"),"").toString().trim();
+				if(rlLabelTxt != "")
+				{
+					liRow.Roll_Label=rlLabelTxt;
 				}
 				mi.Issue_Lines.insert(liRow);
 			}

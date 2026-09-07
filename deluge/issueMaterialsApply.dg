@@ -130,6 +130,32 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 				issuedTotal = 0.0;
 				piecesFromWasteTot = 0;
 				piecesFromRawTot = 0;
+				// RETRY GUARD FOR SECTIONS 2 AND 3 (waste picks, lot moves, roll
+				// decrement). None of those carry their own Apply_Key the way
+				// Material_Requirement does, so they cannot answer "did THIS
+				// move already" on their own. Approximated instead off section
+				// 1: if every allocation on this material line turns out to
+				// already carry this press's Apply_Key, the whole line is a
+				// pure retry of an already-landed chunk, and everything named in
+				// its picks/lotMoves already moved with it - re-running would
+				// move it a second time. Any allocation that is genuinely new
+				// makes the whole line's moves due again.
+				//
+				// ASSUMES A RETRIED CHUNK IS ALL-OLD OR ALL-NEW, NEVER MIXED.
+				// True because a retry replays the WHOLE chunk verbatim under
+				// the same applyKey - either the first attempt's response was
+				// lost after every row landed (all-old) or the call never
+				// completed (all-new). The one way this could see a genuine
+				// mixed line is main.js's isRateLimited() false-triggering on
+				// error TEXT that happens to contain a match ("429" inside a
+				// SKU like RM-4291) for a call that in fact failed outright with
+				// SOME rows applied and some not - a real partial failure
+				// misclassified as a retryable rate limit. Low probability
+				// (main.js's own comment already accepts the false-positive
+				// risk, "costs one wait"), not fixed here - narrowing that
+				// matcher is a change to shared retry logic outside this fix's
+				// scope. If it is ever tightened, this assumption is why.
+				anyNewAlloc = false;
 				for each  alloc in allocs
 				{
 					a = alloc.toMap();
@@ -226,8 +252,18 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 							issuedTotal = issuedTotal + giveQty;
 							piecesFromWasteTot = piecesFromWasteTot + giveWaste;
 							piecesFromRawTot = piecesFromRawTot + giveRaw;
+							anyNewAlloc = true;
 						}
 					}
+				}
+				// No allocations on this line at all (should not happen for a
+				// lotMoves-bearing line in practice, but never silently skip a
+				// roll decrement for a shape this guard was not designed to
+				// judge) - default to "due", the behaviour before this guard
+				// existed.
+				if(allocs.size() == 0)
+				{
+					anyNewAlloc = true;
 				}
 				//--------------------------------------------------------------
 				// 2. CONSUME REMNANT PICKS. One point lookup per Waste_Master.
@@ -295,6 +331,20 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 					else if(takePcs <= 0)
 					{
 						info "issueMaterialsApply: waste pick " + wId + " asked 0 pieces - skipped";
+					}
+					else if(anyNewAlloc == false)
+					{
+						// RETRY GUARD, same class as section 3's. A rate-limit
+						// retry replays this whole chunk under the same applyKey
+						// when the first attempt's writes landed but its response
+						// was lost - section 1 already found every allocation on
+						// this line pre-stamped and set anyNewAlloc false. Without
+						// this, a retried pick would consume Waste_Master a second
+						// time AND mint a second "Issued" Waste_Movement carrying
+						// the SAME Apply_Key - getIssueApplyStatus would then hand
+						// the handover two movement ids for one physical pick,
+						// each independently receivable: double-receivable waste.
+						info "issueMaterialsApply: waste pick " + wId + " skipped - this line already applied under key " + keyTxt;
 					}
 					else
 					{
@@ -404,6 +454,22 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 						}
 						errJson = errJson + "\"" + matName + ": lot " + lotId + " not found\"";
 					}
+					else if(anyNewAlloc == false)
+					{
+						// RETRY GUARD FOR THE WHOLE LOT MOVE, 3a AND 3b TOGETHER.
+						// A rate-limit retry replays this chunk under the same
+						// applyKey when the first attempt's writes landed but its
+						// response was lost - section 1 above already detected
+						// that (every allocation on this line already carried
+						// this Apply_Key) and set anyNewAlloc false. Skipping ONLY
+						// the roll decrement here and letting Wash_Quantity
+						// decrement again would desync the two invariants against
+						// each other worse than either alone: Wash_Quantity wrong
+						// by one extra moveQty, Roll_Length correct, and
+						// verifyLotSync has no way to tell which one lied. Both
+						// move together, or neither does.
+						info "issueMaterialsApply: lot " + lotId + " move skipped - this line already applied under key " + keyTxt;
+					}
 					else
 					{
 						for each  lotMv in lotRecs
@@ -432,8 +498,113 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 							lotMv.Wash_Quantity=newWash;
 							lotMv.In_Transit_Qty=lmtS.toDecimal() + moveQty;
 						}
-						if(isPieces == true)
+						//----------------------------------------------------
+						// 3b. DECREMENT THE NAMED ROLL(S). lot-rolls-model.md
+						// Step 5. The lot-level Wash_Quantity above is the
+						// existing invariant readers still depend on; this is
+						// the ADDITIONAL per-roll ledger the allocator's roll
+						// choice depends on being kept in sync.
+						//
+						// THROUGH THE PARENT, NOT A BARE SUBFORM QUERY.
+						// Lot_Rolls is a subform nested under Raw_Material_Lot
+						// (lot-rolls-model.md Step 0) - it is not a standalone
+						// form, and querying it directly ("Lot_Rolls[ID == …]")
+						// would be the first place in this repo to do that.
+						// Every other writer (seedLotRolls.dg) reaches a
+						// Lot_Rolls row only through its parent -
+						// lotRec.Lot_Rolls.insert(...), for each in
+						// lotRec.Lot_Rolls - so this hops through the SAME
+						// lotRecs query result the Wash_Quantity block above
+						// already opened, re-iterated under a second loop
+						// variable (lotMv2, not lotMv) rather than a bare
+						// Lot_Rolls[ID==...] query. This re-iterates lotRecs a
+						// second time SEQUENTIALLY, after the first for-each has
+						// fully closed - not the "two live iterators over the
+						// same list" failure mode CLAUDE.md documents, which is
+						// simultaneous iteration. Still unverified here (no
+						// Execute yet) alongside the parent-hop pattern itself.
+						//
+						// RE-READ FRESH, INSIDE THIS EXECUTION, IMMEDIATELY
+						// BEFORE THE DECREMENT - the concurrency rule in the
+						// doc. The allocator read Roll_Length once, on the
+						// widget, before this call; two issues racing the same
+						// roll would both see it at full length there. Reading
+						// it again here, right before writing, is what a
+						// second concurrent issue actually sees.
+						//
+						// CAP AND ERROR, NEVER SPILL. If the payload asks for
+						// more than THIS roll currently holds, clamp to what
+						// is there and report it - never take the shortfall
+						// off a different roll. The allocator read the same
+						// rolls the widget displayed, so this firing means the
+						// data moved between read and write (a concurrent
+						// issue, a receive, a dispute correction) - a
+						// concurrency failure to report, not a shortfall to
+						// solve here.
+						//----------------------------------------------------
+						rollsIn = ifnull(lm.get("rolls"),"[]").toString().toJSONList();
+						for each  rlRaw in rollsIn
 						{
+							rl = rlRaw.toMap();
+							rlId = ifnull(rl.get("rollId"),"").toString().trim();
+							rlLabel = ifnull(rl.get("label"),"").toString().trim();
+							rlMtrStr = ifnull(rl.get("metres"),"0").toString().trim();
+							if(rlMtrStr == "")
+							{
+								rlMtrStr = "0";
+							}
+							rlMtr = rlMtrStr.toDecimal();
+							if(rlId != "" && rlId.isNumber() == true && rlMtr > 0)
+							{
+								rollFound = false;
+								for each  lotMv2 in lotRecs
+								{
+									for each  rollRow in lotMv2.Lot_Rolls
+									{
+										if(rollRow.ID.toString() == rlId)
+										{
+											rollFound = true;
+											rlHaveStr = ifnull(rollRow.Roll_Length,"0").toString().trim();
+											if(rlHaveStr == "")
+											{
+												rlHaveStr = "0";
+											}
+											rlHave = rlHaveStr.toDecimal();
+											rlTake = rlMtr;
+											if(rlTake > rlHave)
+											{
+												if(errJson != "")
+												{
+													errJson = errJson + ",";
+												}
+												errJson = errJson + "\"" + matName + ": roll " + ifnull(rollRow.Roll_Label,rlLabel).toString() + " has " + rlHave + "m, asked " + rlMtr + "m - clamped, check for a concurrent issue\"";
+												info "issueMaterialsApply: roll " + rlId + " Roll_Length would go negative - clamped to 0";
+												rlTake = rlHave;
+											}
+											rlLeft = rlHave - rlTake;
+											rollRow.Roll_Length = rlLeft;
+											if(rlLeft <= 0)
+											{
+												rollRow.Roll_Status = "Consumed";
+											}
+										}
+									}
+								}
+								if(rollFound == false)
+								{
+									if(errJson != "")
+									{
+										errJson = errJson + ",";
+									}
+									errJson = errJson + "\"" + matName + ": roll " + rlLabel + " (" + rlId + ") not found on lot " + lotId + "\"";
+								}
+							}
+						}
+						if(isPieces == true && anyNewAlloc == true)
+						{
+							// Same retry guard as 3a/3b above - a printed-piece
+							// split is a stock move too, and re-running it on a
+							// retry would split the remainder a second time.
 							pcList = ifnull(lm.get("pieces"),"[]").toString().toJSONList();
 							for each  pcRaw in pcList
 							{

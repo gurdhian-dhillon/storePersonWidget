@@ -137,6 +137,58 @@ test('fabric, two lots -> two material×lot lines', () => {
   assert.strictEqual(l2.qty, 4.25); assert.strictEqual(l2.piecesFromRaw, 8);
 });
 
+test('roll label: one roll -> bare label; several -> joined "label Xm" list', () => {
+  const s = assertParity([{
+    materialId: 'M9', unit: 'Mtr', isFabric: true,
+    allocations: [
+      // r1 drew from a single roll -> Roll_Label should be just its label.
+      { mrqId: 'r1', planId: 'p1', giveQty: 5, giveRaw: 10, giveWaste: 0, issuedLot: 'L9',
+        rolls: [{ rollId: 'roll1', label: 'L9-R1', metres: 5 }] },
+      // r2 shares the SAME material+lot but a DIFFERENT roll -> the line
+      // merges (same key as r1) and must carry BOTH rolls.
+      { mrqId: 'r2', planId: 'p1', giveQty: 3, giveRaw: 6, giveWaste: 0, issuedLot: 'L9',
+        rolls: [{ rollId: 'roll2', label: 'L9-R2', metres: 3 }] }
+    ],
+    issueLines: [
+      { mrqId: 'r1', qty: 5, cutW: 55, cutL: 55, note: '' },
+      { mrqId: 'r2', qty: 3, cutW: 55, cutL: 55, note: '' }
+    ]
+  }]);
+  assert.strictEqual(s.lines.length, 1);
+  assert.strictEqual(s.lines[0].qty, 8);
+  assert.strictEqual(s.lines[0].rollLabel, 'L9-R1 5m, L9-R2 3m');
+});
+
+test('roll label: one roll fed by two allocations -> metres SUM, single label', () => {
+  const s = assertParity([{
+    materialId: 'M10', unit: 'Mtr', isFabric: true,
+    allocations: [
+      { mrqId: 'r1', planId: 'p1', giveQty: 4, giveRaw: 8, giveWaste: 0, issuedLot: 'L10',
+        rolls: [{ rollId: 'rollX', label: 'L10-R1', metres: 4 }] },
+      { mrqId: 'r2', planId: 'p1', giveQty: 2, giveRaw: 4, giveWaste: 0, issuedLot: 'L10',
+        rolls: [{ rollId: 'rollX', label: 'L10-R1', metres: 2 }] }
+    ],
+    issueLines: [
+      { mrqId: 'r1', qty: 4, cutW: 55, cutL: 55, note: '' },
+      { mrqId: 'r2', qty: 2, cutW: 55, cutL: 55, note: '' }
+    ]
+  }]);
+  assert.strictEqual(s.lines.length, 1);
+  assert.strictEqual(s.lines[0].rollLabel, 'L10-R1');
+});
+
+test('roll label: offcut-only line (no rolls) -> empty label', () => {
+  const s = assertParity([{
+    materialId: 'M11', unit: 'Mtr', isFabric: true,
+    allocations: [
+      { mrqId: 'r1', planId: 'p1', giveQty: 0, giveRaw: 0, giveWaste: 6, issuedLot: '' }
+    ],
+    issueLines: [{ mrqId: 'r1', qty: 0, cutW: 55, cutL: 55, note: '' }]
+  }]);
+  assert.strictEqual(s.lines.length, 1);
+  assert.strictEqual(s.lines[0].rollLabel, '');
+});
+
 test('same material, same lot, two requirements -> merged into one line', () => {
   const s = assertParity([{
     materialId: 'M2', unit: 'Mtr', isFabric: true,
