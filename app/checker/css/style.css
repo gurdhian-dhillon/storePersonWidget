@@ -277,33 +277,41 @@ body {
 .outcome-order.is-ok { color: var(--status-success); font-weight: 600; }
 
 @media (max-width: 640px) {
-    .app-container { padding: 0.75rem; }
-    .app-header { flex-direction: column; align-items: stretch; gap: 0.75rem; }
-    .app-header-right { width: 100%; display: flex; gap: 0.5rem; }
-    .sup-select { flex: 1 1 auto; min-width: 0; width: 100%; height: 40px; }
-    .item-header { flex-direction: row !important; align-items: center !important; justify-content: space-between !important; padding: 0.75rem !important; }
+    .app-container { padding: 0.2rem !important; }
+    .app-header { flex-direction: column; align-items: stretch; gap: 0.4rem; padding: 0.35rem 0.4rem !important; margin-bottom: 0.5rem !important; }
+    .app-header h1 { font-size: 1.2rem !important; }
+    .app-header-right { width: 100%; display: flex; gap: 0.4rem; }
+    .sup-select { flex: 1 1 auto; min-width: 0; width: 100%; height: 38px; }
+    .primary-btn { height: 38px !important; padding: 0 0.85rem !important; font-size: 0.85rem !important; }
+    .sup-block { margin-bottom: 0.5rem !important; border-radius: 6px !important; }
+    .sup-head { padding: 0.6rem 0.65rem !important; gap: 0.5rem !important; }
+    .sup-name { font-size: 0.9rem !important; }
+    .sup-body { padding: 0 0.5rem 0.65rem !important; }
+    .item-card { margin-bottom: 0.5rem !important; border-radius: 6px !important; }
+    .item-header { flex-direction: row !important; align-items: center !important; justify-content: space-between !important; padding: 0.55rem 0.6rem !important; gap: 0.4rem !important; }
     .item-title-row { flex: 1 1 auto !important; min-width: 0 !important; }
     .item-header-right { width: auto !important; flex-shrink: 0 !important; }
+    .item-meta-line { gap: 0.4rem !important; margin-top: 0.2rem !important; }
 
     /* Fix inspector row on mobile */
     .insp-row {
         flex-direction: column !important;
         align-items: stretch !important;
         gap: 0.4rem !important;
-        padding: 0.75rem !important;
+        padding: 0.6rem !important;
         max-width: none !important;
     }
     .insp-row select {
         width: 100% !important;
         min-width: 0 !important;
-        height: 40px !important;
+        height: 38px !important;
     }
 
     /* Fix decision section textarea squishing on mobile */
     .decision-section {
         flex-direction: column !important;
         align-items: stretch !important;
-        gap: 0.75rem !important;
+        gap: 0.5rem !important;
     }
     .decision-left {
         flex: none !important;
@@ -311,14 +319,14 @@ body {
     }
     .disp-row-vertical {
         height: auto !important;
-        padding: 0.75rem !important;
+        padding: 0.6rem !important;
     }
     .decision-right {
         width: 100% !important;
     }
     .decision-right #remarks-container {
         height: auto !important;
-        gap: 0.75rem !important;
+        gap: 0.5rem !important;
     }
     .rem-label textarea {
         min-height: 4.5rem !important;
@@ -327,10 +335,10 @@ body {
 
     /* De-congest nested sub-item cards */
     .so-items-container {
-        padding: 0.5rem 0.5rem 0.75rem 0.5rem !important;
+        padding: 0.35rem 0.4rem 0.5rem 0.4rem !important;
     }
     .sub-item-header {
-        padding: 0.75rem 0.85rem !important;
+        padding: 0.55rem 0.6rem !important;
         flex-direction: row !important;
         justify-content: space-between !important;
         align-items: center !important;
@@ -344,7 +352,7 @@ body {
         flex-shrink: 0 !important;
     }
     .item-body {
-        padding: 0.75rem !important;
+        padding: 0.5rem 0.5rem !important;
     }
     .table-wrapper {
         border-radius: 6px;

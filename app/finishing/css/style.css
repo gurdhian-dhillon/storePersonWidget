@@ -621,3 +621,131 @@ body {
     color: #ffffff;
     border-color: var(--primary);
 }
+
+/* ---- Mobile Responsiveness for Finishing Widget (Mobile View Only: Max-Width 768px) ---- */
+@media (max-width: 768px) {
+    .app-container {
+        padding: 0.2rem !important;
+    }
+    .app-header {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 0.4rem !important;
+        padding: 0.35rem 0.4rem !important;
+        margin-bottom: 0.5rem !important;
+    }
+    .app-header h1 {
+        font-size: 1.2rem !important;
+    }
+    .app-date {
+        font-size: 0.75rem !important;
+    }
+    .app-header-right {
+        width: 100% !important;
+        display: flex !important;
+        gap: 0.4rem !important;
+    }
+    .sup-select {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        width: 100% !important;
+        height: 38px !important;
+    }
+    .primary-btn {
+        height: 38px !important;
+        padding: 0 0.85rem !important;
+        font-size: 0.85rem !important;
+        white-space: nowrap !important;
+    }
+
+    /* Tab strip */
+    .tab-strip {
+        display: flex !important;
+        flex-wrap: nowrap !important;
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        padding-bottom: 0.25rem !important;
+        margin-bottom: 0.5rem !important;
+        gap: 0.2rem !important;
+        scrollbar-width: none !important;
+    }
+    .tab-strip::-webkit-scrollbar { display: none !important; }
+    .tab-btn {
+        flex: 0 0 auto !important;
+        white-space: nowrap !important;
+        padding: 0.4rem 0.7rem !important;
+        font-size: 0.8rem !important;
+        min-height: 36px !important;
+    }
+
+    /* Accordion */
+    .sup-block {
+        margin-bottom: 0.5rem !important;
+        border-radius: 6px !important;
+    }
+    .sup-head {
+        padding: 0.6rem 0.65rem !important;
+        gap: 0.5rem !important;
+    }
+    .sup-name {
+        font-size: 0.9rem !important;
+    }
+    .sup-body {
+        padding: 0 0.5rem 0.65rem !important;
+    }
+
+    /* Item card */
+    .item-card {
+        margin-bottom: 0.5rem !important;
+        border-radius: 6px !important;
+    }
+    .item-header {
+        padding: 0.55rem 0.6rem !important;
+        gap: 0.4rem !important;
+    }
+    .item-title-row {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        gap: 0.5rem !important;
+    }
+    .item-header-right {
+        width: auto !important;
+        flex-shrink: 0 !important;
+    }
+    .item-meta-line {
+        gap: 0.4rem !important;
+        margin-top: 0.2rem !important;
+    }
+    .item-body {
+        padding: 0.5rem !important;
+    }
+
+    /* Sub-item rows */
+    .so-items-container {
+        padding: 0.35rem 0.4rem 0.5rem 0.4rem !important;
+    }
+    .sub-item-header {
+        padding: 0.55rem 0.6rem !important;
+    }
+
+    /* Tables */
+    .table-wrapper {
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        border-radius: 6px !important;
+        margin-top: 0.25rem !important;
+    }
+
+    /* Modals */
+    .modal-back {
+        padding: 0.75rem !important;
+    }
+    .modal-panel {
+        padding: 0.85rem !important;
+        border-radius: 10px !important;
+        width: 98% !important;
+    }
+    .modal-actions {
+        margin-top: 0.75rem !important;
+    }
+}
