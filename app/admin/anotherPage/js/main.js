@@ -30,6 +30,8 @@ var PIPELINE_PAGE = 1;
 var PIPELINE_TOTAL_PAGES = 1;
 var PIPELINE_PAGE_SIZE = 25;
 var PIPELINE_TOTAL_ORDERS = 0;
+var PROD_SEARCH_TERM = '';
+var PENDING_SEARCH_TERM = '';
 
 // Sales orders still at "Pending" — the ones the CreateProductionPlan batch
 // workflow has not turned into a plan yet. Loaded alongside the pipeline counts,
@@ -198,6 +200,113 @@ function chevronSvg() {
         'stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>';
 }
 
+// ---- search & item matching helpers ----
+
+function highlightMatch(text, query) {
+    var str = String(text === null || text === undefined ? '' : text);
+    if (!str || !query || typeof query !== 'string') return esc(str);
+    var q = query.trim();
+    if (!q) return esc(str);
+    var idx = str.toLowerCase().indexOf(q.toLowerCase());
+    if (idx === -1) return esc(str);
+    return esc(str.substring(0, idx)) +
+        '<mark class="search-highlight">' + esc(str.substring(idx, idx + q.length)) + '</mark>' +
+        highlightMatch(str.substring(idx + q.length), q);
+}
+
+function getPendingItemNames(order) {
+    if (!order) return [];
+    if (order.itemsSummary && typeof order.itemsSummary === 'string') {
+        return order.itemsSummary.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    }
+    if (Array.isArray(order.itemNames) && order.itemNames.length) {
+        return order.itemNames.map(function (s) { return String(s).trim(); }).filter(Boolean);
+    }
+    // Fallback: extract item name from rejectReason like "No BOM for: HeliosZoho test item"
+    var r = String(order.rejectReason || '');
+    var m = r.match(/No BOM for:\s*([^,|]+)/i);
+    if (m && m[1]) {
+        return [m[1].trim()];
+    }
+    return [];
+}
+
+function getOrderMatchingItems(order, query) {
+    if (!order || !query) return [];
+    var q = query.trim().toLowerCase();
+    if (!q) return [];
+    var matched = [];
+
+    var addIfMatches = function (n) {
+        var str = String(n || '').trim();
+        if (str && str.toLowerCase().indexOf(q) !== -1 && matched.indexOf(str) === -1) {
+            matched.push(str);
+        }
+    };
+
+    addIfMatches(order.itemName);
+    addIfMatches(order.firstItemName);
+
+    if (Array.isArray(order.items)) {
+        order.items.forEach(function (it) {
+            addIfMatches(it.itemName || it.name);
+            if (Array.isArray(it.batches)) {
+                it.batches.forEach(function (b) {
+                    addIfMatches(b.itemName);
+                });
+            }
+        });
+    }
+    return matched;
+}
+
+function matchesOrderQuery(order, query, isPending) {
+    if (!query || !query.trim()) return true;
+    var q = query.trim().toLowerCase();
+    if (!order) return false;
+
+    // 1. Strictly check Sales Order number (e.g. "SO-01016", "01016")
+    var so = String(order.salesOrder || '').toLowerCase();
+    if (so.indexOf(q) !== -1) return true;
+
+    // 2. Strictly check Items ONLY (no customer, no supervisor, no plan, no source)
+    if (isPending) {
+        var pItems = getPendingItemNames(order);
+        for (var i = 0; i < pItems.length; i++) {
+            if (pItems[i].toLowerCase().indexOf(q) !== -1) return true;
+        }
+        if (Array.isArray(order.items)) {
+            for (var m = 0; m < order.items.length; m++) {
+                var itm = order.items[m];
+                var nm = String(itm.itemName || itm.name || '').toLowerCase();
+                if (nm && nm.indexOf(q) !== -1) return true;
+            }
+        }
+        return false;
+    }
+
+    // In Production / Progress order items
+    var mainItem = String(order.itemName || order.firstItemName || '').toLowerCase();
+    if (mainItem.indexOf(q) !== -1) return true;
+
+    // Check each item in order.items
+    if (Array.isArray(order.items)) {
+        for (var j = 0; j < order.items.length; j++) {
+            var item = order.items[j];
+            var itName = String(item.itemName || item.name || '').toLowerCase();
+            if (itName && itName.indexOf(q) !== -1) return true;
+            if (Array.isArray(item.batches)) {
+                for (var k = 0; k < item.batches.length; k++) {
+                    var bName = String(item.batches[k].itemName || '').toLowerCase();
+                    if (bName && bName.indexOf(q) !== -1) return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 // ---- the day in five numbers ----
 
 function renderTiles() {
@@ -338,7 +447,7 @@ function renderItemProgressBar(order) {
     return '<div class="item-legend" style="gap:4px; flex-wrap:wrap;">' + badges.join('') + '</div>';
 }
 
-function renderItemDrawer(order) {
+function renderItemDrawer(order, searchHighlightTerm) {
     var items = Array.isArray(order.items) && order.items.length ? order.items : null;
     var soId = String(order.id || order.salesOrder);
     var activeSub = DRAWER_STAGE_FILTERS[soId] || 'All';
@@ -352,6 +461,8 @@ function renderItemDrawer(order) {
         if (stStatus === 'Passed' || stStatus === 'Completed') pill = '<span class="pill pill-done">' + esc(st + ' Passed') + '</span>';
 
         var displayName = order.itemName || order.firstItemName || (order.salesOrder ? ('Item for ' + order.salesOrder) : 'Main Line Item');
+        var isSingleMatch = searchHighlightTerm && String(displayName).toLowerCase().indexOf(searchHighlightTerm.trim().toLowerCase()) !== -1;
+        var displayHtml = isSingleMatch ? highlightMatch(displayName, searchHighlightTerm) : esc(displayName);
 
         return '<div class="item-drawer-wrap">' +
             '<div class="item-drawer-title">Order Item Summary (1 item line)</div>' +
@@ -359,7 +470,7 @@ function renderItemDrawer(order) {
             '<table class="item-drawer-table"><thead><tr>' +
             '<th>Item Name</th><th class="r">Ordered</th><th class="r">Produced</th><th>Current Stage</th>' +
             '</tr></thead><tbody>' +
-            '<tr><td><strong>' + esc(displayName) + '</strong></td>' +
+            '<tr><td><strong>' + displayHtml + '</strong></td>' +
             '<td class="r">' + ord + '</td>' +
             '<td class="r">' + prod + '</td>' +
             '<td>' + pill + '</td></tr>' +
@@ -525,9 +636,11 @@ function renderItemDrawer(order) {
             : '';
 
         var tdStage = showStageCol ? ('<td>' + pill + '</td>') : '';
+        var isItemMatch = searchHighlightTerm && String(nameStr).toLowerCase().indexOf(searchHighlightTerm.trim().toLowerCase()) !== -1;
+        var nameDisplay = isItemMatch ? highlightMatch(nameStr, searchHighlightTerm) : esc(nameStr);
 
         var rowHtml = '<tr>' +
-            '<td><strong>' + esc(nameStr) + '</strong>' + (batchBtn ? ' ' + batchBtn : '') + '</td>' +
+            '<td><strong>' + nameDisplay + '</strong>' + (batchBtn ? ' ' + batchBtn : '') + '</td>' +
             '<td class="r">' + n(it.qtyOrdered) + '</td>' +
             '<td class="r">' + n(it.qtyProduced) + '</td>' +
             '<td class="r">' + n(it.qtyAccepted) + '</td>' +
@@ -623,7 +736,7 @@ function bindDrawerControls(containerEl) {
     });
 }
 
-function updateOrderDrawerInPlace(soId) {
+function updateOrderDrawerInPlace(soId, shouldToggle) {
     var order = findOrderById(soId);
     if (!order) {
         renderPipeline(soId);
@@ -637,27 +750,35 @@ function updateOrderDrawerInPlace(soId) {
     if (!orderRow) return;
 
     var drawerRow = orderRow.nextElementSibling;
-    var isOpen = !!OPEN_ITEM_DRAWERS[soId];
-    var itemCount = Array.isArray(order.items) ? order.items.length : (order.itemCount || 0);
+    var isCurrentlyOpen = !!(drawerRow && drawerRow.classList.contains('item-drawer-row') && drawerRow.style.display !== 'none');
 
-    if (isOpen) {
-        var drawerHtml = renderItemDrawer(order);
+    var itemCount = Array.isArray(order.items) ? order.items.length : (order.itemCount || 0);
+    var isSearching = !!(PROD_SEARCH_TERM && PROD_SEARCH_TERM.trim());
+
+    var willBeOpen = shouldToggle ? !isCurrentlyOpen : !!OPEN_ITEM_DRAWERS[soId];
+
+    OPEN_ITEM_DRAWERS[soId] = willBeOpen;
+
+    if (willBeOpen) {
+        var drawerHtml = renderItemDrawer(order, isSearching ? PROD_SEARCH_TERM : '');
         if (drawerRow && drawerRow.classList.contains('item-drawer-row')) {
             drawerRow.style.display = '';
             var td = drawerRow.querySelector('td');
             if (td) td.innerHTML = drawerHtml;
+            bindDrawerControls(drawerRow);
         } else {
             var newRowHtml = '<tr class="item-drawer-row"><td colspan="6">' + drawerHtml + '</td></tr>';
             orderRow.insertAdjacentHTML('afterend', newRowHtml);
-            drawerRow = orderRow.nextElementSibling;
+            bindDrawerControls(orderRow.nextElementSibling);
         }
         drawerBtn.innerHTML = 'Hide Items ▲';
-        bindDrawerControls(drawerRow);
+        drawerBtn.classList.add('is-open-btn');
     } else {
         if (drawerRow && drawerRow.classList.contains('item-drawer-row')) {
             drawerRow.remove();
         }
         drawerBtn.innerHTML = 'Inspect Items (' + itemCount + ') ▼';
+        drawerBtn.classList.remove('is-open-btn');
     }
 }
 
@@ -728,43 +849,9 @@ function renderPipeline(targetSoId) {
         });
     });
 
-    // Bind drawer toggles with in-place DOM updates (zero full-screen flicker)
-    Array.prototype.forEach.call(el.querySelectorAll('.btn-toggle-drawer'), function (btn) {
-        btn.addEventListener('click', function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            var soId = btn.getAttribute('data-so-id');
-            OPEN_ITEM_DRAWERS[soId] = !OPEN_ITEM_DRAWERS[soId];
-            updateOrderDrawerInPlace(soId);
-        });
-    });
-
-    // Bind inner drawer controls (stage sub-chips & batch details buttons)
-    bindDrawerControls(el);
-
-    // Bind progress modal popup buttons
-    Array.prototype.forEach.call(el.querySelectorAll('.btn-open-progress-modal'), function (btn) {
-        btn.addEventListener('click', function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            var soId = btn.getAttribute('data-so-id');
-            openProgressModal(soId);
-        });
-    });
-
     bindPendingButtons();
-
-    // Bind pagination buttons
-    Array.prototype.forEach.call(el.querySelectorAll('.pipeline-page-btn, .btn-pipeline-prev, .btn-pipeline-next'), function (btn) {
-        btn.addEventListener('click', function (e) {
-            e.preventDefault();
-            if (btn.disabled || btn.classList.contains('is-active')) return;
-            var targetPage = Number(btn.getAttribute('data-page'));
-            if (targetPage && targetPage >= 1 && targetPage <= PIPELINE_TOTAL_PAGES && targetPage !== PIPELINE_PAGE) {
-                loadSalesOrderProgress(PIPELINE_STATUS === 'In Production' ? 'In Progress' : PIPELINE_STATUS, targetPage);
-            }
-        });
-    });
+    bindSearchInputs();
+    bindTableEvents(el);
 
     // Preserve exact viewport scroll position smoothly without scrollIntoView jumps
     window.scrollTo(0, currentScroll);
@@ -918,13 +1005,8 @@ function openProgressModal(soId) {
     });
 }
 
-function renderInProgressOrders() {
-    if (PIPELINE_STATUS === 'Pending') {
-        return renderPendingOrders();
-    }
-
+function getFilteredInProgressOrders() {
     var orders = DATA && Array.isArray(DATA.progressOrders) ? DATA.progressOrders : null;
-
     if (orders && PIPELINE_STATUS === 'In Production' && IN_PRODUCTION_SUB_FILTER !== 'All') {
         orders = orders.filter(function (o) {
             var bd = getEffectiveBreakdown(o);
@@ -936,28 +1018,68 @@ function renderInProgressOrders() {
             return true;
         });
     }
+    return orders;
+}
 
+function getSearchedInProgressOrders() {
+    var orders = getFilteredInProgressOrders();
+    var isSearching = !!(PROD_SEARCH_TERM && PROD_SEARCH_TERM.trim());
+    if (orders && isSearching) {
+        orders = orders.filter(function (o) {
+            return matchesOrderQuery(o, PROD_SEARCH_TERM, false);
+        });
+    }
+    return orders;
+}
+
+function getInProgressTotalBadgeHtml() {
+    var rawOrders = getFilteredInProgressOrders();
+    var totalBeforeSearch = rawOrders ? rawOrders.length : 0;
+    var isSearching = !!(PROD_SEARCH_TERM && PROD_SEARCH_TERM.trim());
+    var orders = getSearchedInProgressOrders();
+
+    if (DATA && Array.isArray(DATA.progressOrders)) {
+        if (isSearching) {
+            return '<span class="pipe-total pipe-search-total"><strong>' + (orders ? orders.length : 0) + '</strong> of ' + totalBeforeSearch + ' orders</span>';
+        } else {
+            return '<span class="pipe-total">' + totalBeforeSearch + ' order' + (totalBeforeSearch === 1 ? '' : 's') + '</span>';
+        }
+    }
+    return '';
+}
+
+function renderInProgressOrdersBody() {
+    var rawOrders = getFilteredInProgressOrders();
+    var totalBeforeSearch = rawOrders ? rawOrders.length : 0;
+    var isSearching = !!(PROD_SEARCH_TERM && PROD_SEARCH_TERM.trim());
+    var orders = getSearchedInProgressOrders();
     var displayStatus = (PIPELINE_STATUS === 'In Production' && IN_PRODUCTION_SUB_FILTER !== 'All') ? IN_PRODUCTION_SUB_FILTER : PIPELINE_STATUS;
-    var h = '<section class="progress-section"><div class="pipeline-header">' +
-        '<h2>' + esc(displayStatus) + ' orders</h2>';
 
     if (DATA && DATA.progressError) {
-        return h + '</div><p class="pipeline-error">Could not load ' + esc(displayStatus) + ' orders: ' + esc(DATA.progressError) + '</p></section>';
+        return '<p class="pipeline-error">Could not load ' + esc(displayStatus) + ' orders: ' + esc(DATA.progressError) + '</p>';
     }
-    if (orders === null) {
-        return h + '</div><p class="progress-empty">Loading live order progress…</p></section>';
+    if (DATA && DATA.progressOrders === null) {
+        return '<p class="progress-empty">Loading live order progress…</p>';
     }
-    if (!orders.length) {
-        return h + '</div><p class="progress-empty">No sales orders are currently in ' + esc(displayStatus) + ' status.</p></section>';
+    if (!totalBeforeSearch) {
+        return '<p class="progress-empty">No sales orders are currently in ' + esc(displayStatus) + ' status.</p>';
+    }
+    if (isSearching && (!orders || !orders.length)) {
+        return '<div class="pipeline-search-empty">' +
+            '<p class="progress-empty">No orders match "<strong>' + esc(PROD_SEARCH_TERM) + '</strong>".</p>' +
+            '<button type="button" id="btn-reset-prod-search" class="ghost-btn reset-search-btn">Clear search</button>' +
+            '</div>';
     }
 
-    h += '<span class="pipe-total">' + orders.length + ' order' + (orders.length === 1 ? '' : 's') + '</span></div>' +
-        '<div class="table-wrapper"><table class="progress-table"><thead><tr>';
+    var h = '<div class="table-wrapper"><table class="progress-table"><thead><tr>';
 
     if (PIPELINE_STATUS === 'Dispatched') {
         h += '<th>Sales order</th><th>Customer</th><th>Plan</th><th>Order date</th><th class="r">Dispatched / ordered</th><th>Next step</th></tr></thead><tbody>';
         orders.forEach(function (order) {
-            var itemSub = (order.itemName || order.firstItemName) ? '<div class="emp-sub">' + esc(order.itemName || order.firstItemName) + '</div>' : '';
+            var soDisplay = isSearching ? highlightMatch(order.salesOrder || '—', PROD_SEARCH_TERM) : esc(order.salesOrder || '—');
+            var matchedItems = isSearching ? getOrderMatchingItems(order, PROD_SEARCH_TERM) : [];
+            var displayItemName = (isSearching && matchedItems.length) ? matchedItems.join(', ') : (order.itemName || order.firstItemName || '');
+            var itemSub = displayItemName ? '<div class="emp-sub">' + (isSearching ? highlightMatch(displayItemName, PROD_SEARCH_TERM) : esc(displayItemName)) + '</div>' : '';
             var qtyBadgeMobile = '<span class="mobile-only so-qty-badge">' + n(order.producedQty) + ' / ' + n(order.orderedQty) + '</span>';
             var metaMobile = '<div class="mobile-only so-meta-row">' +
                 (order.customer ? '<span class="so-meta-chip cust-chip"><strong>Cust:</strong> ' + esc(order.customer) + '</span>' : '') +
@@ -968,7 +1090,7 @@ function renderInProgressOrders() {
             h += '<tr class="so-card-row">' +
                 '<td class="td-so-header">' +
                     '<div class="so-title-line">' +
-                        '<div class="so-num-wrap"><strong>' + esc(order.salesOrder || '—') + '</strong></div>' +
+                        '<div class="so-num-wrap"><strong>' + soDisplay + '</strong></div>' +
                         qtyBadgeMobile +
                     '</div>' +
                     itemSub +
@@ -983,7 +1105,10 @@ function renderInProgressOrders() {
     } else if (PIPELINE_STATUS === 'Packed') {
         h += '<th>Sales order</th><th>Customer</th><th>Plan</th><th>Order date</th><th class="r">Packed / ordered</th><th>Next step</th></tr></thead><tbody>';
         orders.forEach(function (order) {
-            var itemSub = (order.itemName || order.firstItemName) ? '<div class="emp-sub">' + esc(order.itemName || order.firstItemName) + '</div>' : '';
+            var soDisplay = isSearching ? highlightMatch(order.salesOrder || '—', PROD_SEARCH_TERM) : esc(order.salesOrder || '—');
+            var matchedItems = isSearching ? getOrderMatchingItems(order, PROD_SEARCH_TERM) : [];
+            var displayItemName = (isSearching && matchedItems.length) ? matchedItems.join(', ') : (order.itemName || order.firstItemName || '');
+            var itemSub = displayItemName ? '<div class="emp-sub">' + (isSearching ? highlightMatch(displayItemName, PROD_SEARCH_TERM) : esc(displayItemName)) + '</div>' : '';
             var qtyBadgeMobile = '<span class="mobile-only so-qty-badge">' + n(order.producedQty) + ' / ' + n(order.orderedQty) + '</span>';
             var metaMobile = '<div class="mobile-only so-meta-row">' +
                 (order.customer ? '<span class="so-meta-chip cust-chip"><strong>Cust:</strong> ' + esc(order.customer) + '</span>' : '') +
@@ -994,7 +1119,7 @@ function renderInProgressOrders() {
             h += '<tr class="so-card-row">' +
                 '<td class="td-so-header">' +
                     '<div class="so-title-line">' +
-                        '<div class="so-num-wrap"><strong>' + esc(order.salesOrder || '—') + '</strong></div>' +
+                        '<div class="so-num-wrap"><strong>' + soDisplay + '</strong></div>' +
                         qtyBadgeMobile +
                     '</div>' +
                     itemSub +
@@ -1024,17 +1149,23 @@ function renderInProgressOrders() {
 
             var itemCount = Array.isArray(order.items) ? order.items.length : (order.itemCount || 0);
 
-            var itemSub = (order.itemName || order.firstItemName) ? '<div class="emp-sub">' + esc(order.itemName || order.firstItemName) + '</div>' : '';
+            var soDisplay = isSearching ? highlightMatch(order.salesOrder || '—', PROD_SEARCH_TERM) : esc(order.salesOrder || '—');
+            var matchedItems = isSearching ? getOrderMatchingItems(order, PROD_SEARCH_TERM) : [];
+            var displayItemName = (isSearching && matchedItems.length) ? matchedItems.join(', ') : (order.itemName || order.firstItemName || '');
+            var itemSub = displayItemName ? '<div class="emp-sub">' + (isSearching ? highlightMatch(displayItemName, PROD_SEARCH_TERM) : esc(displayItemName)) + '</div>' : '';
+
             var qtyBadgeMobile = '<span class="mobile-only so-qty-badge">' + n(order.producedQty) + ' / ' + n(order.orderedQty) + '</span>';
             var metaMobile = '<div class="mobile-only so-meta-row">' +
                 (order.planNo ? '<span class="so-meta-chip plan-chip"><strong>Plan:</strong> ' + esc(order.planNo) + '</span>' : '') +
                 (order.supervisor ? '<span class="so-meta-chip sup-chip"><strong>Sup:</strong> ' + esc(order.supervisor) + '</span>' : '') +
                 '</div>';
 
+            var btnText = isOpen ? 'Hide Items ▲' : ('Inspect Items (' + itemCount + ') ▼');
+
             h += '<tr class="so-card-row">' +
                 '<td class="td-so-header">' +
                     '<div class="so-title-line">' +
-                        '<div class="so-num-wrap"><strong>' + esc(order.salesOrder || '—') + '</strong>' + remTxt + '</div>' +
+                        '<div class="so-num-wrap"><strong>' + soDisplay + '</strong>' + remTxt + '</div>' +
                         qtyBadgeMobile +
                     '</div>' +
                     itemSub +
@@ -1044,11 +1175,11 @@ function renderInProgressOrders() {
                 '<td class="td-sup desktop-only">' + esc(order.supervisor || '—') + '</td>' +
                 '<td class="td-progress">' + itemProgHtml + '</td>' +
                 '<td class="td-qty desktop-only r">' + n(order.producedQty) + ' / ' + n(order.orderedQty) + '</td>' +
-                '<td class="td-actions"><button type="button" class="ghost-btn btn-toggle-drawer" data-so-id="' + esc(soId) + '">' +
-                (isOpen ? 'Hide Items ▲' : 'Inspect Items (' + itemCount + ') ▼') + '</button></td></tr>';
+                '<td class="td-actions"><button type="button" class="ghost-btn btn-toggle-drawer' + (isOpen ? ' is-open-btn' : '') + '" data-so-id="' + esc(soId) + '">' +
+                btnText + '</button></td></tr>';
 
             if (isOpen) {
-                h += '<tr class="item-drawer-row"><td colspan="6">' + renderItemDrawer(order) + '</td></tr>';
+                h += '<tr class="item-drawer-row"><td colspan="6">' + renderItemDrawer(order, isSearching ? PROD_SEARCH_TERM : '') + '</td></tr>';
             }
         });
     }
@@ -1098,29 +1229,89 @@ function renderInProgressOrders() {
             '</div>';
     }
 
-    return h + '</tbody></table></div>' + paginationHtml + '</section>';
+    return h + '</tbody></table></div>' + paginationHtml;
+}
+
+function renderInProgressOrders() {
+    if (PIPELINE_STATUS === 'Pending') {
+        return renderPendingOrders();
+    }
+
+    var displayStatus = (PIPELINE_STATUS === 'In Production' && IN_PRODUCTION_SUB_FILTER !== 'All') ? IN_PRODUCTION_SUB_FILTER : PIPELINE_STATUS;
+    var isSearching = !!(PROD_SEARCH_TERM && PROD_SEARCH_TERM.trim());
+    var searchVal = esc(PROD_SEARCH_TERM || '');
+    var clearBtnCls = isSearching ? '' : ' hidden';
+
+    var searchBarHtml = '<div class="pipeline-search-wrap">' +
+        '<svg class="pipeline-search-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+        '<circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>' +
+        '<input type="text" id="prod-order-search" class="pipeline-search-input" placeholder="Search sales order or item…" value="' + searchVal + '" aria-label="Search production orders">' +
+        '<button type="button" id="clear-prod-search" class="pipeline-search-clear' + clearBtnCls + '" title="Clear search" aria-label="Clear search">&times;</button>' +
+        '</div>';
+
+    var totalBadge = '<span id="pipeline-total-badge-wrap">' + getInProgressTotalBadgeHtml() + '</span>';
+
+    return '<section class="progress-section"><div class="pipeline-header pipeline-section-header">' +
+        '<div class="pipeline-title-group"><h2>' + esc(displayStatus) + ' orders</h2></div>' +
+        '<div class="pipeline-header-controls">' +
+        searchBarHtml +
+        totalBadge +
+        '</div></div>' +
+        '<div id="pipeline-orders-table-wrap">' +
+        renderInProgressOrdersBody() +
+        '</div></section>';
 }
 
 // ---- pending sales orders + manual convert ----
 
-function renderPendingOrders() {
-    var refreshBtnHtml = '<button type="button" id="btn-refresh-pending" class="ghost-btn refresh-pending-btn mobile-only" title="Refresh pending sales orders">↻ Refresh</button>';
+function getSearchedPendingOrders() {
+    var isSearching = !!(PENDING_SEARCH_TERM && PENDING_SEARCH_TERM.trim());
+    var orders = PENDING_ORDERS;
+    if (orders && isSearching) {
+        orders = PENDING_ORDERS.filter(function (o) {
+            return matchesOrderQuery(o, PENDING_SEARCH_TERM, true);
+        });
+    }
+    return orders;
+}
 
-    var h = '<section class="progress-section"><div class="pipeline-header">' +
-        '<h2>Pending sales orders</h2>';
+function getPendingTotalBadgeHtml() {
+    var totalPending = PENDING_ORDERS ? PENDING_ORDERS.length : 0;
+    var isSearching = !!(PENDING_SEARCH_TERM && PENDING_SEARCH_TERM.trim());
+    var orders = getSearchedPendingOrders();
+
+    if (PENDING_ORDERS !== null) {
+        if (isSearching) {
+            return '<span class="pipe-total pipe-search-total"><strong>' + (orders ? orders.length : 0) + '</strong> of ' + totalPending + ' waiting</span>';
+        } else {
+            return '<span class="pipe-total">' + totalPending + ' waiting</span>';
+        }
+    }
+    return '';
+}
+
+function renderPendingOrdersBody() {
+    var totalPending = PENDING_ORDERS ? PENDING_ORDERS.length : 0;
+    var isSearching = !!(PENDING_SEARCH_TERM && PENDING_SEARCH_TERM.trim());
+    var orders = getSearchedPendingOrders();
 
     if (PENDING_ERROR) {
-        return h + '<div class="pending-header-right">' + refreshBtnHtml + '</div></div><p class="pipeline-error">Could not load pending orders: ' + esc(PENDING_ERROR) + '</p></section>';
+        return '<p class="pipeline-error">Could not load pending orders: ' + esc(PENDING_ERROR) + '</p>';
     }
     if (PENDING_ORDERS === null) {
-        return h + '<div class="pending-header-right">' + refreshBtnHtml + '</div></div><p class="progress-empty">Loading pending sales orders…</p></section>';
+        return '<p class="progress-empty">Loading pending sales orders…</p>';
     }
     if (!PENDING_ORDERS.length) {
-        return h + '<div class="pending-header-right">' + refreshBtnHtml + '</div></div><p class="progress-empty">No sales orders are waiting. Every pending order has been turned into a plan.</p></section>';
+        return '<p class="progress-empty">No sales orders are waiting. Every pending order has been turned into a plan.</p>';
+    }
+    if (isSearching && (!orders || !orders.length)) {
+        return '<div class="pipeline-search-empty">' +
+            '<p class="progress-empty">No pending orders match "<strong>' + esc(PENDING_SEARCH_TERM) + '</strong>".</p>' +
+            '<button type="button" id="btn-reset-pending-search" class="ghost-btn reset-search-btn">Clear search</button>' +
+            '</div>';
     }
 
-    h += '<div class="pending-header-right">' + refreshBtnHtml + '<span class="pipe-total">' + PENDING_ORDERS.length + ' waiting</span></div></div>' +
-        '<p class="progress-hint">These have not been turned into production plans yet. ' +
+    var h = '<p class="progress-hint">These have not been turned into production plans yet. ' +
         'The scheduled run retries them automatically; use <strong>Convert to plan</strong> to do one now. ' +
         'A rejected order stays here with its reason until the blocker is fixed.</p>' +
         '<div class="table-wrapper"><table class="progress-table"><thead><tr>' +
@@ -1128,9 +1319,10 @@ function renderPendingOrders() {
         '<th class="r">Items</th><th>Last attempt</th><th class="r">Action</th>' +
         '</tr></thead><tbody>';
 
-    PENDING_ORDERS.forEach(function (o) {
+    orders.forEach(function (o) {
         var outcome = String(o.lastOutcome || '').trim();
         var reason = String(o.rejectReason || '').trim();
+        var pendingItems = getPendingItemNames(o);
 
         var statusCell;
         if (outcome === 'Rejected' || reason) {
@@ -1159,29 +1351,233 @@ function renderPendingOrders() {
             metaChips += '<span class="so-meta-chip"><strong>Source:</strong> ' + esc(o.source) + '</span>';
         }
 
-        var custLine = o.customer ? '<div class="emp-sub mobile-only">' + esc(o.customer) + '</div>' : '';
+        var custDisplay = esc(o.customer || '—');
+        var custLine = o.customer ? '<div class="emp-sub mobile-only">' + custDisplay + '</div>' : '';
         var itemsBadge = '<span class="so-qty-badge mobile-only">' + n(o.itemCount) + (n(o.itemCount) === 1 ? ' item' : ' items') + '</span>';
+
+        // Item names line under sales order:
+        var itemLine = '';
+        if (pendingItems.length) {
+            var fullItemTxt = pendingItems.join(', ');
+            var itemHtml = isSearching ? highlightMatch(fullItemTxt, PENDING_SEARCH_TERM) : esc(fullItemTxt);
+            itemLine = '<div class="emp-sub pending-item-sub" title="' + esc(fullItemTxt) + '"><span class="pending-item-tag">Item:</span> ' + itemHtml + '</div>';
+        }
+
+        var soDisplay = isSearching ? highlightMatch(o.salesOrder || '—', PENDING_SEARCH_TERM) : esc(o.salesOrder || '—');
+        var itemsTooltip = pendingItems.length ? (' title="Items: ' + esc(pendingItems.join(', ')) + '"') : '';
 
         h += '<tr class="pending-card-row">' +
             '<td class="td-pending-header">' +
                 '<div class="so-title-line">' +
-                    '<div class="so-num-wrap"><strong>' + esc(o.salesOrder || '—') + '</strong></div>' +
+                    '<div class="so-num-wrap"><strong>' + soDisplay + '</strong></div>' +
                     itemsBadge +
                 '</div>' +
+                itemLine +
                 custLine +
                 (metaChips ? ('<div class="so-meta-row mobile-only">' + metaChips + '</div>') : '') +
             '</td>' +
-            '<td class="td-pending-cust desktop-only">' + esc(o.customer || '—') + '</td>' +
+            '<td class="td-pending-cust desktop-only">' + custDisplay + '</td>' +
             '<td class="td-pending-date desktop-only">' + esc(o.orderDate || '—') + '</td>' +
             '<td class="td-pending-source desktop-only">' + esc(o.source || '—') + '</td>' +
-            '<td class="td-pending-count desktop-only r">' + n(o.itemCount) + '</td>' +
+            '<td class="td-pending-count desktop-only r"' + itemsTooltip + '>' + n(o.itemCount) + '</td>' +
             '<td class="td-pending-status">' + statusCell + '</td>' +
             '<td class="td-pending-action r">' + btn + '</td>' +
             '</tr>';
     });
 
-    h += '</tbody></table></div></section>';
+    h += '</tbody></table></div>';
     return h;
+}
+
+function renderPendingOrders() {
+    var refreshBtnHtml = '<button type="button" id="btn-refresh-pending" class="ghost-btn refresh-pending-btn mobile-only" title="Refresh pending sales orders">↻ Refresh</button>';
+    var isSearching = !!(PENDING_SEARCH_TERM && PENDING_SEARCH_TERM.trim());
+    var searchVal = esc(PENDING_SEARCH_TERM || '');
+    var clearBtnCls = isSearching ? '' : ' hidden';
+
+    var searchBarHtml = '<div class="pipeline-search-wrap">' +
+        '<svg class="pipeline-search-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+        '<circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>' +
+        '<input type="text" id="pending-order-search" class="pipeline-search-input" placeholder="Search sales order or item…" value="' + searchVal + '" aria-label="Search pending orders">' +
+        '<button type="button" id="clear-pending-search" class="pipeline-search-clear' + clearBtnCls + '" title="Clear search" aria-label="Clear search">&times;</button>' +
+        '</div>';
+
+    var totalBadge = '<span id="pending-total-badge-wrap">' + getPendingTotalBadgeHtml() + '</span>';
+
+    return '<section class="progress-section"><div class="pipeline-header pipeline-section-header">' +
+        '<div class="pipeline-title-group"><h2>Pending sales orders</h2></div>' +
+        '<div class="pipeline-header-controls">' +
+        refreshBtnHtml +
+        searchBarHtml +
+        totalBadge +
+        '</div></div>' +
+        '<div id="pending-orders-table-wrap">' +
+        renderPendingOrdersBody() +
+        '</div></section>';
+}
+
+function bindTableEvents(rootEl) {
+    if (!rootEl) return;
+
+    // Bind drawer toggles with in-place DOM updates (zero full-screen flicker)
+    Array.prototype.forEach.call(rootEl.querySelectorAll('.btn-toggle-drawer'), function (btn) {
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var soId = btn.getAttribute('data-so-id');
+            updateOrderDrawerInPlace(soId, true);
+        });
+    });
+
+    // Bind inner drawer controls (stage sub-chips & batch details buttons)
+    bindDrawerControls(rootEl);
+
+    // Bind progress modal popup buttons
+    Array.prototype.forEach.call(rootEl.querySelectorAll('.btn-open-progress-modal'), function (btn) {
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var soId = btn.getAttribute('data-so-id');
+            openProgressModal(soId);
+        });
+    });
+
+    // Bind convert to plan buttons (if in pending)
+    Array.prototype.forEach.call(rootEl.querySelectorAll('.btn-convert-plan'), function (b) {
+        b.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var id = b.getAttribute('data-so-id');
+            if (id) convertOrderToPlan(id);
+        });
+    });
+
+    // Bind pagination buttons
+    Array.prototype.forEach.call(rootEl.querySelectorAll('.pipeline-page-btn, .btn-pipeline-prev, .btn-pipeline-next'), function (btn) {
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            if (btn.disabled || btn.classList.contains('is-active')) return;
+            var targetPage = Number(btn.getAttribute('data-page'));
+            if (targetPage && targetPage >= 1 && targetPage <= PIPELINE_TOTAL_PAGES && targetPage !== PIPELINE_PAGE) {
+                loadSalesOrderProgress(PIPELINE_STATUS === 'In Production' ? 'In Progress' : PIPELINE_STATUS, targetPage);
+            }
+        });
+    });
+
+    // Reset search buttons in empty state
+    var resetProdBtn = rootEl.querySelector('#btn-reset-prod-search');
+    if (resetProdBtn) {
+        resetProdBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            PROD_SEARCH_TERM = '';
+            var input = document.getElementById('prod-order-search');
+            if (input) {
+                input.value = '';
+                input.focus();
+            }
+            updateInProgressSearch(true);
+        });
+    }
+
+    var resetPendingBtn = rootEl.querySelector('#btn-reset-pending-search');
+    if (resetPendingBtn) {
+        resetPendingBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            PENDING_SEARCH_TERM = '';
+            var input = document.getElementById('pending-order-search');
+            if (input) {
+                input.value = '';
+                input.focus();
+            }
+            updatePendingSearch(true);
+        });
+    }
+}
+
+var PROD_SEARCH_DEBOUNCE_TIMER = null;
+var LAST_PROD_SEARCH_TERM = '';
+var PENDING_SEARCH_DEBOUNCE_TIMER = null;
+var LAST_PENDING_SEARCH_TERM = '';
+
+function updateInProgressSearchTable() {
+    var tableWrap = document.getElementById('pipeline-orders-table-wrap');
+    if (!tableWrap) return;
+    tableWrap.innerHTML = renderInProgressOrdersBody();
+    var tw = tableWrap.querySelector('.table-wrapper');
+    if (tw) tw.scrollLeft = 0;
+    bindTableEvents(tableWrap);
+}
+
+function updateInProgressSearch(immediate) {
+    var clearBtn = document.getElementById('clear-prod-search');
+    if (clearBtn) {
+        if (PROD_SEARCH_TERM && PROD_SEARCH_TERM.trim()) {
+            clearBtn.classList.remove('hidden');
+        } else {
+            clearBtn.classList.add('hidden');
+        }
+    }
+    var badgeWrap = document.getElementById('pipeline-total-badge-wrap');
+    if (badgeWrap) {
+        badgeWrap.innerHTML = getInProgressTotalBadgeHtml();
+    }
+
+    var newQuery = (PROD_SEARCH_TERM || '').trim().toLowerCase();
+    if (newQuery !== LAST_PROD_SEARCH_TERM.trim().toLowerCase()) {
+        OPEN_ITEM_DRAWERS = {};
+        LAST_PROD_SEARCH_TERM = PROD_SEARCH_TERM || '';
+    }
+
+    if (PROD_SEARCH_DEBOUNCE_TIMER) {
+        clearTimeout(PROD_SEARCH_DEBOUNCE_TIMER);
+        PROD_SEARCH_DEBOUNCE_TIMER = null;
+    }
+
+    if (immediate || !newQuery) {
+        updateInProgressSearchTable();
+    } else {
+        PROD_SEARCH_DEBOUNCE_TIMER = setTimeout(function () {
+            updateInProgressSearchTable();
+        }, 120);
+    }
+}
+
+function updatePendingSearchTable() {
+    var tableWrap = document.getElementById('pending-orders-table-wrap');
+    if (!tableWrap) return;
+    tableWrap.innerHTML = renderPendingOrdersBody();
+    var tw = tableWrap.querySelector('.table-wrapper');
+    if (tw) tw.scrollLeft = 0;
+    bindTableEvents(tableWrap);
+}
+
+function updatePendingSearch(immediate) {
+    var clearBtn = document.getElementById('clear-pending-search');
+    if (clearBtn) {
+        if (PENDING_SEARCH_TERM && PENDING_SEARCH_TERM.trim()) {
+            clearBtn.classList.remove('hidden');
+        } else {
+            clearBtn.classList.add('hidden');
+        }
+    }
+    var badgeWrap = document.getElementById('pending-total-badge-wrap');
+    if (badgeWrap) {
+        badgeWrap.innerHTML = getPendingTotalBadgeHtml();
+    }
+
+    if (PENDING_SEARCH_DEBOUNCE_TIMER) {
+        clearTimeout(PENDING_SEARCH_DEBOUNCE_TIMER);
+        PENDING_SEARCH_DEBOUNCE_TIMER = null;
+    }
+
+    var newQuery = (PENDING_SEARCH_TERM || '').trim().toLowerCase();
+    if (immediate || !newQuery) {
+        updatePendingSearchTable();
+    } else {
+        PENDING_SEARCH_DEBOUNCE_TIMER = setTimeout(function () {
+            updatePendingSearchTable();
+        }, 120);
+    }
 }
 
 function bindPendingButtons() {
@@ -1200,15 +1596,80 @@ function bindPendingButtons() {
             loadPendingOrders(true);
         });
     }
+}
 
-    Array.prototype.forEach.call(el.querySelectorAll('.btn-convert-plan'), function (b) {
-        b.addEventListener('click', function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            var id = b.getAttribute('data-so-id');
-            if (id) convertOrderToPlan(id);
+function bindSearchInputs() {
+    var prodInput = document.getElementById('prod-order-search');
+    var prodClear = document.getElementById('clear-prod-search');
+
+    if (prodInput && !prodInput._bound) {
+        prodInput._bound = true;
+        prodInput.addEventListener('input', function () {
+            PROD_SEARCH_TERM = prodInput.value;
+            updateInProgressSearch(false);
         });
-    });
+        prodInput.addEventListener('search', function () {
+            PROD_SEARCH_TERM = prodInput.value;
+            updateInProgressSearch(true);
+        });
+        prodInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && PROD_SEARCH_TERM) {
+                e.preventDefault();
+                PROD_SEARCH_TERM = '';
+                prodInput.value = '';
+                updateInProgressSearch(true);
+            }
+        });
+    }
+
+    if (prodClear && !prodClear._bound) {
+        prodClear._bound = true;
+        prodClear.addEventListener('click', function (e) {
+            e.preventDefault();
+            PROD_SEARCH_TERM = '';
+            if (prodInput) {
+                prodInput.value = '';
+                prodInput.focus();
+            }
+            updateInProgressSearch(true);
+        });
+    }
+
+    var pendingInput = document.getElementById('pending-order-search');
+    var pendingClear = document.getElementById('clear-pending-search');
+
+    if (pendingInput && !pendingInput._bound) {
+        pendingInput._bound = true;
+        pendingInput.addEventListener('input', function () {
+            PENDING_SEARCH_TERM = pendingInput.value;
+            updatePendingSearch(false);
+        });
+        pendingInput.addEventListener('search', function () {
+            PENDING_SEARCH_TERM = pendingInput.value;
+            updatePendingSearch(true);
+        });
+        pendingInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && PENDING_SEARCH_TERM) {
+                e.preventDefault();
+                PENDING_SEARCH_TERM = '';
+                pendingInput.value = '';
+                updatePendingSearch(true);
+            }
+        });
+    }
+
+    if (pendingClear && !pendingClear._bound) {
+        pendingClear._bound = true;
+        pendingClear.addEventListener('click', function (e) {
+            e.preventDefault();
+            PENDING_SEARCH_TERM = '';
+            if (pendingInput) {
+                pendingInput.value = '';
+                pendingInput.focus();
+            }
+            updatePendingSearch(true);
+        });
+    }
 }
 
 function loadPendingOrders(showLoading) {

@@ -66,9 +66,24 @@ string getPendingSalesOrders()
 			srcTxt = ifnull(so.Order_Source,"").toString().trim().replaceAll("\"","'");
 
 			itemCount = 0;
+			itemsList = List();
 			for each  it in so.Item_Table
 			{
 				itemCount = itemCount + 1;
+				itName = ifnull(it.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").trim();
+				if(itName != "")
+				{
+					itemsList.add(itName);
+				}
+			}
+			itemsSummary = "";
+			for each  iName in itemsList
+			{
+				if(itemsSummary != "")
+				{
+					itemsSummary = itemsSummary + ", ";
+				}
+				itemsSummary = itemsSummary + iName;
 			}
 
 			// The reason the LAST attempt failed, flattened for JSON. A newline
@@ -82,7 +97,7 @@ string getPendingSalesOrders()
 				ordersJson = ordersJson + ",";
 			}
 			// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-			ordersJson = ordersJson + "{\"id\":\"" + so.ID + "\",\"salesOrder\":\"" + soNo + "\",\"customer\":\"" + custTxt + "\",\"orderDate\":\"" + odTxt + "\",\"source\":\"" + srcTxt + "\",\"itemCount\":" + itemCount + ",\"rejectReason\":\"" + rejTxt + "\",\"lastOutcome\":\"" + outcomeTxt + "\"}";
+			ordersJson = ordersJson + "{\"id\":\"" + so.ID + "\",\"salesOrder\":\"" + soNo + "\",\"customer\":\"" + custTxt + "\",\"orderDate\":\"" + odTxt + "\",\"source\":\"" + srcTxt + "\",\"itemCount\":" + itemCount + ",\"itemsSummary\":\"" + itemsSummary + "\",\"rejectReason\":\"" + rejTxt + "\",\"lastOutcome\":\"" + outcomeTxt + "\"}";
 		}
 	}
 	catch (e)

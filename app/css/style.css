@@ -2783,7 +2783,7 @@ th.col-num {
 
     /* Tables & Container on Mobile */
     .tables-container {
-        padding: 0.35rem 0.4rem !important;
+        padding: 0.35rem 0.25rem !important;
     }
     .table-wrapper,
     .print-form + .table-wrapper {
@@ -2799,16 +2799,145 @@ th.col-num {
         width: 100% !important;
     }
     table th, table td {
-        padding: 0.4rem 0.25rem !important;
+        padding: 0.4rem 0.3rem !important;
         font-size: 0.78rem !important;
     }
     table th {
         font-size: 0.65rem !important;
         letter-spacing: 0.01em !important;
-        padding: 0.4rem 0.2rem !important;
+        padding: 0.4rem 0.3rem !important;
         white-space: normal !important;
-        line-height: 1.15 !important;
+        line-height: 1.2 !important;
+    }
+    table th:first-child {
+        text-align: left !important;
+    }
+    table th.col-num {
+        text-align: right !important;
+    }
+    table th.col-lot-issue {
+        text-align: left !important;
+    }
+    table th.col-issue {
         text-align: center !important;
+    }
+
+    /* Issue Tab: Material Name column (uncongested & readable) */
+    .material-name-cell {
+        min-width: 135px !important;
+        max-width: 175px !important;
+        vertical-align: top !important;
+        padding-top: 0.45rem !important;
+        white-space: normal !important;
+    }
+    .material-name-cell .mat-name {
+        font-size: 0.82rem !important;
+        line-height: 1.35 !important;
+        font-weight: 600 !important;
+        color: var(--text-main) !important;
+        word-break: normal !important;
+    }
+    .material-name-cell .mat-sku {
+        font-size: 0.72rem !important;
+        color: var(--text-muted) !important;
+        margin-top: 0.15rem !important;
+        font-family: monospace !important;
+    }
+
+    /* Issue Tab: To Be Issued Column */
+    .col-strong {
+        vertical-align: top !important;
+        padding-top: 0.45rem !important;
+        white-space: nowrap !important;
+        text-align: right !important;
+    }
+    .col-strong .qty-big {
+        font-size: 0.95rem !important;
+        font-weight: 700 !important;
+        color: var(--text-main) !important;
+    }
+    .col-strong .unit {
+        font-size: 0.75rem !important;
+        font-weight: 500 !important;
+        margin-left: 0.15rem !important;
+        color: var(--text-muted) !important;
+    }
+
+    /* Issue Tab: Lot Column on Mobile (compact, cleanly sized) */
+    .col-lot-issue {
+        width: auto !important;
+        min-width: 6.5rem !important;
+        max-width: 9.5rem !important;
+        vertical-align: top !important;
+        padding-top: 0.4rem !important;
+        white-space: normal !important;
+    }
+    .lot-line-row {
+        min-height: 1.9rem !important;
+        padding: 0.2rem 0.35rem !important;
+        font-size: 0.75rem !important;
+        gap: 0.3rem !important;
+        border-radius: 0 4px 4px 0 !important;
+        white-space: nowrap !important;
+    }
+    .lot-line-row,
+    .lot-line-cell,
+    .col-lot-issue .waste-where,
+    .col-lot-issue .lot-pieces {
+        min-height: 1.9rem !important;
+    }
+    .lot-pieces {
+        font-size: 0.72rem !important;
+        line-height: 1.3 !important;
+    }
+
+    /* Issue Tab: Total Wash Stock Column on Mobile */
+    .col-lot-stock {
+        width: auto !important;
+        min-width: 4.5rem !important;
+        vertical-align: top !important;
+        padding-top: 0.4rem !important;
+        text-align: right !important;
+        white-space: nowrap !important;
+        font-size: 0.78rem !important;
+    }
+    .col-lot-stock .lot-line-cell {
+        font-size: 0.78rem !important;
+        min-height: 1.9rem !important;
+    }
+
+    /* Issue Tab: Issue Now Column on Mobile */
+    .col-issue {
+        vertical-align: top !important;
+        padding-top: 0.4rem !important;
+        width: auto !important;
+        min-width: 5.5rem !important;
+    }
+    .col-issue .lot-line-cell,
+    .col-issue .issue-cell {
+        min-height: 1.9rem !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 0.35rem !important;
+    }
+    .col-issue .issue-input,
+    .lot-line-box .issue-input {
+        width: 3.6rem !important;
+        height: 28px !important;
+        padding: 0.2rem 0.3rem !important;
+        font-size: 0.8rem !important;
+    }
+    .col-issue .issue-checkbox {
+        width: 17px !important;
+        height: 17px !important;
+    }
+
+    /* Section titles in Issue tab */
+    .section-title {
+        font-size: 0.68rem !important;
+        margin-top: 0.45rem !important;
+        margin-bottom: 0.35rem !important;
+        padding-bottom: 0.25rem !important;
     }
 
     /* Table Inputs on Mobile (Cut size & quantity) */
@@ -2963,6 +3092,128 @@ th.col-num {
         line-height: 1.35 !important;
     }
 
+    /* ---- History Date Range Bar on Mobile ---- */
+    .day-bar {
+        display: grid !important;
+        grid-template-columns: repeat(6, 1fr) !important;
+        gap: 0.35rem 0.5rem !important;
+        padding: 0.65rem 0.75rem !important;
+        margin-bottom: 0.65rem !important;
+        background: #ffffff !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 8px !important;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
+    }
+
+    /* Row 1: Labels above inputs */
+    .day-bar label.range-label:nth-of-type(1) {
+        grid-column: 1 / span 3 !important;
+        grid-row: 1 !important;
+        font-size: 0.7rem !important;
+        font-weight: 700 !important;
+        color: var(--text-muted) !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.04em !important;
+        margin-bottom: -0.1rem !important;
+    }
+
+    .day-bar label.range-label:nth-of-type(2) {
+        grid-column: 4 / span 3 !important;
+        grid-row: 1 !important;
+        font-size: 0.7rem !important;
+        font-weight: 700 !important;
+        color: var(--text-muted) !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.04em !important;
+        margin-bottom: -0.1rem !important;
+    }
+
+    /* Row 2: Date Inputs side by side */
+    .day-bar input#hist-from {
+        grid-column: 1 / span 3 !important;
+        grid-row: 2 !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        height: 36px !important;
+        padding: 0.35rem 0.45rem !important;
+        font-size: 0.82rem !important;
+        border: 1px solid var(--border) !important;
+        border-radius: 6px !important;
+        background: #f8fafc !important;
+        color: var(--text-main) !important;
+        box-sizing: border-box !important;
+    }
+
+    .day-bar input#hist-to {
+        grid-column: 4 / span 3 !important;
+        grid-row: 2 !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        height: 36px !important;
+        padding: 0.35rem 0.45rem !important;
+        font-size: 0.82rem !important;
+        border: 1px solid var(--border) !important;
+        border-radius: 6px !important;
+        background: #f8fafc !important;
+        color: var(--text-main) !important;
+        box-sizing: border-box !important;
+    }
+
+    /* Row 3: Preset Buttons (Today, 7 days, 30 days) evenly spaced across full width */
+    .day-bar button:nth-of-type(1) {
+        grid-column: 1 / span 2 !important;
+        grid-row: 3 !important;
+    }
+
+    .day-bar button:nth-of-type(2) {
+        grid-column: 3 / span 2 !important;
+        grid-row: 3 !important;
+    }
+
+    .day-bar button:nth-of-type(3) {
+        grid-column: 5 / span 2 !important;
+        grid-row: 3 !important;
+    }
+
+    .day-bar .raise-btn {
+        width: 100% !important;
+        min-height: 32px !important;
+        padding: 0.35rem 0.4rem !important;
+        font-size: 0.78rem !important;
+        font-weight: 600 !important;
+        border-radius: 6px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        background: #f8fafc !important;
+        color: var(--text-main) !important;
+        border: 1px solid #cbd5e1 !important;
+        box-shadow: none !important;
+        white-space: nowrap !important;
+        cursor: pointer !important;
+        margin: 0.15rem 0 !important;
+        transition: all 0.15s ease !important;
+    }
+
+    .day-bar .raise-btn:hover,
+    .day-bar .raise-btn:active {
+        background: #eff6ff !important;
+        border-color: var(--primary, #2563eb) !important;
+        color: var(--primary, #2563eb) !important;
+    }
+
+    /* Row 4: Summary Text (centered at bottom) */
+    .day-bar .day-bar-sub {
+        grid-column: 1 / -1 !important;
+        grid-row: 4 !important;
+        width: 100% !important;
+        margin: 0.25rem 0 0 0 !important;
+        text-align: center !important;
+        font-size: 0.76rem !important;
+        color: var(--text-muted) !important;
+        line-height: 1.35 !important;
+    }
+
     /* Hide throwaway WF test button on mobile so it never obstructs UI */
     #wf-test-btn {
         display: none !important;
@@ -2980,3 +3231,326 @@ th.col-num {
 #panel-waste .material-name-cell .mat-name {
     white-space: nowrap;
 }
+
+/* ==========================================================================
+   Store Widget: History Tab Mobile View (@media max-width: 768px)
+   Prevents text and column overlapping in mobile view.
+   Does not affect web / desktop view.
+   ========================================================================== */
+@media (max-width: 768px) {
+    /* Handover Card Container */
+    #panel-history .item-card {
+        margin-bottom: 0.55rem !important;
+        border-radius: 8px !important;
+        border: 1px solid #cbd5e1 !important;
+        overflow: hidden !important;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05) !important;
+    }
+
+    #panel-history .item-header {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: flex-start !important;
+        justify-content: space-between !important;
+        padding: 0.65rem 0.75rem !important;
+        gap: 0.5rem !important;
+        background: #f8fafc !important;
+        border-bottom: 1px solid #e2e8f0 !important;
+    }
+
+    #panel-history .item-header-info {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 0.2rem !important;
+    }
+
+    #panel-history .item-header-info h2 {
+        font-size: 0.95rem !important;
+        font-weight: 700 !important;
+        color: #0f172a !important;
+        line-height: 1.3 !important;
+        margin: 0 !important;
+        word-break: break-word !important;
+    }
+
+    #panel-history .hist-siv {
+        display: inline-flex !important;
+        align-items: center !important;
+        align-self: flex-start !important;
+        font-size: 0.75rem !important;
+        font-weight: 700 !important;
+        color: #1d4ed8 !important;
+        background: #eff6ff !important;
+        border: 1px solid #bfdbfe !important;
+        padding: 1.5px 6px !important;
+        border-radius: 4px !important;
+        margin: 0.15rem 0 0.1rem !important;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+        letter-spacing: 0.02em !important;
+    }
+
+    #panel-history .hist-siv-more {
+        font-weight: 500 !important;
+        color: #64748b !important;
+        font-family: inherit !important;
+        margin-left: 3px !important;
+    }
+
+    #panel-history .item-meta-line {
+        font-size: 0.75rem !important;
+        color: #64748b !important;
+        margin: 0.15rem 0 0 !important;
+        line-height: 1.35 !important;
+        white-space: normal !important;
+    }
+
+    #panel-history .item-header-right {
+        flex: 0 0 auto !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: flex-end !important;
+        gap: 0.35rem !important;
+    }
+
+    #panel-history .status-pill {
+        font-size: 0.72rem !important;
+        font-weight: 600 !important;
+        padding: 2.5px 8px !important;
+        border-radius: 9999px !important;
+        line-height: 1.2 !important;
+        text-transform: capitalize !important;
+    }
+
+    #panel-history .item-header-right .chevron {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 26px !important;
+        height: 26px !important;
+        border-radius: 50% !important;
+        background: #ffffff !important;
+        border: 1px solid #cbd5e1 !important;
+        color: #475569 !important;
+        margin: 0 !important;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04) !important;
+        transition: transform 0.2s ease, background-color 0.15s ease !important;
+    }
+
+    #panel-history .item-card.open .item-header-right .chevron {
+        background: #eff6ff !important;
+        border-color: #93c5fd !important;
+        color: #1d4ed8 !important;
+    }
+
+    /* Card Content & Table Container */
+    #panel-history .item-body {
+        padding: 0.45rem 0.5rem !important;
+        background: #ffffff !important;
+    }
+
+    #panel-history .tables-container {
+        padding: 0 !important;
+    }
+
+    #panel-history .table-wrapper {
+        width: 100% !important;
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        border: 1px solid #e2e8f0 !important;
+        border-radius: 6px !important;
+        margin: 0 !important;
+        background: #ffffff !important;
+        box-shadow: none !important;
+        max-height: none !important;
+    }
+
+    /* History Table Structure */
+    #panel-history table {
+        display: table !important;
+        width: 100% !important;
+        border-collapse: collapse !important;
+        table-layout: auto !important;
+        border: none !important;
+        background: #ffffff !important;
+    }
+
+    #panel-history thead {
+        display: table-header-group !important;
+        background: #f8fafc !important;
+    }
+
+    #panel-history thead th {
+        display: table-cell !important;
+        font-size: 0.68rem !important;
+        font-weight: 600 !important;
+        color: #64748b !important;
+        letter-spacing: 0.03em !important;
+        text-transform: uppercase !important;
+        padding: 0.45rem 0.5rem !important;
+        border-bottom: 1px solid #e2e8f0 !important;
+        white-space: nowrap !important;
+        line-height: 1.2 !important;
+    }
+
+    #panel-history thead th:first-child {
+        text-align: left !important;
+        min-width: 130px !important;
+    }
+
+    #panel-history thead th:nth-child(2) {
+        text-align: left !important;
+        min-width: 90px !important;
+    }
+
+    #panel-history thead th.col-num {
+        text-align: right !important;
+        min-width: 65px !important;
+    }
+
+    #panel-history tbody {
+        display: table-row-group !important;
+    }
+
+    #panel-history tbody tr {
+        display: table-row !important;
+        border-bottom: 1px solid #f1f5f9 !important;
+        background: transparent !important;
+    }
+
+    #panel-history tbody tr:last-child {
+        border-bottom: none !important;
+    }
+
+    #panel-history table td {
+        display: table-cell !important;
+        vertical-align: top !important;
+        padding: 0.5rem 0.5rem !important;
+    }
+
+    /* Column 1: Material Name & SKU — allow clean multi-line wrapping */
+    #panel-history .material-name-cell {
+        min-width: 130px !important;
+        max-width: none !important;
+        white-space: normal !important;
+        vertical-align: top !important;
+        padding: 0.5rem 0.5rem !important;
+        border: none !important;
+    }
+
+    #panel-history .material-name-cell .mat-name {
+        font-size: 0.82rem !important;
+        font-weight: 600 !important;
+        color: #0f172a !important;
+        line-height: 1.35 !important;
+        white-space: normal !important;
+        word-break: break-word !important;
+    }
+
+    #panel-history .material-name-cell .mat-sku {
+        font-size: 0.72rem !important;
+        color: #64748b !important;
+        margin-top: 3px !important;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+        white-space: nowrap !important;
+        letter-spacing: 0.02em !important;
+    }
+
+    /* Column 2: Issued from (Lot / Pieces / Waste) */
+    #panel-history .hist-src-cell {
+        min-width: 90px !important;
+        white-space: normal !important;
+        vertical-align: top !important;
+        padding: 0.5rem 0.5rem !important;
+        line-height: 1.4 !important;
+        border: none !important;
+    }
+
+    #panel-history .hist-src-line {
+        display: flex !important;
+        align-items: center !important;
+        flex-wrap: wrap !important;
+        gap: 4px !important;
+        white-space: normal !important;
+        line-height: 1.4 !important;
+        margin-bottom: 2px !important;
+    }
+
+    #panel-history .hist-lot {
+        display: inline-block !important;
+        font-size: 0.72rem !important;
+        font-weight: 700 !important;
+        color: #1e40af !important;
+        background: #eff6ff !important;
+        border: 1px solid #bfdbfe !important;
+        border-left: 3px solid #2563eb !important;
+        padding: 1px 5px !important;
+        border-radius: 3px !important;
+        white-space: nowrap !important;
+    }
+
+    #panel-history .hist-src-qty {
+        font-size: 0.82rem !important;
+        font-weight: 700 !important;
+        color: #0f172a !important;
+        font-variant-numeric: tabular-nums !important;
+        white-space: nowrap !important;
+        margin-left: 0 !important;
+    }
+
+    #panel-history .hist-src-qty .unit {
+        font-size: 0.72rem !important;
+        font-weight: 500 !important;
+        color: #64748b !important;
+        margin-left: 2px !important;
+    }
+
+    #panel-history .hist-src-waste {
+        display: inline-flex !important;
+        align-items: center !important;
+        flex-wrap: wrap !important;
+        gap: 4px !important;
+        font-size: 0.74rem !important;
+        color: #047857 !important;
+        background: #ecfdf5 !important;
+        border: 1px solid #a7f3d0 !important;
+        padding: 1.5px 6px !important;
+        border-radius: 4px !important;
+        white-space: normal !important;
+        line-height: 1.3 !important;
+    }
+
+    #panel-history .hist-waste-size {
+        font-weight: 700 !important;
+    }
+
+    #panel-history .hist-waste-where {
+        font-size: 0.7rem !important;
+        color: #065f46 !important;
+    }
+
+    /* Column 3: Qty issued */
+    #panel-history td.col-num {
+        min-width: 65px !important;
+        text-align: right !important;
+        vertical-align: top !important;
+        white-space: nowrap !important;
+        font-size: 0.88rem !important;
+        font-weight: 700 !important;
+        color: #0f172a !important;
+        line-height: 1.35 !important;
+        font-variant-numeric: tabular-nums !important;
+        padding: 0.5rem 0.5rem !important;
+        border: none !important;
+    }
+
+    #panel-history td.col-num .unit {
+        font-size: 0.72rem !important;
+        font-weight: 500 !important;
+        color: #64748b !important;
+        margin-left: 2px !important;
+    }
+}
+
+
