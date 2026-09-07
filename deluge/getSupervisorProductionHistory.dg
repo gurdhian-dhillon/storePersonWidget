@@ -436,6 +436,10 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 	itemSkuMap = Map();
 	itemStatMap = Map();
 	itemSeenMap = Map();
+	// Lot number cache, same pattern as getStoreIssueHistory.dg - a miss is
+	// cached too, as an empty string, so a lot that cannot be read is not
+	// re-queried on every line that names it.
+	lotNumMap = Map();
 
 	for each  mi in issues
 	{
@@ -507,6 +511,31 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 					rName = ifnull(rln.Material_Name,"").toString().trim().replaceAll("\"","'");
 				}
 
+				// WHICH LOT AND ROLL this line cut from, lot-rolls-model.md
+				// Step 5/7 - the same pair getStoreIssueHistory.dg already
+				// resolves for the store's own history card, so what he was
+				// handed reads back the same way it was issued. Roll_Label is
+				// carried as-is (one label, or several joined "L2-R1 5m,
+				// L2-R2 1.05m") - the widget parses it the same way the
+				// receive screen's own JS-API path does.
+				rLotKey = ifnull(rln.Lot,"").toString().trim();
+				rLot = "";
+				if(rLotKey != "")
+				{
+					if(lotNumMap.get(rLotKey) == null)
+					{
+						lotNumMap.put(rLotKey,"");
+
+						for each  rLotC in Raw_Material_Lot[ID == rLotKey.toLong()]
+						{
+							lotNumMap.put(rLotKey,ifnull(rLotC.Lot_Number,"").toString().trim().replaceAll("\"","'"));
+						}
+					}
+
+					rLot = ifnull(lotNumMap.get(rLotKey),"").toString();
+				}
+				rRoll = ifnull(rln.Roll_Label,"").toString().trim().replaceAll("\"","'");
+
 				// The item this line's quantity was cut for. Plan_Item is a
 				// LOOKUP - toString() gives the record id, which is the map key.
 				// Empty on a pre-Plan_Item handover or a line issued without one;
@@ -557,7 +586,7 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 				{
 					rLines = rLines + ",";
 				}
-				rLines = rLines + "{\"material\":\"" + rName + "\",\"qty\":" + rqStr.toDecimal() + ",\"unit\":\"" + ifnull(rln.Unit,"").toString() + "\",\"itemId\":\"" + rItemKey + "\",\"itemName\":\"" + rItemName + "\",\"itemSku\":\"" + rItemSku + "\",\"itemStatus\":\"" + rItemStat + "\"}";
+				rLines = rLines + "{\"material\":\"" + rName + "\",\"qty\":" + rqStr.toDecimal() + ",\"unit\":\"" + ifnull(rln.Unit,"").toString() + "\",\"itemId\":\"" + rItemKey + "\",\"itemName\":\"" + rItemName + "\",\"itemSku\":\"" + rItemSku + "\",\"itemStatus\":\"" + rItemStat + "\",\"lot\":\"" + rLot + "\",\"roll\":\"" + rRoll + "\"}";
 				totalRecvLines = totalRecvLines + 1;
 			}
 		}

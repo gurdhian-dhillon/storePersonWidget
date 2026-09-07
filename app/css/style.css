@@ -2495,6 +2495,16 @@ th.col-num {
     white-space: nowrap;
 }
 
+/* WHICH ROLL this lot's cloth came off, lot-rolls-model.md Step 5. Sits
+   under the lot tag rather than beside it — quieter still, since it is a
+   qualifier on the qualifier. Absent for a pre-Step-5 handover. */
+.hist-roll {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    padding: 0.05rem 0 0 0.4rem;
+    white-space: nowrap;
+}
+
 /* The SIV number(s) of a handover card. One press of Issue can be several
    Material_Issue chunks; the list lets a transfer-order check reconcile. */
 .hist-siv {

@@ -681,6 +681,82 @@ string resolveDispute(string payloadJson)
 					// safe to read after one that matched nothing.
 					takeD = 0.0;
 
+					//------------------------------------------------------
+					// WHICH ROLL A RESTORE GOES BACK TO, lot-rolls-model.md
+					// Step 7. Resolved HERE, once, from the same Issue_Line
+					// section 3a below also reads (Material_Issue[Voucher_No
+					// == dsp.Voucher_No].Issue_Lines, matched on material and
+					// lot) - so both sections agree on one answer rather than
+					// each guessing separately.
+					//
+					// Issue_Lines.Roll_Label is ONE label, or several joined
+					// "L2-R1 5m, L2-R2 1.05m" when that handover line drained
+					// more than one roll. There is no record of which portion
+					// of a multi-roll line the DISPUTED metres came from -
+					// only which rolls the line touched at all - so this
+					// restores to the LAST one named. Drain order is
+					// shortest-first, so the last-named roll is the one the
+					// line most recently drew from - the same "unwind
+					// newest-drain-first" rule applyFabricOverride already
+					// uses for an edit-down, applied here to a correction
+					// instead of a hand edit.
+					//
+					// Empty when the dispute carries no voucher (pre-migration
+					// dispute, legacy per-requirement Issue_Lines with no
+					// Roll_Label) - the lot-level restore below still runs,
+					// exactly as it always did, just with no roll attached.
+					restoreRollLabel = "";
+					if(restore == true)
+					{
+						dspVoucherTxtR = ifnull(dsp.Voucher_No,"").toString().trim();
+						if(dspVoucherTxtR != "")
+						{
+							dspLotMatchR = ifnull(dsp.Lot,"").toString().trim();
+							for each  miHR in Material_Issue[Voucher_No == dspVoucherTxtR]
+							{
+								for each  ilHR in miHR.Issue_Lines
+								{
+									ilMatTxtR = ifnull(ilHR.Material,"").toString().trim();
+									ilLotTxtR = ifnull(ilHR.Lot,"").toString().trim();
+									lotOkR = true;
+									if(dspLotMatchR != "" && ilLotTxtR != dspLotMatchR)
+									{
+										lotOkR = false;
+									}
+									if(ilMatTxtR == dsp.Material.toString() && lotOkR == true)
+									{
+										rlLabelR = ifnull(ilHR.Roll_Label,"").toString().trim();
+										if(rlLabelR != "")
+										{
+											rlPartsR = rlLabelR.toList(",");
+											if(rlPartsR.size() <= 1)
+											{
+												restoreRollLabel = rlLabelR;
+											}
+											else
+											{
+												lastSegR = rlPartsR.get(rlPartsR.size() - 1).trim();
+												if(lastSegR.endsWith("m"))
+												{
+													lastSegR = lastSegR.substring(0,lastSegR.length() - 1);
+												}
+												lastSpR = lastSegR.lastIndexOf(" ");
+												if(lastSpR > 0)
+												{
+													restoreRollLabel = lastSegR.substring(0,lastSpR).trim();
+												}
+												else
+												{
+													restoreRollLabel = lastSegR.trim();
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+
 					for each  rm in Raw_Material[ID == dsp.Material]
 					{
 						rdStr = ifnull(rm.Disputed_Qty,"0").toString().trim();
@@ -773,6 +849,103 @@ string resolveDispute(string payloadJson)
 									lwStr = "0";
 								}
 								dLot.Wash_Quantity = lwStr.toDecimal() + takeL;
+
+								//------------------------------------------
+								// THE ROLL ITSELF, lot-rolls-model.md Step 7.
+								// Wash_Quantity above is the existing
+								// invariant readers still depend on; this
+								// keeps Σ Roll_Length in step with it, the
+								// same pairing issueMaterialsApply's 3a/3b
+								// already keeps together.
+								//
+								// A CONSUMED ROLL IS NOT REVIVED - per the
+								// doc, a roll that reached zero may have been
+								// physically discarded, so restoring to it
+								// would claim cloth is on a roll nobody can
+								// find. A NEW row is inserted instead,
+								// Origin="Returned", carrying the SAME label
+								// so the store recognises it as the same
+								// physical delivery even though it is a new
+								// record.
+								//------------------------------------------
+								if(restoreRollLabel != "")
+								{
+									// FIRST MATCH WINS. Several rows can carry
+									// this label - the still-Consumed original,
+									// plus one Returned row per earlier dispute
+									// restore on it - and only the first
+									// non-Consumed one found should take the
+									// metres, or a repeat dispute on the same
+									// label compounds: each restore would both
+									// grow the existing Available row AND insert
+									// another Returned row for the still-there
+									// Consumed original, inventing metres.
+									// A quarantined roll (Blocked) is left
+									// exactly as found: metres go back onto it
+									// (keeps Σ Roll_Length honest) but its
+									// status is not silently lifted, since the
+									// quarantine may have nothing to do with
+									// this dispute. Only a truly bare status
+									// (never set) is promoted to Available -
+									// the allocator only cuts Available rolls,
+									// so an empty-status row must not strand
+									// the restored metres.
+									rollHit = false;
+									restoreRollUpdRow = "";
+									for each  dRoll in dLot.Lot_Rolls
+									{
+										if(rollHit == false && ifnull(dRoll.Roll_Label,"").toString().trim().toUpperCase() == restoreRollLabel.toUpperCase())
+										{
+											dRollStatusR = ifnull(dRoll.Roll_Status,"").toString().trim();
+											if(dRollStatusR != "Consumed")
+											{
+												rollHit = true;
+												drLenStr = ifnull(dRoll.Roll_Length,"0").toString().trim();
+												if(drLenStr == "")
+												{
+													drLenStr = "0";
+												}
+												dRoll.Roll_Length = drLenStr.toDecimal() + takeL;
+												if(dRollStatusR == "")
+												{
+													dRoll.Roll_Status = "Available";
+												}
+											}
+										}
+									}
+									if(rollHit == false)
+									{
+										for each  dRoll2 in dLot.Lot_Rolls
+										{
+											if(rollHit == false && ifnull(dRoll2.Roll_Label,"").toString().trim().toUpperCase() == restoreRollLabel.toUpperCase())
+											{
+												rollHit = true;
+												newRetRow = Raw_Material_Lot.Lot_Rolls();
+												newRetRow.Roll_Label = restoreRollLabel;
+												newRetRow.Roll_Length = takeL;
+												newRetRow.Roll_Status = "Available";
+												newRetRow.Origin = "Returned";
+												newRetRow.Source_Receipt = "DISPUTE-" + dispId;
+												dLot.Lot_Rolls.insert(newRetRow);
+											}
+										}
+									}
+									if(rollHit == false)
+									{
+										// The named roll no longer exists at all
+										// (deleted, or the label was edited on
+										// the rack since) - same "Returned" new
+										// row, since there is nothing left to
+										// add the metres onto.
+										newRetRow2 = Raw_Material_Lot.Lot_Rolls();
+										newRetRow2.Roll_Label = restoreRollLabel;
+										newRetRow2.Roll_Length = takeL;
+										newRetRow2.Roll_Status = "Available";
+										newRetRow2.Origin = "Returned";
+										newRetRow2.Source_Receipt = "DISPUTE-" + dispId;
+										dLot.Lot_Rolls.insert(newRetRow2);
+									}
+								}
 							}
 						}
 					}

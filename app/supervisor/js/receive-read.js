@@ -10,8 +10,9 @@
  * It produces the EXACT shape render(merged) in receive.js consumes:
  *   { supervisors:[{id,name}],
  *     materials:[{materialId,material,unit,isFabric,isReissue,pending,
- *                 lots:[{lot,qty}], orders:[{planId,planNo,salesOrder,pending,
- *                 isReissue,reason,lineCount}], voucherIds:[..] }],
+ *                 lots:[{lot,qty,rolls:[{roll,qty}]}],
+ *                 orders:[{planId,planNo,salesOrder,pending,
+ *                 isReissue,reason,lineCount,lot,rolls:[{roll,qty}]}], voucherIds:[..] }],
  *     waste:[{rowId,planId,planNo,salesOrder,materialId,material,width,length,
  *             pending,cutWidth,cutLength,yields}],
  *     printedPieces:[{issueLineId,voucherId,materialId,material,unit,qty,pending,
@@ -283,6 +284,13 @@ var ReceiveRead = (function () {
 
                 var lotId = lookupId(ln.Lot);
                 var lotLabel = lotId ? (lotNumById[lotId] || 'Not recorded') : 'Not recorded';
+                // THE ROLL(S), lot-rolls-model.md Step 5/7. issueMaterialsHandover
+                // stamps this per material x lot line - one label, or several
+                // joined "L2-R1 5m, L2-R2 1.05m" (drain order) when the line
+                // drained more than one roll. Kept as the raw string here; the
+                // widget parses it the same way the store screen's own display
+                // already does, so both read one convention.
+                var rollLabelTxt = flat(ln.Roll_Label);
 
                 if (isPrinted) {
                     // One receipt row per printed Issue_Line — confirmed per piece.
@@ -314,6 +322,11 @@ var ReceiveRead = (function () {
                         isReissue: false,
                         pending: 0,
                         lots: {},
+                        // lotLabel -> { rollLabel -> qty }, and lotLabel -> [rollLabel,...]
+                        // to keep drain order rather than object key order (which a
+                        // numeric-looking label like "1" would silently reorder).
+                        rollsByLot: {},
+                        rollOrderByLot: {},
                         voucherIds: {}
                     };
                     mat[matId] = cur;
@@ -322,6 +335,55 @@ var ReceiveRead = (function () {
                 cur.pending = r2(cur.pending + owed);
                 cur.lots[lotLabel] = r2((cur.lots[lotLabel] || 0) + owed);
                 cur.voucherIds[voucherId] = 1;
+
+                if (rollLabelTxt) {
+                    var rolls = cur.rollsByLot[lotLabel] || (cur.rollsByLot[lotLabel] = {});
+                    var rollOrder = cur.rollOrderByLot[lotLabel] || (cur.rollOrderByLot[lotLabel] = []);
+                    // A line can name several rolls at once ("L2-R1 5m, L2-R2
+                    // 1.05m") - split and credit each its own share, same
+                    // parsing the store screen's rollLinesFor already does.
+                    var segs = rollLabelTxt.split(',');
+                    if (segs.length <= 1) {
+                        // One roll: no "Xm" suffix to parse, the WHOLE owed
+                        // amount for this line came off it.
+                        var rlbl = rollLabelTxt.trim();
+                        if (!rlbl) { /* nothing to credit */ }
+                        else {
+                            if (!rolls[rlbl]) { rolls[rlbl] = 0; rollOrder.push(rlbl); }
+                            rolls[rlbl] = r2(rolls[rlbl] + owed);
+                        }
+                    } else {
+                        // Segment metres are the ORIGINAL amounts stamped at
+                        // issue time, which sum to the line's full qty, not
+                        // what's still owed (partly received/disputed since).
+                        // Scale each segment by owed/qty so a half-received
+                        // multi-roll line shows sub-lines that actually sum
+                        // to the lot line's owed total, not the original.
+                        var segTotal = 0;
+                        var parsed = [];
+                        segs.forEach(function (seg) {
+                            var s = seg.trim();
+                            // Only strip a trailing "m" when what's left still
+                            // parses as a number - a label that itself ends in
+                            // "m" (e.g. "FOAM") must not be mangled.
+                            var sNoM = (s.slice(-1) === 'm') ? s.slice(0, -1) : s;
+                            var sp = sNoM.lastIndexOf(' ');
+                            if (sp <= 0) return;
+                            var segLbl = sNoM.slice(0, sp).trim();
+                            var mtrCand = sNoM.slice(sp + 1).trim();
+                            var segMtr = Number(mtrCand);
+                            if (!segLbl || mtrCand === '' || isNaN(segMtr)) return;
+                            parsed.push({ label: segLbl, mtr: segMtr });
+                            segTotal += segMtr;
+                        });
+                        var scale = (qty > 0 && segTotal > 0) ? (owed / qty) : 1;
+                        parsed.forEach(function (p) {
+                            var creditMtr = r2(p.mtr * scale);
+                            if (!rolls[p.label]) { rolls[p.label] = 0; rollOrder.push(p.label); }
+                            rolls[p.label] = r2(rolls[p.label] + creditMtr);
+                        });
+                    }
+                }
             });
         });
 
@@ -379,7 +441,18 @@ var ReceiveRead = (function () {
                     pending: 0,
                     isReissue: false,
                     reason: '',
-                    lineCount: 0
+                    lineCount: 0,
+                    // WHICH LOT + ROLL THIS ORDER'S CUT COMES FROM.
+                    // Material_Requirement.Issued_Lot / .Roll_Label are the
+                    // tone pin - written once, by issueMaterialsApply, from
+                    // the FIRST allocation that gave this row fresh cloth.
+                    // Several requirement rows can feed one (plan, material)
+                    // entry (two cut sizes of the same fabric), and they can
+                    // legitimately name different lots/rolls - lotRolls[]
+                    // carries one entry per distinct (lot,roll) pair seen,
+                    // not just the first or the last.
+                    lotRolls: [],
+                    _lotRollSeen: {}
                 };
                 byPlan[planId] = e;
                 list.push(planId);
@@ -388,6 +461,48 @@ var ReceiveRead = (function () {
             e.lineCount += 1;
             if (isRe) { e.isReissue = true; mat[matId].isReissue = true; }
             if (!e.reason) e.reason = flat(rq.Reason);
+
+            var reqLotId = lookupId(rq.Issued_Lot);
+            var reqLotLabel = reqLotId ? (lotNumById[reqLotId] || 'Not recorded') : '';
+            var reqRollTxt = flat(rq.Roll_Label);
+            if (reqLotLabel) {
+                // One (lot, roll) pair per distinct roll named on this row -
+                // a row split across two rolls names both, same parsing as
+                // the material-level rollsByLot above. A row with a lot but
+                // no roll (offcut-only, or issued before Step 5) still gets
+                // a (lot, "") entry so the lot is not silently dropped.
+                var rollNames = [''];
+                if (reqRollTxt) {
+                    var rsegs = reqRollTxt.split(',');
+                    rollNames = rsegs.map(function (seg) {
+                        var s = seg.trim();
+                        if (rsegs.length <= 1) {
+                            // A single roll carries no "Xm" suffix at all -
+                            // the whole string is the label. Trimming a
+                            // trailing "m" here would mangle a bare label
+                            // that itself ends in "m" (e.g. "FOAM").
+                            return s;
+                        }
+                        var sNoM = (s.slice(-1) === 'm') ? s.slice(0, -1) : s;
+                        var sp = sNoM.lastIndexOf(' ');
+                        // Only treat the tail after the space as the label
+                        // when what precedes looks like "<label> <metres>" -
+                        // i.e. the metres part actually parses as a number.
+                        if (sp > 0 && !isNaN(Number(sNoM.slice(sp + 1).trim()))) {
+                            return sNoM.slice(0, sp).trim();
+                        }
+                        return s.trim();
+                    }).filter(Boolean);
+                    if (rollNames.length === 0) rollNames = [''];
+                }
+                rollNames.forEach(function (rollName) {
+                    var seenKey = reqLotLabel + '|' + rollName;
+                    if (!e._lotRollSeen[seenKey]) {
+                        e._lotRollSeen[seenKey] = true;
+                        e.lotRolls.push({ lot: reqLotLabel, roll: rollName });
+                    }
+                });
+            }
         });
 
         // ---- waste: his Issued movements minus their Received children ----
@@ -445,10 +560,24 @@ var ReceiveRead = (function () {
         var materialsOut = matOrder.map(function (matId) {
             var c = mat[matId];
             var lotsArr = Object.keys(c.lots).map(function (lbl) {
-                return { lot: lbl, qty: c.lots[lbl] };
+                // rolls[] in DRAIN ORDER (rollOrderByLot), not object key
+                // order - "R2" before "R10" only holds if the order is kept
+                // explicitly. Empty when this lot's lines carried no
+                // Roll_Label at all (a pre-Step-5 handover).
+                var rollOrder = c.rollOrderByLot[lbl] || [];
+                var rollMap = c.rollsByLot[lbl] || {};
+                var rollsArr = rollOrder
+                    .map(function (rlbl) { return { roll: rlbl, qty: rollMap[rlbl] }; })
+                    .filter(function (r) { return r.qty > 0; });
+                return { lot: lbl, qty: c.lots[lbl], rolls: rollsArr };
             }).filter(function (l) { return l.qty > 0; });
             var ordersArr = (ordOrder[matId] || []).map(function (pid) {
-                return ordAgg[matId][pid];
+                var e = ordAgg[matId][pid];
+                return {
+                    planId: e.planId, planNo: e.planNo, salesOrder: e.salesOrder,
+                    pending: e.pending, isReissue: e.isReissue, reason: e.reason,
+                    lineCount: e.lineCount, lotRolls: e.lotRolls
+                };
             });
             return {
                 materialId: matId,

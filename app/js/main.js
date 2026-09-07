@@ -6544,7 +6544,13 @@ function histMaterialGroups(h) {
         var lot = l.lot || '';
         var lk = lot || '(no lot)';
         if (!g.freshByLot[lk]) {
-            g.freshByLot[lk] = { lot: lot, qty: 0 };
+            // roll: which physical roll(s) this lot's cloth came off, lot-
+            // rolls-model.md Step 5 - one label, or several joined "L2-R1
+            // 5m, L2-R2 1.05m". Carried as the raw string getStoreIssueHistory
+            // emits; a line grouped into an existing lot bucket keeps the
+            // FIRST line's roll rather than concatenating several, same as
+            // every other per-lot field here is a snapshot, not a merge.
+            g.freshByLot[lk] = { lot: lot, roll: l.roll || '', qty: 0 };
             g.freshOrder.push(lk);
         }
         g.freshByLot[lk].qty += Number(l.qty) || 0;
@@ -6578,10 +6584,14 @@ function histMaterialRows(h) {
             var f = g.freshByLot[lk];
             // Lot only qualifies fabric — thread and labels are issued by count
             // off no roll, so their line is just the quantity, no "no lot" tag.
+            // Roll sub-line under it, same convention the issue screen's own
+            // rollLinesFor uses — absent for a pre-Step-5 handover, and for
+            // non-fabric (no lot means no roll either).
             return '<div class="hist-src-line">' +
                 (f.lot ? '<span class="hist-lot">' + escapeHtml(f.lot) + '</span> ' : '') +
                 '<span class="hist-src-qty">' + fmt(f.qty) +
                 '<span class="unit">' + escapeHtml(g.unit || '') + '</span></span>' +
+                (f.roll ? '<div class="hist-roll">' + escapeHtml(f.roll) + '</div>' : '') +
                 '</div>';
         });
         g.waste.forEach(function (w) {

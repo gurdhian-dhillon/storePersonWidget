@@ -82,6 +82,40 @@ test('fresh lines group by lot within a material, qty summed', () => {
   assert.strictEqual(linen.freshByLot['L3'].qty, 4);
 });
 
+test('ROLL: a lot line carries its roll label through to the group', () => {
+  const h = handover();
+  h.lines[3].roll = 'L1-R1'; // the first L1 line (12.5)
+  const linen = ctx.histMaterialGroups(h).find((x) => x.sku === 'RM-01');
+  assert.strictEqual(linen.freshByLot['L1'].roll, 'L1-R1');
+});
+
+test('ROLL: a lot bucket keeps the FIRST line\'s roll, does not concatenate a second', () => {
+  const h = handover();
+  h.lines[3].roll = 'L1-R1'; // first L1 line
+  h.lines[4].roll = 'L1-R2'; // second L1 line, same lot bucket
+  const linen = ctx.histMaterialGroups(h).find((x) => x.sku === 'RM-01');
+  assert.strictEqual(linen.freshByLot['L1'].roll, 'L1-R1', 'snapshot of the first line, not a merge');
+  assert.strictEqual(linen.freshByLot['L1'].qty, 20, 'qty still sums across both lines');
+});
+
+test('ROLL: a lot line with NO roll (pre-Step-5 handover) leaves roll empty, nothing else affected', () => {
+  const linen = ctx.histMaterialGroups(handover()).find((x) => x.sku === 'RM-01');
+  assert.strictEqual(linen.freshByLot['L1'].roll, '');
+  assert.strictEqual(linen.freshByLot['L1'].qty, 20);
+});
+
+test('ROLL: rendered history shows the roll as a sub-line under the lot', () => {
+  const h = handover();
+  h.lines[3].roll = 'L1-R1';
+  const html = ctx.histMaterialRows(h);
+  assert.ok(/hist-roll">L1-R1<\/div>/.test(html), html);
+});
+
+test('ROLL: no render output at all when the line carries no roll', () => {
+  const html = ctx.histMaterialRows(handover());
+  assert.ok(!/hist-roll/.test(html), 'no roll sub-line for a pre-Step-5 handover');
+});
+
 test('lotless fresh (thread) folds into one bucket', () => {
   const thr = ctx.histMaterialGroups(handover()).find((x) => x.sku === 'RM-05');
   assert.strictEqual(thr.freshOrder.length, 1);

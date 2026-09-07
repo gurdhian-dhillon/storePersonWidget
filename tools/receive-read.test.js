@@ -129,6 +129,145 @@ test('two lots of one fabric -> two lot lines, pending sums', async () => {
   assert.strictEqual(m.lots.find((l) => l.lot === 'LOT-99').qty, 4);
 });
 
+test('ROLL: one Issue_Line naming a single roll -> lot.rolls has one entry, full qty', async () => {
+  const out = await run({
+    issues: [issue({
+      Issue_Lines: [issueLine({ Material: lk('M2'), Qty: 10, Lot: lk('L1'), Unit: 'Mtr', Roll_Label: 'LOT-88-R1' })]
+    })]
+  });
+  const m = out.materials.find((x) => x.materialId === 'M2');
+  assert.strictEqual(m.lots.length, 1);
+  const l = m.lots[0];
+  assert.strictEqual(l.lot, 'LOT-88');
+  assert.strictEqual(l.rolls.length, 1);
+  assert.strictEqual(l.rolls[0].roll, 'LOT-88-R1');
+  assert.strictEqual(l.rolls[0].qty, 10);
+});
+
+test('ROLL: one Issue_Line naming TWO rolls ("L R1 5m, L R2 1.05m") splits qty per roll', async () => {
+  const out = await run({
+    issues: [issue({
+      Issue_Lines: [issueLine({
+        Material: lk('M2'), Qty: 6.05, Lot: lk('L1'), Unit: 'Mtr',
+        Roll_Label: 'LOT-88-R1 5m, LOT-88-R2 1.05m'
+      })]
+    })]
+  });
+  const m = out.materials.find((x) => x.materialId === 'M2');
+  const l = m.lots[0];
+  assert.strictEqual(l.qty, 6.05, 'lot total is the whole owed amount, unaffected by roll split');
+  assert.strictEqual(l.rolls.length, 2);
+  assert.strictEqual(l.rolls[0].roll, 'LOT-88-R1');
+  assert.strictEqual(l.rolls[0].qty, 5);
+  assert.strictEqual(l.rolls[1].roll, 'LOT-88-R2');
+  assert.strictEqual(l.rolls[1].qty, 1.05);
+});
+
+test('ROLL: a PARTLY-RECEIVED multi-roll line pro-rates segment metres to what is still owed', async () => {
+  // Line issued 6.05m across two rolls (5 + 1.05), but 3.05 already received -
+  // owed is 3. Sub-lines must sum to 3 (owed), not 6.05 (the original split).
+  const out = await run({
+    issues: [issue({
+      Issue_Lines: [issueLine({
+        Material: lk('M2'), Qty: 6.05, Received_Qty: 3.05, Lot: lk('L1'), Unit: 'Mtr',
+        Roll_Label: 'LOT-88-R1 5m, LOT-88-R2 1.05m'
+      })]
+    })]
+  });
+  const m = out.materials.find((x) => x.materialId === 'M2');
+  const l = m.lots[0];
+  assert.strictEqual(l.qty, 3, 'lot total is owed, not original');
+  const rollTotal = l.rolls.reduce((t, r) => t + r.qty, 0);
+  assert.strictEqual(rollTotal, 3, 'roll sub-lines must sum to owed, not the original 6.05');
+});
+
+test('ROLL: a bare roll label ending in "m" (e.g. "FOAM") is not mangled', async () => {
+  const out = await run({
+    issues: [issue({
+      Issue_Lines: [issueLine({ Material: lk('M2'), Qty: 5, Lot: lk('L1'), Unit: 'Mtr', Roll_Label: 'FOAM' })]
+    })]
+  });
+  const m = out.materials.find((x) => x.materialId === 'M2');
+  const l = m.lots[0];
+  assert.strictEqual(l.rolls.length, 1);
+  assert.strictEqual(l.rolls[0].roll, 'FOAM', 'must not be stripped to "FOA"');
+});
+
+test('ROLL: order breakdown with a bare label ending in "m" is not dropped or mangled', async () => {
+  const out = await run({
+    issues: [issue({ Issue_Lines: [issueLine({ Material: lk('M2'), Qty: 5, Unit: 'Mtr', Lot: lk('L1'), Roll_Label: 'FOAM' })] })],
+    reqs: [req({ Material: lk('M2'), Issued_Qty: 5, Received_Qty: 0, Issued_Lot: lk('L1'), Roll_Label: 'FOAM' })]
+  });
+  const m = out.materials.find((x) => x.materialId === 'M2');
+  const o = m.orders[0];
+  assert.strictEqual(o.lotRolls.length, 1);
+  assert.strictEqual(o.lotRolls[0].roll, 'FOAM');
+});
+
+test('ROLL: TWO Issue_Lines on the SAME roll accumulate into one rolls[] entry, not two', async () => {
+  const out = await run({
+    issues: [issue({
+      Issue_Lines: [
+        issueLine({ ID: 'a', Material: lk('M2'), Qty: 3, Lot: lk('L1'), Unit: 'Mtr', Roll_Label: 'LOT-88-R1' }),
+        issueLine({ ID: 'b', Material: lk('M2'), Qty: 2, Lot: lk('L1'), Unit: 'Mtr', Roll_Label: 'LOT-88-R1' })
+      ]
+    })]
+  });
+  const m = out.materials.find((x) => x.materialId === 'M2');
+  const l = m.lots[0];
+  assert.strictEqual(l.rolls.length, 1);
+  assert.strictEqual(l.rolls[0].qty, 5);
+});
+
+test('ROLL: an Issue_Line with NO Roll_Label (pre-Step-5 handover) -> lot.rolls is empty, lot.qty unaffected', async () => {
+  const out = await run({
+    issues: [issue({
+      Issue_Lines: [issueLine({ Material: lk('M2'), Qty: 7, Lot: lk('L1'), Unit: 'Mtr', Roll_Label: '' })]
+    })]
+  });
+  const m = out.materials.find((x) => x.materialId === 'M2');
+  const l = m.lots[0];
+  assert.strictEqual(l.qty, 7);
+  assert.deepStrictEqual(l.rolls, []);
+});
+
+test('ROLL: order breakdown carries lotRolls[] from Material_Requirement.Issued_Lot + Roll_Label', async () => {
+  const out = await run({
+    issues: [issue({ Issue_Lines: [issueLine({ Material: lk('M2'), Qty: 10, Unit: 'Mtr', Lot: lk('L1'), Roll_Label: 'LOT-88-R1' })] })],
+    reqs: [req({ Material: lk('M2'), Issued_Qty: 10, Received_Qty: 0, Issued_Lot: lk('L1'), Roll_Label: 'LOT-88-R1' })]
+  });
+  const m = out.materials.find((x) => x.materialId === 'M2');
+  assert.strictEqual(m.orders.length, 1);
+  const o = m.orders[0];
+  assert.strictEqual(o.lotRolls.length, 1);
+  assert.strictEqual(o.lotRolls[0].lot, 'LOT-88');
+  assert.strictEqual(o.lotRolls[0].roll, 'LOT-88-R1');
+});
+
+test('ROLL: order breakdown with a MULTI-ROLL requirement row lists each roll once', async () => {
+  const out = await run({
+    issues: [issue({ Issue_Lines: [issueLine({ Material: lk('M2'), Qty: 6, Unit: 'Mtr', Lot: lk('L1'), Roll_Label: 'LOT-88-R1 4m, LOT-88-R2 2m' })] })],
+    reqs: [req({ Material: lk('M2'), Issued_Qty: 6, Received_Qty: 0, Issued_Lot: lk('L1'), Roll_Label: 'LOT-88-R1 4m, LOT-88-R2 2m' })]
+  });
+  const m = out.materials.find((x) => x.materialId === 'M2');
+  const o = m.orders[0];
+  assert.strictEqual(o.lotRolls.length, 2);
+  assert.strictEqual(o.lotRolls[0].roll, 'LOT-88-R1');
+  assert.strictEqual(o.lotRolls[1].roll, 'LOT-88-R2');
+});
+
+test('ROLL: order breakdown with a lot but NO roll (offcut-only requirement row) still names the lot', async () => {
+  const out = await run({
+    issues: [issue({ Issue_Lines: [issueLine({ Material: lk('M2'), Qty: 6, Unit: 'Mtr', Lot: lk('L1') })] })],
+    reqs: [req({ Material: lk('M2'), Issued_Qty: 6, Received_Qty: 0, Issued_Lot: lk('L1'), Roll_Label: '' })]
+  });
+  const m = out.materials.find((x) => x.materialId === 'M2');
+  const o = m.orders[0];
+  assert.strictEqual(o.lotRolls.length, 1);
+  assert.strictEqual(o.lotRolls[0].lot, 'LOT-88');
+  assert.strictEqual(o.lotRolls[0].roll, '');
+});
+
 test('order breakdown from Material_Requirement, netted against a dispute', async () => {
   const out = await run({
     issues: [issue({ Issue_Lines: [issueLine({ Qty: 10, Received_Qty: 0 })] })],

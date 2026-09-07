@@ -141,17 +141,33 @@ function setEditMode(on) {
 // they are separate rolls on his bench: he is not signing for "5.5 metres", he
 // is signing for 3 off L2 and 2.5 off L3 — and if only one of them is on the
 // trolley, that is exactly the discrepancy this screen exists to catch.
+//
+// ROLL SUB-LINES, lot-rolls-model.md Step 5/7. A lot is a set of physical
+// rolls, not a metres pool — "L1 10 Mtr" tells him a number and leaves him
+// standing in front of a rack of rolls guessing which one to check against.
+// Each lot line now names the roll(s) it actually came off underneath it,
+// same convention the store's own issue screen already uses (rollLinesFor /
+// lotLinesHtml in app/js/main.js) — one sub-line per roll, in the order
+// Issue_Lines.Roll_Label recorded them (drain order). Empty for a
+// pre-Step-5 handover (no Roll_Label on the line at all) — the lot line
+// alone is exactly what this screen showed before rolls existed.
 function lotColumn(m) {
     var lots = (m.isFabric && m.lots) ? m.lots : [];
     if (lots.length === 0) return '<td class="col-lot">-</td>';
 
     var parts = lots.map(function (l) {
-        if (lots.length > 1) {
-            return '<div class="rcv-lot"><b>' + escapeHtml(l.lot) + '</b> <span style="font-size: 0.9em; color: #666;">(' +
-                   fmt(l.qty) + ' ' + escapeHtml(m.unit) + ')</span></div>';
-        } else {
-            return '<div class="rcv-lot"><b>' + escapeHtml(l.lot) + '</b></div>';
-        }
+        var head = (lots.length > 1)
+            ? '<div class="rcv-lot"><b>' + escapeHtml(l.lot) + '</b> <span style="font-size: 0.9em; color: #666;">(' +
+              fmt(l.qty) + ' ' + escapeHtml(m.unit) + ')</span></div>'
+            : '<div class="rcv-lot"><b>' + escapeHtml(l.lot) + '</b></div>';
+
+        var rolls = l.rolls || [];
+        var rollLines = rolls.map(function (r) {
+            return '<div class="rcv-roll"><b>' + escapeHtml(r.roll) + '</b> &middot; ' +
+                fmt(r.qty) + ' ' + escapeHtml(m.unit) + '</div>';
+        }).join('');
+
+        return head + rollLines;
     }).join('');
 
     return '<td class="col-lot">' + parts + '</td>';
@@ -186,6 +202,16 @@ function matBreakdownHtml(m, i) {
         var name = escapeHtml(o.salesOrder || o.planNo || 'Order');
         var metaBits = 'needs <b>' + fmt(o.pending) + '</b> ' + escapeHtml(m.unit);
         if (o.lineCount > 1) metaBits += ' &middot; ' + o.lineCount + ' lines';
+        // WHICH LOT AND ROLL THIS ORDER CUTS FROM, lot-rolls-model.md Step 5/7.
+        // Material_Requirement.Issued_Lot / .Roll_Label, the tone pin - this is
+        // the answer to "which roll do I walk to for THIS order", as opposed
+        // to lotColumn's per-material total. Usually one tag; more than one
+        // means this order's own lines were split across lots or rolls (two
+        // cut sizes, or a handover that spanned a roll boundary).
+        var lotRollTags = (o.lotRolls || []).map(function (lr) {
+            var label = lr.roll ? (escapeHtml(lr.lot) + ' &middot; ' + escapeHtml(lr.roll)) : escapeHtml(lr.lot);
+            return '<span class="bd-roll-tag">' + label + '</span>';
+        }).join('');
         return '' +
             '<div class="bd-order">' +
                 '<button type="button" class="bd-order-head" ' +
@@ -193,6 +219,7 @@ function matBreakdownHtml(m, i) {
                     '<span class="chevron bd-chevron" id="' + ordChevId(i, j) + '">' + CHEV_SVG + '</span>' +
                     '<span class="bd-order-name">' + name + '</span>' +
                     '<span class="bd-order-meta">' + metaBits + '</span>' +
+                    lotRollTags +
                     (o.isReissue === true ? '<span class="reissue-tag">reissue</span>' : '') +
                 '</button>' +
                 '<div class="bd-order-items hidden" id="' + ordItemsId(i, j) + '"></div>' +

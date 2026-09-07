@@ -3072,6 +3072,25 @@ th.col-num {
     white-space: nowrap;
 }
 
+/* WHICH LOT AND ROLL this order cuts from, lot-rolls-model.md Step 5/7 -
+   same blue as .rcv-lot (informational, not a warning like .reissue-tag's
+   amber). Usually one; more than one means this order's own lines split
+   across lots or rolls. Absent for a pre-Step-5 handover. */
+.bd-roll-tag {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 1rem;
+    background: #eff6ff;
+    color: #1d4ed8;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
 /* The one chip in the per-order split that is a reissue. Tinted rather than
    badged again — the row already carries the badge, and this only has to say
    WHICH of the orders behind the figure it is. The reason rides on the title
@@ -3401,6 +3420,25 @@ th.col-num {
     border-radius: 4px;
     padding: 0.05rem 0.4rem;
     white-space: nowrap;
+}
+
+/* WHICH PHYSICAL ROLL this lot's metres came off, one sub-line per roll in
+   drain order — same convention the store's own issue screen uses (.lot-rolls
+   in app/css/style.css). The roll label is the only bold thing on the line:
+   it is what he reads down the column looking for on the rack, the metres
+   beside it confirm he has found the right one. Absent on a pre-Step-5
+   handover (no Roll_Label recorded) — the plain lot line above is unchanged. */
+.rcv-roll {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    padding: 0.05rem 0.4rem 0.05rem 0.65rem;
+    white-space: nowrap;
+    border-left: 2px solid var(--primary);
+    margin-top: 0.15rem;
+}
+.rcv-roll b {
+    color: var(--text-main);
+    font-weight: 700;
 }
 
 /* ---- Phase 2: read-only "where this goes" breakdown under a material row ---- */

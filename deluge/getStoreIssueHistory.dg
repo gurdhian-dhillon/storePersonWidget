@@ -404,11 +404,19 @@ string getStoreIssueHistory(string fromTxt, string toTxt, string offsetTxt, stri
 					lnLot = ifnull(lotNumMap.get(lnLotKey),"").toString();
 				}
 
+				// WHICH ROLL(S) this line came off, lot-rolls-model.md Step 5 -
+				// one label, or several joined "L2-R1 5m, L2-R2 1.05m" when the
+				// line drained more than one roll. A plain field on the line
+				// itself, no extra lookup - carried as-is, same convention
+				// getSupervisorProductionHistory.dg and the receive screen's
+				// JS-API path both use.
+				lnRoll = ifnull(ln.Roll_Label,"").toString().trim().replaceAll("\"","'");
+
 				if(linesJson != "")
 				{
 					linesJson = linesJson + ",";
 				}
-				linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"lot\":\"" + lnLot + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + "}";
+				linesJson = linesJson + "{\"material\":\"" + lnName + "\",\"sku\":\"" + lnSku + "\",\"lot\":\"" + lnLot + "\",\"roll\":\"" + lnRoll + "\",\"qty\":" + qStr.toDecimal() + ",\"unit\":\"" + ifnull(ln.Unit,"").toString() + "\",\"cutWidth\":" + ifnull(ln.Cut_Size_Width,0) + ",\"cutLength\":" + ifnull(ln.Cut_Size_Length,0) + "}";
 				totalLines = totalLines + 1;
 			}
 
