@@ -910,177 +910,18 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 					logsJson = logsJson + "{\"id\":\"" + trk.ID + "\",\"phase\":\"" + trk.Phase_Name + "\",\"operator\":\"" + opId + "\",\"assigns\":[" + asgJson + "],\"outsourced\":" + ifnull(trk.Is_Outsourced,false) + ",\"party\":\"" + trkParty + "\",\"sentOn\":\"" + trkSent + "\",\"outsourceRef\":\"" + ifnull(trk.Outsource_Ref,"").toString().replaceAll("\"","'") + "\",\"returnedOn\":\"" + trkBack + "\",\"start\":\"" + ifnull(trk.Start_Time,"") + "\",\"end\":\"" + ifnull(trk.End_Time,"") + "\",\"qtyIn\":" + ifnull(trk.Qty_In,0) + ",\"qtyOut\":" + ifnull(trk.Qty_Out,0) + ",\"status\":\"" + ifnull(trk.Stage_Status,"") + "\",\"remarks\":\"" + trkRemTxt + "\"}";
 				}
 
-				//------------------------------------------------------------
-				// EXPECTED WASTE, THE ARITHMETIC ONLY.
-				//
-				// production.js used to fire getExpectedWaste once per visible
-				// item on render - ~110 POSTs on a Faire order, most of them
-				// bounced 429 by Creator's per-minute cap. Folded in here so a
-				// page of 10 items costs zero extra calls.
-				//
-				// THIS IS NOT THE WHOLE OF getExpectedWaste. That function also
-				// resolves which LOT each remnant goes back to, which means
-				// walking Material_Issue and its Issue_Lines subform and
-				// Raw_Material_Lot - the heavy part, and the reason it could not
-				// simply be looped. The inline "Expected waste" cell renders
-				// only count / length x width (production.js), so NONE of the
-				// lot machinery is needed here. The cutting-waste DIALOG still
-				// calls the standalone getExpectedWaste, which still does all of
-				// it - fresh cloth is treated as one continuous block for the
-				// prediction cell, and the exact per-lot split stays in the
-				// dialog.
-				//
-				// Grain is fixed: cut width across the piece width, cut length
-				// along its length, never rotated. Same two passes as
-				// getExpectedWaste - the received waste pieces first, then fresh
-				// fabric for whatever they did not cover.
-				expWasteJson = "";
-				expPcsCut = ifnull(itm.Qty_Ordered,0);
-
-				for each  ewK in mOrder
-				{
-					ewM = mAgg.get(ewK);
-					if(ewM.get("isFabric") == true && expPcsCut > 0)
-					{
-						ewMatId = ewM.get("materialId");
-						ewCutW = ewM.get("cutWidth");
-						ewCutL = ewM.get("cutLength");
-
-						ewFabWcm = 0.0;
-						for each  ewRm in Raw_Material[ID == ewMatId.toLong()]
-						{
-							// Stored as TEXT, in inches.
-							ewWv = ewRm.Fabric_Width_Inches;
-							if(ewWv != null && ewWv.trim() != "")
-							{
-								ewFabWcm = ewWv.trim().toDecimal() * 2.54;
-							}
-						}
-
-						if(ewCutW > 0 && ewCutL > 0 && ewFabWcm > 0)
-						{
-							ewGen = "";
-							ewRemain = expPcsCut;
-
-							//--------------------------------------------------
-							// Pass 1 - the waste pieces he actually received.
-							// itemIssued was already fetched above for wasteJson.
-							//--------------------------------------------------
-							for each  ewWi in itemIssued
-							{
-								ewAvail = 0;
-								for each  ewRv in Waste_Movement[Parent_Movement == ewWi.ID && Movement_Type == "Received"]
-								{
-									ewAvail = ewAvail + ifnull(ewRv.Piece_Count,0);
-								}
-
-								ewWMat = "";
-								for each  ewWmRec in Waste_Master[ID == ewWi.Waste_Piece]
-								{
-									ewWMat = ifnull(ewWmRec.SKU,"").toString();
-								}
-
-								ewPieceW = ifnull(ewWi.Piece_Width,0);
-								ewPieceL = ifnull(ewWi.Piece_Length,0);
-
-								if(ewRemain > 0 && ewAvail > 0 && ewWMat == ewMatId.toString() && ewPieceW >= ewCutW && ewPieceL >= ewCutL)
-								{
-									ewPerRow = (ewPieceW / ewCutW).floor();
-									ewMaxRows = (ewPieceL / ewCutL).floor();
-									ewCap = ewPerRow * ewMaxRows;
-									ewSideW = ewPieceW - (ewPerRow * ewCutW);
-
-									ewFull = (ewRemain / ewCap).floor();
-									if(ewFull > ewAvail) { ewFull = ewAvail; }
-									if(ewFull > 0)
-									{
-										ewUsedLen = ewMaxRows * ewCutL;
-										if(ewSideW > 0)
-										{
-											if(ewGen != "") { ewGen = ewGen + ","; }
-											ewGen = ewGen + "{\"count\":" + ewFull + ",\"length\":" + ewUsedLen + ",\"width\":" + ewSideW + "}";
-										}
-										ewFullTail = ewPieceL - ewUsedLen;
-										if(ewFullTail > 0)
-										{
-											if(ewGen != "") { ewGen = ewGen + ","; }
-											ewGen = ewGen + "{\"count\":" + ewFull + ",\"length\":" + ewFullTail + ",\"width\":" + ewPieceW + "}";
-										}
-										ewRemain = ewRemain - (ewFull * ewCap);
-										ewAvail = ewAvail - ewFull;
-									}
-
-									if(ewRemain > 0 && ewAvail > 0)
-									{
-										ewTake = ewRemain;
-										ewPartRows = (ewTake / ewPerRow).floor();
-										ewLastRow = ewTake - (ewPartRows * ewPerRow);
-										ewRows = ewPartRows;
-										if(ewLastRow > 0) { ewRows = ewRows + 1; }
-										ewLenUsed = ewRows * ewCutL;
-
-										if(ewPartRows > 0 && ewSideW > 0)
-										{
-											if(ewGen != "") { ewGen = ewGen + ","; }
-											ewGen = ewGen + "{\"count\":1,\"length\":" + (ewPartRows * ewCutL) + ",\"width\":" + ewSideW + "}";
-										}
-										if(ewLastRow > 0)
-										{
-											ewPartW = ewPieceW - (ewLastRow * ewCutW);
-											if(ewPartW > 0)
-											{
-												if(ewGen != "") { ewGen = ewGen + ","; }
-												ewGen = ewGen + "{\"count\":1,\"length\":" + ewCutL + ",\"width\":" + ewPartW + "}";
-											}
-										}
-										ewTailL = ewPieceL - ewLenUsed;
-										if(ewTailL > 0)
-										{
-											if(ewGen != "") { ewGen = ewGen + ","; }
-											ewGen = ewGen + "{\"count\":1,\"length\":" + ewTailL + ",\"width\":" + ewPieceW + "}";
-										}
-										ewRemain = 0;
-									}
-								}
-							}
-
-							//--------------------------------------------------
-							// Pass 2 - fresh fabric for whatever is left, as one
-							// continuous block (the per-lot split is dialog-only).
-							//--------------------------------------------------
-							if(ewRemain > 0)
-							{
-								ewPerRowR = (ewFabWcm / ewCutW).floor();
-								if(ewPerRowR > 0)
-								{
-									ewSideWR = ewFabWcm - (ewPerRowR * ewCutW);
-									ewFullRowsR = (ewRemain / ewPerRowR).floor();
-									ewLastRowR = ewRemain - (ewFullRowsR * ewPerRowR);
-
-									if(ewFullRowsR > 0 && ewSideWR > 0)
-									{
-										if(ewGen != "") { ewGen = ewGen + ","; }
-										ewGen = ewGen + "{\"count\":1,\"length\":" + (ewFullRowsR * ewCutL) + ",\"width\":" + ewSideWR + "}";
-									}
-									if(ewLastRowR > 0)
-									{
-										ewPartWR = ewFabWcm - (ewLastRowR * ewCutW);
-										if(ewPartWR > 0)
-										{
-											if(ewGen != "") { ewGen = ewGen + ","; }
-											ewGen = ewGen + "{\"count\":1,\"length\":" + ewCutL + ",\"width\":" + ewPartWR + "}";
-										}
-									}
-									ewRemain = 0;
-								}
-							}
-
-							if(expWasteJson != "") { expWasteJson = expWasteJson + ","; }
-							expWasteJson = expWasteJson + "{\"materialId\":\"" + ewMatId + "\",\"waste\":[" + ewGen + "]}";
-						}
-					}
-				}
-
+				// EXPECTED-WASTE FOLD-IN REMOVED. It computed a prediction for
+				// EVERY visible item on every render (~110 items on a Faire
+				// order), deliberately treating fresh cloth as one continuous
+				// block to skip the lot walk only the real getExpectedWaste
+				// does - fine before rolls, but under lot-rolls-model.md it
+				// now under-predicts a lot split across several rolls (one
+				// tail there where the truth is one per roll). Rather than
+				// carry a second, approximate number that can disagree with
+				// the dialog's real one, production.js now asks
+				// getExpectedWaste directly, on click, per item, via a
+				// "Preview expected waste" button reusing the same End-Stage
+				// dialog read-only. Nothing here computes it any more.
 				if(itemsJson != "") { itemsJson = itemsJson + ","; }
 				// isRemake carried so the card can say so. A supervisor handed
 				// cloth for something he already finished deserves to be told it
@@ -1109,7 +950,7 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 					}
 				}
 
-				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"name\":\"" + itm.Item_Name + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"isAlteration\":" + isAltTxt + ",\"canCloseAlteration\":" + canCloseTxt + ",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "],\"expectedWaste\":{\"fabrics\":[" + expWasteJson + "]}}";
+				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"name\":\"" + itm.Item_Name + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"isAlteration\":" + isAltTxt + ",\"canCloseAlteration\":" + canCloseTxt + ",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "]}";
 				}
 			}
 

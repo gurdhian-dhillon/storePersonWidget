@@ -81,6 +81,12 @@ let wasteDraft = [];
 let wasteFabricOptions = [];
 let wasteRowSeq = 0;
 let pendingEnd = null; // {card, item, plan, payload} held while he edits waste
+// True while the SAME dialog is open as a look-before-cutting PREVIEW (the
+// item-card button), not the real End-Stage declaration. Nothing is written
+// from a preview - it reuses openWasteDialog/renderWasteDialog wholesale so
+// there is exactly one rendering of "what getExpectedWaste predicts" to keep
+// in sync, rather than a second copy that could drift from the real dialog.
+let wastePreviewMode = false;
 
 let operators = [];
 let supervisors = [];
@@ -730,66 +736,25 @@ function renderSelectedPlan() {
 
 	// index is the position ON THE PAGE; the serial the card prints has to be
 	// the position in the WHOLE list, so it is offset by where the page starts.
+	//
+	// NO AUTO-FETCHED WASTE PREVIEW HERE ANY MORE. This used to fire either
+	// from item.expectedWaste (the getProductionWidgetData fold-in) or a
+	// per-item getExpectedWaste call, for every visible item on every render.
+	// Both were an APPROXIMATION - fresh cloth as one continuous block,
+	// deliberately skipping the lot/roll walk - and under the rolls model
+	// that approximation can now understate a lot split across several
+	// rolls (one predicted tail where the real answer is one per roll).
+	// Rather than show a number that quietly disagrees with the one the
+	// dialog gives at End Stage, there is now only the one number: the
+	// "Preview expected waste" button on the card, wired in renderItemCard,
+	// which calls the exact same getExpectedWaste the dialog does, read-only.
 	const pageBase = itemPage * ITEM_PAGE_SIZE;
 	visibleItems.forEach((item, index) => {
 		const card = renderItemCard(plan, item, pageBase + index);
 		elDynamicContent.appendChild(card);
-
-		const hasFabric = (item.materials || []).some(
-			(m) => m.isFabric && !m.isWaste,
-		);
-		if (!hasFabric) return;
-
-		// The server folds the expected-waste prediction into the item now
-		// (item.expectedWaste). Fill the cells from it directly — zero extra
-		// calls. Only fall back to the per-item getExpectedWaste call when the
-		// field is absent, which means the .dg has not been redeployed yet.
-		if (item.expectedWaste && Array.isArray(item.expectedWaste.fabrics)) {
-			fillExpectedWaste(item.id, item.expectedWaste.fabrics);
-			return;
-		}
-
-		ZOHO.CREATOR.DATA.invokeCustomApi({
-			api_name: API.expectedWaste,
-			http_method: "POST",
-			payload: {
-				planId: plan.id,
-				planItemId: item.id,
-				qtyOut: String(item.qty || 0),
-			},
-		}).then((response) => {
-			try {
-				const data = JSON.parse(response.result);
-				fillExpectedWaste(item.id, data.fabrics || []);
-			} catch (e) {
-				console.error("Waste parse error", e);
-			}
-		});
 	});
 
 	renderItemPager(plan);
-}
-
-// Paint the "Expected waste" cells for one item from a fabrics[] array — the
-// same shape whether it came folded into the item or from a standalone
-// getExpectedWaste call.
-function fillExpectedWaste(itemId, fabrics) {
-	fabrics.forEach((f) => {
-		const el = document.getElementById(`exp-waste-${itemId}-${f.materialId}`);
-		if (!el) return;
-		if (f.waste && f.waste.length > 0) {
-			el.innerHTML = f.waste
-				.map(
-					(w) =>
-						`<div style="padding: 2px 0;"><b>${w.count}</b> <span class="unit">pc${w.count > 1 ? "s" : ""}</span> of ${w.length}&times;${w.width}<span class="unit">cm</span></div>`,
-				)
-				.join("");
-			el.style.opacity = "1";
-			el.classList.remove("is-muted");
-		} else {
-			el.innerHTML = "No waste";
-		}
-	});
 }
 
 // ---- The item search box, in the plan header ----
@@ -1156,10 +1121,31 @@ function renderItemCard(plan, item, index) {
 	// Earlier versions split this into grouped blocks with totals. That was more
 	// structure than the question needs - he is standing at a table deciding
 	// what to lay out next, not reconciling an account.
+	// EXPECTED WASTE IS A BUTTON NOW, NOT A COLUMN. It used to be computed for
+	// every visible item on every render (item.expectedWaste, folded into
+	// getProductionWidgetData to avoid ~110 getExpectedWaste POSTs a page) -
+	// but that fold-in deliberately treats fresh cloth as ONE CONTINUOUS
+	// BLOCK, skipping the lot/roll walk only the real function does. Under
+	// the rolls model that gap widens: a lot split across several rolls
+	// predicts one tail there where the real answer (this same dialog, at
+	// End Stage) is one per roll. Rather than carry two numbers that
+	// disagree, there is now only one: click to ask, on THIS item alone,
+	// reusing the exact same call and the exact same dialog End Stage uses
+	// (read-only - see wastePreviewMode). No standing per-material column,
+	// no bulk fetch, no fold-in for getProductionWidgetData to keep in sync.
+	const hasFabricForWaste = (item.materials || []).some(
+		(m) => m.isFabric && !m.isWaste,
+	);
+
 	let matHtml = `
         <div class="tables-container" style="border-bottom: 1px solid var(--border);">
             <div class="section-title section-title-row">
                 <span>Materials for this item</span>
+                ${
+									hasFabricForWaste
+										? `<button type="button" class="btn btn-secondary btn-waste-preview">Preview expected waste</button>`
+										: ""
+								}
             </div>
             <div class="table-wrapper">
                 <table>
@@ -1169,7 +1155,6 @@ function renderItemCard(plan, item, index) {
                             <th>Per piece size <span class="cut-axis">(L &times; W)</span></th>
                             <th>Material You have</th>
                             <th>Pieces to cut</th>
-                            <th>Expected waste</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1258,11 +1243,6 @@ function renderItemCard(plan, item, index) {
 					? `<b>${cutCount}</b> <span class="unit">pcs</span>`
 					: `<span class="is-muted">&mdash;</span>`;
 
-			const expectedWasteCell =
-				mat.isFabric && !mat.isWaste
-					? `<span class="is-muted" id="exp-waste-${item.id}-${mat.materialId}" style="font-size: 0.85em; opacity: 0.7;">Loading...</span>`
-					: `<span class="is-muted">&mdash;</span>`;
-
 			matHtml += `
                 <tr${
 									mat.isWaste
@@ -1275,7 +1255,6 @@ function renderItemCard(plan, item, index) {
                     <td>${cutCell}</td>
                     <td class="col-strong">${haveCell}</td>
                     <td>${cutCountCell}</td>
-                    <td>${expectedWasteCell}</td>
                 </tr>
             `;
 		});
@@ -1283,9 +1262,9 @@ function renderItemCard(plan, item, index) {
 		// An empty table on a rejected batch is not a gap in the record — it is
 		// the batch's own state, and saying "no materials logged" would read as
 		// something having gone missing.
-		matHtml += `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Nothing asked for yet. Raise it on the <b>Reissue</b> tab and the store will see it.</td></tr>`;
+		matHtml += `<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">Nothing asked for yet. Raise it on the <b>Reissue</b> tab and the store will see it.</td></tr>`;
 	} else {
-		matHtml += `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No materials logged against this item.</td></tr>`;
+		matHtml += `<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No materials logged against this item.</td></tr>`;
 	}
 
 	matHtml += `</tbody></table></div>`;
@@ -2237,6 +2216,13 @@ function renderItemCard(plan, item, index) {
 			});
 		});
 
+		const btnWastePreview = card.querySelector(".btn-waste-preview");
+		if (btnWastePreview) {
+			btnWastePreview.addEventListener("click", () => {
+				openWasteDialog(plan, item, Number(item.qty) || 0, true);
+			});
+		}
+
 		const btnsSave = card.querySelectorAll(".btn-save");
 		btnsSave.forEach((btnSave) => {
 			btnSave.addEventListener("click", () => {
@@ -2826,7 +2812,8 @@ function defaultLotFor(materialId) {
 	return lots.length === 1 ? String(lots[0].lotId) : "";
 }
 
-function openWasteDialog(plan, item, qtyOut) {
+function openWasteDialog(plan, item, qtyOut, preview) {
+	wastePreviewMode = preview === true;
 	const el = wasteDialogEl();
 	el.classList.remove("hidden");
 	el.innerHTML = `<div class="waste-panel"><div class="waste-head">Working out the waste…</div></div>`;
@@ -2930,8 +2917,9 @@ function openWasteDialog(plan, item, qtyOut) {
 // One lot: shown, not asked about. Two: he picks, and it starts blank so an
 // unanswered row is visibly unanswered rather than silently wrong. None: the
 // handover predates lots, and saying so beats an empty box.
-function lotCellHtml(r) {
+function lotCellHtml(r, preview) {
 	const lots = wasteLotsByMat[String(r.materialId)] || [];
+	const disabled = preview || !r.keep;
 
 	// The prediction already placed this piece — show what it decided rather
 	// than asking again. He can still change it by editing the row's fabric.
@@ -2947,7 +2935,7 @@ function lotCellHtml(r) {
 						`<option value="${l.lotId}" ${String(l.lotId) === String(r.lotId) ? "selected" : ""}>${escapeHtml(l.lotNumber || "—")}</option>`,
 				)
 				.join("");
-			return `<select class="w-lot" ${r.keep ? "" : "disabled"}>${opts}</select>`;
+			return `<select class="w-lot" ${disabled ? "disabled" : ""}>${opts}</select>`;
 		}
 	}
 
@@ -2961,12 +2949,17 @@ function lotCellHtml(r) {
 				`<option value="${l.lotId}" ${String(l.lotId) === String(r.lotId) ? "selected" : ""}>${escapeHtml(l.lotNumber || "—")}</option>`,
 		)
 		.join("");
-	return `<select class="w-lot" ${r.keep ? "" : "disabled"}><option value="">Which lot?</option>${opts}</select>`;
+	return `<select class="w-lot" ${disabled ? "disabled" : ""}><option value="">Which lot?</option>${opts}</select>`;
 }
 
 function renderWasteDialog(errors) {
 	const el = wasteDialogEl();
 	const opts = wasteFabricOptions;
+	// PREVIEW IS READ-ONLY, FULL STOP. Nothing is written from a look before
+	// cutting has happened - every input is disabled, Discard/+Add are gone
+	// (there is nothing to edit into a draft that will never be saved), and
+	// the footer is a single Close rather than Cancel/Save.
+	const preview = wastePreviewMode;
 
 	const rows = wasteDraft
 		.map((r) => {
@@ -2976,18 +2969,19 @@ function renderWasteDialog(errors) {
 						`<option value="${o.materialId}" ${o.materialId === r.materialId ? "selected" : ""}>${o.material}</option>`,
 				)
 				.join("");
+			const rowDisabled = preview || !r.keep;
 			// Discarding does NOT delete the row — it flips it to scrap, which is
 			// still written so "how much did we throw away this month" stays
 			// answerable. A deleted row is silent loss.
 			return `
             <tr data-key="${r.key}" class="${r.keep ? "" : "w-discarded"}">
-                <td><select class="w-mat" ${r.keep ? "" : "disabled"}>${sel}</select></td>
-                <td>${lotCellHtml(r)}</td>
-                <td><input type="number" class="w-length" min="0" step="0.01" value="${r.length}" ${r.keep ? "" : "disabled"}></td>
-                <td><input type="number" class="w-width" min="0" step="0.01" value="${r.width}" ${r.keep ? "" : "disabled"}></td>
-                <td><input type="number" class="w-count" min="1" step="1" value="${r.count}" ${r.keep ? "" : "disabled"}></td>
+                <td><select class="w-mat" ${rowDisabled ? "disabled" : ""}>${sel}</select></td>
+                <td>${lotCellHtml(r, preview)}</td>
+                <td><input type="number" class="w-length" min="0" step="0.01" value="${r.length}" ${rowDisabled ? "disabled" : ""}></td>
+                <td><input type="number" class="w-width" min="0" step="0.01" value="${r.width}" ${rowDisabled ? "disabled" : ""}></td>
+                <td><input type="number" class="w-count" min="1" step="1" value="${r.count}" ${rowDisabled ? "disabled" : ""}></td>
                 <td class="w-actions">
-                    <button type="button" class="btn btn-secondary w-del">${r.keep ? "Discard" : "Keep"}</button>
+                    ${preview ? "" : `<button type="button" class="btn btn-secondary w-del">${r.keep ? "Discard" : "Keep"}</button>`}
                 </td>
             </tr>
         `;
@@ -2998,8 +2992,8 @@ function renderWasteDialog(errors) {
         <div class="waste-panel">
             <div class="waste-head">
                 <div>
-                    <h3>Waste from this cutting</h3>
-                    <p>Edit anything that is wrong, discard what is not worth keeping, add anything the maths missed.</p>
+                    <h3>${preview ? "Expected waste from this cutting" : "Waste from this cutting"}</h3>
+                    <p>${preview ? "A preview of what the store will predict once this stage ends — nothing here is saved." : "Edit anything that is wrong, discard what is not worth keeping, add anything the maths missed."}</p>
                 </div>
             </div>
             ${errors && errors.length ? `<div class="waste-warn">${errors.join("<br>")}</div>` : ""}
@@ -3024,13 +3018,23 @@ function renderWasteDialog(errors) {
                     </tbody>
                 </table>
             </div>
-            <button type="button" class="btn btn-secondary" id="waste-add">+ Add a piece</button>
+            ${preview ? "" : `<button type="button" class="btn btn-secondary" id="waste-add">+ Add a piece</button>`}
             <div class="waste-foot">
-                <button type="button" class="btn btn-secondary" id="waste-cancel">Cancel</button>
-                <button type="button" class="primary-btn" id="waste-confirm">Save waste &amp; end cutting</button>
+                ${
+									preview
+										? `<button type="button" class="btn btn-secondary" id="waste-cancel">Close</button>`
+										: `<button type="button" class="btn btn-secondary" id="waste-cancel">Cancel</button>
+                       <button type="button" class="primary-btn" id="waste-confirm">Save waste &amp; end cutting</button>`
+								}
             </div>
         </div>
     `;
+
+	document
+		.getElementById("waste-cancel")
+		.addEventListener("click", closeWasteDialog);
+
+	if (preview) return;
 
 	el.querySelectorAll(".w-del").forEach((btn) => {
 		btn.addEventListener("click", () => {
@@ -3070,9 +3074,6 @@ function renderWasteDialog(errors) {
 	});
 
 	document
-		.getElementById("waste-cancel")
-		.addEventListener("click", closeWasteDialog);
-	document
 		.getElementById("waste-confirm")
 		.addEventListener("click", confirmWaste);
 }
@@ -3099,6 +3100,7 @@ function syncWasteDraft() {
 
 function closeWasteDialog() {
 	wasteDialogEl().classList.add("hidden");
+	wastePreviewMode = false;
 	if (pendingEnd) {
 		pendingEnd.btn.textContent = pendingEnd.originalText;
 		pendingEnd.btn.disabled = false;

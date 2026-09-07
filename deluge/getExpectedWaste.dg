@@ -70,6 +70,23 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 	lotSeqByMat = Map();
 	lotQtyByKey = Map();
 	lotNumById = Map();
+	// PER-ROLL BREAKDOWN, lot-rolls-model.md Step 4. Material_Requirement.Roll_Label
+	// (Step 4's own prerequisite, stamped by issueMaterialsApply) is either one
+	// label - the row's whole Issued_Qty came off that one roll - or several
+	// joined "L2-R1 5m, L2-R2 1.05m", in DRAIN ORDER (the order the allocator
+	// used them, same order Roll_Label was built in). Parsed once here into
+	// rollSeqByKey (material|lot -> ordered "~"-joined roll labels, drain order
+	// preserved) and rollQtyByKey (material|lot|rollLabel -> summed metres) -
+	// same shape as lotSeqByMat/lotQtyByKey one level down. A row with no
+	// Roll_Label (offcut-only, or issued before Step 4) contributes nothing;
+	// Pass 2 below falls back to its old lot-only behaviour for that lot.
+	rollSeqByKey = Map();
+	rollQtyByKey = Map();
+	// "material|lot|rollLabel" -> "1", once a roll has been added to
+	// rollSeqByKey's ordered list for that key. A plain Map lookup rather
+	// than testing the joined string for a substring, which cannot tell
+	// "R1" from "R10" reliably at the boundary.
+	rollSeenKey = Map();
 
 	// Empty by default so Pass 1.5's for-each is safe when there is no
 	// supervisor / item to scan for.
@@ -125,6 +142,87 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 					lotsByMat.put(lnMatW,haveW + "{\"lotId\":\"" + lnLotW + "\",\"lotNumber\":\"" + ifnull(lotNumById.get(lnLotW),"").toString() + "\"}");
 				}
 				lotQtyByKey.put(qKeyW,prevQW.toDecimal() + lnqW.toDecimal());
+
+				//----------------------------------------------------------
+				// PARSE Roll_Label FOR THIS ROW - Step 4. "L2-R1" (one roll,
+				// the whole lnqW came off it) or "L2-R1 5m, L2-R2 1.05m"
+				// (several, DRAIN ORDER, metres named per roll - do not
+				// re-split lnqW, the row already says the true per-roll
+				// share).
+				//----------------------------------------------------------
+				rlLabelW = ifnull(rqLotE.Roll_Label,"").toString().trim();
+				if(rlLabelW != "")
+				{
+					// Split on "," alone (single-char delimiter, the proven
+					// pattern every other .toList() call in this repo uses) -
+					// each segment is trimmed below to drop the leading space
+					// the ", " join in main.js leaves behind.
+					rlParts = rlLabelW.toList(",");
+					if(rlParts.size() <= 1)
+					{
+						// ONE ROLL. No comma, so no "Xm" suffix to parse - the
+						// label IS the roll, and the row's whole Issued_Qty
+						// came off it.
+						rkKey = lnMatW + "|" + lnLotW + "|" + rlLabelW;
+						if(rollSeenKey.get(rkKey) == null)
+						{
+							rollSeenKey.put(rkKey,"1");
+							rqSeq = ifnull(rollSeqByKey.get(qKeyW),"").toString();
+							if(rqSeq != "")
+							{
+								rqSeq = rqSeq + "~";
+							}
+							rollSeqByKey.put(qKeyW,rqSeq + rlLabelW);
+						}
+						rPrevQ = ifnull(rollQtyByKey.get(rkKey),"0").toString().trim();
+						if(rPrevQ == "")
+						{
+							rPrevQ = "0";
+						}
+						rollQtyByKey.put(rkKey,rPrevQ.toDecimal() + lnqW.toDecimal());
+					}
+					else
+					{
+						// SEVERAL ROLLS. Each segment is "<label> <metres>m" -
+						// strip the trailing "m" and split label from metres
+						// on the last space, since a label itself may contain
+						// spaces (unlikely, but typed by a person).
+						for each  rlSeg in rlParts
+						{
+							rlSegT = rlSeg.trim();
+							if(rlSegT.endsWith("m"))
+							{
+								rlSegT = rlSegT.substring(0,rlSegT.length() - 1);
+							}
+							rlSp = rlSegT.lastIndexOf(" ");
+							if(rlSp > 0)
+							{
+								rlSegLbl = rlSegT.substring(0,rlSp).trim();
+								rlSegMtrTxt = rlSegT.substring(rlSp + 1).trim();
+								if(rlSegLbl != "" && rlSegMtrTxt != "" && rlSegMtrTxt.isNumber() == true)
+								{
+									rkKey2 = lnMatW + "|" + lnLotW + "|" + rlSegLbl;
+									if(rollSeenKey.get(rkKey2) == null)
+									{
+										rollSeenKey.put(rkKey2,"1");
+										rqSeq2 = ifnull(rollSeqByKey.get(qKeyW),"").toString();
+										if(rqSeq2 != "")
+										{
+											rqSeq2 = rqSeq2 + "~";
+										}
+										rollSeqByKey.put(qKeyW,rqSeq2 + rlSegLbl);
+									}
+									rPrevQ2 = ifnull(rollQtyByKey.get(rkKey2),"0").toString().trim();
+									if(rPrevQ2 == "")
+									{
+										rPrevQ2 = "0";
+									}
+									rollQtyByKey.put(rkKey2,rPrevQ2.toDecimal() + rlSegMtrTxt.toDecimal());
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 
@@ -515,80 +613,140 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 								{
 									if(remain > 0)
 									{
-										// How many pieces THIS lot's cloth yields,
-										// off its own metres in whole marker rows.
-										//
-										// Always a whole multiple of perRow, so a lot
-										// never ends mid-row: he cuts full rows off
-										// that roll and moves to the next. The
-										// part-filled row happens once, on whichever
-										// lot the requirement runs out on.
-										pcsHere = remain;
+										lotIdJson = "";
 										if(lotCut != "")
 										{
-											lqTxt = ifnull(lotQtyByKey.get(matId.toString() + "|" + lotCut),"0").toString().trim();
-											if(lqTxt == "")
+											// Same lazy resolve, cached for the call.
+											if(lotNumById.get(lotCut) == null)
 											{
-												lqTxt = "0";
+												lotNumById.put(lotCut,"");
+
+												for each  lotRefC in Raw_Material_Lot[ID == lotCut.toLong()]
+												{
+													lotNumById.put(lotCut,ifnull(lotRefC.Lot_Number,"").toString().replaceAll("\"","'"));
+												}
 											}
-											rowsHere = ((lqTxt.toDecimal() * 100) / cutL).floor();
-											pcsHere = perRowR * rowsHere;
-											if(pcsHere > remain)
-											{
-												pcsHere = remain;
-											}
+
+											lotIdJson = ",\"lotId\":\"" + lotCut + "\",\"lotNumber\":\"" + ifnull(lotNumById.get(lotCut),"").toString() + "\"";
 										}
 
-										if(pcsHere > 0)
+										//----------------------------------------
+										// STEP 4: ONE TAIL PER ROLL, NOT PER LOT.
+										// rollSeqByKey has this lot's rolls in DRAIN
+										// ORDER (the order Roll_Label recorded them,
+										// which is the order the allocator used them)
+										// - walk them the same way the lot loop above
+										// walks lots, each roll getting its own side
+										// strip and its own part-filled row, exactly
+										// mirroring the lot-level logic this replaces
+										// one level down.
+										//
+										// FALLS BACK TO LOT-ONLY when this lot has no
+										// roll breakdown - a pre-Step-4 issue, or an
+										// offcut-only lot with no fresh-cloth row to
+										// carry a Roll_Label. One nameless pass keeps
+										// the exact old behaviour for that lot.
+										//----------------------------------------
+										rollSeqTxt = "";
+										if(lotCut != "")
 										{
-											lotIdJson = "";
-											if(lotCut != "")
-											{
-												// Same lazy resolve, cached for the call.
-												if(lotNumById.get(lotCut) == null)
-												{
-													lotNumById.put(lotCut,"");
+											rollSeqTxt = ifnull(rollSeqByKey.get(matId.toString() + "|" + lotCut),"").toString();
+										}
+										rollList = List();
+										if(rollSeqTxt != "")
+										{
+											rollList = rollSeqTxt.toList("~");
+										}
+										else
+										{
+											rollList.add("");
+										}
 
-													for each  lotRefC in Raw_Material_Lot[ID == lotCut.toLong()]
+										for each  rollCut in rollList
+										{
+											if(remain > 0)
+											{
+												// How many pieces THIS ROLL's cloth
+												// yields, off its own metres in whole
+												// marker rows. Always a whole multiple
+												// of perRow, so a roll never ends
+												// mid-row - the part-filled row happens
+												// once, on whichever roll the
+												// requirement runs out on.
+												pcsHere = remain;
+												if(rollCut != "")
+												{
+													rqTxt = ifnull(rollQtyByKey.get(matId.toString() + "|" + lotCut + "|" + rollCut),"0").toString().trim();
+													if(rqTxt == "")
 													{
-														lotNumById.put(lotCut,ifnull(lotRefC.Lot_Number,"").toString().replaceAll("\"","'"));
+														rqTxt = "0";
+													}
+													rowsHere = ((rqTxt.toDecimal() * 100) / cutL).floor();
+													pcsHere = perRowR * rowsHere;
+													if(pcsHere > remain)
+													{
+														pcsHere = remain;
+													}
+												}
+												else if(lotCut != "")
+												{
+													// No per-roll data for this lot -
+													// same figure the pre-Step-4 code
+													// used, off the lot's own total.
+													lqTxt = ifnull(lotQtyByKey.get(matId.toString() + "|" + lotCut),"0").toString().trim();
+													if(lqTxt == "")
+													{
+														lqTxt = "0";
+													}
+													rowsHere = ((lqTxt.toDecimal() * 100) / cutL).floor();
+													pcsHere = perRowR * rowsHere;
+													if(pcsHere > remain)
+													{
+														pcsHere = remain;
 													}
 												}
 
-												lotIdJson = ",\"lotId\":\"" + lotCut + "\",\"lotNumber\":\"" + ifnull(lotNumById.get(lotCut),"").toString() + "\"";
-											}
-
-											fullRowsR = (pcsHere / perRowR).floor();
-											lastRowR = pcsHere - (fullRowsR * perRowR);
-											rawRows = fullRowsR;
-											if(lastRowR > 0)
-											{
-												rawRows = rawRows + 1;
-											}
-											freshCm = freshCm + (rawRows * cutL);
-
-											if(fullRowsR > 0 && sideWR > 0)
-											{
-												if(genJson != "")
+												if(pcsHere > 0)
 												{
-													genJson = genJson + ",";
-												}
-												genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideWR + ",\"length\":" + (fullRowsR * cutL) + ",\"count\":1,\"origin\":\"side\"" + lotIdJson + "}";
-											}
-											if(lastRowR > 0)
-											{
-												partWR = fabricWidthCm - (lastRowR * cutW);
-												if(partWR > 0)
-												{
-													if(genJson != "")
+													rollJson = lotIdJson;
+													if(rollCut != "")
 													{
-														genJson = genJson + ",";
+														rollJson = rollJson + ",\"rollLabel\":\"" + rollCut.replaceAll("\"","'") + "\"";
 													}
-													genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + partWR + ",\"length\":" + cutL + ",\"count\":1,\"origin\":\"partial_row\"" + lotIdJson + "}";
+
+													fullRowsR = (pcsHere / perRowR).floor();
+													lastRowR = pcsHere - (fullRowsR * perRowR);
+													rawRows = fullRowsR;
+													if(lastRowR > 0)
+													{
+														rawRows = rawRows + 1;
+													}
+													freshCm = freshCm + (rawRows * cutL);
+
+													if(fullRowsR > 0 && sideWR > 0)
+													{
+														if(genJson != "")
+														{
+															genJson = genJson + ",";
+														}
+														genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + sideWR + ",\"length\":" + (fullRowsR * cutL) + ",\"count\":1,\"origin\":\"side\"" + rollJson + "}";
+													}
+													if(lastRowR > 0)
+													{
+														partWR = fabricWidthCm - (lastRowR * cutW);
+														if(partWR > 0)
+														{
+															if(genJson != "")
+															{
+																genJson = genJson + ",";
+															}
+															genJson = genJson + "{\"materialId\":\"" + matId + "\",\"width\":" + partWR + ",\"length\":" + cutL + ",\"count\":1,\"origin\":\"partial_row\"" + rollJson + "}";
+														}
+													}
+
+													remain = remain - pcsHere;
 												}
 											}
-
-											remain = remain - pcsHere;
 										}
 									}
 								}

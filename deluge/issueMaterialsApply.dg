@@ -42,9 +42,15 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 	//     "issueLines":[ ... ] }   -- issueLines is IGNORED here, it is for the
 	//                                 handover call
 	//
-	// WRITE-CONTRACT (unchanged):
+	// WRITE-CONTRACT:
 	//  - Material_Requirement: Issued_Qty, Pieces_From_Raw, Pieces_From_Waste,
-	//    Issued_Lot (written only when empty - the tone pin).
+	//    Issued_Lot, Roll_Label (both written only when empty - the tone pin).
+	//    Roll_Label is Step 4's prerequisite (lot-rolls-model.md): getExpectedWaste
+	//    reads it to predict a tail per ROLL instead of per lot. Derived from
+	//    each allocation's own "rolls" array (a.rolls) - the one label if this
+	//    row drew from a single roll, or every roll it drew from joined
+	//    "L2-R1 5m, L2-R2 1.05m" the same way the allocator's own display reads.
+	//    Empty for a row served entirely by offcuts, same as Issued_Lot.
 	//  - Waste_Master: Piece_Count down, In_Transit_Count up, Status="Issued" when
 	//    emptied.
 	//  - Waste_Movement "Issued": Piece_Count/Width/Length, Cut_Size_Width/Length,
@@ -179,6 +185,43 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 					giveRaw = grStr.toDecimal().toLong();
 					giveWaste = gwStr.toDecimal().toLong();
 					issLotStr = ifnull(a.get("issuedLot"),"").toString().trim();
+					// THE ROLL(S) THIS ROW'S FRESH CLOTH CAME OFF, lot-rolls-model.md
+					// Step 4's prerequisite. issueMaterialsHandover only ever learns
+					// the AGGREGATE roll picture for a whole material x lot line,
+					// which can span many requirement rows - so this is the one place
+					// that still has the per-REQUIREMENT breakdown the allocator
+					// computed (main.js's rollsByMrq, forwarded here as a.rolls).
+					// Built the same way buildHandoverSummary's rollLabel is: the
+					// single label, or every roll this row drew from joined the same
+					// way the allocator's own on-screen summary reads.
+					rollsForRow = ifnull(a.get("rolls"),"[]").toString().toJSONList();
+					rowRollLabel = "";
+					if(rollsForRow.size() == 1)
+					{
+						for each  rfr in rollsForRow
+						{
+							rfrM = rfr.toMap();
+							rowRollLabel = ifnull(rfrM.get("label"),"").toString().trim();
+						}
+					}
+					else if(rollsForRow.size() > 1)
+					{
+						for each  rfr2 in rollsForRow
+						{
+							rfrM2 = rfr2.toMap();
+							rfrLbl = ifnull(rfrM2.get("label"),"").toString().trim();
+							rfrMtrStr = ifnull(rfrM2.get("metres"),"0").toString().trim();
+							if(rfrMtrStr == "")
+							{
+								rfrMtrStr = "0";
+							}
+							if(rowRollLabel != "")
+							{
+								rowRollLabel = rowRollLabel + ", ";
+							}
+							rowRollLabel = rowRollLabel + rfrLbl + " " + rfrMtrStr.toDecimal() + "m";
+						}
+					}
 					mrqRecs = Material_Requirement[ID == mrqId.toLong()];
 					if(mrqId == "" || mrqRecs.count() == 0)
 					{
@@ -242,6 +285,14 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 									if(issLotStr != "" && ifnull(mrq.Issued_Lot,"").toString().trim() == "")
 									{
 										mrq.Issued_Lot=issLotStr.toLong();
+									}
+									// SAME TONE-PIN RULE, for the roll(s). A row served
+									// entirely by offcuts has no rolls at all - rowRollLabel
+									// stays "" and nothing is written, exactly as Issued_Lot
+									// is left alone when issLotStr is empty.
+									if(rowRollLabel != "" && ifnull(mrq.Roll_Label,"").toString().trim() == "")
+									{
+										mrq.Roll_Label=rowRollLabel;
 									}
 								}
 							}
