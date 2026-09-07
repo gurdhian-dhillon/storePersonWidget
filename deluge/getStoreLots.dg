@@ -109,9 +109,25 @@ string getStoreLots()
 					ltSt = "Active";
 				}
 
+				// EXISTING ROLL LABELS on this lot - lot-rolls-model.md Step 6.
+				// The widget checks a typed roll label against this list on blur,
+				// client-side, with no extra round trip - same pattern the lot
+				// NUMBER collision check already uses against this same payload.
+				// Only labels travel; length/status are not needed for that check
+				// and would just be more bytes on a tab most materials never open.
+				rollLabelsJson = "";
+				for each  rl in lt.Lot_Rolls
+				{
+					if(rollLabelsJson != "")
+					{
+						rollLabelsJson = rollLabelsJson + ",";
+					}
+					rollLabelsJson = rollLabelsJson + "\"" + ifnull(rl.Roll_Label,"").toString().replaceAll("\"","'") + "\"";
+				}
+
 				// Ids forced to string - an 18-digit id breaks JSON.parse on the
 				// widget side.
-				oneLot = "{\"lotId\":\"" + lt.ID + "\",\"lotNumber\":\"" + ltNum + "\",\"label\":\"" + ltLab + "\",\"status\":\"" + ltSt + "\",\"unwash\":" + luS.toDecimal() + ",\"wash\":" + lwS.toDecimal() + ",\"inTransit\":" + liS.toDecimal() + ",\"disputed\":" + ldS.toDecimal() + ",\"inWash\":" + lhS.toDecimal() + "}";
+				oneLot = "{\"lotId\":\"" + lt.ID + "\",\"lotNumber\":\"" + ltNum + "\",\"label\":\"" + ltLab + "\",\"status\":\"" + ltSt + "\",\"unwash\":" + luS.toDecimal() + ",\"wash\":" + lwS.toDecimal() + ",\"inTransit\":" + liS.toDecimal() + ",\"disputed\":" + ldS.toDecimal() + ",\"inWash\":" + lhS.toDecimal() + ",\"rollLabels\":[" + rollLabelsJson + "]}";
 
 				prevJson = ifnull(lotJsonByMat.get(ltMat),"").toString();
 				if(prevJson != "")

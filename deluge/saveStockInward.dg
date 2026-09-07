@@ -6,9 +6,21 @@ string saveStockInward(string inwardJson)
 	//     "lotId":"901",            // empty => create a new lot
 	//     "lotNumber":"L3",         // new lot only - TYPED, and must be unique
 	//     "lotLabel":"darker roll", // new lot only
-	//     "qty":100,
-	//     "state":"Unwash",         // or "Wash"
+	//     "rolls":[ {"label":"L3-R1","length":38}, {"label":"L3-R2","length":42} ],
 	//     "remarks":"" }
+	//
+	// ROLLS, NOT A LUMP QUANTITY. lot-rolls-model.md Step 6. Arriving cloth is
+	// physical rolls landing on the shelf, and cutting instructions are per roll
+	// - a lump metres figure with no roll behind it cannot be issued at all under
+	// the rolls model. So the payload now carries the rolls themselves, TYPED by
+	// the store person (he reads the label off the physical roll), and AT LEAST
+	// ONE IS REQUIRED - there is no "amount with no roll" any more. qty is
+	// derived as their sum; nothing is booked by lump sum any longer.
+	//
+	// EACH ROLL'S LABEL MUST BE UNIQUE WITHIN THE LOT - same rule as the lot
+	// number, checked here even though the widget already checks it on blur
+	// against getStoreLots' rollLabels, because a Custom API is callable from
+	// anywhere and stale client data must not be trusted to enforce it.
 	//
 	// THE LOT HOLDS THE TRUTH, Raw_Material HOLDS A MAINTAINED TOTAL. Both are
 	// written here, in one pass, so they cannot disagree. The parent is not a
@@ -51,16 +63,73 @@ string saveStockInward(string inwardJson)
 		// payload from an older widget is ignored rather than honoured.
 		state = "Unwash";
 
-		// Never compare a number to "" - Deluge rejects mixed-type comparison. So
-		// normalise to string first, test, then convert.
-		qStr = ifnull(inp.get("qty"),"0").toString().trim();
-		if(qStr == "")
-		{
-			qStr = "0";
-		}
-		qty = qStr.toDecimal();
+		//------------------------------------------------------------------
+		// THE ROLLS. AT LEAST ONE IS REQUIRED - stock with no roll behind it
+		// cannot be cut under the rolls model, so there is no "amount with
+		// no roll" input path any more. Each entry needs a label (typed by
+		// the store person, off the physical roll) and a length > 0. qty is
+		// their sum - it drives the existing Wash/Unwash + parent-total
+		// arithmetic below unchanged.
+		//------------------------------------------------------------------
+		rollsIn = ifnull(inp.get("rolls"),"[]").toString().toJSONList();
 
-		if(matId == "")
+		qty = 0.0;
+		rollLabelsIn = List();
+
+		for each  rlRaw in rollsIn
+		{
+			rlM = rlRaw.toMap();
+			rlLbl = ifnull(rlM.get("label"),"").toString().trim().replaceAll("\"","'");
+			rlLenS = ifnull(rlM.get("length"),"0").toString().trim();
+			if(rlLenS == "")
+			{
+				rlLenS = "0";
+			}
+			rlLen = rlLenS.toDecimal();
+
+			if(errTxt == "" && rlLbl == "")
+			{
+				errTxt = "Every roll needs a label";
+			}
+			if(errTxt == "" && rlLen <= 0)
+			{
+				errTxt = "Roll " + rlLbl + " needs a length greater than zero";
+			}
+
+			// DUPLICATE WITHIN THIS SUBMISSION. Checked upper-cased and
+			// trimmed, same as the lot-number clash below - "l3-r1" beside
+			// "L3-R1" would read as two different rolls on screen when it
+			// is not.
+			if(errTxt == "")
+			{
+				rlKey = rlLbl.toUpperCase();
+				dupHere = false;
+				for each  seenLbl in rollLabelsIn
+				{
+					if(seenLbl == rlKey)
+					{
+						dupHere = true;
+					}
+				}
+				if(dupHere == true)
+				{
+					errTxt = "Roll " + rlLbl + " is entered twice";
+				}
+			}
+
+			if(errTxt == "")
+			{
+				rollLabelsIn.add(rlLbl.toUpperCase());
+				qty = qty + rlLen;
+			}
+		}
+
+		if(errTxt == "" && rollsIn.size() == 0)
+		{
+			errTxt = "At least one roll is required";
+		}
+
+		if(errTxt == "" && matId == "")
 		{
 			errTxt = "No material given";
 		}
@@ -74,6 +143,10 @@ string saveStockInward(string inwardJson)
 		matName = "";
 		isFab = false;
 		unallocHave = 0.0;
+		// Width1, cm - seeded onto a NEW lot below, same formula seedLotRolls.dg
+		// uses (Fabric_Width_Inches x 2.54). Fetched here, in the point lookup
+		// this function already does per material, rather than a second one.
+		widthCm = 0.0;
 
 		if(errTxt == "")
 		{
@@ -107,6 +180,12 @@ string saveStockInward(string inwardJson)
 						uaS = "0";
 					}
 					unallocHave = uaS.toDecimal();
+
+					wiTxt = ifnull(rmChk.Fabric_Width_Inches,"").toString().trim();
+					if(wiTxt != "" && wiTxt.isNumber() == true)
+					{
+						widthCm = wiTxt.toDecimal() * 2.54;
+					}
 				}
 			}
 		}
@@ -207,6 +286,7 @@ string saveStockInward(string inwardJson)
 							Disputed_Qty=0
 							Status="Active"
 							Remarks=remarks
+							Width1=widthCm
 						];
 						targetLot = newLotId.toLong();
 						info "new lot " + lotNumOut + " for " + matName + " id=" + targetLot;
@@ -218,6 +298,36 @@ string saveStockInward(string inwardJson)
 		if(errTxt == "" && targetLot == 0)
 		{
 			errTxt = "Could not resolve a lot to book against";
+		}
+
+		//------------------------------------------------------------------
+		// ROLL LABELS VS WHAT IS ALREADY ON THIS LOT. A brand-new lot has
+		// none to clash with, so this only ever fires on the existing-lot
+		// path - but it is not gated on that, it simply finds nothing to
+		// clash with there. The widget already checked this on blur against
+		// getStoreLots' rollLabels; this is the same rule enforced server-
+		// side, because a Custom API is callable from anywhere and stale
+		// client data must not be trusted alone.
+		//------------------------------------------------------------------
+		if(errTxt == "" && targetLot != 0)
+		{
+			for each  lotChkRoll in Raw_Material_Lot[ID == targetLot]
+			{
+				for each  exRollChk in lotChkRoll.Lot_Rolls
+				{
+					exLbl = ifnull(exRollChk.Roll_Label,"").toString().trim().toUpperCase();
+					if(exLbl != "")
+					{
+						for each  newLbl in rollLabelsIn
+						{
+							if(newLbl == exLbl)
+							{
+								errTxt = "Roll " + exLbl + " already exists on this lot";
+							}
+						}
+					}
+				}
+			}
 		}
 
 		if(errTxt == "")
@@ -278,6 +388,40 @@ string saveStockInward(string inwardJson)
 					lotRec.Unwash_Quantity = lcuS.toDecimal() + qty;
 					lotUnwashOut = lcuS.toDecimal() + qty;
 					lotWashOut = lcwS.toDecimal();
+				}
+
+				//------------------------------------------------------------
+				// THE ROLLS THEMSELVES, lot-rolls-model.md Step 6. One row per
+				// entry the store person typed - never a lump qty row. A roll
+				// has no wash state (washing follows the CUT, not the roll -
+				// see the doc's "what washing does to a roll"), so these are
+				// written for BOTH Wash and Unwash bookings alike: either way,
+				// these are physical rolls that just landed and need to be
+				// cuttable.
+				//
+				// Labels are ALREADY UPPER-CASED in rollLabelsIn (from the
+				// clash checks above) - stored as typed instead, from a
+				// second pass over the raw payload, so the record on the
+				// rack reads exactly what he wrote, not a normalised copy.
+				//------------------------------------------------------------
+				for each  rlRaw2 in rollsIn
+				{
+					rlM2 = rlRaw2.toMap();
+					rlLblOut = ifnull(rlM2.get("label"),"").toString().trim().replaceAll("\"","'");
+					rlLenOutS = ifnull(rlM2.get("length"),"0").toString().trim();
+					if(rlLenOutS == "")
+					{
+						rlLenOutS = "0";
+					}
+					rlLenOut = rlLenOutS.toDecimal();
+
+					newRollRow = Raw_Material_Lot.Lot_Rolls();
+					newRollRow.Roll_Label = rlLblOut;
+					newRollRow.Roll_Length = rlLenOut;
+					newRollRow.Roll_Status = "Available";
+					newRollRow.Origin = "Purchased";
+					newRollRow.Source_Receipt = "INWARD";
+					lotRec.Lot_Rolls.insert(newRollRow);
 				}
 			}
 

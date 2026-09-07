@@ -6908,6 +6908,11 @@ function loadCounts() {
 var stockMats = [];
 var stockFilter = '';
 var stockOpenId = null;
+// materialId -> [{label, length}]. Rolls, not a lump quantity - lot-rolls-
+// model.md Step 6. Keyed on materialId like everything else on this screen,
+// initialised once when a card opens (toggleStockCard) rather than at render
+// time, so a re-render from the search box does not wipe what he has typed.
+var stockRolls = {};
 
 function loadStockIn() {
     var panel = document.getElementById('panel-stockin');
@@ -7063,6 +7068,12 @@ function toggleStockCard(matId) {
     if (card) {
         card.classList.toggle('open');
         stockOpenId = card.classList.contains('open') ? matId : null;
+        // Seed one empty roll row the FIRST time this card opens. Left alone
+        // on a later toggle so closing and reopening does not lose what he
+        // already typed.
+        if (stockOpenId === matId && !stockRolls[matId]) {
+            stockRolls[matId] = [{ label: '', length: '' }];
+        }
     }
 }
 
@@ -7176,25 +7187,186 @@ function stockCardBodyHtml(m) {
         '<input type="text" id="si-num-' + m.materialId + '" class="note-input" ' +
         'placeholder="Enter new lot number..." />' +
         '</label>' +
-        '<label class="si-field"><span>Quantity to Allocate</span>' +
-        '<input type="number" step="0.01" min="0" value="' + m.unallocated + '" id="si-qty-' + m.materialId + '" class="issue-input" readonly />' +
-        '</label>' +
         '</div>' +
-        '<div class="card-footer">' +
-        '<span class="sel-count">Goes in as <b>unwashed</b>. Match it against the rack first &mdash; a new lot cannot be merged back later.</span>' +
-        '<button type="button" class="primary-btn" id="si-btn-' + m.materialId + '" ' +
-        'onclick="submitStockIn(\'' + m.materialId + '\')">Add to stock</button>' +
-        '</div>' +
+        '<div id="si-rolls-' + m.materialId + '">' + stockRollLinesHtml(m) + '</div>' +
+        '<div class="card-footer" id="si-foot-' + m.materialId + '">' + stockRollFooterHtml(m) + '</div>' +
         '</div>' +
         '</div>';
+}
+
+// ONE ROW PER PHYSICAL ROLL, not a lump quantity - lot-rolls-model.md Step 6.
+// Cutting instructions are per roll, so cloth with no roll behind it cannot be
+// issued at all under the rolls model; AT LEAST ONE ROW IS REQUIRED and the
+// submit button stays disabled until the rows sum to EXACTLY the unallocated
+// figure (see stockRollFooterHtml) - there is no partial allocation, the
+// whole delivery has to be accounted for as rolls in one pass.
+//
+// SAME SHAPE AS printLinesHtml (the send-to-print form): an array keyed by
+// materialId, add/remove mutate it and re-render only this block, typing
+// never touches innerHTML of anything holding an input.
+function stockRollLinesHtml(m) {
+    var rolls = stockRolls[m.materialId] || [{ label: '', length: '' }];
+
+    var rows = rolls.map(function (r, i) {
+        return '' +
+            '<tr>' +
+            '<td><input type="text" class="note-input" ' +
+            'id="si-rl-lbl-' + m.materialId + '-' + i + '" value="' + escapeHtml(r.label) + '" ' +
+            'placeholder="as written on the roll" ' +
+            'onblur="onStockRollLabelBlur(\'' + m.materialId + '\',' + i + ')" ' +
+            'oninput="refreshStockRollTotals(\'' + m.materialId + '\')" /></td>' +
+            '<td><input type="number" step="0.01" min="0" class="issue-input" ' +
+            'id="si-rl-len-' + m.materialId + '-' + i + '" value="' + escapeHtml(r.length) + '" ' +
+            'oninput="refreshStockRollTotals(\'' + m.materialId + '\')" /></td>' +
+            '<td><button type="button" class="raise-btn is-stale" ' +
+            'onclick="removeStockRollLine(\'' + m.materialId + '\',' + i + ')">Remove</button></td>' +
+            '</tr>';
+    }).join('');
+
+    return '' +
+        '<div class="table-wrapper"><table>' +
+        '<thead><tr>' +
+        '<th>Roll label</th>' +
+        '<th class="col-num">Length (Mtr)</th>' +
+        '<th></th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody></table></div>' +
+        '<button type="button" class="raise-btn" ' +
+        'onclick="addStockRollLine(\'' + m.materialId + '\')">+ Another roll</button>';
+}
+
+function readStockRollLines(matId) {
+    var out = [];
+    (stockRolls[matId] || []).forEach(function (r, i) {
+        var l = document.getElementById('si-rl-lbl-' + matId + '-' + i);
+        var n = document.getElementById('si-rl-len-' + matId + '-' + i);
+        out.push({ label: l ? l.value : r.label, length: n ? n.value : r.length });
+    });
+    return out;
+}
+
+function stockRollTotal(matId) {
+    var t = 0;
+    (stockRolls[matId] || []).forEach(function (r) {
+        var n = Number(r.length) || 0;
+        if (n > 0) t += n;
+    });
+    return Math.round(t * 100) / 100;
+}
+
+// THE SUM MUST MATCH EXACTLY. Partial allocation was rejected on purpose —
+// there is no "some rolls now, the rest later" state to track, so the button
+// stays off until the rolls he has typed account for the WHOLE delivery.
+function stockRollFooterHtml(m) {
+    var total = stockRollTotal(m.materialId);
+    var target = Number(m.unallocated) || 0;
+    var matches = Math.abs(total - target) < 0.005;
+    return '' +
+        '<span class="sel-count' + (matches ? '' : ' is-short') + '">' +
+        fmt(total) + ' of ' + fmt(target) + ' Mtr entered as rolls' +
+        (matches ? '' : ' &mdash; <b>must total exactly the unallocated figure</b>') +
+        '. Goes in as <b>unwashed</b>.' +
+        '</span>' +
+        '<button type="button" class="primary-btn" id="si-btn-' + m.materialId + '" ' +
+        (matches ? '' : 'disabled ') +
+        'onclick="submitStockIn(\'' + m.materialId + '\')">Add to stock</button>';
+}
+
+function addStockRollLine(matId) {
+    stockRolls[matId] = readStockRollLines(matId);
+    stockRolls[matId].push({ label: '', length: '' });
+    var box = document.getElementById('si-rolls-' + matId);
+    if (box) {
+        var mat = null;
+        stockMats.forEach(function (x) { if (x.materialId === matId) mat = x; });
+        if (mat) box.innerHTML = stockRollLinesHtml(mat);
+    }
+    var foot = document.getElementById('si-foot-' + matId);
+    if (foot) {
+        var mat2 = null;
+        stockMats.forEach(function (x) { if (x.materialId === matId) mat2 = x; });
+        if (mat2) foot.innerHTML = stockRollFooterHtml(mat2);
+    }
+}
+
+function removeStockRollLine(matId, idx) {
+    var rows = readStockRollLines(matId);
+    rows.splice(idx, 1);
+    if (!rows.length) rows.push({ label: '', length: '' });
+    stockRolls[matId] = rows;
+    var mat = null;
+    stockMats.forEach(function (x) { if (x.materialId === matId) mat = x; });
+    if (!mat) return;
+    var box = document.getElementById('si-rolls-' + matId);
+    if (box) box.innerHTML = stockRollLinesHtml(mat);
+    var foot = document.getElementById('si-foot-' + matId);
+    if (foot) foot.innerHTML = stockRollFooterHtml(mat);
+}
+
+// TYPING MUST NOT REBUILD THE INPUT BEING TYPED IN — the same trap the print
+// form and the search box both carry their own warning about. Only the
+// footer (no inputs of its own) is replaced on every keystroke; the rows
+// themselves are only rebuilt by add/remove, which is a deliberate click.
+function refreshStockRollTotals(matId) {
+    stockRolls[matId] = readStockRollLines(matId);
+    var mat = null;
+    stockMats.forEach(function (x) { if (x.materialId === matId) mat = x; });
+    if (!mat) return;
+    var foot = document.getElementById('si-foot-' + matId);
+    if (foot) foot.innerHTML = stockRollFooterHtml(mat);
+}
+
+// LIVE COLLISION CHECK ON BLUR, against getStoreLots' rollLabels — the same
+// data this screen already has loaded, no extra round trip. Checked against
+// whichever lot is currently selected (existing lot picks up its own rolls;
+// a brand-new lot has none to clash with) AND against every OTHER row typed
+// in this same submission, matching saveStockInward.dg's own duplicate-
+// within-submission guard.
+function onStockRollLabelBlur(matId, idx) {
+    stockRolls[matId] = readStockRollLines(matId);
+    var input = document.getElementById('si-rl-lbl-' + matId + '-' + idx);
+    if (!input) return;
+    var typed = (input.value || '').trim().toUpperCase();
+    input.classList.remove('invalid');
+    if (typed === '') return;
+
+    var mat = null;
+    stockMats.forEach(function (x) { if (x.materialId === matId) mat = x; });
+    if (!mat) return;
+
+    var lotSel = document.getElementById('si-lot-' + matId);
+    var lotId = lotSel ? lotSel.value : '';
+    var existing = [];
+    (mat.lots || []).forEach(function (l) {
+        if (String(l.lotId) === String(lotId)) existing = l.rollLabels || [];
+    });
+    var clashesExisting = existing.some(function (lbl) {
+        return String(lbl || '').trim().toUpperCase() === typed;
+    });
+
+    var clashesHere = false;
+    (stockRolls[matId] || []).forEach(function (r, i) {
+        if (i === idx) return;
+        if (String(r.label || '').trim().toUpperCase() === typed) clashesHere = true;
+    });
+
+    if (clashesExisting || clashesHere) {
+        input.classList.add('invalid');
+        alert('Roll ' + input.value.trim() + (clashesExisting
+            ? ' already exists on this lot.'
+            : ' is entered twice.'));
+    }
 }
 
 function submitStockIn(matId) {
     var lotSel = document.getElementById('si-lot-' + matId);
     var numEl = document.getElementById('si-num-' + matId);
-    var qtyEl = document.getElementById('si-qty-' + matId);
     var btn = document.getElementById('si-btn-' + matId);
-    if (!qtyEl || !btn) return;
+    if (!btn) return;
+
+    var mat = null;
+    stockMats.forEach(function (x) { if (x.materialId === matId) mat = x; });
+    if (!mat) return;
 
     var creating = !lotSel || lotSel.value === '';
     var lotNum = numEl ? numEl.value.trim() : '';
@@ -7209,9 +7381,7 @@ function submitStockIn(matId) {
     // round trip tells him while he is still looking at the list of lots it
     // clashed with. Upper-cased, so "l1" cannot slip in beside "L1".
     if (creating) {
-        var mat = null;
-        stockMats.forEach(function (x) { if (x.materialId === matId) mat = x; });
-        var taken = (mat && mat.lots || []).some(function (l) {
+        var taken = (mat.lots || []).some(function (l) {
             return String(l.lotNumber || '').trim().toUpperCase() === lotNum.toUpperCase();
         });
         if (taken) {
@@ -7220,9 +7390,42 @@ function submitStockIn(matId) {
         }
     }
 
-    var qty = parseFloat(qtyEl.value);
-    if (isNaN(qty) || qty <= 0) {
-        alert('Enter how much has arrived.');
+    // AT LEAST ONE ROLL, EVERY ROLL LABELLED AND POSITIVE, THE SUM EXACT.
+    // The footer button is already disabled unless the sum matches — this is
+    // the same check repeated for a client that got here anyway (stale DOM,
+    // a fast double-click before the footer redrew).
+    var rolls = readStockRollLines(matId);
+    var target = Number(mat.unallocated) || 0;
+    var total = 0;
+    var rollsOut = [];
+    var seen = {};
+    for (var i = 0; i < rolls.length; i++) {
+        var lbl = String(rolls[i].label || '').trim();
+        var len = parseFloat(rolls[i].length);
+        if (lbl === '') {
+            alert('Every roll needs a label.');
+            return;
+        }
+        if (isNaN(len) || len <= 0) {
+            alert('Roll ' + lbl + ' needs a length greater than zero.');
+            return;
+        }
+        var key = lbl.toUpperCase();
+        if (seen[key]) {
+            alert('Roll ' + lbl + ' is entered twice.');
+            return;
+        }
+        seen[key] = true;
+        total += len;
+        rollsOut.push({ label: lbl, length: len });
+    }
+    if (rollsOut.length === 0) {
+        alert('At least one roll is required.');
+        return;
+    }
+    total = Math.round(total * 100) / 100;
+    if (Math.abs(total - target) > 0.005) {
+        alert('The rolls total ' + total + ' Mtr, but ' + target + ' Mtr is unallocated. They must match exactly.');
         return;
     }
 
@@ -7240,7 +7443,7 @@ function submitStockIn(matId) {
                 // No label from this screen any more. The field still exists on
                 // the form and the migration still writes it; nothing here does.
                 lotLabel: '',
-                qty: qty,
+                rolls: rollsOut,
                 remarks: ''
             })
         }
@@ -7258,6 +7461,10 @@ function submitStockIn(matId) {
             btn.textContent = 'Add to stock';
             return;
         }
+
+        // Cleared so a later delivery to this same material starts from one
+        // empty row again, not the rolls that were just booked.
+        delete stockRolls[matId];
 
         // Refetched rather than patched by hand. The lot balance, the parent
         // total and the unallocated figure all moved, and a card patched from

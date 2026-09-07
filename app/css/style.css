@@ -693,6 +693,15 @@ th.col-num {
     background: var(--status-danger-bg);
 }
 
+/* Same treatment for a text field flagged invalid outside an
+   .issue-input-group — the Stock In roll-label check, checked on blur
+   against a clash rather than against a numeric range. */
+.note-input.invalid {
+    border-color: var(--status-danger);
+    color: var(--status-danger);
+    background: var(--status-danger-bg);
+}
+
 .issue-input-group:has(.issue-input:disabled) {
     background: #f1f5f9;
     border-color: var(--border);
