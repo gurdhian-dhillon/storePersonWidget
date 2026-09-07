@@ -947,6 +947,32 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 
 
 	//------------------------------------------------------------------------
+	// TOTAL OUTSTANDING DEMAND PER MATERIAL, summed from `agg` - already fully
+	// built above, so this is a walk of what is already in memory, not a
+	// query. Needed by the PO-coverage check just below: whether a PO still
+	// covers a material has to be judged against the material's WHOLE
+	// remaining ask, never against the ticket's own Required_Qty, which
+	// raiseBulkPurchaseOrder stamps as the SHORTFALL that was ordered (its own
+	// comment: "not a re-derivation of total demand"). Comparing stock to that
+	// smaller number made the PO stop counting as soon as on-hand stock rose
+	// past the shortfall itself - a number usually far below real demand -
+	// which is what let a just-raised PO's material reappear on refresh with
+	// nothing actually resolved.
+	//------------------------------------------------------------------------
+	matRemainByMat = Map();
+	for each  aggKey in orderedKeys
+	{
+		aggCur = agg.get(aggKey);
+		aggMatTxt = aggCur.get("matId") + "";
+		aggRemain = ifnull(aggCur.get("required"),0) - ifnull(aggCur.get("issued"),0);
+		if(aggRemain < 0)
+		{
+			aggRemain = 0;
+		}
+		matRemainByMat.put(aggMatTxt,ifnull(matRemainByMat.get(aggMatTxt),0.0) + aggRemain);
+	}
+
+	//------------------------------------------------------------------------
 	// Open exception tickets, fetched ONCE and grouped by material.
 	//
 	// This was a query plus a subform walk inside the per-material loop, so a
@@ -994,12 +1020,6 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 				{
 					exSfStr = "0";
 				}
-				exReqStr = ifnull(oex.Required_Qty,"0").toString().trim();
-				if(exReqStr == "")
-				{
-					exReqStr = "0";
-				}
-
 				// STOP COUNTING THE PO ONCE THE STOCK HAS LANDED. Otherwise
 				// availableStock (which rises when syncPurchaseInflow books the
 				// bill) and this poCoveredQty BOTH count the same cloth, and the
@@ -1008,6 +1028,16 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 				// for the rest. resolvePurchaseShortages resolves the ticket for
 				// good on the next inflow; this just keeps the screen honest in
 				// between.
+				//
+				// Judged against the material's WHOLE remaining demand
+				// (matRemainByMat), NOT the ticket's own Required_Qty.
+				// raiseBulkPurchaseOrder stamps Required_Qty as the shortfall
+				// that was actually ordered (a fraction of total demand, by its
+				// own comment), so comparing on-hand stock to THAT let a PO stop
+				// counting the moment stock passed the shortfall alone - usually
+				// far short of what was really needed - and the material
+				// reappeared in "What is missing" on the very next refresh with
+				// nothing about the real shortage resolved.
 				exOnHand = ifnull(calcWashByMat.get(exSku),"").toString().trim();
 				if(exOnHand == "")
 				{
@@ -1017,7 +1047,8 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 				{
 					exOnHand = "0";
 				}
-				if(exReqStr.toDecimal() <= 0 || exOnHand.toDecimal() < exReqStr.toDecimal())
+				exTotalNeed = ifnull(matRemainByMat.get(exSku),0.0);
+				if(exTotalNeed <= 0 || exOnHand.toDecimal() < exTotalNeed)
 				{
 					prevPo = ifnull(poCoveredBySku.get(exSku),"0").toString().trim();
 					if(prevPo == "")

@@ -1,6 +1,7 @@
 /* =============================================================================
- * JS-Data-API stand-in for getSupervisorMaterials — the supervisor's receive
- * list, built from flat getRecords reads instead of a paged Deluge walk.
+ * JS-Data-API replacement for getSupervisorMaterials.dg (retired) — the
+ * supervisor's receive list, built from flat getRecords reads instead of a
+ * paged Deluge walk.
  *
  * WHY IT CAN BE FLAT NOW. After the issue-model migration the receive screen
  * reads the HANDOVER records (Material_Issue / Issue_Lines at material x lot
@@ -33,8 +34,8 @@
  * "STILL OWED" on an Issue_Line = Qty - Received_Qty > 0. Same test
  * receiveMaterials settles against.
  *
- * Behind a flag in receive.js (USE_JS_RECEIVE_READ); the getSupervisorMaterials
- * path stays as the fallback. Console: ReceiveRead.run(supId) / .compare(supId).
+ * receive.js calls this directly — no flag, no Deluge fallback. Console:
+ * ReceiveRead.run(supId).
  * ========================================================================== */
 var ReceiveRead = (function () {
     'use strict';
@@ -645,73 +646,7 @@ var ReceiveRead = (function () {
         });
     }
 
-    // ---- compare against getSupervisorMaterials (paged) -----------------
-    function compare(supervisorId) {
-        if (!have() || typeof ZOHO.CREATOR.DATA.invokeCustomApi !== 'function') {
-            console.warn('[receive-read] compare needs getRecords AND invokeCustomApi');
-            return;
-        }
-        var pJs = run(supervisorId);
-        var pFn = pageDeluge(supervisorId);
-        return Promise.all([pJs, pFn]).then(function (r) {
-            var js = r[0], fn = r[1];
-            function totals(list) {
-                var t = {};
-                (list.materials || []).forEach(function (m) {
-                    t[m.materialId] = { pending: r2(m.pending), lots: (m.lots || []).length, orders: (m.orders || []).length };
-                });
-                return t;
-            }
-            console.log('%c[receive-read] COMPARE', 'font-weight:bold');
-            console.log('  materials — js ' + (js.materials || []).length + '   fn ' + (fn.materials || []).length);
-            console.log('  waste     — js ' + (js.waste || []).length + '   fn ' + (fn.waste || []).length);
-            console.log('  printed   — js ' + (js.printedPieces || []).length + '   fn ' + (fn.printedPieces || []).length);
-            console.log('  plansAssigned — js ' + js.plansAssigned + '   fn ' + fn.plansAssigned);
-            var tj = totals(js), tf = totals(fn), merged = {};
-            Object.keys(tj).concat(Object.keys(tf)).forEach(function (k) {
-                merged[k] = {
-                    'js.pending': tj[k] ? tj[k].pending : '—', 'fn.pending': tf[k] ? tf[k].pending : '—',
-                    'js.lots': tj[k] ? tj[k].lots : '—', 'fn.lots': tf[k] ? tf[k].lots : '—',
-                    'js.orders': tj[k] ? tj[k].orders : '—', 'fn.orders': tf[k] ? tf[k].orders : '—'
-                };
-            });
-            console.table(merged);
-            return { js: js, fn: fn };
-        });
-    }
-
-    function pageDeluge(supervisorId) {
-        return new Promise(function (resolve, reject) {
-            var merged = { materials: [], waste: [], printedPieces: [], _planFed: {}, errors: [] };
-            function mergeIn(page) {
-                (page.materials || []).forEach(function (bm) {
-                    var em = merged.materials.filter(function (x) { return x.materialId === bm.materialId; })[0];
-                    if (!em) { merged.materials.push(JSON.parse(JSON.stringify(bm))); return; }
-                    em.pending = r2((em.pending || 0) + (bm.pending || 0));
-                });
-                (page.waste || []).forEach(function (w) { merged.waste.push(w); });
-                (page.printedPieces || []).forEach(function (p) { merged.printedPieces.push(p); });
-                if (page.plansAssigned) merged.plansAssigned = page.plansAssigned;
-            }
-            function fetchPage(skip, n) {
-                if (n > 60) { resolve(merged); return; }
-                ZOHO.CREATOR.DATA.invokeCustomApi({
-                    api_name: 'getSupervisorMaterials',
-                    http_method: 'POST',
-                    payload: { supervisorId: String(supervisorId || ''), skipLinesTxt: String(skip) }
-                }).then(function (resp) {
-                    var parsed = JSON.parse(resp.result);
-                    mergeIn(parsed);
-                    var consumed = Number(parsed.linesConsumed) || 0;
-                    if (consumed > 0) fetchPage(skip + consumed, n + 1);
-                    else resolve(merged);
-                }).catch(reject);
-            }
-            fetchPage(0, 0);
-        });
-    }
-
-    return { run: run, compare: compare, assemble: assemble, _reports: RPT };
+    return { run: run, assemble: assemble, _reports: RPT };
 })();
 
 if (typeof window !== 'undefined') window.ReceiveRead = ReceiveRead;

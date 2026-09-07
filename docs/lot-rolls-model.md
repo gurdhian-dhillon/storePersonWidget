@@ -525,7 +525,7 @@ last.
 | **1** | **DONE (dummy data).** `deluge/seedLotRolls.dg`, run in Execute: per lot with no `Lot_Rolls`, sets `Width1 = Fabric_Width_Inches × 2.54`, creates one seed roll `Roll_Length = Wash + Unwash + In_Wash`, `Roll_Label = "<Lot>-R1"`, `Origin="Purchased"`, `Source_Receipt="BACKFILL"`. Idempotent, dry-run flag, self-checks `Σ Roll_Length == Wash+Unwash+In_Wash`. **No rack labelling / seed-roll splitting** — OQ5 resolved (dummy data). `Fabric_Piece` migration deferred with the printed-fabric project. | `seedLotRolls` invariant check clean on every lot |
 | **2** | Read path exposes `rolls[]` (`getStoreMaterialRequirements`, `api-experiment.js`). No behaviour change. | one-roll parity identical |
 | **3** | `lot-allocator.js` — **DONE (Pieces 1–4), see BUILD LOG.** `lotFill` per-roll shortest-first drain + wash-gate budget (P1); `spend()` roll ledger + `lotLines[].rolls` + `allocateMaterial` forwards rolls (P2); `applyFabricOverride` multi-roll edit-down/edit-up + `shortReasonFor` longest-roll (P3); dead Pieces-lot code removed, superseded suites retired (P4). the roll DISPLAY on the issue row, dedupe-by-largest across the two `ln.rolls` writers, `isPiecesLot` retired (P5). **Step 3 COMPLETE.** Admin audit still roll-blind — it runs the Deluge path; decided it moves to the JS path instead. | 132/133 across all suites; allocator parity 31/31 byte-identical vs frozen `e000519` baseline; roll-display 10/10 |
-| **4** | `getExpectedWaste.dg` **and `getProductionWidgetData.dg`'s inline copy** per-roll tails, same pass; `saveWasteFromCutting.dg` roll stamp. | waste parity: one-roll identical for both; multi-roll hand-worked; `getProductionWidgetData` inline == `getExpectedWaste` no-lot path (8 cases) |
+| **4** | **DONE.** `getExpectedWaste.dg` per-roll tails. `getProductionWidgetData.dg`'s inline copy was not upgraded to match — it was removed instead (see Group A item 5 note below: a "Preview expected waste" button now calls `getExpectedWaste.dg` on demand, one item at a time). `saveWasteFromCutting.dg` roll stamp does not exist — **OQ3 decided it never will** (see Open Questions): the store issues to exact length, so a fresh-fabric tail is the exception, and when one exists it is ordinary `Waste_Master`, never a new roll. **Step 4 COMPLETE**, with less scope than originally planned. | waste parity: one-roll identical; multi-roll hand-worked (`tools/expected-waste-rolls.test.js`) |
 | **5** | **`issueMaterialsApply.dg`** decrements the named roll (re-read length inside the execution, cap-and-error); **`issueMaterialsHandover.dg`** stamps `Issue_Lines.Roll_Label` from the handover payload. **First write — both, same pass.** | full lifecycle test, conservation invariants after every step; concurrent-issue race test; `Issue_Lines` carries the label |
 | **6** | `saveStockInward`, `receiveFromPrint` create roll rows on receipt (`receiveFromPrint`: one row per printed run). | roll sum holds after each receipt |
 | **7** | `sendToPrint` / `cancelPrintJob` / `resolveDispute` name and wind back rolls (new `Origin="Returned"` row if the roll is `Consumed`). | dispute lifecycle: correction returns exact roll length |
@@ -713,13 +713,19 @@ screen's allocation replay is roll-blind.
 - **OQ5 — splitting a seed roll.** No tool. Dummy data, no physical rack.
   Receipt-creates-rolls (store enters "N rolls × lengths" when new cloth is
   allocated to a lot) is a **later add-on**, not blocking.
+- **OQ3 — remnant threshold. DECIDED: never a roll.** The store issues to the
+  exact length the cut needs — no slack is handed out on purpose — so a fresh-
+  fabric tail after cutting is the exception, not the expected case, and when
+  one exists it is ordinary `Waste_Master`, full stop. **No `Lot_Rolls` row is
+  ever created from a remnant.** `saveWasteFromCutting` needs no roll-stamp
+  logic at all — there is nothing for it to write. This also closes the Step 4
+  tail: the only remaining Step 4 work was this stamp, and it does not exist.
+  Rolls and `Waste_Master` stay two separate, non-overlapping pools — a roll
+  is only ever created at receipt (Step 6: `saveStockInward`,
+  `receiveFromPrint`) or by a dispute restore (Step 7), never by cutting.
 
 **Still open:**
 
-- **OQ3 — remnant threshold (blocks Step 4).** A usable tail long enough for a
-  marker row of its own becomes a `Lot_Rolls` row (`Origin = "Remnant"`);
-  anything smaller stays `Waste_Master`. `saveWasteFromCutting` makes this call.
-  Pin the number when Step 4 lands.
 - **OQ4 — roll label scheme (cosmetic).** `<Lot_Number>-R<n>` in use. Fine for
   now; revisit if lots ever split/merge for real.
 - **OQ6 — the admin audit widget is roll-blind.** `app/admin/` still calls the

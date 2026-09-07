@@ -32,6 +32,38 @@ string verifyLotSync()
 					lotsUnwash = lotsUnwash + ifnull(lot.Unwash_Quantity,"0").toString().toDecimal();
 					lotsTransit = lotsTransit + ifnull(lot.In_Transit_Qty,"0").toString().toDecimal();
 					lotsDisputed = lotsDisputed + ifnull(lot.Disputed_Qty,"0").toString().toDecimal();
+
+					// THE THIRD CHECK - lot-rolls-model.md's roll invariant:
+					// Σ Lot_Rolls.Roll_Length == Wash + Unwash + In_Wash for
+					// THIS lot. Rolls are only the cloth still on the shelf
+					// (docs/lot-rolls-model.md "The five buckets") - In_Transit
+					// and Disputed metres have left the rack and are never
+					// counted in a roll, so they are deliberately excluded
+					// here exactly as they are from the invariant's left side.
+					// A lot with no Lot_Rolls rows at all (never seeded/backfilled)
+					// is skipped rather than reported as a mismatch - that is a
+					// migration-coverage gap, not a drift, and belongs to
+					// seedLotRolls, not this check.
+					lotRollSum = 0.0;
+					lotRollCount = 0;
+					for each  lr in lot.Lot_Rolls
+					{
+						lotRollCount = lotRollCount + 1;
+						lotRollSum = lotRollSum + ifnull(lr.Roll_Length,"0").toString().toDecimal();
+					}
+					if(lotRollCount > 0)
+					{
+						lotRollSum = lotRollSum.round(2);
+						lotOwnWash = ifnull(lot.Wash_Quantity,"0").toString().toDecimal().round(2);
+						lotOwnUnwash = ifnull(lot.Unwash_Quantity,"0").toString().toDecimal().round(2);
+						lotOwnInWash = ifnull(lot.In_Wash_Qty,"0").toString().toDecimal().round(2);
+						lotShelfExpect = (lotOwnWash + lotOwnUnwash + lotOwnInWash).round(2);
+						if(lotRollSum != lotShelfExpect)
+						{
+							lotNoTxt = ifnull(lot.Lot_Number,"").toString().trim();
+							errors.add(sku + " lot " + lotNoTxt + " -> ROLL SUM mismatch! Wash+Unwash+In_Wash is " + lotShelfExpect + ", Sum of Lot_Rolls is " + lotRollSum);
+						}
+					}
 				}
 				
 				lotsWash = lotsWash.round(2);

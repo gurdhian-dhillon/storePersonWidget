@@ -1167,91 +1167,9 @@ function fillSupervisors(list) {
     return false;
 }
 
-// getSupervisorMaterials is PAGED BY Issue_Line ROW. A supervisor with a huge
-// old chunked handover has 1800+ lines on one voucher, and one call cannot walk
-// them all without blowing Zoho's statement limit. So each call processes a
-// slice of his Issue_Lines and returns linesConsumed; we call again with
-// skipLines += linesConsumed until linesConsumed === 0, merging the slices.
-//
-// Merge rules mirror the payload contract:
-//   materials  - keyed by materialId; pending sums, isFabric/isReissue OR.
-//                orders merge by planId (a plan can be split across pages);
-//                lots merge by lot label (qty sums); voucherIds union.
-//   waste      - per Waste_Movement row, no overlap between pages: concat.
-//   printedPieces - per issueLineId, no overlap: concat.
-//   planFed    - union of plan ids; plansAwaiting = plansAssigned - |union|.
-function mergeReceiptPages(target, page) {
-    if (target.materials === undefined) {
-        target.materials = [];
-        target.waste = [];
-        target.printedPieces = [];
-        target.supervisors = page.supervisors || [];
-        target.plansAssigned = Number(page.plansAssigned) || 0;
-        target._planFed = {};
-        target.errors = [];
-    }
-    (page.errors || []).forEach(function (e) { target.errors.push(e); });
-
-    (page.materials || []).forEach(function (bm) {
-        var em = null;
-        for (var i = 0; i < target.materials.length; i++) {
-            if (target.materials[i].materialId === bm.materialId) { em = target.materials[i]; break; }
-        }
-        if (!em) {
-            target.materials.push(JSON.parse(JSON.stringify(bm)));
-            return;
-        }
-        em.pending = round2((Number(em.pending) || 0) + (Number(bm.pending) || 0));
-        if (bm.isFabric) em.isFabric = true;
-        if (bm.isReissue) em.isReissue = true;
-
-        // orders: one entry per plan; a plan whose lines span two pages appears
-        // on both, so merge by planId rather than concat.
-        em.orders = em.orders || [];
-        (bm.orders || []).forEach(function (bo) {
-            var eo = null;
-            for (var j = 0; j < em.orders.length; j++) {
-                if (String(em.orders[j].planId) === String(bo.planId)) { eo = em.orders[j]; break; }
-            }
-            if (eo) {
-                eo.pending = round2((Number(eo.pending) || 0) + (Number(bo.pending) || 0));
-                eo.lineCount = (Number(eo.lineCount) || 0) + (Number(bo.lineCount) || 0);
-                if (bo.isReissue) eo.isReissue = true;
-                if (!eo.reason && bo.reason) eo.reason = bo.reason;
-            } else {
-                em.orders.push(JSON.parse(JSON.stringify(bo)));
-            }
-        });
-
-        // voucherIds: the sweep scope. Union, order does not matter here (the
-        // widget reverses the whole set before sending).
-        em.voucherIds = em.voucherIds || [];
-        (bm.voucherIds || []).forEach(function (v) {
-            if (em.voucherIds.indexOf(String(v)) < 0) em.voucherIds.push(String(v));
-        });
-
-        em.lots = em.lots || [];
-        (bm.lots || []).forEach(function (bl) {
-            var el = null;
-            for (var k = 0; k < em.lots.length; k++) {
-                if (em.lots[k].lot === bl.lot) { el = em.lots[k]; break; }
-            }
-            if (el) el.qty = round2((Number(el.qty) || 0) + (Number(bl.qty) || 0));
-            else em.lots.push(JSON.parse(JSON.stringify(bl)));
-        });
-    });
-
-    (page.waste || []).forEach(function (w) { target.waste.push(w); });
-    (page.printedPieces || []).forEach(function (p) { target.printedPieces.push(p); });
-    (page.planFed || []).forEach(function (pid) { target._planFed[String(pid)] = 1; });
-}
-
-// JS-Data-API receive read. When on, the list is assembled from flat
-// getRecords (ReceiveRead.run) instead of the paged getSupervisorMaterials
-// walk. Same output shape, so render()/submitReceipt() are unchanged. The
-// Deluge path stays below as the fallback.
-var USE_JS_RECEIVE_READ = true;
-
+// JS-Data-API receive read. The list is assembled from flat getRecords
+// (ReceiveRead.run) — getSupervisorMaterials.dg is retired, this is the only
+// path now.
 function loadMaterials() {
     var content = document.getElementById('rcv-content');
     var emptyState = document.getElementById('rcv-empty');
@@ -1263,102 +1181,26 @@ function loadMaterials() {
     LoadProgress.start(content, 'Loading your deliveries…',
         'Reading the handovers the store has made to you.');
 
-    if (USE_JS_RECEIVE_READ && typeof ReceiveRead !== 'undefined') {
-        ReceiveRead.run(supId || '').then(function (data) {
-            refreshBtn.disabled = false;
-            LoadProgress.finish();
-            // Empty supId: only the picker was populated. Default one in, restart.
-            if ((!supId || supId === '') && fillSupervisors(data.supervisors)) {
-                loadMaterials();
-                return;
-            }
-            console.log('receive list (js):', data);
-            if (data.errors && data.errors.length) {
-                console.warn('ReceiveRead errors:', data.errors);
-            }
-            try {
-                render(data);
-            } catch (e) {
-                console.error('render failed:', e, data);
-                content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Could not read the list</h2><p>Check the browser console for details.</p></div>';
-            }
-        }).catch(function (err) {
-            console.error('ReceiveRead failed, falling back to getSupervisorMaterials:', err);
-            LoadProgress.finish();
-            loadMaterialsDeluge();
-        });
-        return;
-    }
-
-    loadMaterialsDeluge();
-}
-
-function loadMaterialsDeluge() {
-    var content = document.getElementById('rcv-content');
-    var emptyState = document.getElementById('rcv-empty');
-    var refreshBtn = document.getElementById('refresh-btn');
-    var supId = document.getElementById('sup-select').value;
-
-    emptyState.classList.add('hidden');
-    refreshBtn.disabled = true;
-    LoadProgress.start(content, 'Loading your deliveries…',
-        'Reading the handovers the store has made to you.');
-
-    var merged = {};
-    var MAX_CALLS = 60; // safety cap - real stop is linesConsumed===0
-
-    function fetchPage(skipLines, callsSoFar) {
-        if (callsSoFar >= MAX_CALLS) {
-            console.error('loadMaterials: hit MAX_CALLS safety cap, stopping');
-            return Promise.resolve();
-        }
-        LoadProgress.setPage(callsSoFar + 1);
-        return ZOHO.CREATOR.DATA.invokeCustomApi({
-            api_name: 'getSupervisorMaterials',
-            http_method: 'POST',
-            payload: {
-                supervisorId: supId || '',
-                skipLinesTxt: String(skipLines)
-            }
-        }).then(function (response) {
-            var parsed = JSON.parse(response.result);
-
-            // Empty supervisorId fetch: only the picker is populated. Default one
-            // in and restart.
-            if ((!supId || supId === '') && fillSupervisors(parsed.supervisors)) {
-                return null; // signal: restart
-            }
-
-            mergeReceiptPages(merged, parsed);
-            var consumed = Number(parsed.linesConsumed) || 0;
-            if (consumed > 0) {
-                LoadProgress.setSub('Loaded ' + (merged.materials || []).length +
-                    ' material' + ((merged.materials || []).length === 1 ? '' : 's') + ' so far…');
-                return fetchPage(skipLines + consumed, callsSoFar + 1);
-            }
-        });
-    }
-
-    fetchPage(0, 0).then(function (restart) {
+    ReceiveRead.run(supId || '').then(function (data) {
         refreshBtn.disabled = false;
         LoadProgress.finish();
-        if (restart === null) { loadMaterials(); return; }
-
-        merged.plansAwaiting = Math.max(0,
-            (merged.plansAssigned || 0) - Object.keys(merged._planFed || {}).length);
-
-        console.log('merged receipt list:', merged);
-        if (merged.errors && merged.errors.length > 0) {
-            console.warn('getSupervisorMaterials page errors:', merged.errors);
+        // Empty supId: only the picker was populated. Default one in, restart.
+        if ((!supId || supId === '') && fillSupervisors(data.supervisors)) {
+            loadMaterials();
+            return;
+        }
+        console.log('receive list (js):', data);
+        if (data.errors && data.errors.length) {
+            console.warn('ReceiveRead errors:', data.errors);
         }
         try {
-            render(merged);
+            render(data);
         } catch (e) {
-            console.error('render failed:', e, merged);
+            console.error('render failed:', e, data);
             content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Could not read the list</h2><p>Check the browser console for details.</p></div>';
         }
     }).catch(function (err) {
-        console.error('invokeCustomApi error:', err);
+        console.error('ReceiveRead failed:', err);
         refreshBtn.disabled = false;
         LoadProgress.finish();
         content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Failed to load</h2><p>Check the browser console for details.</p></div>';

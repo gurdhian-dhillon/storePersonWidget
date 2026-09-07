@@ -19,6 +19,8 @@ string reconcileRawMaterial(string skuPrefix)
 		lotBroken = 0;
 		pieceJson = "";
 		pieceBroken = 0;
+		rollJson = "";
+		rollBroken = 0;
 		netDiff = 0.0;
 		//--------------------------------------------------------------------
 		// PIECE-VERSUS-LOT NEEDS THE PIECES, AND THAT IS ONE QUERY FOR THE
@@ -211,6 +213,47 @@ string reconcileRawMaterial(string skuPrefix)
 						pieceJson = pieceJson + "{\"sku\":\"" + rmSku.replaceAll("\"","'") + "\",\"lotId\":\"" + ltRec.ID + "\",\"lotNumber\":\"" + pcLotNo + "\",\"lotOnRack\":" + lotRack + ",\"pieceMetres\":" + pcMtr + ",\"difference\":" + pcGap + "}";
 					}
 				}
+				//------------------------------------------------------------
+				// ROLL SUM, PER LOT - lot-rolls-model.md Step 8. The roll
+				// invariant is Σ Lot_Rolls.Roll_Length == Wash + Unwash +
+				// In_Wash for THIS lot ("the five buckets" - rolls are only
+				// cloth still on the shelf; In_Transit and Disputed metres
+				// have left it and are never counted in a roll).
+				//
+				// No extra query - Lot_Rolls comes back nested on the lot
+				// record already being walked, same as Step 0 documented.
+				//
+				// A lot with zero Lot_Rolls rows is skipped, not reported -
+				// that is migration coverage (never seeded/backfilled), not
+				// drift, and belongs to seedLotRolls to fix, not this report.
+				//------------------------------------------------------------
+				rollSum = 0.0;
+				rollCount = 0;
+				for each  lr in ltRec.Lot_Rolls
+				{
+					rollCount = rollCount + 1;
+					rlS = ifnull(lr.Roll_Length,"0").toString().trim();
+					if(rlS == "")
+					{
+						rlS = "0";
+					}
+					rollSum = rollSum + rlS.toDecimal();
+				}
+				if(rollCount > 0)
+				{
+					rollShelf = lwS.toDecimal() + luS.toDecimal() + liS.toDecimal();
+					rollGap = rollSum - rollShelf;
+					if(rollGap > 0.005 || rollGap < -0.005)
+					{
+						rollBroken = rollBroken + 1;
+						if(rollJson != "")
+						{
+							rollJson = rollJson + ",";
+						}
+						rlLotNo = ifnull(ltRec.Lot_Number,"").toString().trim().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+						rollJson = rollJson + "{\"sku\":\"" + rmSku.replaceAll("\"","'") + "\",\"lotId\":\"" + ltRec.ID + "\",\"lotNumber\":\"" + rlLotNo + "\",\"lotOnRack\":" + rollShelf + ",\"rollSum\":" + rollSum + ",\"difference\":" + rollGap + "}";
+					}
+				}
 			}
 			lotGap = 0.0;
 			if(isFab == true && lotCount > 0)
@@ -292,7 +335,7 @@ string reconcileRawMaterial(string skuPrefix)
 		{
 			errJson = "\"" + apiError.replaceAll("\"","'") + "\"";
 		}
-		res = "{\"errors\":[" + errJson + "],\"callsUsed\":" + callsUsed + ",\"checked\":" + checked + ",\"agreed\":" + agreed + ",\"differs\":" + differs + ",\"unmapped\":" + unmapped + ",\"remaining\":" + remaining + ",\"lotMismatches\":" + lotBroken + ",\"lotRows\":[" + lotJson + "],\"pieceMismatches\":" + pieceBroken + ",\"pieceRows\":[" + pieceJson + "],\"netDifference\":" + netDiff + ",\"rows\":[" + diffJson + "]}";
+		res = "{\"errors\":[" + errJson + "],\"callsUsed\":" + callsUsed + ",\"checked\":" + checked + ",\"agreed\":" + agreed + ",\"differs\":" + differs + ",\"unmapped\":" + unmapped + ",\"remaining\":" + remaining + ",\"lotMismatches\":" + lotBroken + ",\"lotRows\":[" + lotJson + "],\"pieceMismatches\":" + pieceBroken + ",\"pieceRows\":[" + pieceJson + "],\"rollMismatches\":" + rollBroken + ",\"rollRows\":[" + rollJson + "],\"netDifference\":" + netDiff + ",\"rows\":[" + diffJson + "]}";
 	}
 	catch (e)
 	{

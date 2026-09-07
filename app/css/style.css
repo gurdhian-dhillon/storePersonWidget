@@ -2614,6 +2614,16 @@ th.col-num {
     white-space: normal;
 }
 
+/* The plain statement of what this ticket is, replacing the old per-supervisor
+   breakdown table — the store person acts on "needs washing" / "needs buying",
+   not on who is waiting or which order. */
+.exc-plain {
+    font-size: 0.9rem;
+    color: var(--text);
+    font-weight: 600;
+    margin-top: 0.9rem;
+}
+
 /* The chosen lot cannot give what the ticket asks for. Washing less than needed
    is the one direction that cannot be recovered from, so it is said loudly. */
 .exc-lot-short:not(:empty) {

@@ -1580,69 +1580,17 @@ function openSummaryException(kind, idx) {
     var title = isWash ? 'Send for washing' : 'Request a purchase';
     var actionLabel = isWash ? 'To wash' : 'Short by';
 
-    // One row per contributing order, so the ticket shows where the demand came
-    // from. No shortfall column — which order goes short is decided later, by
-    // priority rules that do not exist yet.
-    // WHO wants it, not which order. The store person hands cloth to a person;
-    // the sales order is the office's business and means nothing at the counter.
-    //
-    // It is only hidden, never dropped — the payload still carries salesOrder
-    // and raiseMaterialException still writes it onto the ticket line, because
-    // procurement genuinely does need to know which orders are held up.
-    //
-    // The ITEM stays, because one supervisor legitimately produces two rows
-    // here: a line per requirement, and a QC remake repeats its original's
-    // material AND its supervisor. Without the item and the remake tag they
-    // arrive as two identical rows and nobody can tell which is which.
-    //
-    // A settled line — everything issued, nothing outstanding — is dimmed
-    // rather than filtered out. It is what says "he has already had 28.35",
-    // which is the context that makes the outstanding figure mean something.
-    // ONE ROW PER SUPERVISOR, summed.
-    //
-    // The server sends one line per Material_Requirement ROW, so a supervisor
-    // with three orders for the same fabric arrived as three lines — and since
-    // this table showed only his name and the item, and two orders for the same
-    // product carry the same item name, they rendered as identical rows that
-    // looked like a duplication bug. They were not: Suraj's 20.55 + 20.55 + 13.7
-    // is the 54.8 on his card.
-    //
-    // Summed rather than labelled with the order, because the store person deals
-    // in supervisor requirements — he hands cloth to a person, not to an order,
-    // and the order number is not a thing he can act on here.
-    var bySupName = {};
-    var supSeq = [];
-    (e.lines || []).forEach(function (l) {
-        var who = l.supervisor || '—';
-        if (!bySupName[who]) {
-            bySupName[who] = { req: 0, iss: 0, remake: false };
-            supSeq.push(who);
-        }
-        bySupName[who].req += Number(l.required) || 0;
-        bySupName[who].iss += Number(l.issued) || 0;
-        // Kept because it changes what the request MEANS — cloth to replace
-        // work already ruined, not cloth for a new order.
-        if (l.isRemake) bySupName[who].remake = true;
-    });
-
-    var lineRows = supSeq.map(function (who) {
-        var agg = bySupName[who];
-        var req = round2(agg.req);
-        var iss = round2(agg.iss);
-        var out = Math.max(0, round2(req - iss));
-        return '<tr' + (out === 0 ? ' class="is-settled"' : '') + '>' +
-            '<td>' +
-            '<div class="exc-who">' + escapeHtml(who) +
-            (agg.remake
-                ? ' <span class="exc-remake">incl. QC remake</span>'
-                : '') +
-            '</div>' +
-            '</td>' +
-            '<td class="col-num">' + fmt(req) + '</td>' +
-            '<td class="col-num">' + fmt(iss) + '</td>' +
-            '<td class="col-num col-strong">' + fmt(out) + '</td>' +
-            '</tr>';
-    }).join('');
+    // SIMPLIFIED, deliberately. This used to break the shortfall down by
+    // supervisor/order — who is waiting, which orders, QC remakes — none of
+    // which the store person acts on here. He needs one fact: this material
+    // is short by this much, and it either needs washing or buying. The
+    // payload behind this dialog is unchanged — raiseMaterialException still
+    // gets the full `lines` array with every plan/order/supervisor on it, so
+    // procurement's ticket still answers "which orders wanted this" exactly
+    // as before. Only this screen's own display dropped the breakdown.
+    var plainMsg = isWash
+        ? 'This material needs washing.'
+        : 'This material needs to be purchased.';
 
     el.classList.remove('hidden');
     el.innerHTML =
@@ -1670,15 +1618,7 @@ function openSummaryException(kind, idx) {
             ' short, so it can all be issued off one lot &mdash; one tone. ' +
             'The washed stock on the other lots keeps for a later order.</div>'
             : '') +
-        '<label class="exc-label">Who is waiting on it</label>' +
-        '<div class="table-wrapper exc-lines">' +
-        '<table><thead><tr>' +
-        '<th>Supervisor</th>' +
-        '<th class="col-num">Required</th>' +
-        '<th class="col-num">Issued</th>' +
-        '<th class="col-num">Outstanding</th>' +
-        '</tr></thead><tbody>' + lineRows + '</tbody></table>' +
-        '</div>' +
+        '<div class="exc-plain">' + plainMsg + '</div>' +
         // Wash only. A purchase ticket has no lot — the cloth does not
         // exist yet, so there is nothing to name.
         (isWash ? washLotPickerHtml(e, entry) : '') +
