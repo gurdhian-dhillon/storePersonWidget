@@ -608,9 +608,34 @@ const RECV = dg('receiveMaterials.dg');
 const SCREEN = dg('getSupervisorMaterials.dg');
 const WASTE = dg('getExpectedWaste.dg');
 
-test('M1 issueMaterials writes the marker into the line NOTE map, guarded to emit once per pass', () => {
-  assert.ok(ISSUE.includes('"PRINTED_PIECE | "'), 'the writer must spell the marker exactly');
-  assert.ok(/passEmitted\.get\(passId\) == null/.test(ISSUE), 'emit-once guard present');
+// THE MARKER IS RETIRED ON THE WRITE SIDE, AND THE READ SIDE HAS NOT CAUGHT UP.
+//
+// `PRINTED_PIECE` marked an Issue_Line as one physical Fabric_Piece rather than
+// metres off a roll. Phase A of the rolls migration retired Fabric_Piece
+// entirely - printed cloth is a lot with short rolls, no branch - so nothing
+// writes the marker any more:
+//
+//   issueMaterials.dg     - the literal is GONE; only a comment mentions it
+//   receiveMaterials.dg   - reader removed (commit 1acf01a)
+//   getSupervisorMaterials.dg, getExpectedWaste.dg - STILL BRANCH ON IT
+//
+// Those last two are the live inconsistency: two readers testing a marker no
+// writer emits, so their branches are unreachable in production and every line
+// now falls through the metres path. That is the CORRECT behaviour post-Phase A
+// - it is the dead branches that are wrong, not the fall-through - so this test
+// is inverted rather than deleted: it now PINS the retirement, and will fail
+// loudly if anything starts writing the marker again without a decision.
+//
+// Deleting the two dead reader branches is a real Deluge edit to two functions
+// that cannot be Executed from here; it belongs with Phase A's Deluge steps, and
+// is recorded in docs/lot-rolls-model.md as such. Until then M3 below records
+// exactly which readers still carry them.
+test('M1 the PRINTED_PIECE marker is no longer WRITTEN (Fabric_Piece retired in Phase A)', () => {
+  assert.ok(!ISSUE.includes('"PRINTED_PIECE | "'),
+    'issueMaterials writes the marker again - Fabric_Piece was retired; if this is deliberate, ' +
+    'the two dead reader branches in getSupervisorMaterials/getExpectedWaste must be revived with it');
+  assert.ok(!/liRow\.Lot_Override_Note\s*=\s*"PRINTED_PIECE/.test(ISSUE),
+    'no direct PRINTED_PIECE write to the note field either');
 });
 
 test('M2 issueMaterials lands that note in Lot_Override_Note - the field every reader matches', () => {
@@ -623,12 +648,47 @@ test('M2 issueMaterials lands that note in Lot_Override_Note - the field every r
 
 console.log('\nstatic marker contract (deluge text passes)');
 
-for (const [name, src] of [['receiveMaterials', RECV], ['getSupervisorMaterials', SCREEN], ['getExpectedWaste', WASTE]]) {
-  test(`M3 ${name} reads the marker off Lot_Override_Note`, () => {
-    assert.ok(src.includes('PRINTED_PIECE'), `${name} lost the marker`);
+// `Lot_Override_Note` ITSELF IS STILL LIVE, and that is the distinction M1 turns
+// on. The FIELD carries the lot-override note - the record that a human chose a
+// different shade - which issueMaterials still writes (`liRow.Lot_Override_Note
+// = noteTxt`, :785) and every screen still reads. It is only the PRINTED_PIECE
+// marker that used to travel in it that is retired. So the readers must keep
+// reading the field; what they must not do is branch on the dead marker.
+// receiveMaterials is NOT in this list, and that is correct rather than an
+// omission. Every one of its `Lot_Override_Note` reads was a PRINTED_PIECE
+// branch (verified against commit 1acf01a - all removed lines matched the
+// marker, none read the field for anything else), so with the marker retired it
+// has no reason to touch the field at all. The note is a record of a human
+// choosing a shade; it is read by the SCREENS, not by the receipt path.
+for (const [name, src] of [['getSupervisorMaterials', SCREEN], ['getExpectedWaste', WASTE]]) {
+  test(`M3 ${name} still reads the Lot_Override_Note field`, () => {
     assert.ok(src.includes('Lot_Override_Note'), `${name} no longer reads the note field`);
   });
 }
+
+test('M3a receiveMaterials reads the note field NOT AT ALL - every use was the dead marker', () => {
+  assert.ok(!RECV.includes('Lot_Override_Note'),
+    'receiveMaterials reads Lot_Override_Note again - if that is a real new use, say what for; ' +
+    'every historical use was a PRINTED_PIECE branch and was removed with the marker');
+});
+
+// WHICH READERS STILL CARRY THE DEAD BRANCH - recorded, not asserted away.
+//
+// This is deliberately a PASSING test that prints the debt rather than a failing
+// one that blocks the suite: the branches are unreachable, so they are wrong but
+// not broken, and the fix is a Deluge edit that has to be Executed against
+// Creator. It fails only if the set CHANGES without the doc changing with it -
+// which is what would happen if somebody removed one of the two and left the
+// other, the exact half-migration that produced this state.
+test('M3b the dead PRINTED_PIECE branches are exactly where the plan says they are', () => {
+  const stillBranching = [['receiveMaterials', RECV], ['getSupervisorMaterials', SCREEN],
+                          ['getExpectedWaste', WASTE]]
+    .filter(([, src]) => src.includes('PRINTED_PIECE'))
+    .map(([n]) => n);
+  assert.deepStrictEqual(stillBranching, ['getSupervisorMaterials', 'getExpectedWaste'],
+    'the set of functions still branching on the retired PRINTED_PIECE marker changed - ' +
+    'update docs/lot-rolls-model.md (Phase A Deluge steps) in the same pass');
+});
 
 test('M4 the supervisor screen emits printedPieces keyed by issueLineId, and receiveMaterials parses them', () => {
   assert.ok(SCREEN.includes('printedPiecesJson'), 'screen payload key changed');

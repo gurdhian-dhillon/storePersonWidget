@@ -189,6 +189,12 @@ function plannerRun(world, opts) {
     // the order keeps Pending. A post-insert plan is NOT rolled back (Deluge
     // has no transaction) - the resume path IS the recovery.
     errored.push({ id: so.id, message: eOrder.message });
+    // :681 - the ERROR line itself, which this port had described in the comment
+    // above and then not emitted. It is the half that makes the separation real:
+    // errored/failed are counters, but the LOG is what a person reads, and a bug
+    // that leaves no line there is indistinguishable from an order that was
+    // never scanned.
+    logs.push('ERROR -> SO ' + so.orderNo + ' | ' + eOrder.message);
   }
   }
 
@@ -628,8 +634,20 @@ function buildScreenPayload(world) {
     freshMeters: 0, remaining: 0,
     lines,
     wasteStock: world.remnants.slice(),
+    // EVERY LOT GETS A SEED ROLL. Since the rolls migration a lot is a set of
+    // physical rolls and its metres are only a wash-state budget over them, so a
+    // lot with `rolls: []` yields no fresh cloth however much it is washed - and
+    // the failure is INDIRECT: the lot stops covering its order, and the atom
+    // rule then skips the order whole, taking the perfectly good remnants with
+    // it. One roll of the lot's full length is exactly what seedLotRolls.dg
+    // backfills onto a pre-migration lot, so this keeps the fixture equivalent
+    // to what the live data now looks like. A case that wants several rolls says
+    // so with `l.rolls`.
     lots: world.lots.map(l => ({ lotId: l.lotId, lotNumber: l.no, blocked: !!l.blocked,
-      wash: l.wash, unwash: l.unwash || 0, inWash: l.inWash || 0, form: 'Roll', pieces: [] })),
+      wash: l.wash, unwash: l.unwash || 0, inWash: l.inWash || 0, form: 'Roll', pieces: [],
+      rolls: l.rolls || [{ rollId: l.lotId + '-r1', label: l.lotId + '-R1',
+                           length: (l.wash || 0) + (l.unwash || 0) + (l.inWash || 0),
+                           status: 'Available' }] })),
   })])];
 }
 

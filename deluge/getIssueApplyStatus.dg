@@ -1,0 +1,44 @@
+string getIssueApplyStatus(string applyKey)
+{
+	res = "{\"errors\":[\"Nothing ran\"],\"mrqIds\":[],\"wasteMvIds\":[]}";
+	try
+	{
+		keyTxt = ifnull(applyKey,"").toString().trim();
+		if(keyTxt == "")
+		{
+			return "{\"errors\":[\"No applyKey given\"],\"mrqIds\":[],\"wasteMvIds\":[]}";
+		}
+
+		mrqJson = "";
+		mrqCount = 0;
+		for each  mrqRow in Material_Requirement[Apply_Key == keyTxt]
+		{
+			if(mrqJson != "")
+			{
+				mrqJson = mrqJson + ",";
+			}
+			mrqJson = mrqJson + "\"" + mrqRow.ID + "\"";
+			mrqCount = mrqCount + 1;
+		}
+
+		wmJson = "";
+		wmCount = 0;
+		for each  wmRow in Waste_Movement[Apply_Key == keyTxt]
+		{
+			if(wmJson != "")
+			{
+				wmJson = wmJson + ",";
+			}
+			wmJson = wmJson + "\"" + wmRow.ID + "\"";
+			wmCount = wmCount + 1;
+		}
+
+		info "getIssueApplyStatus key=" + keyTxt + " mrq=" + mrqCount + " wasteMv=" + wmCount;
+		res = "{\"errors\":[],\"applyKey\":\"" + keyTxt + "\",\"mrqIds\":[" + mrqJson + "],\"wasteMvIds\":[" + wmJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"mrqIds\":[],\"wasteMvIds\":[]}";
+	}
+	return res;
+}

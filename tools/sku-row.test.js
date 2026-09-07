@@ -132,9 +132,17 @@ function line(planItemId, planId, salesOrder, reqPcs, issPcs, cutW, cutL, issued
            supervisorId: 'S1', required: 0, issued: 0, reqPieces: reqPcs, issPieces: issPcs || 0,
            cutW: cutW, cutL: cutL, issuedLot: issuedLot || '', issuedLotNo: issuedLot || '', reason: '' };
 }
-function roll(lotId, wash) {
+// THE LOT NEEDS A PHYSICAL ROLL. Since the rolls migration `wash` is only a
+// wash-state budget OVER the rolls, not cloth in its own right, so a lot with
+// `rolls: []` yields nothing however much of it is washed - the row then gets no
+// lotLines at all, which is what emptied this suite. One seed roll of the lot's
+// full length is exactly what seedLotRolls.dg backfills onto a pre-migration
+// lot, so the fixture stays equivalent to the live data.
+function roll(lotId, wash, rolls) {
   return { lotId: lotId, lotNumber: lotId, blocked: false, wash: wash, unwash: 0, inWash: 0,
-           form: 'Roll', pieces: [], waste: [] };
+           form: 'Roll', pieces: [], waste: [],
+           rolls: rolls || [{ rollId: lotId + '-r1', label: lotId + '-R1',
+                              length: wash, status: 'Available' }] };
 }
 function skuMat(lines, lots, cuts, opts) {
   opts = opts || {};
@@ -376,6 +384,103 @@ console.log('\nF. per-lot hand edit: only that lot re-derived, per-line cut');
   ctx.applyFabricOverride(m, 'L1', 16.5);
   ok('restore -> metresEdited false, total 16.5', !m.metresEdited &&
     Math.abs(m.lotLines.reduce((t, l) => t + l.qty, 0) - 16.5) < 0.01);
+}
+
+// ===========================================================================
+console.log('\nF2. ROLLSSHARED REGRESSION: an edited multi-line lot must not');
+console.log('    have its roll metres counted once per line');
+// ===========================================================================
+{
+  // The exact trap: one lot, edited (so every lotLines row is stamped with the
+  // SAME rollsShared rolls[] array), serving TWO requirement rows. A naive sum
+  // across lines/allocations charges Lot_Rolls 2x (or Nx) the true cut, and
+  // reports a Roll_Label metres figure that is a multiple of what was cut.
+  REG = {};
+  const lines = [
+    line('PI1', 'P1', 'SO-1', 10, 0, 55, 90),
+    line('PI2', 'P1', 'SO-1', 10, 0, 55, 240),
+  ];
+  const cuts = [
+    { cutW: 55, cutL: 90, reqPieces: 10, issPieces: 0 },
+    { cutW: 55, cutL: 240, reqPieces: 10, issPieces: 0 },
+  ];
+  const data = run([skuMat(lines, [roll('L1', 200)], cuts)]);
+  const m = data[0].materials[0];
+
+  // Edit the lot -> every lotLines row now carries rollsShared=true with the
+  // SAME rolls[] (one roll, L1-R1, holding the whole edited draw).
+  ctx.applyFabricOverride(m, 'L1', 10.0);
+  ok('edit produced >1 lotLines row (the trigger shape)', m.lotLines.length > 1,
+    { rows: m.lotLines.length });
+  ok('every row is stamped rollsShared', m.lotLines.every(l => l.rollsShared === true));
+
+  const payload = ctx.buildFabricIssueLine(m, []);
+
+  // lotMoves: exactly ONE roll entry for L1, metres == the edited total (10.0),
+  // never 20.0 (2x) or more.
+  const lm = payload.lotMoves.find(x => String(x.lotId) === 'L1');
+  ok('lotMoves has exactly one roll for L1', lm && lm.rolls.length === 1,
+    { rolls: lm && lm.rolls });
+  ok('lotMoves roll metres == edited total 10.0, not doubled', lm && Math.abs(lm.rolls[0].metres - 10.0) < 0.02,
+    { metres: lm && lm.rolls[0].metres });
+
+  // allocations: NEITHER row claims its own roll share (sharedLot marks it
+  // instead) - claiming the lot's whole draw per row is the wrong attribution
+  // this fix removes, not just a double-count of a right one.
+  ok('allocations carry no per-row rolls on a shared lot',
+    payload.allocations.every(a => (a.rolls || []).length === 0),
+    payload.allocations.map(a => a.rolls));
+  ok('allocations carry sharedLot pointing at L1',
+    payload.allocations.every(a => a.sharedLot === 'L1'),
+    payload.allocations.map(a => a.sharedLot));
+
+  const handoverSrc = fs.readFileSync(ROOT + 'main.js', 'utf8');
+  const bhStart = handoverSrc.indexOf('function buildHandoverSummary(issues)');
+  let depth = 0, started = false, bhEnd = bhStart;
+  for (let j = bhStart; j < handoverSrc.length; j++) {
+    if (handoverSrc[j] === '{') { depth++; started = true; }
+    else if (handoverSrc[j] === '}') { depth--; if (started && depth === 0) { bhEnd = j + 1; break; } }
+  }
+  vm.runInContext(handoverSrc.slice(bhStart, bhEnd), ctx, { filename: 'buildHandoverSummary-reload' });
+
+  // Handover: ONE material×lot line, Roll_Label the single roll's bare label
+  // (not "L1-R1 20m" or a joined string double-counting the same roll).
+  //
+  // ROUTED THROUGH appliedIssues' RESHAPE, NOT THE RAW PAYLOAD. sendHandover
+  // never calls buildHandoverSummary(issues) on the allocator's own output -
+  // it goes through appliedIssues() first, which rebuilds each line keeping
+  // only the confirmed allocations. That reshape is the field list
+  // appliedIssues() actually pushes (main.js's own "out.push({...})" in that
+  // function) - mirrored here rather than re-derived from source, so this
+  // test would have caught the real bug: appliedIssues omitted lotMoves,
+  // which the rollsShared fallback needs, and every real press runs through
+  // exactly this reshape, never the bare allocator payload.
+  const appliedShaped = {
+    materialId: payload.materialId, source: payload.source, isFabric: payload.isFabric,
+    unit: payload.unit, cutWidth: payload.cutWidth, cutLength: payload.cutLength,
+    allocations: payload.allocations, issueLines: payload.issueLines,
+    lotMoves: payload.lotMoves || []
+  };
+  const summary = ctx.buildHandoverSummary([appliedShaped]);
+  const hLine = summary.lines.find(x => x.lot === 'L1');
+  ok('handover has exactly one L1 line', !!hLine);
+  ok('handover Roll_Label is the bare label "L1-R1", not doubled/joined/blank',
+    hLine && hLine.rollLabel === 'L1-R1', { rollLabel: hLine && hLine.rollLabel });
+
+  // AND THE REGRESSION ITSELF: with lotMoves stripped (appliedIssues' state
+  // before the fix), the fallback has nothing to resolve from and must not
+  // silently pass - Roll_Label comes back blank, which is the bug, not a
+  // fine default. Pinned here so removing the lotMoves carry-through breaks
+  // this test immediately.
+  const strippedShaped = Object.assign({}, appliedShaped, { lotMoves: undefined });
+  delete strippedShaped.lotMoves;
+  const strippedSummary = ctx.buildHandoverSummary([strippedShaped]);
+  const strippedLine = strippedSummary.lines.find(x => x.lot === 'L1');
+  ok('WITHOUT lotMoves the label is blank (proves the fallback needs it, not a coincidence)',
+    strippedLine && strippedLine.rollLabel === '', { rollLabel: strippedLine && strippedLine.rollLabel });
+
+  // Restore for isolation from later sections.
+  ctx.applyFabricOverride(m, 'L1', 16.5);
 }
 
 // ===========================================================================

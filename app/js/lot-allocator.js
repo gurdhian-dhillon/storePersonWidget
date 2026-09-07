@@ -68,6 +68,24 @@ function usableLots(material) {
     });
 }
 
+// IS THIS ROLL CLOTH THIS SCREEN MAY CUT?
+//
+// `Consumed` is a roll that has been used up and is off the shelf. `Blocked` is
+// quarantined cloth on a roll — the lot-level `blocked` flag's twin, one roll at
+// a time, and it is a real `Roll_Status` value (docs/lot-rolls-model.md Step 0).
+// Only `Consumed` was ever excluded, so a blocked roll was cut like any other and
+// named on the issue line.
+//
+// EVERY reader of a roll goes through here — lotFill, the ledger seeding, the
+// per-card working copy and the `nofit` scanner. A roll excluded from the
+// allocation but still counted by the scanner is worse than either alone: the row
+// quotes cloth back at him that the allocation has already refused.
+function rollUsable(rr) {
+    var s = String((rr && rr.status) || 'Available');
+    return s !== 'Consumed' && s !== 'Blocked' &&
+           (Number(rr && rr.length) || 0) > 0;
+}
+
 // How many cut pieces one remnant yields. Grain is fixed: the cut width runs
 // across the piece width and the length along its length, never rotated, so a
 // remnant narrower than the cut is useless however long it is.
@@ -101,52 +119,14 @@ function perRowFor(fab, cutW) {
 // becomes scrap; cloth on the roll keeps.
 //
 // Demands are {cutW, cutL, pieces}. Nothing passed in is mutated.
-// IS THIS LOT HELD AS DISCRETE PIECES? An EMPTY form means Roll — every lot
-// that existed before printing has the field blank, and reading blank as
-// anything else would send the whole rack down the piece path with no pieces,
-// making every roll in the building uncuttable.
-function lotIsPieces(lot) {
-    return lot && lot.form === 'Pieces';
-}
-
-// The pieces of a Pieces lot that can go out TODAY, in the same shape the
-// remnant scorer uses.
 //
-// GREIGE PIECES ARE EXCLUDED EVEN FROM THE "AFTER WASHING" SIMULATION, which is
-// deliberately not what a Roll lot does, and it is a phase-2 limitation rather
-// than a rule.
-//
-// A roll's greige counts towards "this lot could cover the order once washed",
-// and the row then offers a wash. There is no way to wash a PIECE yet: a
-// Wash_Request moves a lot's metres between two columns and would leave
-// Fabric_Piece.State saying Unwash while the lot claimed washed metres — the
-// header and its pieces disagreeing, which is the fault this whole design is
-// built to avoid. Offering a wash the store cannot perform is worse than saying
-// the row is short.
-//
-// So greige pieces are counted by the caller and NAMED on the row instead of
-// being silently invisible. When piece washing lands, take the greige flag here.
-function lotPieces(lot) {
-    return (lot.pieces || []).filter(function (p) {
-        return (Number(p.count) || 0) > 0 && p.state === 'Wash';
-    }).map(function (p) {
-        return { pieceId: p.pieceId, width: p.widthCm, length: p.lengthCm,
-                 pieces: Number(p.count) || 0 };
-    });
-}
-
-// Greige pieces sitting on a lot, in pieces. Not allocatable, but real cloth —
-// a row that is short because its printed stock has not been washed has to be
-// able to say so.
-function lotGreigePieces(lot) {
-    var n = 0;
-    if (lotIsPieces(lot)) {
-        (lot.pieces || []).forEach(function (p) {
-            if (p.state === 'Unwash') n += Number(p.count) || 0;
-        });
-    }
-    return n;
-}
+// RETIRED: lotIsPieces / lotPieces / lotGreigePieces. Printed cloth was once a
+// discrete-pieces special case (Fabric_Piece rows, a `form === 'Pieces'`
+// branch) with its own least-waste-area cut scorer and its own greige
+// exclusion. Under the rolls model a printed lot is just a lot whose rolls are
+// short — same `lot.rolls[]`, same shortest-first drain in lotFill, no branch.
+// The functions and the Pieces-only code paths in lotFill/spend/allocateMaterial
+// were removed in Pieces 1-2 of the rolls migration (docs/lot-rolls-model.md).
 
 // ---- Printed cloth, and the plain cloth behind it ----
 //
@@ -171,9 +151,7 @@ function hasOwnStock(m) {
         if ((Number(l.wash) || 0) > 0) return true;
         if ((Number(l.unwash) || 0) > 0) return true;
         if ((Number(l.inWash) || 0) > 0) return true;
-        return (l.pieces || []).some(function (p) {
-            return (Number(p.count) || 0) > 0;
-        });
+        return false;
     });
 }
 
@@ -203,21 +181,56 @@ function plainBaseStock(m) {
              lots: lots };
 }
 
-function lotFill(lot, demands, fab, greige) {
+function lotFill(lot, demands, fab, greige, withInWash) {
     var rem = (lot.waste || []).map(function (r) {
         return { wasteId: r.wasteId, width: r.width, length: r.length,
                  pieces: Number(r.pieces) || 0 };
     });
-    var metres = round2(Number(lot.wash) || 0);
-    if (greige) metres = round2(metres + (Number(lot.unwash) || 0));
 
-    // A PIECES LOT HAS NO CONTINUOUS CLOTH. Its metres are a maintained sum kept
-    // for valuation and for ranking one lot against another — nothing plans a
-    // cut off them, because five 3.00 m pieces are not 15 m of usable cloth.
-    // Fresh yield comes from the pieces below instead, so the metres budget is
-    // taken out of play here to make it impossible to spend twice.
-    var pcs = lotIsPieces(lot) ? lotPieces(lot) : [];
-    if (lotIsPieces(lot)) metres = 0;
+    // WHETHER THIS LOT CAN COVER THE ORDER ONCE ITS GREIGE IS WASHED is a
+    // LOT-LEVEL question — washing moves a metres figure between the lot's wash
+    // columns and never changes a roll's length. So `greige` here only widens
+    // the wash-state gate below; it does NOT add cloth to any roll.
+    //
+    // `inWash` IS NOT PART OF THIS GATE, and adding it was a real regression.
+    // The greige gate answers "could this lot cover the order if somebody went
+    // and washed its greige" - an action the store person can take, and the one
+    // the `wash` shortReason offers a button for. Cloth already AT the wash house
+    // is not that: nobody can send it again, it simply has to come back. Counting
+    // it here made a committed lot report `wash` - "send N metres to wash" - over
+    // cloth that was already there, burying the `atWash` reason ("it is at the
+    // washer, wait") which exists precisely to say so. The frozen e000519
+    // baseline adds `unwash` only; this now matches it again.
+    //
+    // `withInWash` is the THIRD question, and it is never asked by an allocation.
+    // It answers only "would this lot cover the order once the cloth at the wash
+    // house comes back", which the skip path needs so a row can say `atWash`
+    // instead of quoting a roll it is not allowed to cut. Nothing that spends a
+    // ledger passes it.
+    var washMetres = round2(Number(lot.wash) || 0);
+    var gateMetres = greige
+        ? round2(washMetres + (Number(lot.unwash) || 0))
+        : washMetres;
+    if (withInWash) gateMetres = round2(gateMetres + (Number(lot.inWash) || 0));
+
+    // THE PHYSICAL ROLLS — a working copy, drained as this fill places rows so
+    // `covers` can be tested without touching the lot. Shortest first, tie on
+    // length broken by Roll_Label, so short rolls are cleared before a long one
+    // is nibbled (the store consolidates stock into fewer, longer rolls). A
+    // roll below one marker row of the cut contributes nothing and is skipped.
+    //
+    // Printed cloth is not a special case: its lot simply has short rolls, and
+    // they drain shortest-first like any other.
+    var rollWork = (lot.rolls || [])
+        .filter(rollUsable)
+        .map(function (rr) {
+            return { rollId: String(rr.rollId), label: String(rr.label || ''),
+                     length: round2(Number(rr.length) || 0) };
+        });
+    rollWork.sort(function (a, b) {
+        if (a.length !== b.length) return a.length - b.length;
+        return String(a.label) < String(b.label) ? -1 : (String(a.label) > String(b.label) ? 1 : 0);
+    });
 
     var owed = demands.map(function (d) { return Math.max(0, Number(d.pieces) || 0); });
     var fromWaste = demands.map(function () { return 0; });
@@ -240,8 +253,17 @@ function lotFill(lot, demands, fab, greige) {
     // Least-waste-area rather than first-fit, so a snug remnant is spent before
     // a large one and big stock is protected: a 300x400 cut into 187x137 throws
     // away 68,762 cm2 for two pieces where a 200x300 throws away 8,762.
+    // THE GUARD CANNOT BE A CONSTANT, because it is not a safety net — it is a
+    // bound, and 400 was below the real one. Every pass through this loop either
+    // exhausts a remnant row or finishes a demand, so the loop cannot run more
+    // than (remnants + demands) times. A lot carrying more than 400 remnant rows
+    // hit the old cap mid-allocation, and the damage was not "some offcuts went
+    // unused": the demand left owing made `covers` false, so chooseLotForOrder
+    // rejected the lot and the ORDER WAS SKIPPED ENTIRELY — 450 remnants on the
+    // rack against a 450-piece job allocated nothing at all.
     var guard = 0;
-    while (guard++ < 400) {
+    var guardMax = rem.length + demands.length + 2;
+    while (guard++ < guardMax) {
         var bi = -1, br = -1, bScore = 0, bCap = 0;
         demands.forEach(function (d, i) {
             if (owed[i] <= 0) return;
@@ -265,93 +287,70 @@ function lotFill(lot, demands, fab, greige) {
         picksPer[bi][rem[br].wasteId] = (picksPer[bi][rem[br].wasteId] || 0) + use;
     }
 
-    // ---- 2. fresh cloth ----
+    // ---- 2. fresh cloth, ONE ROLL AT A TIME ----
     //
-    // TWO SHAPES, AND THE DIFFERENCE IS THE WHOLE POINT OF THIS FILE.
+    // A lot is a set of physical rolls, not a continuous metres pool. Each roll
+    // yields floor(rollLen / cutL) whole marker rows and the tail below one cut
+    // length is stranded — ON EVERY ROLL. Ten metres in one roll yields more
+    // than ten metres split 8 + 2 against a 10 m marker: the 2 m roll yields
+    // nothing. Treating the lot's metres as one pool credits rows nobody can
+    // cut, closes a requirement early, and strands the item at
+    // Awaiting_Material with Issue doing nothing — the silent-loss family
+    // CLAUDE.md records. This is the whole reason the model went to rolls.
     //
-    // A Roll lot is continuous: its metres divide into whole marker rows and any
-    // row can start where the last one ended.
+    // SHORTEST ROLL FIRST (rollWork is pre-sorted), drained in whole marker
+    // rows until it can give no more, then the next-shortest. Short rolls clear
+    // before a long one is touched, which consolidates the rack into fewer,
+    // longer rolls over time.
     //
-    // A Pieces lot is not. Each piece is cut on its own, so its yield is
-    // floor(len/cutL) rows and the tail below one cut length is stranded — on
-    // EVERY piece. Three 3.00 m pieces are 9.00 m and yield 15 rows of a 55 cm
-    // cut, not the 16 that 9.00 continuous metres would. Dividing the metres
-    // would credit a row nobody can cut, the requirement would close a piece
-    // early, and the item would sit at Awaiting_Material for ever with Issue
-    // doing nothing — the exact family of silent-loss bugs CLAUDE.md records.
-    var pieceTaken = {};
+    // THE WASH GATE BOUNDS THE LOOP, not just the result. `gateBudget` starts
+    // at the lot's washed metres (or wash+greige if `greige`) and every row
+    // placed draws it down. When it runs out, no more cloth is cut — exactly as
+    // the old scalar `metres` pool did. So a lot with 50 m of rolls but 0 m
+    // washed places NOTHING today (greige false) and `covers` is false, rather
+    // than cutting metres it cannot wash.
+    //
+    // `rollLinesPer` records, per demand, which rolls it cut and how many
+    // metres off each — this is what the issue line carries so the fan
+    // decrements the right roll.
+    var rollLinesPer = demands.map(function () { return []; });
+    var gateBudget = round2(gateMetres);
 
-    if (pcs.length) {
-        // Scored the same way remnants are — least waste per cut obtained.
-        // A PIECE IS TREATED AS A MINI-ROLL: we cut exactly what we need
-        // from it, and the remainder goes back on the rack (though not
-        // available for the rest of this session to keep piece provenance clean).
-        var pguard = 0;
-        while (pguard++ < 400) {
-            var pi = -1, pp = -1, pScore = 0, pCap = 0, pTake = 0;
-            demands.forEach(function (d, i) {
-                if (owed[i] <= 0) return;
-                pcs.forEach(function (p, ri) {
-                    if (p.pieces <= 0) return;
-                    var cap = remnantYield(p, d.cutW, d.cutL);
-                    if (cap <= 0) return;
-                    var take = Math.min(cap, owed[i]);
-                    // Score based on taking exactly what we need from ONE piece
-                    var pr = Math.floor(p.width / d.cutW);
-                    var rows = Math.ceil(take / pr);
-                    var lengthCut = rows * d.cutL;
-                    // Score = waste area per usable cut
-                    var score = ((p.width * lengthCut) - (take * d.cutW * d.cutL)) / take;
-                    if (pi < 0 || score < pScore || (score === pScore && take > pTake)) { 
-                        pi = i; pp = ri; pScore = score; pCap = cap; pTake = take; 
-                    }
-                });
-            });
-            if (pi < 0) break;
+    demands.forEach(function (d, i) {
+        if (owed[i] <= 0) return;
+        var pr = perRowFor(fab, d.cutW);
+        var cl = Number(d.cutL) || 0;
+        if (pr <= 0 || cl <= 0) return;
 
-            var d = demands[pi];
-            var p = pcs[pp];
-            var pr = Math.floor(p.width / d.cutW);
-
-            // We only process ONE piece count at a time to keep cut sizes exact
-            var take = Math.min(pCap, owed[pi]);
-            var rows = Math.ceil(take / pr);
-            var lengthCut = rows * d.cutL;
-            var got = Math.min(rows * pr, owed[pi]);
-
-            p.pieces -= 1; // Take one count of this piece
-            var pM = round2(lengthCut / 100);
-
-            owed[pi] -= got;
-            // fromFRESH, not fromWaste: this is raw material
-            fromFresh[pi] += got;
-            freshMetres = round2(freshMetres + pM);
-            metresPer[pi] = round2(metresPer[pi] + pM);
-            
-            pieceTaken[p.pieceId] = (pieceTaken[p.pieceId] || 0) + 1;
-            
-            // Record the cut length for this pieceId
-            if (!piecesPer[pi][p.pieceId]) piecesPer[pi][p.pieceId] = [];
-            piecesPer[pi][p.pieceId].push(lengthCut);
-        }
-    } else {
-        demands.forEach(function (d, i) {
-            if (owed[i] <= 0) return;
-            var pr = perRowFor(fab, d.cutW);
-            var cl = Number(d.cutL) || 0;
-            if (pr <= 0 || cl <= 0) return;
-            var rows = Math.min(Math.ceil(owed[i] / pr),
-                                Math.floor((metres * 100 + 0.0001) / cl));
-            if (rows <= 0) return;
+        for (var ri = 0; ri < rollWork.length && owed[i] > 0 && gateBudget > 0.0001; ri++) {
+            var roll = rollWork[ri];
+            if (roll.length <= 0) continue;
+            // Rows this roll can physically give, AND rows the wash gate still
+            // allows — whichever is smaller.
+            var rowsRoll = Math.floor((roll.length * 100 + 0.0001) / cl);
+            var rowsGate = Math.floor((gateBudget * 100 + 0.0001) / cl);
+            var rowsAvail = Math.min(rowsRoll, rowsGate);
+            if (rowsAvail <= 0) continue;         // roll too short, or gate spent
+            var rowsWant = Math.ceil(owed[i] / pr);
+            var rows = Math.min(rowsWant, rowsAvail);
+            if (rows <= 0) continue;
             var m = round2((rows * cl) / 100);
-            metres = round2(metres - m);
+
+            roll.length = round2(roll.length - m);
+            gateBudget = round2(gateBudget - m);
             freshMetres = round2(freshMetres + m);
             metresPer[i] = round2(metresPer[i] + m);
             var got2 = Math.min(rows * pr, owed[i]);
             owed[i] -= got2;
             fromFresh[i] += got2;
-        });
-    }
+
+            rollLinesPer[i].push({ rollId: roll.rollId, label: roll.label, metres: m });
+        }
+    });
+
+    var rollsCovered = owed.every(function (n) { return n <= 0; });
+    // The loop already respected the gate, so anything placed is within it.
+    var washGateOk = true;
 
     return {
         picks: picks,
@@ -360,13 +359,20 @@ function lotFill(lot, demands, fab, greige) {
         freshMetres: freshMetres,
         metresPer: metresPer,
         picksPer: picksPer,
-        // Which physical pieces this fill would take, and how many of each — in
-        // total and per demand. Both empty for a Roll lot, so nothing downstream
-        // has to branch on the form.
-        pieceTaken: pieceTaken,
-        piecesPer: piecesPer,
-        // Nothing still owing means this lot could serve the whole set alone.
-        covers: owed.every(function (n) { return n <= 0; }),
+        // Which ROLLS this fill would cut, and how many metres off each — per
+        // demand. Empty when there is no fresh cloth to take. The issue line
+        // carries these so the fan decrements the right roll.
+        rollLinesPer: rollLinesPer,
+        // The drained working copy — spend() reads it to mirror the cut onto
+        // the real lot.rolls so the next order sees what is left.
+        rollsAfter: rollWork,
+        // Legacy fields, kept so nothing downstream throws on a missing key.
+        // Printed cloth is now short rolls, not Fabric_Piece — these are always
+        // empty.
+        pieceTaken: {},
+        piecesPer: demands.map(function () { return {}; }),
+        // Nothing still owing (the loop already stayed inside the wash gate).
+        covers: rollsCovered && washGateOk,
         shortBy: owed.reduce(function (a, b) { return a + Math.max(0, b); }, 0)
     };
 }
@@ -404,6 +410,24 @@ function chooseLotForOrder(lots, demands, fab) {
         if (lotFill(l, demands, fab, true).covers) afterWash.push(l);
     });
 
+    // OPEN QUESTION, DELIBERATELY LEFT AS IT IS — see the note below before
+    // changing it, because it is a POLICY and not a defect.
+    //
+    // "Size" is wash + unwash in BOTH tiers, so a lot is ranked by how much of
+    // this shade exists, washed or not. On the today tier that means a lot with
+    // 12 m washed behind 200 m of greige reads as a 212 m lot and is protected
+    // as the big one: the order goes to a 60 m fully-washed lot instead,
+    // nibbling the ready cloth and leaving intact the lot that cannot serve
+    // anybody until somebody washes it. Ranking the today tier by washed metres
+    // alone reverses that, and on the sequences tried it serves more orders.
+    //
+    // It was NOT changed, for two reasons. It is not wrong — protecting the lot
+    // with the most cloth behind it is a coherent rule, and greige does get
+    // washed. And tools/allocator-rolls-parity.test.js pins every decision this
+    // function makes to the frozen pre-rolls baseline (e000519); changing which
+    // lot an order is cut from is the most consequential change this file can
+    // make, and it is not one to slip in behind a bug fix. Decide it on purpose,
+    // then re-baseline that test in the same pass.
     var smallest = function (list) {
         var best = null, bestSize = 0;
         list.forEach(function (l) {
@@ -467,6 +491,40 @@ function wasteAllowed(wasteId, onRack) {
     return Math.max(0, Math.min(onRack, cap));
 }
 
+// ---- METRES HE HAS TYPED INTO A LOT BOX ----
+//
+// Kept on `m.metresEditByLot` (lotId -> metres) and NOT in a module-level store
+// beside lotOverrides and wasteDeclined, and the difference in where it lives is
+// the difference in what it means.
+//
+// It has to be kept SOMEWHERE, because the allocation is a pure function of
+// (raw payload, declines, overrides) that rebuilds every line from scratch on
+// each call — so a figure that is not an input to it is erased the next time
+// anything on the screen moves. That is what happened: `reallocateInPlace` re-runs
+// the WHOLE screen when a remnant is ticked, so an edit typed on any row reverted
+// to the auto figure with `metresEdited` cleared, and because that repaint only
+// ever touched the material he had just touched, the input box on the reverted
+// row went on displaying the number he typed. The screen said 6 and the handover
+// sent 10 — the submit path reads `m.lotLines` and never the boxes.
+//
+// But it must NOT outlive the allocation it answers, which is exactly what a
+// module-level store would have done. A decline and a tone override are decisions
+// about a THING — this remnant, this shade — and the thing survives a refresh, so
+// those two rightly do. A metres figure answers an allocation, and a refetch
+// replaces the allocation: the lot may have been restocked, another store person
+// may have cut the same roll, the order may have been part-covered since.
+// Re-applying "6" to a row that now recommends 22 is the same silent override
+// this store exists to stop, pointing the other way.
+//
+// Living on the material gives that lifetime for free. Every re-render reuses the
+// same objects, so an edit survives them all; a refetch builds new ones from the
+// server payload, so it takes nothing with it. No reset call to remember, and no
+// way for one screen's figure to land on another's row.
+//
+// ONLY DIVERGENCES ARE KEPT. Putting a lot back to its auto figure — by typing
+// it, by the checkbox, or by select-all — deletes the entry rather than storing
+// the auto number, so a screen nobody has edited re-applies nothing.
+
 function overrideKey(supId, materialId, orderId) {
     return String(supId) + '|' + String(materialId) + '|' + String(orderId);
 }
@@ -488,48 +546,143 @@ function lotOverrideFor(supId, materialId, orderId) {
 // getStoreMaterialRequirements. It moved here with the allocation itself,
 // because whether a remnant is usable depends on which lot the fresh cloth is
 // coming off, and only this side knows that.
+// THE CEILING ON A WASTE BOX IS THE ALLOCATOR'S OWN PICK, NOT THE RACK.
+//
+// The rack figure is how many remnants EXIST; the pick is how many this job
+// needs. They are usually different, and offering the rack lets the store person
+// hand over remnants nothing asked for: a demand of 4 cuts takes ONE remnant of
+// a 3-remnant row, and a box capped at 3 invites him to send the other two out
+// against a requirement that cannot credit them. Once issued they are gone from
+// the rack and off the screen, with no row anywhere saying why.
+//
+// SO THE CEILING IS THE UNDECLINED PICK — what the allocator offered before he
+// touched anything. It cannot be the CURRENT pick: typing 1 would drop the
+// ceiling to 1 and trap him there, unable to go back up to the 3 he was offered.
+//
+// This runs the allocation once with declines suspended and records the result
+// per pick as `autoPieces`. That is only safe because applyLotAllocation is a
+// pure function of (raw payload, declines, overrides) and rebuilds every ledger
+// from scratch on each call — the same property that lets the priority reorder
+// re-run it with no reset step. It never mutates the payload's lots.
+//
+// It is the exact mirror of `m.autoMetres` on the lot side, and exists for the
+// same reason: an edit needs a fixed baseline to be measured against, and the
+// live figure moves as he edits.
 function applyLotAllocation(data) {
-    (data || []).forEach(function (sup) {
-        // ONE LEDGER PER SUPERVISOR — NEVER ONE SHARED BETWEEN THEM.
-        //
-        // Shared, these three stopped being a working total and became a
-        // RESERVATION. Cards are walked in priority order, so the first
-        // supervisor spent the rack and the last was measured against what he
-        // left: his rows read "no lot holds enough" while twenty metres sat on
-        // the shelf with nobody's name on it, under a header still saying "All
-        // in stock". The store person could not issue to him at all.
-        //
-        // Priority is the order to SERVE people in. It is not permission to be
-        // served, and the screen must never refuse a handover the store person
-        // wants to make — he can see the rack and we cannot. A hard reservation
-        // ledger was considered for this app and rejected; this was it, rebuilt
-        // by accident inside the allocator.
-        //
-        // Contested stock is SAID instead of enforced ("Also needed by …"), and
-        // settled where it can actually be settled: issueMaterials re-checks
-        // every lot server-side. Two cards may therefore offer the same metres
-        // and the same offcut, and whoever is issued second gets what is really
-        // left. That is honest; pre-emptying him was not.
-        //
-        // Within one card they still do their real job, and it is not optional:
-        // one Issue press serves the whole card, so two orders or two cut sizes
-        // of the same supervisor must not promise the same cloth twice.
-        var wasteLeft = {};    // wasteId -> pieces unclaimed ON THIS CARD
-        var lotLeft = {};      // materialId|lotId -> washed metres, this card
-        // GREIGE IS SPENT TOO, and forgetting it was a real hole: an order that
-        // picks a lot because its greige can finish it has spoken for that
-        // greige at the wash house. Track only the washed metres and the card's
-        // next order is told the same pile will finish it as well.
-        var greigeLeft = {};   // materialId|lotId -> unwashed metres, this card
-        // pieceId -> printed pieces unclaimed ON THIS CARD. A Pieces lot holds
-        // no continuous cloth, so lotLeft alone cannot stop two orders on one
-        // card being offered the same physical piece.
-        var pieceLeft = {};
+    var declineBackup = {};
+    var hadDecline = false;
+    for (var dk in wasteDeclined) {
+        if (Object.prototype.hasOwnProperty.call(wasteDeclined, dk)) {
+            declineBackup[dk] = wasteDeclined[dk];
+            hadDecline = true;
+        }
+    }
+    if (hadDecline) {
+        for (var ck in declineBackup) delete wasteDeclined[ck];
+        allocateEveryCard(data);
+        var autoByMat = {};
+        (data || []).forEach(function (sup) {
+            (sup.materials || []).forEach(function (m, mi) {
+                var key = String(sup.supervisorId) + '|' + mi;
+                var byId = {};
+                (m.wastePicks || []).forEach(function (p) {
+                    byId[String(p.wasteId)] = Number(p.pieces) || 0;
+                });
+                autoByMat[key] = byId;
+            });
+        });
+        for (var rk in declineBackup) wasteDeclined[rk] = declineBackup[rk];
+        allocateEveryCard(data);
+        (data || []).forEach(function (sup) {
+            (sup.materials || []).forEach(function (m, mi) {
+                var byId = autoByMat[String(sup.supervisorId) + '|' + mi] || {};
+                (m.wastePicks || []).forEach(function (p) {
+                    var a = byId[String(p.wasteId)];
+                    p.autoPieces = a === undefined ? (Number(p.pieces) || 0) : a;
+                });
+            });
+        });
+        return;
+    }
 
-        // The server sends the true rack figure to EVERY card — it does not
-        // divide stock between them — so seeding from the card in hand is the
-        // whole rack, which is exactly what this supervisor could be given if
-        // the store person served him first.
+    // No declines in force, so the pass below IS the undeclined pass.
+    allocateEveryCard(data);
+    (data || []).forEach(function (sup) {
+        (sup.materials || []).forEach(function (m) {
+            (m.wastePicks || []).forEach(function (p) {
+                p.autoPieces = Number(p.pieces) || 0;
+            });
+        });
+    });
+}
+
+function allocateEveryCard(data) {
+    // ONE LEDGER ACROSS EVERY CARD — a real reservation, walked in priority
+    // order. This REVERSES a previous decision, deliberately, and the reversal
+    // is the whole feature. What the old comment said, and why it no longer
+    // holds:
+    //
+    //   "ONE LEDGER PER SUPERVISOR — NEVER ONE SHARED BETWEEN THEM. Shared,
+    //    these stopped being a working total and became a RESERVATION… the
+    //    first supervisor spent the rack and the last was measured against what
+    //    he left: his rows read 'no lot holds enough' while twenty metres sat on
+    //    the shelf with nobody's name on it… The store person could not issue to
+    //    him at all. A hard reservation ledger was considered for this app and
+    //    rejected; this was it, rebuilt by accident inside the allocator."
+    //
+    // Every word of that was true of the version it described. It failed for one
+    // reason: the store person could see a card go short and had NO WAY TO SEE
+    // WHY OR ACT ON IT. Priority was an invisible server-side sort key, so a low
+    // card was simply short, over cloth he was looking at.
+    //
+    // Two things make it work now, and neither existed then:
+    //
+    //   1. HE SETS THE ORDER, on this screen. A card is short because he put
+    //      someone else first — and he can move them up.
+    //   2. IT RE-RUNS LIVE. Reordering recomputes the whole screen; there is no
+    //      stale reservation to argue with.
+    //
+    // Priority stopped being a hint and became the control. That is the trade:
+    // the screen may now say a card cannot be served, but only ever as the
+    // direct consequence of an order the store person chose and can change.
+    //
+    // NOTHING IS RESERVED SERVER-SIDE. This is a view: a pure function of (raw
+    // rack, order). issueMaterials still re-checks every lot when Issue is
+    // actually pressed, so a stale plan can never over-issue.
+    //
+    // Within one card they still do their original job too: one Issue press
+    // serves the whole card, so two orders or two cut sizes of the same
+    // supervisor must not promise the same cloth twice.
+    var wasteLeft = {};    // wasteId -> pieces unclaimed, ACROSS ALL CARDS
+    var lotLeft = {};      // materialId|lotId -> washed metres left
+    // GREIGE IS SPENT TOO, and forgetting it was a real hole: an order that
+    // picks a lot because its greige can finish it has spoken for that
+    // greige at the wash house. Track only the washed metres and the next
+    // order is told the same pile will finish it as well.
+    var greigeLeft = {};   // materialId|lotId -> unwashed metres left
+    // pieceId -> printed pieces unclaimed. Legacy: no lot carries `pieces`
+    // any more (printed cloth is short rolls), kept so the seeding below and
+    // spend() stay shape-compatible.
+    var pieceLeft = {};
+    // materialId|lotId|rollId -> metres left on that physical roll. lotLeft is
+    // the WASH-STATE budget; rollLeft is the PHYSICAL length. Both bound a fill
+    // — a lot can be washed enough yet have no single roll long enough, or have
+    // the roll but not the wash.
+    var rollLeft = {};
+
+    // SEEDED ONCE, FROM THE WHOLE SCREEN, BEFORE ANY CARD IS SERVED.
+    //
+    // The server sends the true rack figure to EVERY card — it does not divide
+    // stock between them — so any card that mentions a material carries the same
+    // full figure for it. Seeding on first sight is therefore seeding from the
+    // rack, and the `=== undefined` guards mean a second card mentioning the
+    // same lot cannot re-inflate a ledger the first card is about to spend.
+    //
+    // This pass is SEPARATE from the allocation pass below, and that separation
+    // is the reservation: every ledger holds the full rack before supervisor 1
+    // takes anything, and each card afterwards is measured against the running
+    // remainder.
+    (data || []).forEach(function (sup) {
         (sup.materials || []).forEach(function (m) {
             if (!m.isFabric) return;
             (m.wasteStock || []).forEach(function (r) {
@@ -546,23 +699,177 @@ function applyLotAllocation(data) {
                         pieceLeft[p.pieceId] = Number(p.count) || 0;
                     }
                 });
+                // ROLL LEDGER — the remaining length of each physical roll,
+                // keyed material|lot|rollId. Drained by spend() as orders are
+                // served so the next order — on this card OR any later one —
+                // sees the shortened roll.
+                (l.rolls || []).forEach(function (rr) {
+                    if (!rollUsable(rr)) return;
+                    var rk = String(m.materialId) + '|' + String(l.lotId) + '|' + String(rr.rollId);
+                    if (rollLeft[rk] === undefined) {
+                        rollLeft[rk] = round2(Number(rr.length) || 0);
+                    }
+                });
             });
         });
+    });
 
+    // THE ALLOCATION PASS — cards in priority order, spending the shared
+    // ledgers. `data`'s array order IS the priority order; the caller
+    // (render()) arranges it before calling.
+    var DEBUG_TOP = (typeof window !== 'undefined' && window.DEBUG_ALLOCATOR);
+    (data || []).forEach(function (sup) {
         var done = {};
         (sup.materials || []).forEach(function (m) {
             if (!m.isFabric) return;
             var key = String(m.materialId);
             if (done[key]) return;
             done[key] = true;
-            allocateMaterial(sup, key, wasteLeft, lotLeft, greigeLeft, pieceLeft);
+
+            // WHAT IS LEFT FOR THIS CARD, BEFORE IT TAKES ANY OF IT — the same
+            // reservation the LOT recommendation is about to be measured
+            // against, stamped onto every row of this material on this card so
+            // TOTAL WASH STOCK shows that number instead of the raw rack figure
+            // every card carries (the server sends the full rack to everybody;
+            // it does not divide it up).
+            //
+            // Taken BEFORE allocateMaterial spends this card's own share, or a
+            // card would appear to eat its own total — only what HIGHER-priority
+            // cards already claimed should show as gone. Priority 1 therefore
+            // still reads the full rack; priority 2 reads whatever priority 1
+            // left; and so on down the order the store person set on this
+            // screen, which he can always reshuffle to unlock stock for
+            // whoever he decides should have it first.
+            //
+            // WRITTEN ONTO `m2` (THE MATERIAL), NEVER ONTO `l` (THE LOT). A lot
+            // is shared by reference across every supervisor's copy of the same
+            // material — the payload hands the same lot record to everyone who
+            // mentions it, harmless as long as nothing writes to it. Stamping
+            // `l.washLeft` directly did exactly that: Suraj's card and Aniket's
+            // card were pointing at the SAME lot object, so Aniket's stamp
+            // (processed second) silently overwrote the figure Suraj's card was
+            // about to render, and Suraj's own "Total Wash Stock" ended up
+            // showing what was left for Aniket instead. `m2.lotWashLeft` is a
+            // fresh map on the material, and `m2` is per-card and per-row —
+            // never shared — so this cannot leak between cards the same way.
+            (sup.materials || []).forEach(function (m2) {
+                if (!m2.isFabric || String(m2.materialId) !== key) return;
+                var wl = {};
+                (m2.lots || []).forEach(function (l) {
+                    var lk = key + '|' + String(l.lotId);
+                    wl[String(l.lotId)] = lotLeft[lk] !== undefined
+                        ? round2(lotLeft[lk]) : round2(Number(l.wash) || 0);
+                });
+                m2.lotWashLeft = wl;
+                if (DEBUG_TOP) {
+                    console.log('[reserve] card=' + (sup.supervisorName || sup.supervisorId) +
+                        ' material=' + (m2.material || key) + ' lotWashLeft=' + JSON.stringify(wl));
+                }
+            });
+
+            allocateMaterial(sup, key, wasteLeft, lotLeft, greigeLeft, pieceLeft, rollLeft);
+        });
+    });
+
+    // ---- WHAT IS LEFT ON EACH PHYSICAL ROLL WHEN EVERY CARD HAS BEEN SERVED ----
+    //
+    // The ONLY honest ceiling for a hand-typed metres figure, and the reason it
+    // has to be computed HERE rather than inside a card: `applyFabricOverride`
+    // clamped an edit-up at the roll's length **from the raw server payload**,
+    // which the allocator deliberately never mutates. That figure is the roll
+    // before anybody cut it. One 20 m roll serving two supervisors 5 m each,
+    // supervisor 2 types 20, and 25 m goes out against a 20 m roll — both issue
+    // lines naming it. Within one card it never showed, because a lot's lines all
+    // share one aggregated roll breakdown; across cards there was nothing
+    // stopping it, and the store screen shows every card at once.
+    //
+    // Written after the whole pass, not per card, or card 1's ceiling would still
+    // include the metres cards 2 and 3 are about to take. `rollFree` is what
+    // nobody has claimed; the editable ceiling is that plus what THIS row already
+    // holds on the roll, which applyFabricOverride adds back.
+    // KEYED lotId|rollId, AND SHARED BY EVERY ROW OF THE MATERIAL.
+    //
+    // Two things went wrong with a bare `rollId` key and one object per row, and
+    // they are the same mistake at two grains:
+    //
+    //   - TWO LOTS CAN CARRY THE SAME rollId. Creator ids are unique, but the
+    //     label-derived ids the seed writer and every fixture use are not, and a
+    //     collision silently collapsed both rolls into one entry. Whichever lot
+    //     was written last won — so a lot drained to 6 m read as 10 and the cap
+    //     UNDER-clamped, which is the unsafe direction: an edit-up was allowed
+    //     into metres that were not there.
+    //
+    //   - ONE MATERIAL HAS SEVERAL ROWS (a Plan row and a Reissue row, and the
+    //     same material on another supervisor's card), and each got its own copy
+    //     of the free figure. Each row's cap was then `free + its own auto`,
+    //     measured against a `free` nobody was decrementing — so two rows could
+    //     each be extended into the same unclaimed metres. 20 m + 20 m off one
+    //     20 m roll, which is the very hole the `rollFree` ceiling was added to
+    //     close, one level down.
+    //
+    // So there is ONE object per material, held by reference on every row of it
+    // across every card, and applyFabricOverride charges its edits against it —
+    // see `rollDelta` there for how that stays re-entrant under a keystroke.
+    var freeByMat = {};
+    (data || []).forEach(function (sup) {
+        (sup.materials || []).forEach(function (m) {
+            if (!m.isFabric) return;
+            var mid = String(m.materialId);
+            var free = freeByMat[mid] || (freeByMat[mid] = {});
+            (m.lots || []).forEach(function (l) {
+                (l.rolls || []).forEach(function (rr) {
+                    var fk = String(l.lotId) + '|' + String(rr.rollId);
+                    if (free[fk] !== undefined) return;
+                    var rk = mid + '|' + String(l.lotId) + '|' + String(rr.rollId);
+                    free[fk] = rollLeft[rk] !== undefined ? round2(rollLeft[rk]) : 0;
+                });
+            });
+            m.rollFree = free;
+            // What THIS row has taken off each roll beyond its auto figure,
+            // signed. Reset with the ledger it is measured against.
+            m.rollDelta = {};
+        });
+    });
+
+    // ---- AND PUT BACK WHAT HE TYPED ----
+    //
+    // The allocator rebuilds every ledger from scratch on each call, which is
+    // what makes it safe to re-run — and is exactly why a hand-typed metres
+    // figure did not survive one. `reallocateInPlace` re-runs the WHOLE screen
+    // whenever a remnant is ticked, so an edit typed on any row was silently
+    // reverted to the auto figure, `metresEdited` cleared with it, and — because
+    // that repaint only ever touched the material he had just touched — the input
+    // box on the reverted row went on displaying the number he typed. The screen
+    // said 6 and the handover sent 10, with the submit path reading `m.lotLines`
+    // and never the boxes.
+    //
+    // So the edits live in a session store, exactly like `lotOverrides` and
+    // `wasteDeclined`, and are re-applied after every pass. The store holds only
+    // DIVERGENCES: applyFabricOverride deletes the entry the moment a lot is put
+    // back to its auto figure, so an untouched screen re-applies nothing and the
+    // clean case is unchanged.
+    (data || []).forEach(function (sup) {
+        (sup.materials || []).forEach(function (m) {
+            if (!m.isFabric || !m.metresEditByLot) return;
+            // Snapshot the keys: applyFabricOverride writes back into this same
+            // object, and one that restores a lot to its auto figure deletes from
+            // it.
+            var keys = [];
+            for (var lk in m.metresEditByLot) {
+                if (Object.prototype.hasOwnProperty.call(m.metresEditByLot, lk)) keys.push(lk);
+            }
+            keys.forEach(function (lk) {
+                var e = m.metresEditByLot[lk];
+                if (e !== undefined) applyFabricOverride(m, lk, e);
+            });
         });
     });
 }
 
 // One supervisor, one material: every cut size and both Plan and Reissue rows,
 // allocated together so two rows cannot promise the same cloth.
-function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, pieceLeft) {
+function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, pieceLeft, rollLeft) {
+    rollLeft = rollLeft || {};
     var rows = [];
     (sup.materials || []).forEach(function (m, i) {
         if (m.isFabric && String(m.materialId) === materialId) rows.push({ m: m, idx: i });
@@ -571,6 +878,14 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
 
     var m0 = rows[0].m;
     var fab = { fabricWidthCm: m0.fabricWidthCm };
+
+    // DEBUG AID, OFF BY DEFAULT. Set window.DEBUG_ALLOCATOR = true in the
+    // console and reload to see, per material, every order that could not be
+    // served and why — the exact question "which of the 100+ orders are still
+    // waiting, and how much does each one need" that the screen has no room to
+    // answer. Guarded so normal use pays nothing for it.
+    var DEBUG = (typeof window !== 'undefined' && window.DEBUG_ALLOCATOR);
+    var debugSkips = [];
 
     // EACH LOT CARRIES ONLY ITS OWN REMNANTS. This is the whole change: an
     // offcut cut from L2 is L2's tone, so it is part of what L2 can offer and of
@@ -588,22 +903,26 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
             blocked: !!l.blocked,
             wash: lotLeft[lk] !== undefined ? lotLeft[lk] : round2(Number(l.wash) || 0),
             unwash: greigeLeft[lk] !== undefined ? greigeLeft[lk] : round2(Number(l.unwash) || 0),
-            // ROLL UNLESS IT SAYS OTHERWISE. Every lot that existed before
-            // printing has Form blank, and reading blank as Pieces would send
-            // the whole rack down the piece path with no pieces to pick.
+            // ROLL UNLESS IT SAYS OTHERWISE. Legacy Form value, no longer used
+            // to branch — every lot is rolls now — kept only so nothing
+            // downstream that still reads `.form` gets undefined.
             form: l.form === 'Pieces' ? 'Pieces' : 'Roll',
-            // Copied into fresh objects, with the card's remaining count — the
-            // same treatment `waste` gets one field down, and for the same
-            // reason: the allocator spends these down as it walks the card's
-            // orders, and mutating the server's payload would leak one
-            // supervisor's spending into the next card.
-            pieces: (l.pieces || []).filter(function (p) {
-                return (pieceLeft[p.pieceId] || 0) > 0;
-            }).map(function (p) {
-                return { pieceId: String(p.pieceId), lengthCm: p.lengthCm,
-                         widthCm: p.widthCm, count: pieceLeft[p.pieceId],
-                         state: p.state, carton: p.carton };
-            }),
+            // THE PHYSICAL ROLLS, with the card's remaining length per roll —
+            // the same treatment `waste` and `pieces` get, and for the same
+            // reason: spend() drains rollLeft as the card's orders are served,
+            // and mutating the server's payload would leak one supervisor's
+            // spending into the next card. A roll drained to <= 0 is dropped.
+            rolls: (l.rolls || []).map(function (rr) {
+                var rk = materialId + '|' + l.lotId + '|' + rr.rollId;
+                var left = rollLeft[rk] !== undefined
+                    ? rollLeft[rk] : round2(Number(rr.length) || 0);
+                return { rollId: String(rr.rollId), label: String(rr.label || ''),
+                         length: left, status: rr.status || 'Available',
+                         origin: rr.origin || 'Purchased' };
+            }).filter(rollUsable),
+            // Legacy Fabric_Piece copy — no lot has these any more (printed
+            // cloth is short rolls), kept empty so old readers don't throw.
+            pieces: [],
             // Carried but never allocatable. Cloth at the wash house cannot be
             // issued today, yet the lot is plainly NOT finished — it comes back
             // washed, in this tone. A pin must survive it.
@@ -746,6 +1065,26 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                         // quoting it would offer cloth that can never be used.
                         lotsUsed: [],
                         pinnedDryLots: [], pinnedDryOrders: [],
+                        // THE PINNED LOT IS THERE, IT IS SIMPLY NOT ENOUGH.
+                        //
+                        // Distinct from pinnedDry, which means the tone is gone
+                        // and he has a decision to make. This one has no decision
+                        // in it — the order is cut in this shade, the shade is on
+                        // the rack, there is not enough of it — and it had no
+                        // reason of its own, so it fell all the way through
+                        // shortReasonFor to `empty`: "none of this shade left",
+                        // printed over the hundred metres of another shade he is
+                        // looking at. Everything below `empty` assumed a row
+                        // reached it with no lot at all.
+                        pinnedShortLots: [],
+                        // A LOT WHOSE CLOTH IS AT THE WASH HOUSE, on an order that
+                        // was SKIPPED rather than committed. `lotsUsed` cannot
+                        // carry these — nothing was committed to — but `atWash`
+                        // ("it is at the washer, wait") is still the only true
+                        // sentence about the row, and it was unreachable for an
+                        // unpinned order because the wash gate rightly excludes
+                        // inWash and the order never reached a lot at all.
+                        atWashLots: [],
                         // NOTHING ON THE RACK COVERS A WHOLE JOB. Kept as the
                         // size of the smallest job that was turned away, because
                         // that is the number that ends the argument: he is
@@ -786,42 +1125,21 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
             r.fromFresh += fill.fromFresh[i];
             r.freshMetres = round2(r.freshMetres + fill.metresPer[i]);
             if (fill.metresPer[i] > 0) {
-                // WHICH PHYSICAL PIECES THIS LINE IS, for a Pieces lot. The
-                // server must not re-derive them from the metres: three 3.00 m
-                // pieces are 9.00 m, and 9.00 m divided by a 55 cm cut reads as
-                // 16 rows where the pieces only yield 15. Naming them is what
-                // stops a row nobody can cut being credited.
-                //
-                // Empty on a Roll lot, so the line is the same shape either way
-                // and an older server simply ignores the field.
-                var lnPieces = [];
-                Object.keys(fill.piecesPer[i] || {}).forEach(function (pid) {
-                    var cuts = fill.piecesPer[i][pid]; // Array of cut lengths
-                    var srcP = (lot.pieces || []).filter(function (x) {
-                        return String(x.pieceId) === String(pid);
-                    })[0] || {};
-                    
-                    var cutCounts = {};
-                    cuts.forEach(function(c) {
-                        cutCounts[c] = (cutCounts[c] || 0) + 1;
-                    });
-                    
-                    Object.keys(cutCounts).forEach(function(cutLen) {
-                        lnPieces.push({ pieceId: pid, count: cutCounts[cutLen],
-                                        cutLengthCm: Number(cutLen),
-                                        lengthCm: srcP.lengthCm, carton: srcP.carton });
-                    });
+                // WHICH PHYSICAL ROLLS THIS LINE CUT, and how many metres off
+                // each. The server must not re-derive these from the total: a
+                // lot's metres are spread across rolls of different length, and
+                // the fan has to decrement the exact roll the cutter used. Empty
+                // when this fill placed no fresh cloth on this demand.
+                var lnRolls = (fill.rollLinesPer[i] || []).map(function (rl) {
+                    return { rollId: String(rl.rollId), label: String(rl.label || ''),
+                             metres: round2(Number(rl.metres) || 0) };
                 });
 
                 var cSumm = '';
-                if (lnPieces.length > 0) {
-                    var parts = [];
-                    lnPieces.forEach(function(pc) {
-                        var cStr = round2(pc.cutLengthCm / 100) + 'm';
-                        if (pc.count > 1) cStr += 'x' + pc.count;
-                        parts.push(cStr);
-                    });
-                    cSumm = 'Cuts: ' + parts.join(', ');
+                if (lnRolls.length > 1) {
+                    cSumm = 'Rolls: ' + lnRolls.map(function (rl) {
+                        return rl.label + ' ' + round2(rl.metres) + 'm';
+                    }).join(', ');
                 }
 
                 // fromRaw / fromWaste ARE THE CREDIT, carried so the payload
@@ -848,7 +1166,10 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                                   // no single cut any more, so every consumer of
                                   // a lot line reads it from here.
                                   cutW: Number(d.cutW) || 0, cutL: Number(d.cutL) || 0,
-                                  pieces: lnPieces, cutSummary: cSumm,
+                                  // Which rolls this line cut, metres off each —
+                                  // the fan decrements these. `pieces` kept as an
+                                  // empty array so older readers don't throw.
+                                  rolls: lnRolls, pieces: [], cutSummary: cSumm,
                                   fromRaw: fill.fromFresh[i], fromWaste: fill.fromWaste[i],
                                   note: noteOn, overrideFrom: fromOn });
             }
@@ -877,8 +1198,18 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                 var k = wid + '|' + (d.mrqId || d.planItemId);
                 if (!r.picks[k]) {
                     var src = lot.waste.filter(function (x) { return String(x.wasteId) === String(wid); })[0] || {};
+                    // THE LOT ID, NOT JUST ITS NUMBER. A remnant carries the tone
+                    // of the lot it was cut from, so a pick IS a tone decision —
+                    // and on an order covered ENTIRELY by offcuts it is the only
+                    // record of one, because no fresh metres means no lotLine and
+                    // the payload's `issuedLot` came only from lotLines. That
+                    // order shipped with no pin at all, and its remake was then
+                    // free to be cut off any lot on the rack: the exact defect the
+                    // pin exists to prevent, reached by the one path where the
+                    // tone was never written down. `lot` (the NUMBER) stays for
+                    // display; the id is what the payload stamps.
                     r.picks[k] = { wasteId: wid, pieces: 0, width: src.width, length: src.length,
-                                   lot: lot.lotNumber, carton: src.carton,
+                                   lotId: String(lot.lotId), lot: lot.lotNumber, carton: src.carton,
                                    planItemId: d.planItemId, mrqId: String(d.mrqId || ''),
                                    cutW: Number(d.cutW) || 0, cutL: Number(d.cutL) || 0 };
                 }
@@ -908,19 +1239,30 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
             });
         });
 
-        // THE PIECES COME OFF THE RACK TOO, in both places, for exactly the
-        // reason the metres and the remnants do: `lot.pieces` is what the NEXT
-        // order on this card is measured against, and without this two orders
-        // would each be offered the same physical piece.
+        // THE ROLLS COME OFF THE RACK TOO, in BOTH the ledger and the working
+        // `lot.rolls`, for exactly the reason the metres and remnants do: the
+        // working lot is what the NEXT order on this card is measured against.
+        // Without this, two orders both see a roll at full length and each is
+        // offered its metres — the double-promise. The per-roll metres are what
+        // THIS fill placed (`rollLinesPer`), summed across every demand it
+        // served.
         //
-        // The metres above already moved — a Pieces lot's `wash` is the
-        // maintained sum of its washed pieces, so taking N pieces lowers it by
-        // exactly their metres and the two stay in step.
-        Object.keys(fill.pieceTaken || {}).forEach(function (pid) {
-            pieceLeft[pid] = Math.max(0, (pieceLeft[pid] || 0) - fill.pieceTaken[pid]);
-            (lot.pieces || []).forEach(function (p) {
-                if (String(p.pieceId) === String(pid)) {
-                    p.count = Math.max(0, (Number(p.count) || 0) - fill.pieceTaken[pid]);
+        // On a COMMITMENT (`emit` false) the rolls still drain: the order has
+        // spoken for that physical cloth even though nothing goes out today.
+        // Rolls drain even on commitment — the order has spoken for that cloth.
+        var rollTook = {};
+        (fill.rollLinesPer || []).forEach(function (perDemand) {
+            (perDemand || []).forEach(function (rl) {
+                var fk = String(materialId) + '|' + String(lot.lotId) + '|' + String(rl.rollId);
+                rollTook[fk] = round2((rollTook[fk] || 0) + (Number(rl.metres) || 0));
+            });
+        });
+        Object.keys(rollTook).forEach(function (fk) {
+            rollLeft[fk] = round2(Math.max(0, (rollLeft[fk] !== undefined ? rollLeft[fk] : 0) - rollTook[fk]));
+            var rid = fk.split('|').pop();
+            (lot.rolls || []).forEach(function (rr) {
+                if (String(rr.rollId) === String(rid)) {
+                    rr.length = round2(Math.max(0, (Number(rr.length) || 0) - rollTook[fk]));
                 }
             });
         });
@@ -973,41 +1315,94 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
         // serve this order, so the tone must not be switched: greige gets washed
         // and cloth at the wash house comes back, both in this same tone. Offer
         // a switch over either and he mixes tones where waiting would have done.
-        var pinUsable = false;
-        if (ord.pin && pinnedLot) {
-            var trial = lotFill(pinnedLot, ord.demands, fab, true);
-            pinUsable = trial.freshMetres > 0 || Object.keys(trial.picks).length > 0 ||
-                        (Number(pinnedLot.inWash) || 0) > 0;
-        }
+        var canServe = function (l) {
+            if (!l || l.blocked) return false;
+            var trial = lotFill(l, ord.demands, fab, true);
+            return trial.freshMetres > 0 || Object.keys(trial.picks).length > 0 ||
+                   (Number(l.inWash) || 0) > 0;
+        };
+        var pinUsable = !!(ord.pin && pinnedLot) && canServe(pinnedLot);
 
         if (ord.pin && !pinUsable) {
-            // ONE ROW CAN CARRY TWO DEAD ORDERS, each pinned to a different
-            // spent lot. Collected rather than assigned, because the last write
-            // used to win: the row named one lot while the other order had been
-            // cut from a different one, and the override then rescued only the
-            // order that happened to be processed last.
-            ord.demands.forEach(function (d) {
-                var rr = res[d.rowIdx];
-                var name = ord.pinNo || ord.pin;
-                if (rr.pinnedDryLots.indexOf(name) === -1) rr.pinnedDryLots.push(name);
-                if (rr.pinnedDryOrders.indexOf(ord.oid) === -1) rr.pinnedDryOrders.push(ord.oid);
-                // "L2 is empty" over a full but quarantined lot sends him to the
-                // rack to check, and he finds cloth. Different sentence, same
-                // override.
-                if (pinBlocked) rr.pinnedBlocked = true;
-            });
-
-            // AN OVERRIDE APPLIES ONLY HERE. Checked against the live rack every
-            // time rather than remembered as a decision: if the original lot has
-            // since been restocked the order belongs back on it, and a
-            // remembered override would quietly keep it on the substitute.
+            // AN OVERRIDE APPLIES ONLY HERE, and it is HELD TO THE SAME TEST THE
+            // PIN JUST FAILED. Checked against the live rack every time rather
+            // than remembered as a decision: if the original lot has since been
+            // restocked the order belongs back on it, and a remembered override
+            // would quietly keep it on the substitute.
+            //
+            // IT MUST BE RE-VALIDATED, and this is where quarantined cloth went
+            // out. The pin path refuses a blocked lot (`pinBlocked` above) and the
+            // dialog only ever offers `usableLots`, which excludes them — but the
+            // override is remembered across fetches, and a lot BLOCKED AFTER he
+            // chose it went straight through: `ord.pin` was overwritten with no
+            // check and the lookup below has none either, so the row read as fully
+            // served off quarantined cloth with no reason line at all.
+            //
+            // An override naming a lot that is missing, blocked or itself dry is
+            // REFUSED rather than half-applied, and the row falls back to
+            // pinnedDry — which is what keeps the "Use another lot…" button on
+            // screen so he can choose again. Silently accepting a dry substitute
+            // would take the button away and leave him with a row that cannot
+            // move and no way to say so.
             var ov = lotOverrideFor(sup.supervisorId, materialId, ord.oid);
+            var ovLot = null, ovNamed = '';
             if (ov && ov.lotId) {
-                ord.pin = String(ov.lotId);
+                lots.forEach(function (l) {
+                    if (String(l.lotId) !== String(ov.lotId)) return;
+                    ovNamed = String(l.lotNumber || l.lotId);
+                    if (canServe(l)) ovLot = l;
+                });
+            }
+
+            if (ovLot) {
+                ord.pin = String(ovLot.lotId);
                 ord.note = String(ov.note || '');
+                // AND HE CAN STILL CHANGE HIS MIND. The order is being served off
+                // the substitute, so it is no longer `pinnedDry` and the reason
+                // line has rightly stopped saying it is — but that line was also
+                // the only way back into the dialog. Without this, accepting an
+                // override that only part-covers is a one-way door: the row shows
+                // how short it is and offers nothing to do about it.
+                //
+                // The orders are what the dialog writes overrides for, so they
+                // have to be carried whether or not the pin is dry.
+                ord.demands.forEach(function (d) {
+                    var rr = res[d.rowIdx];
+                    if (rr.pinnedDryOrders.indexOf(ord.oid) === -1) {
+                        rr.pinnedDryOrders.push(ord.oid);
+                    }
+                    rr.overrideOn = true;
+                });
             } else {
-                // No override yet. Allocate NOTHING — the row shows what it needs
-                // and why it cannot have it, and he decides.
+                // ONE ROW CAN CARRY TWO DEAD ORDERS, each pinned to a different
+                // spent lot. Collected rather than assigned, because the last
+                // write used to win: the row named one lot while the other order
+                // had been cut from a different one, and the override then
+                // rescued only the order that happened to be processed last.
+                //
+                // Recorded HERE and not before the override is read, or a
+                // substitute that was accepted but only part-covers the order
+                // still printed "L D is empty — this was cut from L D" and
+                // offered the override button again. He is told to make a
+                // decision he has already made, about a lot the order is no
+                // longer on.
+                ord.demands.forEach(function (d) {
+                    var rr = res[d.rowIdx];
+                    var name = ord.pinNo || ord.pin;
+                    if (rr.pinnedDryLots.indexOf(name) === -1) rr.pinnedDryLots.push(name);
+                    if (rr.pinnedDryOrders.indexOf(ord.oid) === -1) rr.pinnedDryOrders.push(ord.oid);
+                    // "L2 is empty" over a full but quarantined lot sends him to
+                    // the rack to check, and he finds cloth. Different sentence,
+                    // same override.
+                    if (pinBlocked) rr.pinnedBlocked = true;
+                    // HIS OWN CHOICE WAS REFUSED, and saying nothing about it is
+                    // how the same lot gets picked again. Named so the row can
+                    // say which, instead of re-offering the dialog as if he had
+                    // never opened it.
+                    if (ovNamed) rr.overrideRefused = ovNamed;
+                });
+                // Allocate NOTHING — the row shows what it needs and why it
+                // cannot have it, and he decides.
                 return;
             }
         }
@@ -1043,11 +1438,42 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
             // Smallest, because that is the one nearest to being servable and the
             // only figure that makes "20 on the rack" mean anything.
             var want = orderMetres(ord.demands, fab);
+
+            // CLOTH AT THE WASH HOUSE THAT WOULD FINISH THIS ORDER.
+            //
+            // The only fact about a skipped order that shortReasonFor cannot work
+            // out for itself, because it needs the DEMANDS to ask whether the
+            // returning wash would actually cover the job — and it is handed the
+            // row, not the orders on it. Everything else about a refusal is
+            // readable off the lots, and is read there, so there is one place
+            // that decides what the row says rather than two that must agree.
+            //
+            // Without this the `atWash` reason ("it is at the washer, wait") was
+            // unreachable for an unpinned order however plainly true it was: the
+            // wash gate rightly excludes inWash, so the order never reached a lot
+            // at all, `lotsUsed` stayed empty, and the row quoted a roll instead.
+            var wait = [];
+            lots.forEach(function (l) {
+                if (l.blocked) return;
+                if ((Number(l.inWash) || 0) > 0 &&
+                    lotFill(l, ord.demands, fab, true, true).covers) {
+                    wait.push({ lotId: String(l.lotId), lotNumber: l.lotNumber,
+                                qty: round2(Number(l.inWash) || 0) });
+                }
+            });
+
             ord.demands.forEach(function (d) {
                 var rr = res[d.rowIdx];
                 if (rr.noFitSmallest === 0 || want < rr.noFitSmallest) {
                     rr.noFitSmallest = want;
                 }
+                wait.forEach(function (w) {
+                    var had = false;
+                    rr.atWashLots.forEach(function (x) {
+                        if (String(x.lotId) === String(w.lotId)) had = true;
+                    });
+                    if (!had) rr.atWashLots.push(w);
+                });
             });
             outcomes.push({
                 planId: ord.oid, why: 'skipped', lotId: '', lotNumber: '',
@@ -1055,6 +1481,17 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                 needMetres: want, metres: 0, wastePieces: 0, greige: 0,
                 pin: ord.pin ? String(ord.pinNo || ord.pin) : '', override: ''
             });
+            if (DEBUG) {
+                debugSkips.push({
+                    order: ord.oid,
+                    neededMetres: round2(want),
+                    pin: ord.pin ? String(ord.pinNo || ord.pin) : '',
+                    cuts: ord.demands.map(function (d) {
+                        return { cutW: Number(d.cutW) || 0, cutL: Number(d.cutL) || 0,
+                                 pieces: Number(d.pieces) || 0 };
+                    })
+                });
+            }
             return;
         }
 
@@ -1092,6 +1529,43 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
             // gap; a committed row wants everything its lot cannot give washed
             // today, which is the same figure by a different route.
             greige = greigeUse;
+
+            // THE LOT IS THERE AND IT IS NOT ENOUGH.
+            //
+            // Only a PINNED order can reach this: an unpinned one is served by a
+            // lot that covers it whole or is skipped, so its fill is never short.
+            // A pinned order takes whatever its lot can give, and when that is
+            // less than the job there was no reason for it at all — the row fell
+            // past every named case to `empty`, "none of this shade left",
+            // printed while a hundred metres of ANOTHER shade sat on the rack.
+            //
+            // Ranked below `wash` and `atWash` in shortReasonFor, so when the
+            // same lot has greige or cloth at the washer he is told the thing he
+            // can act on instead of a number he cannot.
+            //
+            // PER DEMAND, NOT PER ROW. `shortBy` is the ORDER's total, and one
+            // order can span two rows of the same material — a Plan row and a
+            // Reissue row for the same plan. Stamping the order total on each of
+            // them reported a 38-piece shortfall twice, so the screen said 76 over
+            // an order that is 38 short. Each demand carries its own share, and a
+            // row holding two cut sizes of the order rightly sums both of them.
+            if (useFill.shortBy > 0) {
+                ord.demands.forEach(function (d, i) {
+                    var shortHere = Math.max(0, (Number(d.pieces) || 0) -
+                        (Number(useFill.fromWaste[i]) || 0) -
+                        (Number(useFill.fromFresh[i]) || 0));
+                    if (shortHere <= 0) return;
+                    var rs = res[d.rowIdx];
+                    var hit = null;
+                    rs.pinnedShortLots.forEach(function (x) {
+                        if (String(x.lotId) === String(lot.lotId)) hit = x;
+                    });
+                    if (hit) hit.pieces += shortHere;
+                    else rs.pinnedShortLots.push({ lotId: String(lot.lotId),
+                                                   lotNumber: lot.lotNumber,
+                                                   pieces: shortHere });
+                });
+            }
 
             // WHY THIS LOT, in one word, for the audit:
             //   pinned    — cloth is already cut in this shade, no choice existed
@@ -1177,6 +1651,33 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
         // column says so rather than leaving an empty cell.
     });
 
+    if (DEBUG && debugSkips.length) {
+        console.group('[allocator] ' + (m0.material || materialId) +
+            ' (' + (m0.sku || '') + ') — ' + debugSkips.length +
+            ' order(s) could not be served');
+        console.log('Rolls left (after this pass):');
+        console.table(lots.reduce(function (out, l) {
+            (l.rolls || []).forEach(function (rr) {
+                out.push({ lot: l.lotNumber, roll: rr.label,
+                           metresLeft: rr.length, status: rr.status });
+            });
+            if (!(l.rolls || []).length) {
+                out.push({ lot: l.lotNumber, roll: '(none)', metresLeft: 0,
+                           status: l.blocked ? 'Blocked' : '—' });
+            }
+            return out;
+        }, []));
+        console.log('Orders still waiting on this material:');
+        console.table(debugSkips.map(function (s) {
+            return { order: s.order, neededMetres: s.neededMetres,
+                     pin: s.pin || '(unpinned)',
+                     cuts: s.cuts.map(function (c) {
+                         return c.cutW + 'x' + c.cutL + ' × ' + c.pieces + 'pc';
+                     }).join(', ') };
+        }));
+        console.groupEnd();
+    }
+
     // ---- write back, in the shape the rest of the screen already reads ----
     rows.forEach(function (rw) {
         var r = res[rw.idx];
@@ -1195,7 +1696,8 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
             });
             if (already) return;
             m.wastePicks.push({ wasteId: rk.wasteId, pieces: 0, width: rk.width,
-                                length: rk.length, lot: rk.lot, carton: rk.carton,
+                                length: rk.length, lotId: String(rk.lotId || ''),
+                                lot: rk.lot, carton: rk.carton,
                                 planItemId: '', mrqId: '' });
         });
         m.piecesCoveredByWaste = r.fromWaste;
@@ -1394,45 +1896,204 @@ function applyFabricOverride(m, lotId, editedMetres) {
     if (base.length === 0) return;
     var lotKey = String(lotId);
 
-    // A Pieces lot line carries a per-piece cut list the server needs to
-    // decrement Fabric_Piece. A hand-sized metres figure cannot be mapped onto
-    // discrete pieces, so an override of THIS lot is refused when any of its
-    // lines is one — the box is rendered read-only for the same reason.
     var thisLotBase = base.filter(function (ln) { return String(ln.lotId) === lotKey; });
     if (thisLotBase.length === 0) return;
-    if (thisLotBase.some(function (ln) { return ln.pieces && ln.pieces.length; })) return;
 
-    var autoThisLot = round2(thisLotBase.reduce(function (t, ln) {
-        return t + (Number(ln.qty) || 0);
-    }, 0));
-    var want = Math.max(0, Number(editedMetres) || 0);
-
-    // Rebuild m.lotLines: other lots' lines straight from auto, this lot's lines
-    // re-derived. Start from whatever is currently on m.lotLines for the other
-    // lots (they may carry earlier per-lot edits) but re-seed this lot from auto.
     var otherLines = (m.lotLines || []).filter(function (ln) {
         return String(ln.lotId) !== lotKey;
     });
 
-    // Back to exactly what the allocator decided for this lot.
+    var autoThisLot = round2(thisLotBase.reduce(function (t, ln) {
+        return t + (Number(ln.qty) || 0);
+    }, 0));
+
+    m.metresEditByLot = m.metresEditByLot || {};
+    if (m.lotEditShort) delete m.lotEditShort[lotKey];
+
+    // GIVE BACK WHAT THIS ROW IS CURRENTLY HOLDING BEYOND ITS AUTO FIGURE, on
+    // this lot's rolls, before a single ceiling is worked out.
+    //
+    // `rollFree` is shared by every row of the material and is the live count of
+    // what nobody has claimed. This function runs on EVERY KEYSTROKE, so charging
+    // the new figure without first releasing the old one would ratchet the
+    // ledger down as he types — 20, then 19, then 18 would each take metres
+    // again and the roll would read as spent after four digits.
+    //
+    // Releasing first also makes the row's own cap come out right: the ceiling is
+    // (what nobody else has claimed) + (this row's own auto), and this row's own
+    // extra must not be counted in the first term as well as the second.
+    var freeById = m.rollFree || null;
+    var deltaById = m.rollDelta || null;
+    if (freeById && deltaById) {
+        Object.keys(deltaById).forEach(function (dk) {
+            if (dk.indexOf(lotKey + '|') !== 0) return;
+            freeById[dk] = round2((freeById[dk] || 0) + deltaById[dk]);
+            delete deltaById[dk];
+        });
+    }
+
+    // Back to exactly what the allocator decided for this lot — and FORGET the
+    // edit, so re-running the allocation puts nothing back. The checkbox and
+    // select-all both come through here with the auto figure, so "untouched"
+    // and "put back" end in the same state, which is the point.
+    var want = Math.max(0, Number(editedMetres) || 0);
     if (Math.abs(want - autoThisLot) < 0.005) {
+        delete m.metresEditByLot[lotKey];
         var restored = JSON.parse(JSON.stringify(thisLotBase));
         m.lotLines = otherLines.concat(restored);
         recomputeMetresEdited(m);
         setOverrideRemaining(m);
         return;
     }
+    m.metresEditByLot[lotKey] = want;
 
-    // mrqId -> pieces still owed (ceiling on fromRaw), from the server lines.
-    // Keyed on the requirement ROW, not the item: one Plan_Item can have two
-    // rows for this fabric (two cut sizes), each with its own owed count, and
-    // capping both against the first row's count would strand the second.
-    // Offcut credit per row comes from ALL of that row's auto lines, not just
-    // this lot's, so a short edit here cannot silently re-charge waste-covered
-    // pieces to fresh cloth.
+    // ---- THE ROLL BREAKDOWN THE ALLOCATOR PRODUCED, in DRAIN ORDER ----
+    //
+    // The allocation drained shortest-roll-first. `autoRolls` is that sequence
+    // for this lot — { rollId, label, autoMetres (what the fill took),
+    // cap (the roll's physical length from the payload) } — first entry is the
+    // roll drained first, last is the most recently used.
+    // THE CEILING IS WHAT IS STILL FREE ON THE ROLL, NOT ITS PRINTED LENGTH.
+    //
+    // `m.lots` is the raw server payload and the allocator never mutates it, so a
+    // roll reads there at the length it had before ANY card cut it. Clamping an
+    // edit-up against that let two supervisors' rows each be extended into the
+    // same metres — 5 m + 20 m off one 20 m roll, both lines naming it, and
+    // nothing on either screen saying so.
+    //
+    // `m.rollFree` is what no card has claimed once the whole pass has run
+    // (allocateEveryCard writes it). The ceiling for THIS row is that plus what
+    // this row's own lines already hold on the roll, which is added below — it is
+    // his cloth to re-spread, and subtracting it would forbid him his own metres.
+    //
+    // Falls back to the printed length when `rollFree` is absent, which is the
+    // old behaviour, for the admin audit and any payload that predates the field.
+    var capById = {};
+    (m.lots || []).forEach(function (l) {
+        if (String(l.lotId) !== lotKey) return;
+        (l.rolls || []).forEach(function (rr) {
+            capById[String(rr.rollId)] = round2(Number(rr.length) || 0);
+        });
+    });
+    var autoRolls = [];
+    var seenRoll = {};
+    thisLotBase.forEach(function (ln) {
+        (ln.rolls || []).forEach(function (rl) {
+            var rid = String(rl.rollId);
+            if (seenRoll[rid]) {
+                // Two lines of this lot cutting the same roll. Both halves are
+                // his, so both count towards what he may re-spread.
+                seenRoll[rid].autoMetres = round2(seenRoll[rid].autoMetres + (Number(rl.metres) || 0));
+                if (freeById && freeById[lotKey + '|' + rid] !== undefined) {
+                    seenRoll[rid].cap = round2(seenRoll[rid].cap + (Number(rl.metres) || 0));
+                }
+            } else {
+                var mine = round2(Number(rl.metres) || 0);
+                var fk = lotKey + '|' + rid;
+                var cap = (freeById && freeById[fk] !== undefined)
+                    ? round2(freeById[fk] + mine)
+                    : (capById[rid] !== undefined ? capById[rid] : mine);
+                var e = { rollId: rid, label: String(rl.label || ''),
+                          autoMetres: mine, cap: cap };
+                seenRoll[rid] = e;
+                autoRolls.push(e);
+            }
+        });
+    });
+
+    // ---- RE-SPREAD `want` ACROSS THE ROLLS ----
+    //
+    // EDIT DOWN: unwind the drain newest-roll-first. Keep the earlier rolls at
+    //   their auto figure and take the shortfall off the last, then the
+    //   second-last, and so on. A roll driven to 0 drops out of the breakdown.
+    // EDIT UP: extend ONLY the last used roll, clamped at its physical cap. No
+    //   spill onto a fresh, previously-unused roll — a hand-edit does not open a
+    //   new roll.
+    var rollAlloc = [];   // { rollId, label, metres } in drain order, >0 only
+    if (autoRolls.length === 0) {
+        // No roll breakdown on the auto lines (shouldn't happen post-migration).
+        // Fall back to a single synthetic line carrying just the metres.
+        rollAlloc = [];
+    } else if (want >= autoThisLot) {
+        // extend the last roll only
+        var extra = round2(want - autoThisLot);
+        autoRolls.forEach(function (e, i) {
+            var mtr = e.autoMetres;
+            if (i === autoRolls.length - 1) {
+                mtr = round2(Math.min(e.cap, e.autoMetres + extra));
+            }
+            if (mtr > 0) rollAlloc.push({ rollId: e.rollId, label: e.label, metres: mtr });
+        });
+    } else {
+        // EDIT DOWN — unwind the drain NEWEST-roll-first. The rolls drained
+        // earliest keep their auto figure; the shortfall comes off the LAST
+        // roll used, then the second-last. So fill FORWARD through drain order,
+        // each roll taking min(its auto, what is left of `want`) — the early
+        // rolls fill up first and the last roll absorbs the reduction. A roll
+        // that ends at 0 drops out of the breakdown.
+        var need = round2(want);
+        autoRolls.forEach(function (e) {
+            if (need <= 0.0001) return;
+            var g = round2(Math.min(e.autoMetres, need));
+            need = round2(need - g);
+            if (g > 0) rollAlloc.push({ rollId: e.rollId, label: e.label, metres: g });
+        });
+    }
+
+    var placedMetres = round2(rollAlloc.reduce(function (t, r) { return t + r.metres; }, 0));
+
+    // CHARGE THE NEW CLAIM TO THE SHARED LEDGER, so the NEXT row of this material
+    // — on this card or another — is measured against what is genuinely left.
+    // Signed, so an edit DOWN hands metres back and another row can use them.
+    if (freeById && deltaById) {
+        var placedBy = {};
+        rollAlloc.forEach(function (r) {
+            placedBy[String(r.rollId)] = round2((placedBy[String(r.rollId)] || 0) + r.metres);
+        });
+        autoRolls.forEach(function (e) {
+            var fk2 = lotKey + '|' + e.rollId;
+            var dlt = round2((placedBy[e.rollId] || 0) - e.autoMetres);
+            if (dlt !== 0) deltaById[fk2] = dlt;
+            freeById[fk2] = round2(Math.max(0, (freeById[fk2] || 0) - dlt));
+        });
+    }
+
+    // WHAT HE ASKED FOR AND COULD NOT HAVE, RECORDED RATHER THAN SWALLOWED.
+    //
+    // An edit-up beyond the free length of the last roll used is clamped, and the
+    // clamp was invisible: the keystroke path deliberately does not repaint the
+    // box he is typing in (it would eat the caret), so he typed 50 against an
+    // 11 m ceiling, the payload carried 5 and the box went on reading 50. The
+    // screen has to say so somewhere, and the LOT column is repainted on every
+    // keystroke — so the note goes there, beside the roll it could not come off.
+    if (placedMetres + 0.005 < want) {
+        m.lotEditShort = m.lotEditShort || {};
+        m.lotEditShort[lotKey] = { typed: round2(want), placed: placedMetres };
+    }
+
+    // ---- REBUILD THIS LOT'S LINES ----
+    //
+    // A SKU row can take two cut sizes off one lot, so `placedMetres` has to be
+    // split between that lot's lines — and the split is IN WHOLE MARKER ROWS,
+    // because a part-row is not a cut piece.
+    //
+    // Splitting by metres alone and flooring each line afterwards LOSES A ROW PER
+    // LINE to the remainder. Two 5 m lines of a 1 m cut, typed down to 9 m,
+    // became 4.5 + 4.5 -> floor -> four rows each: EIGHT pieces credited for NINE
+    // metres of cloth. The ninth metre went out with nothing booking it and the
+    // requirement stayed open for a piece that had physically been cut — the
+    // silent-loss shape CLAUDE.md records, one lay at a time.
+    //
+    // So the proportional split is the STARTING POINT only. Each line takes as
+    // many whole rows as its share affords; the metres left over are then handed
+    // out A WHOLE ROW AT A TIME, largest share first, to lines that still have
+    // pieces owing. Only what remains after that — genuinely less than one row of
+    // any line — rides on the biggest line, which is the rule this function has
+    // always applied: metres that are not a whole number of rows are sent as
+    // typed and the stray part-row counts 0 pieces.
     var owedBy = {}, wasteBy = {};
     (m.lines || []).forEach(function (ln) {
-        var q = String(ln.mrqId || '');
+        var q = String(ln.mrqId || ln.planItemId || '');
         if (q && owedBy[q] === undefined) {
             owedBy[q] = Math.max(0, (Number(ln.reqPieces) || 0) - (Number(ln.issPieces) || 0));
         }
@@ -1442,37 +2103,88 @@ function applyFabricOverride(m, lotId, editedMetres) {
         wasteBy[q] = (wasteBy[q] || 0) + (Number(ln.fromWaste) || 0);
     });
 
-    // Spread the edited total across this lot's lines, weighted by their auto qty.
-    var lines = JSON.parse(JSON.stringify(thisLotBase));
-    var autoSum = lines.reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0);
-    if (autoSum <= 0) { autoSum = lines.length; lines.forEach(function (ln) { ln.qty = 1; }); }
-
-    var biggest = 0;
-    lines.forEach(function (ln, i) {
-        ln.qty = round2(want * ((Number(ln.qty) || 0) / autoSum));
-        if ((Number(lines[i].qty) || 0) > (Number(lines[biggest].qty) || 0)) biggest = i;
-    });
-    var spread = lines.reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0);
-    lines[biggest].qty = round2((Number(lines[biggest].qty) || 0) + (want - spread));
-    if ((Number(lines[biggest].qty) || 0) < 0) lines[biggest].qty = 0;
-
-    // fromRaw per line: whole rows using THIS LINE'S cut, capped at what the
-    // requirement row still owes after its offcuts and after any credit already
-    // taken on another line for the same row (a row's cut can be split across
-    // two lots).
     var rawTaken = {};
-    // Seed rawTaken from the OTHER lots' lines for the same row, so the cap is
-    // against the row's total outstanding, not just this lot's slice.
     otherLines.forEach(function (ln) {
         var q = String(ln.mrqId || ln.planItemId || '');
         rawTaken[q] = (rawTaken[q] || 0) + (Number(ln.fromRaw) || 0);
     });
+
+    var lines = JSON.parse(JSON.stringify(thisLotBase));
+    var autoSum = lines.reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0);
+    if (autoSum <= 0) { autoSum = lines.length; lines.forEach(function (ln) { ln.qty = 1; }); }
+
+    // Per line: the geometry, and how many whole rows it could still WANT. Rows
+    // beyond that are surplus and are never handed out preferentially — surplus
+    // rides on one line, as it always has.
+    var geo = lines.map(function (ln) {
+        var q = String(ln.mrqId || ln.planItemId || '');
+        var cl = Number(ln.cutL) || 0;
+        var perRow = perRowFor({ fabricWidthCm: m.fabricWidthCm }, Number(ln.cutW) || 0);
+        var room = Math.max(0, (owedBy[q] === undefined ? 0 : owedBy[q]) -
+                               (wasteBy[q] || 0) - (rawTaken[q] || 0));
+        return { auto: Number(ln.qty) || 0, cutL: cl, perRow: perRow,
+                 rowM: cl > 0 ? round2(cl / 100) : 0,
+                 maxRows: (perRow > 0 && cl > 0) ? Math.ceil(room / perRow) : 0,
+                 rows: 0 };
+    });
+
+    var left = placedMetres;
+    geo.forEach(function (g) {
+        if (g.rowM <= 0 || g.maxRows <= 0) return;
+        var share = placedMetres * (g.auto / autoSum);
+        var rws = Math.floor((share * 100 + 0.0001) / g.cutL);
+        if (rws > g.maxRows) rws = g.maxRows;
+        if (rws < 0) rws = 0;
+        g.rows = rws;
+        left = round2(left - rws * g.rowM);
+    });
+
+    // The remainder, a whole row at a time. Largest share first so the split
+    // stays as close to proportional as whole rows allow, and round-robin rather
+    // than filling one line to the top — an edit-down must not empty the smaller
+    // cut entirely to keep the larger one whole.
+    var byShare = geo.map(function (g, i) { return i; }).sort(function (a, b) {
+        return geo[b].auto - geo[a].auto;
+    });
+    var moved = true;
+    while (moved && left > 0.0001) {
+        moved = false;
+        for (var bi = 0; bi < byShare.length; bi++) {
+            var g2 = geo[byShare[bi]];
+            if (g2.rowM <= 0 || g2.rows >= g2.maxRows) continue;
+            if (g2.rowM <= left + 0.0001) {
+                g2.rows += 1;
+                left = round2(left - g2.rowM);
+                moved = true;
+            }
+        }
+    }
+
+    var biggest = 0;
+    lines.forEach(function (ln, i) {
+        ln.qty = round2(geo[i].rows * geo[i].rowM);
+        if ((Number(ln.qty) || 0) > (Number(lines[biggest].qty) || 0)) biggest = i;
+    });
+    // NOTHING COULD TAKE A WHOLE ROW — a lot whose lines have no countable cut,
+    // or an edit smaller than one row. Fall back to the old proportional spread
+    // so the metres are still charged to the roll rather than silently dropped:
+    // he is telling the screen how much cloth leaves the shelf, and that is true
+    // whether or not it makes a cut piece.
+    var spread = round2(lines.reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0));
+    if (spread <= 0 && placedMetres > 0) {
+        lines.forEach(function (ln, i) {
+            ln.qty = round2(placedMetres * (geo[i].auto / autoSum));
+            if ((Number(ln.qty) || 0) > (Number(lines[biggest].qty) || 0)) biggest = i;
+        });
+        spread = round2(lines.reduce(function (t, ln) { return t + (Number(ln.qty) || 0); }, 0));
+    }
+    lines[biggest].qty = round2((Number(lines[biggest].qty) || 0) + round2(placedMetres - spread));
+    if ((Number(lines[biggest].qty) || 0) < 0) lines[biggest].qty = 0;
+
     lines.forEach(function (ln) {
         var q = String(ln.mrqId || ln.planItemId || '');
-        var lineCutL = Number(ln.cutL) || 0;
-        var lineCutLcm = lineCutL * 100;
         var perRow = perRowFor({ fabricWidthCm: m.fabricWidthCm }, Number(ln.cutW) || 0);
-        var rows = (lineCutLcm > 0) ? Math.floor(((Number(ln.qty) || 0) * 100 + 0.5) / lineCutLcm) : 0;
+        var rows = (Number(ln.cutL) || 0) > 0 ? Math.floor((Number(ln.qty) * 100 + 0.0001) / Number(ln.cutL)) : 0;
         var gross = rows * perRow;
         var owed = owedBy[q] === undefined ? gross : owedBy[q];
         var wasteCredit = wasteBy[q] || 0;
@@ -1481,8 +2193,28 @@ function applyFabricOverride(m, lotId, editedMetres) {
         var give = Math.min(gross, room);
         rawTaken[q] = already + give;
         ln.fromRaw = give;
-        // fromWaste is the physical-pick credit and is not a function of metres —
-        // leave it exactly as the allocator set it.
+        // fromWaste is the physical-pick credit and is not a function of metres.
+        // The roll breakdown is the LOT's — every line of this lot carries it,
+        // so the handover payload's qty and rolls[] cannot disagree.
+        //
+        // `rollsShared` marks that: EVERY line of this lot now carries the
+        // SAME array, byte for byte. A display reading `.rolls` across several
+        // lines of one lot has to know that — the ordinary (unedited) case has
+        // each line carry only the rolls IT cut, and several lines of one lot
+        // genuinely sharing a roll (a big roll serving many separate orders)
+        // must be SUMMED to get the roll's true total draw. Once this stamp is
+        // in force that sum would be wrong: it would count the same breakdown
+        // once per line instead of once for the lot. See `rollsByLot` in
+        // main.js, which reads this flag to tell the two cases apart.
+        ln.rollsShared = true;
+        ln.rolls = rollAlloc.map(function (r) {
+            return { rollId: r.rollId, label: r.label, metres: r.metres };
+        });
+        ln.cutSummary = rollAlloc.length > 1
+            ? 'Rolls: ' + rollAlloc.map(function (r) {
+                  return r.label + ' ' + round2(r.metres) + 'm';
+              }).join(', ')
+            : '';
     });
 
     m.lotLines = otherLines.concat(lines);
@@ -1556,7 +2288,12 @@ function shortReasonFor(m, r, lots) {
     // until he does the order cannot move at all.
     if (r.pinnedDryLots.length > 0) {
         return { kind: r.pinnedBlocked ? 'pinnedBlocked' : 'pinnedDry',
-                 lot: r.pinnedDryLots.join(' and ') };
+                 lot: r.pinnedDryLots.join(' and '),
+                 // The substitute he already picked, when it was refused —
+                 // missing, quarantined or dry itself. Without it the dialog
+                 // reopens looking exactly as it did the first time and he has no
+                 // way to know his answer did not take.
+                 refused: r.overrideRefused || '' };
     }
 
     var byId = {};
@@ -1582,6 +2319,14 @@ function shortReasonFor(m, r, lots) {
         if (!atWash && l && (Number(l.inWash) || 0) > 0) {
             atWash = { kind: 'atWash', lot: l.lotNumber,
                        qty: round2(Number(l.inWash) || 0) };
+        }
+    });
+    // …AND THE ORDERS THAT WERE SKIPPED WAITING ON THE SAME CLOTH. Nothing was
+    // committed, so they are not in `lotsUsed`; the skip path records them
+    // separately, and only when that lot's returning wash would cover the job.
+    (r.atWashLots || []).forEach(function (w) {
+        if (!atWash) {
+            atWash = { kind: 'atWash', lot: w.lotNumber, qty: round2(Number(w.qty) || 0) };
         }
     });
     if (atWash) return atWash;
@@ -1614,20 +2359,79 @@ function shortReasonFor(m, r, lots) {
 
     // Cloth on the rack that no single job fits inside. SAY THE NUMBERS: he is
     // looking at a rack with cloth on it, and "no lot holds enough" is true and
-    // unusable. The biggest lot and the smallest job end the argument in a
-    // glance, and neither of them is a marker row.
+    // unusable. What he can act on is the LONGEST SINGLE ROLL — a lot with two
+    // 10 m rolls holds 20 m but cannot cut a 12 m marker, and "L2 has 20 m"
+    // reads as a bug. Report the longest roll of the lot with the longest roll,
+    // against the smallest job.
+    // THE SHADE IS ON THE RACK AND THERE IS NOT ENOUGH OF IT. Nothing to wash,
+    // nothing at the washer, no substitute to offer — the order is cut in this
+    // tone and the tone has run low, so the only honest next step is more cloth.
+    // Ranked here because everything above it is an action he can take today.
+    if ((r.pinnedShortLots || []).length > 0) {
+        return { kind: 'pinnedShort',
+                 lots: r.pinnedShortLots.map(function (x) {
+                     return { lotNumber: x.lotNumber, pieces: x.pieces };
+                 }),
+                 // OFFERED ONLY WHERE ONE IS ALREADY IN FORCE. On an ordinary
+                 // pinned row it would erode the pin by being easier than asking
+                 // why — the whole value of the pin is that breaking it is a
+                 // decision somebody made and can be asked about. Here the
+                 // decision has already been made, and this only lets him revise
+                 // it.
+                 canOverride: !!r.overrideOn };
+    }
+
+    // Cloth on the rack that no single job fits inside. SAY THE NUMBERS: he is
+    // looking at a rack with cloth on it, and "no lot holds enough" is true and
+    // unusable.
+    //
+    // `noFitBest` is recorded WHERE THE ORDER WAS REFUSED and is the longest
+    // CUTTABLE length — the longest single roll capped by that lot's washed
+    // metres. The scan that used to live here read the rolls alone, so it quoted
+    // physical cloth the wash gate had already refused: 100 m on a lot with 5 m
+    // washed, "smallest job needs 10". When nothing was cuttable there is no
+    // honest sentence of this shape and the row falls through instead.
+    // What he can act on is the LONGEST SINGLE ROLL — a lot with two 10 m rolls
+    // holds 20 m but cannot cut a 12 m marker, and "L2 has 20 m" reads as a bug.
+    //
+    // CAPPED BY WHAT THE LOT MAY ACTUALLY SPEND, which the old scan did not do.
+    // `covers` is false for two quite different reasons and reading the rolls
+    // alone could only see one of them: a roll too short to take the marker, or
+    // the WASH GATE. A lot holding 5 washed metres on a 100 m roll printed
+    // "100 Mtr on L1, smallest job needs 10" — and that state is ROUTINE, not an
+    // edge, because issuing moves Wash_Quantity while nothing yet decrements
+    // Roll_Length, so the two drift apart on every handover.
+    //
+    // The cap is wash + unwash, the widest gate any allocation tried, so a lot
+    // left holding only greige still gets a truthful sentence. Cloth at the WASH
+    // HOUSE is excluded: it has its own reason, ranked above this one, and that
+    // is the true answer whenever it applies. When nothing is cuttable there is
+    // no honest sentence of this shape and the row falls through instead.
     if (r.noFitSmallest > 0) {
         var big = null;
         lots.forEach(function (l) {
             if (l.blocked) return;
-            var have = round2(Number(l.wash) || 0);
-            if (have > 0 && (big === null || have > big.qty)) {
-                big = { lotNumber: l.lotNumber, qty: have };
+            var longest = 0;
+            (l.rolls || []).forEach(function (rr) {
+                if (!rollUsable(rr)) return;
+                var len = round2(Number(rr.length) || 0);
+                if (len > longest) longest = len;
+            });
+            var cuttable = round2(Math.min(longest,
+                round2((Number(l.wash) || 0) + (Number(l.unwash) || 0))));
+            if (cuttable > 0 && (big === null || cuttable > big.qty)) {
+                big = { lotNumber: l.lotNumber, qty: cuttable };
             }
         });
         if (big) {
+            // `short` is what THIS ROW is still missing, the same figure the
+            // top of this function used to decide the row is short at all —
+            // carried through so the screen can say "issuing most of it today,
+            // still short N" instead of leaving him to read a lot box showing
+            // real progress right next to a warning and work out for himself
+            // that they are both true at once.
             return { kind: 'nofit', lot: big.lotNumber, have: big.qty,
-                     need: round2(r.noFitSmallest) };
+                     need: round2(r.noFitSmallest), short: round2(want - got) };
         }
     }
 

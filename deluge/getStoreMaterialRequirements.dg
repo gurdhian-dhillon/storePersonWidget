@@ -383,6 +383,12 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 				lnMap.put("mrqId",mr.ID + "");
 				lnMap.put("planId",plan.ID + "");
 				lnMap.put("salesOrder",soNo);
+				// Store-screen default supervisor ORDER (a JS-only client
+				// feature): best order-source rank, then plan age. Neither is
+				// used server-side here — just carried through, same as
+				// salesOrder above, so the widget has the raw ingredients.
+				lnMap.put("priorityKey",ifnull(plan.Priority_Key,""));
+				lnMap.put("planStartDate",ifnull(plan.Plan_Start_Date,"").toString());
 				lnMap.put("planItemId",piKey);
 				lnMap.put("item",lnItem.replaceAll("\"","'"));
 				lnMap.put("isRemake",lnRemake);
@@ -1406,7 +1412,13 @@ string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 				{
 					linesJson = linesJson + ",";
 				}
-				linesJson = linesJson + "{\"mrqId\":\"" + lnE.get("mrqId") + "\",\"planId\":\"" + lnE.get("planId") + "\",\"salesOrder\":\"" + lnE.get("salesOrder").toString().replaceAll("\"","'") + "\",\"planItemId\":\"" + lnE.get("planItemId") + "\",\"item\":\"" + lnE.get("item") + "\",\"isRemake\":" + lnE.get("isRemake") + ",\"supervisorId\":\"" + lnE.get("supervisorId") + "\",\"required\":" + lnE.get("required") + ",\"issued\":" + lnE.get("issued") + ",\"reqPieces\":" + lnE.get("reqPieces") + ",\"issPieces\":" + lnE.get("issPieces") + ",\"cutW\":" + ifnull(lnE.get("cutW"),0) + ",\"cutL\":" + ifnull(lnE.get("cutL"),0) + ",\"issuedLot\":\"" + ifnull(lnE.get("issuedLot"),"").toString() + "\",\"issuedLotNo\":\"" + ifnull(lotNameById.get(ifnull(lnE.get("issuedLot"),"").toString().trim()),"").toString() + "\",\"reason\":\"" + lnE.get("reason") + "\"}";
+				lnPrioTxt = ifnull(lnE.get("priorityKey"),"").toString().trim();
+				if(lnPrioTxt == "" || lnPrioTxt.isNumber() == false)
+				{
+					lnPrioTxt = "0";
+				}
+				lnStartTxt = ifnull(lnE.get("planStartDate"),"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," ");
+				linesJson = linesJson + "{\"mrqId\":\"" + lnE.get("mrqId") + "\",\"planId\":\"" + lnE.get("planId") + "\",\"salesOrder\":\"" + lnE.get("salesOrder").toString().replaceAll("\"","'") + "\",\"priorityKey\":" + lnPrioTxt + ",\"planStartDate\":\"" + lnStartTxt + "\",\"planItemId\":\"" + lnE.get("planItemId") + "\",\"item\":\"" + lnE.get("item") + "\",\"isRemake\":" + lnE.get("isRemake") + ",\"supervisorId\":\"" + lnE.get("supervisorId") + "\",\"required\":" + lnE.get("required") + ",\"issued\":" + lnE.get("issued") + ",\"reqPieces\":" + lnE.get("reqPieces") + ",\"issPieces\":" + lnE.get("issPieces") + ",\"cutW\":" + ifnull(lnE.get("cutW"),0) + ",\"cutL\":" + ifnull(lnE.get("cutL"),0) + ",\"issuedLot\":\"" + ifnull(lnE.get("issuedLot"),"").toString() + "\",\"issuedLotNo\":\"" + ifnull(lotNameById.get(ifnull(lnE.get("issuedLot"),"").toString().trim()),"").toString() + "\",\"reason\":\"" + lnE.get("reason") + "\"}";
 			}
 
 			exsJson = "";

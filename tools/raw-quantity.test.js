@@ -286,7 +286,6 @@ const WRITERS = [
   ['raiseMaterialException', /rmMv\.Quantity\s*=\s*if\(qW/, 1],
   ['receiveFromPrint', /pmatNew\.Quantity\s*=\s*if\(qW/, 1],
   ['resolveDispute', /rm\.Quantity\s*=\s*rm\.Wash_Quantity \+ if\(qU/, 1],
-  ['resolveStockDispute', /rm\.Quantity\s*=\s*rm\.Wash_Quantity \+ if\(qU/, 1],
   ['saveStockInward', /rmUpd\.Quantity\s*=\s*matWashOut \+ matUnwashOut/, 1],
   ['sendToPrint', /rmUpd\.Quantity\s*=\s*if\(qW/, 1],
 ];

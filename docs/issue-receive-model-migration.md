@@ -283,8 +283,8 @@ allocations with no drift; closed-plan row never steals a credit.
 `receive-model.test.js` 13 → **14** (re-run does not re-raise a dispute).
 
 **Totals through the two write-model audits: 9 defects found and fixed, 51 new
-tests.** (Two more JS read-path defects and 8 more tests in the THIRD PASS
-below → **11 defects, 59 tests** overall.)
+tests.** (Two more JS read-path defects and 9 more tests in the THIRD PASS
+below → **11 defects, 60 tests** overall.)
 
 ---
 
@@ -345,37 +345,49 @@ Two faults:
    `byMat` entirely (`isFullyIssued` / `remaining<=0` skip), taking its demand
    out of the denominator.
 
-**The correct shortfall is a property of demand vs stock and does not change
-when material is issued** — issuing moves cloth from the shelf to in-transit and
-drops demand by the same amount. So:
+**The correct shortfall is what the ALLOCATOR itself could not seat — not a
+metres balance.** A metres balance over a printed (Pieces-form) lot is
+meaningless: five 3 m pieces are not 15 m of cuttable cloth. A first attempt
+(`demandMetres − Σ lotLines[].qty`) got the Roll-lot case right but raised a
+**false "short by 1.05 m"** over a Block-Print lot holding 641 m — a Pieces lot
+emits `lotLines[].qty == 0` (its yield is pieces, not roll metres), so the
+subtraction saw ~0 placed against a ~1 m demand estimate.
+
+**Final formula — driven off `orderOutcomes`**, the allocator's own per-order
+verdict, computed once at load over the WHOLE requirement set:
 
 ```
-demandMetres    = Σ per cut: ceil(outstandingPieces / perRow) × cutLength / 100
-                  // WHOLE marker row-sets, from server Required_Pieces −
-                  // (Pieces_From_Raw + Pieces_From_Waste); matches issue-time
-                  // rounding so a PO yields complete cut-piece sets
-placeableMetres = Σ m.lotLines[].qty
-                  // what the allocator actually committed to lots, computed
-                  // once at load over the WHOLE requirement set
-buyQty          = demandMetres − placeableMetres − poCovered
+per order in m.orderOutcomes:
+  why 'ready' / 'pinned'  + shortPieces 0   -> fully covered            (no PO)
+  why 'afterWash'         + shortPieces 0   -> covered by a wash        (no PO)
+  why 'skipped'                             -> no lot took it   → owed = pieces
+  shortPieces > 0  (any why)                -> lot took it, still short → owed = shortPieces
+
+buyQty = Σ over the owed orders: ceil(owedPieces / perRow) × cutLength / 100
+         − poCovered
 ```
 
-The gap between `demandMetres` and `placeableMetres` **is** the stranded greige
-plus every order no single lot could seat (`orderOutcomes` `why:'skipped'`, which
-never make it into `lotLines`). Issue-invariant by construction: handing an
-order over drops `demandMetres` and `placeableMetres` by the same amount.
+`perRow` and the cut length come from the material's requirement lines, keyed
+by `planId` (each `orderOutcome` carries its `planId`). Rounded up to whole
+marker row-sets so the cloth ordered yields complete sets.
+
+Issue-invariant: an order handed over leaves `orderOutcomes` as covered (its
+requirement pieces are issued and the allocator seats the remainder), so the
+gap does not move as material goes out. Works identically for Roll and Pieces
+lots — it never looks at roll metres, only at whether the allocator seated the
+order.
 
 → **Fixed** in `app/js/main.js`:
 
 - **`buildShortfallSummary`** — fabric materials no longer skipped on
-  `isFullyIssued` / `remaining<=0` (they contribute zero but stay in the
-  denominator); fabric BUY switched to the `demandMetres − placeableMetres`
-  formula above; `e.needed` for fabric set to `demandMetres` (drives the raise
-  dialog's "Still needed" and payload). Non-fabric BUY (`needed − owned`) and
-  all WASH logic **unchanged** — a trim has no lots and no marker rows, so the
-  raw metres balance is right for it.
-- **`byMat[key]`** now carries `orderOutcomes`, `placeableMetres`,
-  `fabricWidthCm` — taken once (same array on every row of a material).
+  `isFullyIssued` / `remaining<=0` (they contribute zero but stay counted);
+  fabric BUY driven off `orderOutcomes` per the formula above; `e.needed` for
+  fabric set to the metres the PO must cover (drives the raise dialog's "Still
+  needed" and payload). Non-fabric BUY (`needed − owned`) and all WASH logic
+  **unchanged** — a trim has no lots and no marker rows, so the raw metres
+  balance is right for it.
+- **`byMat[key]`** now carries `orderOutcomes` + `fabricWidthCm` — taken once
+  (same array on every row of a material).
 - **`render()`** feeds `renderShortfallSummary(data)` (the full list), not
   `actionable` — a fully-issued supervisor is still demand that came off the
   same shelf.
@@ -385,26 +397,26 @@ order over drops `demandMetres` and `placeableMetres` by the same amount.
   the buy row, without waiting for `poCoveredQty` to come back on the next load.
   A ticket that misses a plan stays visible (stale).
 
-**Wash is not involved when no lot can complete an order.** Washing L2's 4.3 m
-greige still does not give a lot that can finish a 7.5 m order — so the
-unplaceable case goes to **PO**, not to the wash list. (The genuine
-"this lot CAN finish the order once its own greige is washed" case still
-produces `lotLines` + a `washLots` entry and shows on the wash list as before.)
+**A PO is only raised when the allocator says an order is unseated.** The
+`skipped` / `shortPieces` cases are it — a lot that CAN finish the order once
+its own greige is washed produces `why:'afterWash'` + `shortPieces 0` and shows
+on the **wash** list, not here.
 
 **Deluge `getStoreMaterialRequirements` left as-is** — it already surfaces a
 figure via its own aggregate formula, and the old widget is the fallback. The
 two paths' PO numbers can differ slightly until the JS path is the only one.
 
 ### Third-pass test coverage
-`tools/shortfall-summary.test.js` — **8 cases**, `buildShortfallSummary` +
+`tools/shortfall-summary.test.js` — **9 cases**, `buildShortfallSummary` +
 the real allocator in a `vm` sandbox: unplaceable order → PO for its metres;
 stranded greige not netted into owned; **PO figure unchanged after an order is
 issued** (issue-invariance); a rack that seats every order raises no PO; an open
 Shortage ticket covering every plan hides the row; a ticket that misses a plan
 keeps it; trim BUY still `needed − owned`; fully-issued fabric adds no
-shortfall. All existing store / allocator suites green
-(`allocator` 31, `api-experiment-parity` 15, `store-ui`, `store-history-merge`
-10, `print-shortreason` 22, `order-overview-ui` 19).
+shortfall; **a printed Pieces-form lot with 641 m of stock and a covered order
+raises NO false PO** (the regression). All existing store / allocator suites
+green (`allocator` 31, `api-experiment-parity` 15, `store-ui`,
+`store-history-merge` 10, `print-shortreason` 22, `order-overview-ui` 19).
 
 **Deploy: widget only — rezip `app/`. No Creator change for D10 / D11.**
 
@@ -413,6 +425,71 @@ shortfall. All existing store / allocator suites green
 ### STILL TO DO
 - End-to-end parity run on real data before flipping any flag off-fallback.
 - Printed-fabric end-to-end (separate project) — see the notes block at top.
+
+### REVIEWED, NO CHANGE NEEDED
+
+- **Material-exception shape.** Raised: it carries too much for a pure-store act
+  (supervisor names, `lines[]`, covered-plan ids). **Left as-is** — the
+  over-build is cosmetic and the covered-plan list is load-bearing:
+  `requestState` marks a ticket **'stale'** when a plan not on it appears, so
+  today's order doesn't silently inherit yesterday's request. Don't touch a
+  working ticket flow during this migration. Cosmetic cleanup noted for later.
+
+- **`Material_Requirement.Required_Qty` for fabric — the PO-from-exception flow
+  is ALREADY the code, and no operational fabric path reads the field.**
+  Verified:
+  - **`raiseMaterialException` never reads `Material_Requirement.Required_Qty`.**
+    It takes `required` and `shortfall` straight from the **widget payload**
+    (`raiseMaterialException.dg:70,85`) and stamps them onto the
+    `Material_Exception` row. Post-D11 the widget computes those, for fabric,
+    from the allocator's live `orderOutcomes` shortfall (unseated pieces →
+    whole marker rows → metres against the actual rack), **not** from
+    `Required_Qty`.
+  - **`raiseBulkPurchaseOrder` sizes the PO from the exception** (`item.qty` off
+    the shortfall summary, which is the exception's stored `Shortfall_Qty`).
+  - So the chain **widget live-metres → exception → PO** already carries no
+    read of `Material_Requirement.Required_Qty` for fabric.
+  - **The field stays on the form and stays populated** — two things still need
+    it and both are non-operational or fallback:
+    1. **Non-fabric rows** (cones, buttons, trims): `Required_Qty` is their only
+       target. Untouched.
+    2. **`isFullyIssued` settle-fallback** (`main.js:942`): a fabric row with no
+       usable piece data — planned before `Required_Pieces` existed, a cut
+       wider than the cloth, a fabric with no width on file — cannot be judged
+       on pieces, so it settles on `remaining <= 0` against `requiredTotal`
+       (= `Required_Qty`, sent by `getStoreMaterialRequirements`). Remove that
+       and such rows never leave the Issue screen — the exact bug the code
+       comment there describes.
+    3. `getAdminCalculation` compares it to BOM × qty to catch plan-generation
+       drift — an audit read, not a fulfilment read.
+  - **The firm boundary, now written down:** every fabric
+    *fulfilment / completion / issuing / PO-sizing* path targets
+    `Required_Pieces` (or the live metres derived from outstanding pieces),
+    **never `Material_Requirement.Required_Qty`**. The field is a procurement
+    baseline, a BOM-audit reference, and a settle-fallback for un-piece-trackable
+    rows — nothing else. This was already true in the code; it is now a stated
+    rule so it does not drift back.
+
+  - **GOAL for after this migration: no fabric reader touches `Required_Qty` at
+    all.** The user wants the field gone from every fabric path. Two readers
+    block that today and both need their own decision — **deferred, review after
+    the migration lands:**
+    1. **`getAdminCalculation` + admin widget** (`admin/js/main.js:989`,
+       `same(planned, mat.storedRequiredQty)`) — the BOM-drift check compares
+       stored `Required_Qty` against the BOM-derived metres; catching a cut
+       size / fabric width changed after plan generation is the entire purpose
+       of that screen. To drop the read, the fabric check would have to be
+       rebuilt around `Required_Pieces × (BOM metres per piece)` instead.
+    2. **`isFullyIssued` settle-fallback** (`main.js:942`, via
+       `getStoreMaterialRequirements`' `requiredTotal`) — a fabric row with no
+       usable piece data (no width on file, cut wider than the cloth, planned
+       before `Required_Pieces` existed) cannot be piece-judged, so it settles
+       on `remaining <= 0` vs `requiredTotal`. To drop the read, those rows need
+       another settle rule (e.g. settled when `Issued_Qty > 0` and nothing
+       outstanding).
+    3. The store screen's "originally planned 18.5 m" **display** read is purely
+       cosmetic and can be dropped whenever.
+    Non-fabric rows keep `Required_Qty` as their only target regardless.
 
 ---
 
