@@ -1,0 +1,32 @@
+string resetWasteMaster(string dryRun)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		writeAllowed = true;
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase();
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			writeAllowed = false;
+		}
+
+		wasteCount = Waste_Master[ID != 0].count();
+
+		if(writeAllowed == true)
+		{
+			delete from Waste_Master[ID != 0];
+		}
+
+		modeTxt = "WROTE";
+		if(writeAllowed == false)
+		{
+			modeTxt = "DRY-RUN";
+		}
+		res = "{\"errors\":[],\"mode\":\"" + modeTxt + "\",\"wasteDeleted\":" + wasteCount + "}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

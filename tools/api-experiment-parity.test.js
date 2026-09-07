@@ -356,6 +356,31 @@ test('poCovered NOT counted once FABRIC on-hand covers the requirement', () => {
   assert.strictEqual(m.poCoveredQty, 0, 'fabric stock has landed, PO no longer netted');
 });
 
+test('BUG (confirmed live): PO covers only a fraction of demand — must still count against total demand, not against the ticket\'s own Required_Qty', () => {
+  // Real scenario: total demand 3,729.54, on-hand 3,000 (short of TOTAL demand,
+  // but far above the small 743.77 shortfall that was actually ordered). The
+  // ticket's Required_Qty is the shortfall raised, not total demand
+  // (raiseBulkPurchaseOrder's own comment). Comparing on-hand to Required_Qty
+  // alone (3000 >= 743.77) wrongly zeroed poCoveredQty and the row never
+  // dropped off "What is missing" even with a genuinely open PO out for it.
+  const out = assemble({
+    plans: [plan({ ID: '1' })],
+    reqs: [req({ Is_Fabric: true, Material: lk('F1'), Material_Name: 'Dusty Gold', Unit: 'Mtr',
+                 Required_Qty: 3729.54, Issued_Qty: 0, Cut_Size_Width: 0 })],
+    emps: [emp('E1', 'Ravi')],
+    rawMats: [rawMat({ ID: 'F1', Name: 'Dusty Gold', Fabric_Width_Inches: '124' })],
+    lots: [lot({ ID: 'L1', Material: lk('F1'), Lot_Number: 'A', Wash_Quantity: 3000 })],
+    exceptions: [exc({
+      Type_field: 'Shortage', SKU: lk('F1'), PO_Number: 'PO-38',
+      Shortfall_Qty: 743.77, Required_Qty: 743.77,
+      Exception_Lines: [{ Plan: lk('1') }]
+    })]
+  });
+  const m = matOf(out, 'E1', 'F1');
+  assert.strictEqual(m.poCoveredQty, 743.77,
+    'PO must still count: on-hand 3000 < TOTAL demand 3729.54, even though 3000 >= the 743.77 shortfall alone');
+});
+
 test('non-fabric PO shortage is always counted (calcWash is 0)', () => {
   const out = assemble({
     plans: [plan({ ID: '1' })],

@@ -234,7 +234,13 @@ var ApiExperiment = (function () {
                     dispName: str(rm.Material_Display_Name).trim(),
                     qty: num(rm.Quantity),
                     widthCm: num(rm.Fabric_Width_Inches) * 2.54,
-                    printBase: lookupId(rm.Print_Base)
+                    printBase: lookupId(rm.Print_Base),
+                    // Fabric that arrived (bill/receive) but has not been put
+                    // into a lot yet — not cuttable, so it must not close a
+                    // shortfall on its own. Surfaced so "What is missing" can
+                    // say WHY stock exists but the gap did not shrink, rather
+                    // than leaving the store person to guess.
+                    unallocatedQty: num(rm.Unallocated_Qty)
                 };
             });
 
@@ -528,14 +534,36 @@ var ApiExperiment = (function () {
                 calcInWashByMat[matId] = r2(mInWash);
             });
 
+            // TOTAL OUTSTANDING DEMAND PER MATERIAL, summed from `agg` (already
+            // fully built above — no extra fetch). Needed by the PO-coverage
+            // check just below: a Shortage ticket's own Required_Qty is the
+            // SHORTFALL THAT WAS ORDERED (raiseBulkPurchaseOrder's own
+            // comment: "not a re-derivation of total demand"), never total
+            // demand, so comparing on-hand stock to that let a PO stop
+            // counting as soon as stock passed the shortfall alone — usually
+            // far below real demand — and the material's buy row never
+            // dropped off "What is missing" even with a genuinely open PO out
+            // for it. Same fix as getStoreMaterialRequirements.dg's
+            // matRemainByMat, ported here because this JS path (the one the
+            // store widget actually runs) had the same bug independently.
+            var matRemainBySku = {};
+            orderedKeys.forEach(function (key) {
+                var cur = agg[key];
+                var remain = (cur.required || 0) - (cur.issued || 0);
+                if (remain > 0) {
+                    matRemainBySku[cur.matId] = (matRemainBySku[cur.matId] || 0) + remain;
+                }
+            });
+
             // ---------- poCovered netting (needs on-hand) ------------
             var poCoveredBySku = {};
             Object.keys(poRawBySku).forEach(function (sku) {
                 var onHand = calcWashByMat[sku];
                 if (onHand === undefined) onHand = (rmById[sku] || {}).qty || 0;
+                var totalNeed = matRemainBySku[sku] || 0;
                 var total = 0;
                 poRawBySku[sku].forEach(function (row) {
-                    if (row.required <= 0 || onHand < row.required) total += row.shortfall;
+                    if (totalNeed <= 0 || onHand < totalNeed) total += row.shortfall;
                 });
                 if (total > 0) poCoveredBySku[sku] = r2(total);
             });
@@ -577,6 +605,7 @@ var ApiExperiment = (function () {
                     issued: e.issued,
                     remaining: e.required - e.issued,
                     availableStock: availableStock,
+                    unallocatedQty: isFab ? (rm.unallocatedQty || 0) : 0,
                     poCoveredQty: poCoveredBySku[matId] || 0,
                     lines: e.lines,
                     openExceptions: excBySku[matId] || []

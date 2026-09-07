@@ -31,6 +31,19 @@ string getStoreRequests()
 	washStatusByExc = Map();
 	washGotByExc = Map();
 
+	// TOTAL OUTSTANDING DEMAND PER MATERIAL, filled lazily - one indexed query
+	// per DISTINCT material that actually reaches the PO-coverage check below,
+	// not a whole-form fetch. A Shortage ticket's own Required_Qty is the
+	// SHORTFALL THAT WAS ORDERED (raiseBulkPurchaseOrder's own comment: "not a
+	// re-derivation of total demand"), so comparing on-hand stock against it
+	// let a PO stop counting as covering anything the moment stock passed the
+	// shortfall alone - usually far short of what was really needed - and
+	// this tab told the store the ticket was Resolved while Creator's own
+	// Status column still read Open and nothing had actually been received.
+	// Same fix as getStoreMaterialRequirements.dg's matRemainByMat, applied
+	// here because this tab makes the same comparison independently.
+	matRemainCache = Map();
+
 	//--------------------------------------------------------------------
 	// BOUNDED BY OPEN WORK PLUS A FIXED WINDOW, never the whole form.
 	//
@@ -136,10 +149,9 @@ string getStoreRequests()
 		exPoNo = ifnull(ex.PO_Number,"").toString().trim();
 		if(exType == "Shortage" && exPoNo != "" && (showStatus == "Open" || showStatus == "Pending"))
 		{
-			needCov = rStr.toDecimal();
 			exMatId = ifnull(ex.SKU,"").toString().trim();
 			onHandCov = 0.0;
-			if(exMatId != "" && exMatId.isNumber() == true && needCov > 0)
+			if(exMatId != "" && exMatId.isNumber() == true)
 			{
 				for each  rmCov in Raw_Material[ID == exMatId.toLong()]
 				{
@@ -162,10 +174,41 @@ string getStoreRequests()
 						onHandCov = cqStr.toDecimal();
 					}
 				}
-				if(onHandCov >= needCov)
+
+				// TOTAL OUTSTANDING DEMAND, not this ticket's own Required_Qty
+				// (the shortfall that was ORDERED, always <= total demand).
+				// Cached per material so a second Shortage ticket on the same
+				// SKU does not re-walk Material_Requirement.
+				needCov = ifnull(matRemainCache.get(exMatId),"").toString();
+				if(needCov == "")
+				{
+					matRemainTotal = 0.0;
+					for each  mrCov in Material_Requirement[Material == exMatId.toLong()]
+					{
+						mrqReqS = ifnull(mrCov.Required_Qty,"0").toString().trim();
+						if(mrqReqS == "")
+						{
+							mrqReqS = "0";
+						}
+						mrqIssS = ifnull(mrCov.Issued_Qty,"0").toString().trim();
+						if(mrqIssS == "")
+						{
+							mrqIssS = "0";
+						}
+						mrqOwed = mrqReqS.toDecimal() - mrqIssS.toDecimal();
+						if(mrqOwed > 0)
+						{
+							matRemainTotal = matRemainTotal + mrqOwed;
+						}
+					}
+					matRemainCache.put(exMatId,matRemainTotal.toString());
+					needCov = matRemainTotal.toString();
+				}
+
+				if(needCov.toDecimal() <= 0 || onHandCov >= needCov.toDecimal())
 				{
 					showStatus = "Resolved";
-					gotQty = needCov;
+					gotQty = rStr.toDecimal();
 				}
 			}
 		}

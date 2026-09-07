@@ -2764,6 +2764,11 @@ function redrawCards() {
 // purchase order.
 function buildShortfallSummary(data) {
     var byMat = {};
+    // (material, supervisor card) -> seen, so each card's orderOutcomes array
+    // is concatenated into byMat[key] exactly once even though the allocator
+    // stamps the same array reference onto every row of that material within
+    // one card (a Plan row and its Reissue row share it).
+    var seenOutcomeCards = {};
 
     data.forEach(function (sup) {
         // ONE CARD'S WASH NEED, PER LOT, TAKEN ONCE.
@@ -2806,6 +2811,11 @@ function buildShortfallSummary(data) {
                     // from the first row that mentions the material is right;
                     // summing it would invent stock that does not exist.
                     stock: Number(m.availableStock) || 0,
+                    // Arrived (billed/received) but not yet put into a lot —
+                    // not cuttable, so it never closes a shortfall on its
+                    // own. Shown so the row can say WHY buying more would be
+                    // wrong when this is sitting right there.
+                    unallocated: Number(m.unallocatedQty) || 0,
                     unwashed: Number(m.unwashedStock) || 0,
                     // Same reasoning as stock: one live list, taken from the
                     // first row that mentions the material rather than merged.
@@ -2837,15 +2847,32 @@ function buildShortfallSummary(data) {
                     // belongs to exactly one — so concatenating is safe.
                     lines: [],
                     openExceptions: (m.openExceptions || []).slice(),
-                    // FABRIC-ONLY, for the buy calc. The allocator writes the
-                    // same `orderOutcomes` onto every row of a material — one
-                    // entry per order it tried to place. `why:'skipped'` = no
-                    // lot took it; `shortPieces > 0` = a lot took it but fell
-                    // short. Both are a PO gap; anything else is covered (or a
-                    // wash). Taken once — it is the same array on every row.
-                    orderOutcomes: (m.orderOutcomes || []).slice(),
+                    // FABRIC-ONLY, for the buy calc. `orderOutcomes` starts
+                    // empty here and is filled below, ONCE PER CARD (not once
+                    // per row, and not just the first card) — see the
+                    // `seenOutcomeCards` guard just below this block.
+                    orderOutcomes: [],
                     fabricWidthCm: Number(m.fabricWidthCm) || 0
                 };
+            }
+            // allocateMaterial runs ONCE PER SUPERVISOR CARD, against a shared
+            // draining ledger (lot-allocator.js allocateEveryCard) — so a
+            // material demanded by several supervisors gets a SEPARATE
+            // `orderOutcomes` array per card, each covering only that card's
+            // own orders. Taking it from only the first card silently dropped
+            // every other supervisor's stranded orders from the PO figure —
+            // "Short by" read as though only one card's demand existed. The
+            // allocator writes the SAME array reference onto every material
+            // ROW within one card (a Plan row and its Reissue row share it),
+            // so this is guarded per (material, card) — not per row — to
+            // concat each card's outcomes exactly once.
+            if (isFab) {
+                var outcomeCardKey = key + '|' + String(sup.supervisorId);
+                if (!seenOutcomeCards[outcomeCardKey]) {
+                    seenOutcomeCards[outcomeCardKey] = true;
+                    byMat[key].orderOutcomes =
+                        byMat[key].orderOutcomes.concat(m.orderOutcomes || []);
+                }
             }
             // `need` only exists for non-fabric (fabric skips the early gate).
             // Fabric's needed total is summed from its lines further down.
@@ -2982,9 +3009,10 @@ function buildShortfallSummary(data) {
                 return (fw > 0 && cw > 0 && fw >= cw) ? Math.floor(fw / cw) : 0;
             };
 
-            // Cut length per plan, so a shortfall in PIECES can be turned into
-            // metres. orderOutcomes carries pieces + planId; the cut geometry is
-            // on the lines.
+            // Cut length per plan — FALLBACK ONLY, for an outcome with no
+            // `cuts[]` (an older cached payload from before the allocator
+            // started emitting per-cut breakdowns). orderOutcomes carries
+            // pieces + planId; the cut geometry is on the lines.
             var cutByPlan = {};
             (e.lines || []).forEach(function (l) {
                 var pid = String(l.planId || '');
@@ -2995,14 +3023,45 @@ function buildShortfallSummary(data) {
                 }
             });
 
-            // orderOutcomes is written by the allocator onto the material
-            // object; byMat stashed it once (first row that mentioned the
-            // material — it is the same array on every row).
+            // orderOutcomes is written by the allocator per supervisor CARD
+            // (allocateMaterial runs once per card against a shared draining
+            // ledger); byMat merged every card's array above, once each, so
+            // this is now every order from every supervisor that mentioned
+            // the material — not just the first card's.
             var outcomes = e.orderOutcomes || [];
 
+            // PER CUT SIZE, NOT PER PLAN. One order (plan) commonly spans many
+            // distinct cut sizes — a bulk order can carry a hundred of them,
+            // from small trims to large panels — and each needs its OWN
+            // marker-row rounding: pieces / perRow(cutW), rounded up, times
+            // cutL. Collapsing them into one aggregate piece count and
+            // applying a single guessed cut size (the plan's first line)
+            // wildly distorted the metres figure — confirmed against a real
+            // 515-piece / ~100-cut-size order where the old per-plan guess
+            // read 1,308 m against a true per-cut total of 660 m, because it
+            // applied one large cut's geometry (279x254) to hundreds of much
+            // smaller pieces that would have needed far fewer marker rows.
             var shortMetres = 0;
             var shortSeenPlans = {};
             outcomes.forEach(function (o) {
+                var pid = String(o.planId || '');
+                if (pid) shortSeenPlans[pid] = true;
+
+                if (o.cuts && o.cuts.length) {
+                    o.cuts.forEach(function (c) {
+                        var owedHere = o.why === 'skipped'
+                            ? (Number(c.pieces) || 0)
+                            : (Number(c.shortPieces) || 0);
+                        if (owedHere <= 0) return;
+                        var pr = perRowFab(c.cutW);
+                        if (pr > 0) {
+                            shortMetres += Math.ceil(owedHere / pr) * (Number(c.cutL) || 0) / 100;
+                        }
+                    });
+                    return;
+                }
+
+                // FALLBACK — no per-cut breakdown on this outcome.
                 var owedPieces = 0;
                 if (o.why === 'skipped') {
                     owedPieces = Number(o.pieces) || 0;
@@ -3010,12 +3069,11 @@ function buildShortfallSummary(data) {
                     owedPieces = Number(o.shortPieces) || 0;
                 }
                 if (owedPieces <= 0) return;
-                var pid = String(o.planId || '');
                 var geo = cutByPlan[pid];
                 if (geo) {
-                    var pr = perRowFab(geo.cutW);
-                    if (pr > 0) {
-                        shortMetres += Math.ceil(owedPieces / pr) * geo.cutL / 100;
+                    var pr2 = perRowFab(geo.cutW);
+                    if (pr2 > 0) {
+                        shortMetres += Math.ceil(owedPieces / pr2) * geo.cutL / 100;
                     } else if (Number(o.needMetres) > 0) {
                         shortMetres += Number(o.needMetres);
                     }
@@ -3024,9 +3082,43 @@ function buildShortfallSummary(data) {
                     // allocator's own metres figure for the order.
                     shortMetres += Number(o.needMetres);
                 }
-                if (pid) shortSeenPlans[pid] = true;
             });
             shortMetres = round2(shortMetres);
+
+            // USABLE STOCK — what the allocator actually could and did place
+            // against today's orders, in metres. `o.metres` is only nonzero
+            // when an order was seated `ready` (lot-allocator.js outcomes
+            // push), so summing it across every order gives the cloth that is
+            // genuinely consumable right now — never raw "In stock", which
+            // also counts cloth stranded across rolls too short for a marker
+            // row, greige waiting on a wash, or metres locked to another
+            // pinned order's lot. This is the number that closes
+            // grossDemand - usableMetres = shortMetres (modulo the same
+            // piece-rounding shortMetres itself already applies), so the
+            // store person can see WHY "in stock" does not simply subtract.
+            var usableMetres = 0;
+            outcomes.forEach(function (o) {
+                usableMetres += Number(o.metres) || 0;
+            });
+            e.usableMetres = round2(usableMetres);
+
+            // TOTAL DEMAND ACROSS EVERY SUPERVISOR, in metres — what the "Short
+            // by" figure otherwise leaves the store person to take on faith.
+            // "Needed 1,308 / In stock 3,000 / Short 1,308" reads as a
+            // contradiction without this: the 3,000 is real, but it is the
+            // WHOLE fabric's stock shared across every open plan on every
+            // supervisor's card, and shortMetres already nets that sharing out
+            // via the allocator's own reservation walk. Summing Σ(required -
+            // issued) straight off e.lines (every supervisor's rows, already
+            // merged) gives the plain total the allocator started from, so the
+            // three numbers can be read as one sentence: demanded − in stock
+            // (+ already on order) = short.
+            var grossDemand = 0;
+            (e.lines || []).forEach(function (l) {
+                var lineOwed = (Number(l.required) || 0) - (Number(l.issued) || 0);
+                if (lineOwed > 0) grossDemand += lineOwed;
+            });
+            e.grossDemand = round2(grossDemand);
 
             // e.needed drives the dialog's "Still needed" line and the raise
             // payload. For fabric it is the metres the PO has to cover.
@@ -3049,6 +3141,10 @@ function buildShortfallSummary(data) {
             (Number(e.unwashed) || 0) +
             (Number(e.inWash) || 0) +
             (Number(e.poCovered) || 0));
+        // Already the plain gross total (never overwritten for non-fabric) —
+        // stamped as the same field name the fabric branch uses, so the render
+        // side asks one question regardless of material type.
+        e.grossDemand = e.needed;
         var trimBuyQty = round2(e.needed - owned);
         if (trimBuyQty > 0 && !poRaisedThisSession) {
             toBuy.push({ e: e, qty: trimBuyQty, kind: 'buy' });
@@ -3127,7 +3223,20 @@ function summaryRow(entry, idx) {
         '<div class="mat-name">' + escapeHtml(e.material) + '</div>' +
         '<div class="mat-sku">' + escapeHtml(e.sku) + '</div>' +
         '</td>' +
-        '<td class="col-num">' + qty(e.needed, e.unit, { keepZero: true }) + '</td>' +
+        // BUY rows show the TRUE GROSS DEMAND (every supervisor's Σ required -
+        // issued), not e.needed — for fabric e.needed is the allocator's own
+        // short-metres figure (what could not be seated), which is smaller
+        // than gross demand whenever the shortfall isn't a straight metres
+        // balance (piece-rounding, wash gate). Showing the short-metres number
+        // next to "In stock" made the row read as an arithmetic contradiction:
+        // "Needed 1,308 / In stock 3,000 / Short 1,308" looks impossible until
+        // you know 1,308 was never gross demand. Gross − in stock (+ on order)
+        // = short is the sentence this column exists to complete. Wash rows
+        // keep e.needed — there the "Needed" heading means the wash-specific
+        // ask, not the whole material.
+        '<td class="col-num">' +
+        qty(kind === 'buy' ? (Number(e.grossDemand) || 0) : e.needed, e.unit, { keepZero: true }) +
+        '</td>' +
         // WASHED AND UNWASHED ARE THE LOT'S, not the material's, on any row
         // that names a lot. A ticket capped at what L2 holds beside a greige
         // figure totalling every lot of the SKU is the same "two figures on
@@ -3135,6 +3244,30 @@ function summaryRow(entry, idx) {
         // "wash 50, all it has" reads as an arithmetic error.
         '<td class="col-num">' +
         qty((kind === 'wash' && entry.lot) ? (Number(entry.lot.wash) || 0) : e.stock, e.unit) +
+        // "In stock" is the raw rack total — real, but not all of it is
+        // CUTTABLE today. A roll shorter than the marker it would need,
+        // greige waiting on a wash, or metres already locked to another
+        // pinned order's lot all count toward "in stock" while contributing
+        // nothing to what can actually be issued. Without this note, gross
+        // demand minus in-stock looked smaller than "Short by" and read as a
+        // second arithmetic fault on top of the first one this row already
+        // had to explain.
+        (kind === 'buy' && e.isFabric && round2((Number(e.usableMetres) || 0)) + 0.0001 < round2(Number(e.stock) || 0)
+            ? '<div class="sum-lot-note">' + fmt(e.usableMetres) + ' usable</div>'
+            : '') +
+        // Completes the sentence when a PO is already out for part of the
+        // gap: gross demand minus in-stock alone would not match "Short by"
+        // without also showing what a draft PO already accounts for.
+        (kind === 'buy' && (Number(e.poCovered) || 0) > 0
+            ? '<div class="sum-inwash">+' + fmt(e.poCovered) + ' on order</div>'
+            : '') +
+        // Cloth has arrived but is sitting in Unallocated_Qty — not in a lot,
+        // so it cannot be cut and does not close this gap. Without this the
+        // store person sees stock rise after a bill and cannot tell why the
+        // shortfall did not move.
+        (kind === 'buy' && e.isFabric && (Number(e.unallocated) || 0) > 0.0001
+            ? '<div class="sum-lot-short">' + fmt(e.unallocated) + ' unallocated — allocate to a lot first</div>'
+            : '') +
         '</td>' +
         // Wash rows only — the greige pile and the lot it comes off. A
         // purchase row has neither: the cloth does not exist yet.

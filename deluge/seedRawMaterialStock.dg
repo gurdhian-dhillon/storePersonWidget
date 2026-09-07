@@ -1,0 +1,269 @@
+string seedRawMaterialStock(string specsJson, string dryRun)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		writeAllowed = true;
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase();
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			writeAllowed = false;
+		}
+
+		specs = specsJson.toJSONList();
+		madeMats = 0;
+		madeLots = 0;
+		madeRolls = 0;
+		skippedHasLots = 0;
+		skippedNotFound = 0;
+		skippedInvalid = 0;
+		rowsJson = "";
+
+		for each  specItem in specs
+		{
+			sp = specItem.toMap();
+			sku = ifnull(sp.get("sku"),"").toString().trim();
+			fabTxtIn = ifnull(sp.get("fabric"),"false").toString().trim().toLowerCase();
+			specIsFab = (fabTxtIn == "true" || fabTxtIn == "yes" || fabTxtIn == "1");
+
+			if(sku == "")
+			{
+				skippedInvalid = skippedInvalid + 1;
+				continue;
+			}
+
+			matRecs = Raw_Material[SKU == sku];
+			if(matRecs.count() == 0)
+			{
+				skippedNotFound = skippedNotFound + 1;
+				continue;
+			}
+
+			matId = 0;
+			widthCm = 0.0;
+			for each  rmChk in matRecs
+			{
+				matId = rmChk.ID;
+				wiTxt = ifnull(rmChk.Fabric_Width_Inches,"").toString().trim();
+				if(wiTxt != "" && wiTxt.isNumber() == true)
+				{
+					widthCm = wiTxt.toDecimal() * 2.54;
+				}
+			}
+
+			if(specIsFab != true)
+			{
+				qStr = ifnull(sp.get("qty"),"0").toString().trim();
+				if(qStr == "")
+				{
+					qStr = "0";
+				}
+				qty = qStr.toDecimal();
+				if(qty <= 0)
+				{
+					skippedInvalid = skippedInvalid + 1;
+					continue;
+				}
+				if(writeAllowed == true)
+				{
+					for each  rmUpd in Raw_Material[ID == matId]
+					{
+						curS = ifnull(rmUpd.Quantity,"0").toString().trim();
+						if(curS == "")
+						{
+							curS = "0";
+						}
+						rmUpd.Quantity = curS.toDecimal() + qty;
+					}
+				}
+				madeMats = madeMats + 1;
+				if(rowsJson != "")
+				{
+					rowsJson = rowsJson + ",";
+				}
+				rowsJson = rowsJson + "{\"sku\":\"" + sku + "\",\"fabric\":false,\"qty\":" + qty + "}";
+				continue;
+			}
+
+			if(Raw_Material_Lot[Material == matId].count() > 0)
+			{
+				skippedHasLots = skippedHasLots + 1;
+				continue;
+			}
+
+			// EXPLICIT ROLL LENGTHS, NEVER DERIVED. Each fabric spec names its own
+			// L1.R1 / L1.R2 / L2.R1 / L2.R2 so the shape of the stock (one lot vs
+			// two, one roll vs two, which one is the big one) is a deliberate test
+			// scenario chosen by whoever wrote the spec, not an even split that
+			// hides which case is which.
+			l1Map = ifnull(sp.get("L1"),"{}").toString().toMap();
+			l2Map = ifnull(sp.get("L2"),"{}").toString().toMap();
+
+			a1S = ifnull(l1Map.get("R1"),"0").toString().trim();
+			if(a1S == "")
+			{
+				a1S = "0";
+			}
+			a2S = ifnull(l1Map.get("R2"),"0").toString().trim();
+			if(a2S == "")
+			{
+				a2S = "0";
+			}
+			b1S = ifnull(l2Map.get("R1"),"0").toString().trim();
+			if(b1S == "")
+			{
+				b1S = "0";
+			}
+			b2S = ifnull(l2Map.get("R2"),"0").toString().trim();
+			if(b2S == "")
+			{
+				b2S = "0";
+			}
+
+			rA1 = a1S.toDecimal();
+			rA2 = a2S.toDecimal();
+			rB1 = b1S.toDecimal();
+			rB2 = b2S.toDecimal();
+			lotA = rA1 + rA2;
+			lotB = rB1 + rB2;
+
+			if(lotA <= 0 && lotB <= 0)
+			{
+				skippedInvalid = skippedInvalid + 1;
+				continue;
+			}
+
+			if(writeAllowed == true)
+			{
+				lotAId = insert into Raw_Material_Lot
+				[
+					Material=matId
+					Lot_Number="L1"
+					Width1=widthCm
+					Unwash_Quantity=0
+					Wash_Quantity=lotA
+					In_Wash_Qty=0
+					In_Transit_Qty=0
+					Disputed_Qty=0
+					Status="Active"
+					Added_User=zoho.loginuser
+				];
+				for each  lRecA in Raw_Material_Lot[ID == lotAId]
+				{
+					if(rA1 > 0)
+					{
+						rRowA1 = Raw_Material_Lot.Lot_Rolls();
+						rRowA1.Roll_Label = "R1";
+						rRowA1.Roll_Length = rA1;
+						rRowA1.Roll_Status = "Available";
+						rRowA1.Origin = "Purchased";
+						rRowA1.Source_Receipt = "SEED";
+						lRecA.Lot_Rolls.insert(rRowA1);
+					}
+					if(rA2 > 0)
+					{
+						rRowA2 = Raw_Material_Lot.Lot_Rolls();
+						rRowA2.Roll_Label = "R2";
+						rRowA2.Roll_Length = rA2;
+						rRowA2.Roll_Status = "Available";
+						rRowA2.Origin = "Purchased";
+						rRowA2.Source_Receipt = "SEED";
+						lRecA.Lot_Rolls.insert(rRowA2);
+					}
+				}
+
+				lotBId = insert into Raw_Material_Lot
+				[
+					Material=matId
+					Lot_Number="L2"
+					Width1=widthCm
+					Unwash_Quantity=0
+					Wash_Quantity=lotB
+					In_Wash_Qty=0
+					In_Transit_Qty=0
+					Disputed_Qty=0
+					Status="Active"
+					Added_User=zoho.loginuser
+				];
+				for each  lRecB in Raw_Material_Lot[ID == lotBId]
+				{
+					if(rB1 > 0)
+					{
+						rRowB1 = Raw_Material_Lot.Lot_Rolls();
+						rRowB1.Roll_Label = "R1";
+						rRowB1.Roll_Length = rB1;
+						rRowB1.Roll_Status = "Available";
+						rRowB1.Origin = "Purchased";
+						rRowB1.Source_Receipt = "SEED";
+						lRecB.Lot_Rolls.insert(rRowB1);
+					}
+					if(rB2 > 0)
+					{
+						rRowB2 = Raw_Material_Lot.Lot_Rolls();
+						rRowB2.Roll_Label = "R2";
+						rRowB2.Roll_Length = rB2;
+						rRowB2.Roll_Status = "Available";
+						rRowB2.Origin = "Purchased";
+						rRowB2.Source_Receipt = "SEED";
+						lRecB.Lot_Rolls.insert(rRowB2);
+					}
+				}
+
+				for each  rmUpd in Raw_Material[ID == matId]
+				{
+					curWS = ifnull(rmUpd.Wash_Quantity,"0").toString().trim();
+					if(curWS == "")
+					{
+						curWS = "0";
+					}
+					rmUpd.Wash_Quantity = curWS.toDecimal() + lotA + lotB;
+					curQS = ifnull(rmUpd.Quantity,"0").toString().trim();
+					if(curQS == "")
+					{
+						curQS = "0";
+					}
+					rmUpd.Quantity = curQS.toDecimal() + lotA + lotB;
+				}
+			}
+
+			rollCountThis = 0;
+			if(rA1 > 0)
+			{
+				rollCountThis = rollCountThis + 1;
+			}
+			if(rA2 > 0)
+			{
+				rollCountThis = rollCountThis + 1;
+			}
+			if(rB1 > 0)
+			{
+				rollCountThis = rollCountThis + 1;
+			}
+			if(rB2 > 0)
+			{
+				rollCountThis = rollCountThis + 1;
+			}
+
+			madeMats = madeMats + 1;
+			madeLots = madeLots + 2;
+			madeRolls = madeRolls + rollCountThis;
+			if(rowsJson != "")
+			{
+				rowsJson = rowsJson + ",";
+			}
+			rowsJson = rowsJson + "{\"sku\":\"" + sku + "\",\"fabric\":true,\"total\":" + (lotA + lotB) + ",\"L1\":{\"wash\":" + lotA + ",\"R1\":" + rA1 + ",\"R2\":" + rA2 + "},\"L2\":{\"wash\":" + lotB + ",\"R1\":" + rB1 + ",\"R2\":" + rB2 + "}}";
+		}
+
+		modeTxt = "WROTE";
+		if(writeAllowed == false)
+		{
+			modeTxt = "DRY-RUN";
+		}
+		res = "{\"errors\":[],\"mode\":\"" + modeTxt + "\",\"materialsDone\":" + madeMats + ",\"lotsCreated\":" + madeLots + ",\"rollsCreated\":" + madeRolls + ",\"skippedHasLots\":" + skippedHasLots + ",\"skippedNotFound\":" + skippedNotFound + ",\"skippedInvalid\":" + skippedInvalid + ",\"rows\":[" + rowsJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

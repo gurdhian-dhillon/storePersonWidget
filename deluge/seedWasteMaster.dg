@@ -1,0 +1,130 @@
+string seedWasteMaster(string specsJson, string dryRun)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		writeAllowed = true;
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase();
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			writeAllowed = false;
+		}
+
+		specs = specsJson.toJSONList();
+		made = 0;
+		skippedNotFound = 0;
+		skippedLotNotFound = 0;
+		skippedInvalid = 0;
+		rowsJson = "";
+
+		for each  specItem in specs
+		{
+			sp = specItem.toMap();
+			sku = ifnull(sp.get("sku"),"").toString().trim();
+			lotNo = ifnull(sp.get("lot"),"").toString().trim();
+			carton = ifnull(sp.get("carton"),"").toString().trim().replaceAll("\"","'");
+
+			wStr = ifnull(sp.get("width"),"0").toString().trim();
+			if(wStr == "")
+			{
+				wStr = "0";
+			}
+			lStr = ifnull(sp.get("length"),"0").toString().trim();
+			if(lStr == "")
+			{
+				lStr = "0";
+			}
+			cStr = ifnull(sp.get("count"),"0").toString().trim();
+			if(cStr == "")
+			{
+				cStr = "0";
+			}
+
+			width = wStr.toDecimal();
+			length = lStr.toDecimal();
+			count = cStr.toDecimal().toLong();
+
+			if(sku == "" || width <= 0 || length <= 0 || count <= 0)
+			{
+				skippedInvalid = skippedInvalid + 1;
+				continue;
+			}
+
+			matRecs = Raw_Material[SKU == sku];
+			if(matRecs.count() == 0)
+			{
+				skippedNotFound = skippedNotFound + 1;
+				continue;
+			}
+			matId = 0;
+			for each  rmChk in matRecs
+			{
+				matId = rmChk.ID;
+			}
+
+			// EVERY REMNANT BELONGS TO A LOT. A piece with no lot recorded is
+			// invisible to the allocator's per-lot capacity (see lot-allocator.js
+			// - "Remnants with no lot recorded belong to no lot's capacity"), so a
+			// lot number that does not resolve is refused rather than silently
+			// creating an orphan piece nothing can ever pick.
+			lotId = 0;
+			if(lotNo != "")
+			{
+				for each  lchk in Raw_Material_Lot[Material == matId]
+				{
+					if(ifnull(lchk.Lot_Number,"").toString().trim().toUpperCase() == lotNo.toUpperCase())
+					{
+						lotId = lchk.ID;
+					}
+				}
+				if(lotId == 0)
+				{
+					skippedLotNotFound = skippedLotNotFound + 1;
+					continue;
+				}
+			}
+			else
+			{
+				skippedLotNotFound = skippedLotNotFound + 1;
+				continue;
+			}
+
+			if(writeAllowed == true)
+			{
+				newId = insert into Waste_Master
+				[
+					SKU=matId
+					Piece_Width=width
+					Piece_Length=length
+					Piece_Count=count
+					Status="Available"
+					Carton_Number=carton
+					Remarks="SEED test data"
+				];
+				for each  wchk in Waste_Master[ID == newId.toLong()]
+				{
+					wchk.Lot = lotId;
+				}
+			}
+
+			made = made + 1;
+			if(rowsJson != "")
+			{
+				rowsJson = rowsJson + ",";
+			}
+			rowsJson = rowsJson + "{\"sku\":\"" + sku + "\",\"lot\":\"" + lotNo + "\",\"width\":" + width + ",\"length\":" + length + ",\"count\":" + count + ",\"carton\":\"" + carton + "\"}";
+		}
+
+		modeTxt = "WROTE";
+		if(writeAllowed == false)
+		{
+			modeTxt = "DRY-RUN";
+		}
+		res = "{\"errors\":[],\"mode\":\"" + modeTxt + "\",\"created\":" + made + ",\"skippedNotFound\":" + skippedNotFound + ",\"skippedLotNotFound\":" + skippedLotNotFound + ",\"skippedInvalid\":" + skippedInvalid + ",\"rows\":[" + rowsJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

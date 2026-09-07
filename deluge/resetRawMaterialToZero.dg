@@ -1,0 +1,49 @@
+string resetRawMaterialToZero(string dryRun)
+{
+	res = "{\"errors\":[\"Nothing ran\"]}";
+	try
+	{
+		writeAllowed = true;
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase();
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			writeAllowed = false;
+		}
+
+		lotCount = Raw_Material_Lot[ID != 0].count();
+
+		matCount = 0;
+		for each  rmRec in Raw_Material[ID != 0]
+		{
+			matCount = matCount + 1;
+			if(writeAllowed == true)
+			{
+				rmRec.Quantity = 0;
+				rmRec.Wash_Quantity = 0;
+				rmRec.Unwash_Quantity = 0;
+				rmRec.In_Transit_Qty = 0;
+				rmRec.Disputed_Qty = 0;
+				rmRec.In_Wash_Qty = 0;
+				rmRec.In_Print_Qty = 0;
+				rmRec.Unallocated_Qty = 0;
+			}
+		}
+
+		if(writeAllowed == true)
+		{
+			delete from Raw_Material_Lot[ID != 0];
+		}
+
+		modeTxt = "WROTE";
+		if(writeAllowed == false)
+		{
+			modeTxt = "DRY-RUN";
+		}
+		res = "{\"errors\":[],\"mode\":\"" + modeTxt + "\",\"materialsZeroed\":" + matCount + ",\"lotsDeleted\":" + lotCount + "}";
+	}
+	catch (e)
+	{
+		res = "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"]}";
+	}
+	return res;
+}

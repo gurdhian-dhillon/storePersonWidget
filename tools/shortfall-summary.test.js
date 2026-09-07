@@ -135,6 +135,128 @@ function makeData(opts) {
   return data;
 }
 
+// ---- multi-cut-size order (the real bug) -----------------------------------
+//
+// CONFIRMED against a live bug report: one order/plan spanning many DISTINCT
+// cut sizes was being converted to metres using ONE aggregate piece count and
+// a SINGLE guessed cut size (the plan's first line) instead of each cut
+// size's own marker-row rounding. A 515-piece order across ~100 different
+// sizes read as 1,308 m under the old per-plan guess; the true per-cut total
+// was 660 m — the guess picked one large cut (279x254) and applied it to
+// hundreds of much smaller pieces that each needed far fewer marker rows.
+//
+// Reduced to two cut sizes here (still enough to prove the bug): a big cut
+// that wastes most of the fabric width per row, and a small cut that packs
+// many rows per marker length. Applying the BIG cut's geometry to the SMALL
+// cut's pieces (the old bug) overstates metres; the correct per-cut sum does
+// not.
+function makeMultiCutData() {
+  const fw = 300; // fabric width cm
+  // Big cut: 250 wide x 200 long, perRow = floor(300/250) = 1. 5 pieces -> 5
+  // rows -> 5 * 200/100 = 10 m.
+  // Small cut: 50 wide x 50 long, perRow = floor(300/50) = 6. 30 pieces ->
+  // ceil(30/6)=5 rows -> 5 * 50/100 = 2.5 m.
+  // Correct total: 10 + 2.5 = 12.5 m.
+  // Old bug (applies the FIRST line's cut — the big one — to ALL 35 pieces
+  // combined): perRow(250)=1, ceil(35/1)=35 rows * 200/100 = 70 m.
+  const mat = {
+    materialId: 'RM-9', material: 'Linen / Solid / Multi-Cut', sku: 'RM-9', unit: 'Mtr',
+    isFabric: true,
+    availableStock: 0, unwashedStock: 0, inWashStock: 0,
+    poCoveredQty: 0, fabricWidthCm: fw,
+    requiredPieces: 35, issuedPieces: 0,
+    cuts: [
+      { cutW: 250, cutL: 200, reqPieces: 5, issPieces: 0 },
+      { cutW: 50, cutL: 50, reqPieces: 30, issPieces: 0 }
+    ],
+    cutsJson: '[]',
+    // NO lots at all -> the whole order is skipped, exercising the
+    // `why: 'skipped'` / `o.cuts[].pieces` path.
+    lots: [],
+    wasteStock: [],
+    lines: [
+      { mrqId: 'MRQ-BIG', planId: 'PX', salesOrder: 'SO-X', planItemId: 'IT-PX-1',
+        item: 'Big Panel', isRemake: false, supervisorId: 'S1',
+        required: 10, issued: 0, cutW: 250, cutL: 200, reqPieces: 5, issPieces: 0,
+        issuedLot: '', issuedLotNo: '', reason: '' },
+      { mrqId: 'MRQ-SMALL', planId: 'PX', salesOrder: 'SO-X', planItemId: 'IT-PX-2',
+        item: 'Small Trim', isRemake: false, supervisorId: 'S1',
+        required: 2.5, issued: 0, cutW: 50, cutL: 50, reqPieces: 30, issPieces: 0,
+        issuedLot: '', issuedLotNo: '', reason: '' }
+    ],
+    openExceptions: []
+  };
+  const data = [{ supervisorId: 'S1', supervisorName: 'Suraj', materials: [mat] }];
+  applyLotAllocation(data);
+  return data;
+}
+
+test('S1c a plan spanning TWO cut sizes sums per-cut marker rows, not one guessed cut applied to all pieces', () => {
+  const s = buildShortfallSummary(makeMultiCutData());
+  assert.strictEqual(s.toBuy.length, 1, 'one buy row');
+  const b = s.toBuy[0];
+  assert.ok(Math.abs(b.qty - 12.5) < 0.01,
+    'correct per-cut total is 12.5 m (10 + 2.5), got ' + b.qty +
+    ' — 70 would mean the old per-plan single-cut bug is back');
+});
+
+// ---- multi-supervisor aggregation ------------------------------------------
+//
+// allocateMaterial runs ONCE PER CARD against a SHARED, draining ledger, so a
+// material demanded by two supervisors produces TWO SEPARATE orderOutcomes
+// arrays — one per card. buildShortfallSummary used to read only the first
+// card's array (`byMat[key]` created once, orderOutcomes taken at creation
+// and never merged), so a second supervisor's stranded order was silently
+// invisible to the PO figure. Two cards, same material: card A's rack fully
+// covers its own order; nothing is left for card B's, which must therefore
+// show up as short too.
+function makeTwoCardData() {
+  function line(planId, so, mrq, sup) {
+    return {
+      mrqId: mrq, planId: planId, salesOrder: so, planItemId: 'IT-' + planId,
+      item: 'Napkin Set', isRemake: false, supervisorId: sup,
+      required: 7.5, issued: 0,
+      cutW: 150, cutL: 150, reqPieces: 10, issPieces: 0,
+      issuedLot: '', issuedLotNo: '', reason: ''
+    };
+  }
+  function mat(sup, lineDef) {
+    return {
+      materialId: 'RM-9', material: 'Linen / Solid / Two-Card', sku: 'RM-9', unit: 'Mtr',
+      isFabric: true,
+      availableStock: 7.5, unwashedStock: 0, inWashStock: 0,
+      poCoveredQty: 0, fabricWidthCm: 314.96,
+      requiredPieces: 10, issuedPieces: 0,
+      cuts: [{ cutW: 150, cutL: 150, reqPieces: 10, issPieces: 0 }],
+      cutsJson: '[]',
+      // ONE roll, 7.5 m — exactly enough for ONE card's order, nothing left
+      // for the other.
+      lots: [seedRoll({ lotId: 'LX', lotNumber: 'LX', blocked: false, wash: 7.5, unwash: 0, inWash: 0, form: 'Roll', pieces: [] })],
+      wasteStock: [],
+      lines: [lineDef],
+      openExceptions: []
+    };
+  }
+  const data = [
+    { supervisorId: 'S1', supervisorName: 'Suraj', materials: [mat('S1', line('PA', 'SO-A', 'MRQ-A', 'S1'))] },
+    { supervisorId: 'S2', supervisorName: 'Vivek', materials: [mat('S2', line('PB', 'SO-B', 'MRQ-B', 'S2'))] }
+  ];
+  applyLotAllocation(data);
+  return data;
+}
+
+test('S0 a material demanded by TWO supervisor cards counts BOTH cards\' stranded orders, not just the first', () => {
+  const s = buildShortfallSummary(makeTwoCardData());
+  assert.strictEqual(s.toBuy.length, 1, 'one buy row for the shared material');
+  const b = s.toBuy[0];
+  // Card A (priority order first) takes the whole 7.5 m roll; card B's
+  // identical order finds nothing left and is stranded. The PO figure must
+  // reflect card B's 7.5 m shortfall, not read as fully covered because card
+  // A's own orderOutcomes (empty of any skip) was the only one consulted.
+  assert.ok(Math.abs(b.qty - 7.5) < 0.01,
+    'PO qty must include the second card\'s stranded order (7.5 m), got ' + b.qty);
+});
+
 // ---- 1. the stranded order shows up as a PO --------------------------------
 test('S1 unplaceable order -> a buy row for its metres', () => {
   const s = buildShortfallSummary(makeData());
@@ -145,12 +267,50 @@ test('S1 unplaceable order -> a buy row for its metres', () => {
   assert.ok(Math.abs(b.qty - 7.5) < 0.01, 'PO qty ~7.5 m, got ' + b.qty);
 });
 
+test('S1b usableMetres reports what the allocator actually placed, less than raw stock when some is stranded', () => {
+  // L2 (15 m) seats exactly 2 orders = 15 m usable; L1's 3.2 m is too little
+  // for a third 7.5 m order and sits unusable, even though it is real stock.
+  // Raw stock is 18.2 m (15 + 3.2), so usableMetres (15) must be strictly
+  // less than e.stock (18.2) — that gap IS the 3.2 m stranded on L1.
+  const s = buildShortfallSummary(makeData());
+  const b = s.toBuy[0];
+  assert.ok(Math.abs(b.e.usableMetres - 15) < 0.01,
+    'usableMetres should be 15 (two placed orders), got ' + b.e.usableMetres);
+  assert.ok(b.e.usableMetres < b.e.stock,
+    'usable must be less than raw stock when some cloth is stranded (usable=' +
+    b.e.usableMetres + ' stock=' + b.e.stock + ')');
+});
+
 test('S2 stranded greige is NOT netted into owned', () => {
   // 4.3 (L2 greige) + 3.2 (L1 washed) = 7.5 m of real cloth that cannot seat an
   // order. If it were counted as owned the buy row would disappear.
   const s = buildShortfallSummary(makeData());
   assert.ok(s.toBuy.length === 1 && s.toBuy[0].qty > 0.01,
     'stranded cloth must still read as short');
+});
+
+test('S2b grossDemand is the TRUE total across every line, not the allocator short-metres figure', () => {
+  // 3 orders x 7.5 m each = 22.5 m gross demand, but only one order (7.5 m) is
+  // actually unplaceable -> the buy row's qty stays 7.5 while grossDemand
+  // reports the full 22.5. This is the exact "Needed 1,308 / In stock 3,000 /
+  // Short 1,308" confusion from the real bug report: e.needed used to BE the
+  // short-metres figure, so "Needed" and "Short by" always matched and never
+  // explained the actual math against on-hand stock.
+  const s = buildShortfallSummary(makeData());
+  const b = s.toBuy[0];
+  assert.ok(Math.abs(b.e.grossDemand - 22.5) < 0.01,
+    'grossDemand should be 22.5 (3 x 7.5), got ' + b.e.grossDemand);
+  assert.ok(Math.abs(b.qty - 7.5) < 0.01, 'the PO figure itself is unchanged at 7.5');
+  assert.ok(b.e.grossDemand > b.qty, 'gross demand must be strictly larger than the short-metres PO figure here');
+});
+
+test('S2c grossDemand nets off issued pieces (issue-invariant, like the PO figure)', () => {
+  // Plan P1's 10 pieces (7.5 m) handed over -> that line's outstanding drops
+  // to 0, so gross demand should fall from 22.5 to 15.
+  const s = buildShortfallSummary(makeData({ issuedPieces: 10 }));
+  const b = s.toBuy[0];
+  assert.ok(Math.abs(b.e.grossDemand - 15) < 0.01,
+    'grossDemand should drop to 15 once one order is issued, got ' + b.e.grossDemand);
 });
 
 // ---- 2. issue-invariance -------------------------------------------------

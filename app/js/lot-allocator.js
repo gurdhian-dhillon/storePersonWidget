@@ -1479,7 +1479,20 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                 planId: ord.oid, why: 'skipped', lotId: '', lotNumber: '',
                 pieces: ord.demands.reduce(function (a, d) { return a + d.pieces; }, 0),
                 needMetres: want, metres: 0, wastePieces: 0, greige: 0,
-                pin: ord.pin ? String(ord.pinNo || ord.pin) : '', override: ''
+                pin: ord.pin ? String(ord.pinNo || ord.pin) : '', override: '',
+                // PER CUT SIZE. An order spans as many marker layouts as it has
+                // distinct cut sizes — a bulk order can carry a hundred of
+                // them, from tiny trims to large panels — and the shortfall
+                // summary's metres conversion needs each one's own width/length
+                // to round up to whole marker rows correctly. Reducing to one
+                // aggregate piece count and guessing a single cut size for all
+                // of them (the plan's first line) understated how many marker
+                // rows small cuts actually need and overstated it for large
+                // ones, whichever cut happened to be read first.
+                cuts: ord.demands.map(function (d) {
+                    return { cutW: Number(d.cutW) || 0, cutL: Number(d.cutL) || 0,
+                             pieces: Number(d.pieces) || 0 };
+                })
             });
             if (DEBUG) {
                 debugSkips.push({
@@ -1549,11 +1562,19 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
             // them reported a 38-piece shortfall twice, so the screen said 76 over
             // an order that is 38 short. Each demand carries its own share, and a
             // row holding two cut sizes of the order rightly sums both of them.
+            // PER-DEMAND SHORTFALL, captured regardless of shortBy so the
+            // outcome pushed below can carry each cut size's own remaining
+            // pieces — same reasoning as the skipped-order cuts[] above: one
+            // aggregate figure and a single guessed cut size understates small
+            // cuts and overstates large ones when an order spans several.
+            var shortByDemand = ord.demands.map(function (d, i) {
+                return Math.max(0, (Number(d.pieces) || 0) -
+                    (Number(useFill.fromWaste[i]) || 0) -
+                    (Number(useFill.fromFresh[i]) || 0));
+            });
             if (useFill.shortBy > 0) {
                 ord.demands.forEach(function (d, i) {
-                    var shortHere = Math.max(0, (Number(d.pieces) || 0) -
-                        (Number(useFill.fromWaste[i]) || 0) -
-                        (Number(useFill.fromFresh[i]) || 0));
+                    var shortHere = shortByDemand[i];
                     if (shortHere <= 0) return;
                     var rs = res[d.rowIdx];
                     var hit = null;
@@ -1590,7 +1611,14 @@ function allocateMaterial(sup, materialId, wasteLeft, lotLeft, greigeLeft, piece
                 // The disagreement between these two IS the evidence a person
                 // chose the shade rather than a rule slipping.
                 override: (ord.note && ord.origPin && ord.origPin !== ord.pin)
-                    ? ord.note : ''
+                    ? ord.note : '',
+                // PER CUT SIZE, each with its own remaining shortfall — see the
+                // comment on the skipped-order push above for why one
+                // aggregate figure and a single cut size is not enough.
+                cuts: ord.demands.map(function (d, i) {
+                    return { cutW: Number(d.cutW) || 0, cutL: Number(d.cutL) || 0,
+                             shortPieces: shortByDemand[i] };
+                })
             });
 
             var usedSeen = [];
