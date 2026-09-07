@@ -3,12 +3,12 @@ string resolveDispute(string payloadJson)
 	// Resolve part or all of a stock dispute. Called from BOTH widgets.
 	// POST, one argument: payloadJson.
 	//
-	// WHY THIS EXISTS ALONGSIDE resolveStockDispute. A widget cannot trigger a form
-	// workflow - Creator fires those on user submission, not on a Deluge write - so
-	// the resolution logic cannot simply be reused from here. This is the single
-	// implementation now. If the widget is the only way people resolve disputes,
-	// DELETE the resolveStockDispute form workflow: two copies of stock arithmetic
-	// that must agree is a bug waiting for the day somebody edits one of them.
+	// THE SINGLE IMPLEMENTATION. A legacy form workflow (resolveStockDispute)
+	// used to duplicate this arithmetic - a widget cannot trigger a form
+	// workflow, since Creator fires those on user submission, not on a Deluge
+	// write, so it could not simply be reused from here. It was never deployed
+	// as a live Custom API and has been deleted from the repo - this is the
+	// only place stock-dispute resolution happens.
 	//
 	// DIRECTION. Every dispute has a sender and a receiver, and Direction says
 	// which way round they are. Outbound is the store issuing material out;
