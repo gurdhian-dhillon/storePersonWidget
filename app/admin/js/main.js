@@ -29,12 +29,58 @@
 // remnants on every multi-lot item while presenting itself as the working behind
 // the real number.
 //
-// getAdminCalculation already fetches the real answer per item and returns it on
-// `item.expectedWaste`; nothing here read it. serverWasteCheck now does, and says
-// on screen when the two disagree. A comment asking the next person to remember
-// something is not a mechanism; this is.
+// The real answer per item comes from getExpectedWaste, fetched lazily by the
+// widget when a fabric line's working is opened (ensureExpectedWaste).
+// serverWasteCheck compares it to the derivation and says on screen when the two
+// disagree. A comment asking the next person to remember something is not a
+// mechanism; this is.
 
 var DATA = null;
+// The audited order's plan ids - filled in load(), read by bucketFor.
+var MY_PLAN_IDS = [];
+
+// Expected-waste payloads, one per plan item, fetched LAZILY when an item card
+// is first opened. getAdminCalculation used to call thisapp.getExpectedWaste
+// once per item inside its own execution - ~110 cross-calls for a Faire order,
+// straight into the uncatchable statement limit. Now the widget calls
+// getExpectedWaste itself, one item at a time, only for the item being looked
+// at. Keyed by planItemId. A value of `null` means "in flight".
+var EXP_WASTE = {};
+
+// Fetch (once) the expected-waste payload for an item, then run cb. If it is
+// already loaded or in flight, cb is not called again - the render that follows
+// the in-flight fetch will pick it up.
+function ensureExpectedWaste(item, cb) {
+    var key = String(item.planItemId);
+    if (EXP_WASTE[key] !== undefined) return; // loaded or in flight
+    EXP_WASTE[key] = null;
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getExpectedWaste',
+        http_method: 'POST',
+        payload: {
+            planId: String(item.planId || ''),
+            planItemId: key,
+            qtyOut: String(item.qtyOrdered || 0)
+        }
+    }).then(function (response) {
+        var parsed;
+        try {
+            parsed = JSON.parse(response.result);
+        } catch (e) {
+            parsed = { errors: ['Could not read getExpectedWaste: ' + (e.message || e)], fabrics: [], fabricOptions: [] };
+        }
+        EXP_WASTE[key] = parsed;
+        item.expectedWaste = parsed;
+        if (cb) cb();
+    }).catch(function (err) {
+        console.error('getExpectedWaste error for item ' + key + ':', err);
+        var parsed = { errors: ['getExpectedWaste call failed'], fabrics: [], fabricOptions: [] };
+        EXP_WASTE[key] = parsed;
+        item.expectedWaste = parsed;
+        if (cb) cb();
+    });
+}
 
 // Pieces-cut overrides, keyed by requirement id. Empty until the admin types.
 var CUT_QTY = {};
@@ -841,20 +887,20 @@ function renderWasteStep(mat, item, bucket) {
 
 // ---- the same question, answered by the function that actually runs ----
 //
-// getAdminCalculation calls getExpectedWaste through thisapp for every item and
-// returns the whole payload on `item.expectedWaste`. Its own comment says why:
+// `item.expectedWaste` is the getExpectedWaste payload for this item. It is
+// fetched LAZILY (ensureExpectedWaste) the first time a fabric line's working is
+// opened - one call, for the item being looked at.
 //
-//   "The widget used to mirror this maths in JavaScript so it could react to a
-//    typed piece count without a round trip. That made the screen a check on a
-//    copy rather than on the thing that runs. The authoritative answer for the
-//    ORDERED quantity is fetched here; the widget can still re-derive live for a
-//    what-if figure, but now it has the real one beside it to be measured
-//    against."
+// getAdminCalculation used to make this call itself, through thisapp, once per
+// item inside its own execution. A Faire order is one plan with ~110 items, so
+// that was ~110 cross-function calls in a single script - straight into the
+// uncatchable statement limit (a bare 500, no error card). Moving the call into
+// the widget, per item, on demand, is the same fix production.js's "Preview
+// expected waste" button uses for the same reason.
 //
-// It was fetched and then never read — nothing in this file mentioned
-// expectedWaste at all. So the round trip was paid for on every item and the
-// screen went on showing only the copy, which is the exact state that comment
-// describes being fixed. This is the "measured against" half.
+// The JS mirror of the maths (deriveWaste, above) is still shown; this is the
+// "measured against" half - the authoritative answer for the ordered quantity,
+// beside the derivation, so a disagreement is visible.
 function serverWaste(item, mat) {
     var ew = item && item.expectedWaste;
     if (!ew || !ew.fabrics) return null;
@@ -867,6 +913,15 @@ function serverWaste(item, mat) {
 
 function serverWasteCheck(mat, item, w, pieces) {
     var ew = item && item.expectedWaste;
+
+    // The payload is fetched lazily when this working is first opened. While
+    // that call is in flight EXP_WASTE holds null; the row redraws itself when
+    // it lands (redrawWorkRow).
+    if (!ew && EXP_WASTE[String(item.planItemId)] === null) {
+        return '<div class="check note">Checking against <b>getExpectedWaste</b>, the function that ' +
+            'really runs…</div>';
+    }
+
     if (ew && ew.errors && ew.errors.length) {
         return '<div class="check bad">getExpectedWaste could not answer for this item: ' +
             esc(ew.errors.join('; ')) + '</div>';
@@ -948,11 +1003,105 @@ function renderNonFabric(mat, item) {
     return h;
 }
 
+// THE LIVE ALLOCATION BUCKET, SYNTHESISED FROM `LIVE`.
+//
+// This used to be a row in `DATA.buckets`, which getAdminCalculation built by
+// calling getStoreMaterialRequirements through thisapp and walking its output.
+// That cross-call is gone - the Deluge function no longer touches the store
+// function at all - so the bucket is now assembled here from `LIVE`
+// (ApiExperiment.run() + applyLotAllocation), the SAME data the store screen
+// runs on. Every field the renderers read is either already on the LIVE material
+// entry or is pure geometry derived from the cut size, so nothing is lost.
+//
+// `key` is `supId|matId|<cutW*100>x<cutL*100>|Plan|Reissue`, still built
+// server-side on the Material_Requirement line (getAdminCalculation PART 2) and
+// carried on `mat.bucketKey`. Parsed here to find the matching LIVE material.
 function bucketFor(key) {
-    if (!key || !DATA) return null;
-    var found = null;
-    (DATA.buckets || []).forEach(function (b) { if (b.key === key) found = b; });
-    return found;
+    if (!key || !LIVE) return null;
+
+    var parts = String(key).split('|');
+    if (parts.length < 4) return null;
+    var supId = parts[0];
+    var matId = parts[1];
+    var srcWanted = parts[3]; // "Plan" or "Reissue"
+
+    var m = null;
+    (LIVE || []).forEach(function (sup) {
+        if (String(sup.supervisorId) !== String(supId)) return;
+        (sup.materials || []).forEach(function (mm) {
+            if (!mm.isFabric || String(mm.materialId) !== String(matId)) return;
+            var mmSrc = (mm.isReissue === true) ? 'Reissue' : 'Plan';
+            if (mmSrc !== srcWanted) return;
+            if (!m) m = { sup: sup, mat: mm };
+        });
+    });
+    if (!m) return null;
+
+    var mat = m.mat;
+    var cutW = Number(mat.cutWidth) || 0;
+    var cutL = Number(mat.cutLength) || 0;
+
+    // Competing lines: every order of this supervisor for this fabric. The
+    // widget wants planNo / salesOrder / reqPieces / issuedPieces / planItemId
+    // per line, plus which ones belong to the order being audited - and that
+    // last flag is the caller's (it knows myPlanIds), so it is left to the
+    // renderers, which already filter `bucket.lines` by `l.isThisOrder`.
+    var lines = (mat.lines || []).map(function (l) {
+        return {
+            planId: String(l.planId || ''),
+            planNo: l.planNo || '',
+            salesOrder: l.salesOrder || '',
+            planItemId: String(l.planItemId || ''),
+            reqPieces: Number(l.reqPieces) || 0,
+            issuedPieces: Number(l.issPieces) || 0,
+            isThisOrder: MY_PLAN_IDS.indexOf(String(l.planId || '')) > -1
+        };
+    });
+
+    // The whole rack for this fabric, with fit geometry. `wasteStock` is every
+    // remnant of the material (raw, lot-tagged); "fits" is judged on the cut
+    // alone, exactly as the Deluge did.
+    var pool = (mat.wasteStock || []).map(function (w) {
+        var pw = Number(w.width) || 0;
+        var pl = Number(w.length) || 0;
+        var pc = Number(w.pieces) || 0;
+        var fits = false, perRow = 0, maxRows = 0;
+        if (cutW > 0 && cutL > 0 && pw >= cutW && pl >= cutL) {
+            fits = true;
+            perRow = Math.floor(pw / cutW);
+            maxRows = Math.floor(pl / cutL);
+        }
+        return {
+            wasteId: String(w.wasteId || ''),
+            width: pw, length: pl,
+            opening: pc, left: pc,
+            fits: fits, perRow: perRow, maxRows: maxRows,
+            capacity: perRow * maxRows
+        };
+    });
+
+    var freshPerRow = 0;
+    var fabWcm = Number(mat.fabricWidthCm) || 0;
+    if (fabWcm > 0 && cutW > 0) freshPerRow = Math.floor(fabWcm / cutW);
+
+    return {
+        key: key,
+        supervisorId: String(supId),
+        supervisor: mat.supervisorName || m.sup.supervisorName || '',
+        materialId: String(matId),
+        unit: mat.unit || 'Mtr',
+        cutWidth: cutW,
+        cutLength: cutL,
+        fabricWidthCm: fabWcm,
+        freshPerRow: freshPerRow,
+        washStock: Number(mat.availableStock) || 0,
+        unwashStock: Number(mat.unwashedStock) || 0,
+        requiredPieces: Number(mat.requiredPieces) || 0,
+        issuedPieces: Number(mat.issuedPieces) || 0,
+        outstandingPieces: Number(mat.outstandingPieces) || 0,
+        lines: lines,
+        pool: pool
+    };
 }
 
 // ---- the answer table: one row per material, working behind a chevron ----
@@ -998,11 +1147,11 @@ function matAnswerRow(mat, item, idx) {
 
     // PLANNED OFFCUT REUSE, before anybody issues anything.
     //
-    // This is not a forecast this screen invents. getAdminCalculation calls
-    // getStoreMaterialRequirements through thisapp and reads its output, so
-    // these are the very picks the store person is about to be offered — the
-    // admin can see which remnants a sales order is going to consume while the
-    // cloth is still on the rack.
+    // This is not a forecast this screen invents. It comes from LIVE - the store
+    // screen's own allocator (applyLotAllocation) run over ApiExperiment.run() -
+    // so these are the very picks the store person is about to be offered, and
+    // the admin can see which remnants a sales order is going to consume while
+    // the cloth is still on the rack.
     //
     // Pulled up into the answer table rather than left in the working, because
     // "what are we reusing" is a question asked of the whole order at once, and
@@ -1306,12 +1455,22 @@ function render() {
                 '<div class="item-header" data-toggle="' + esc(item.planItemId) + '">' +
                 '<div class="item-title-row"><span class="item-serial">' + (item.lineNo || idx + 1) + '</span>' +
                 '<div class="item-header-info"><h2>' + esc(item.itemName) + '</h2>' +
-                '<div class="item-meta-line">Ordered ' + item.qtyOrdered + ' · produced ' + item.qtyProduced +
-                (item.status ? ' · ' + esc(String(item.status).replace(/_/g, ' ')) : '') +
-                (item.hasBom ? '' : ' · <span class="no">no BOM</span>') + '</div></div></div>' +
+                ((item.itemSku || item.itemSize || item.itemColor)
+                    ? '<div class="item-sku-line">' +
+                        [
+                            item.itemSku ? esc(item.itemSku) : '',
+                            item.itemSize ? 'size ' + esc(item.itemSize) : '',
+                            item.itemColor ? esc(item.itemColor) : ''
+                        ].filter(Boolean).join(' · ') +
+                      '</div>'
+                    : '') +
+                '<div class="item-meta-line">' +
+                '<span class="item-qty">Ordered ' + item.qtyOrdered + ' · produced ' + item.qtyProduced + '</span>' +
+                (item.status ? '<span class="item-status-badge">' + esc(String(item.status).replace(/_/g, ' ')) + '</span>' : '') +
+                (item.hasBom ? '' : '<span class="no">no BOM</span>') + '</div></div></div>' +
                 '<span class="chevron" aria-hidden="true">' +
-                    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
-                'stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>' +
+                    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+                'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
                 '</span></div>' +
                 '<div class="item-body">';
 
@@ -1393,13 +1552,56 @@ function wire() {
     document.querySelectorAll('[data-ans-toggle]').forEach(function (btn) {
         btn.addEventListener('click', function (ev) {
             ev.stopPropagation();
-            var row = document.getElementById('work-' + btn.getAttribute('data-ans-toggle'));
+            var reqId = btn.getAttribute('data-ans-toggle');
+            var row = document.getElementById('work-' + reqId);
             if (!row) return;
             row.hidden = !row.hidden;
             btn.classList.toggle('is-open', !row.hidden);
+
+            // Step 3 of the working checks the JS mirror against getExpectedWaste,
+            // the function that really runs. That payload is fetched lazily, the
+            // first time a fabric line's working is opened - one call, for this
+            // item alone. When it lands the work row is redrawn in place.
+            if (!row.hidden) {
+                var found = matItemByReqId(reqId);
+                if (found && found.mat && found.mat.isFabric &&
+                    EXP_WASTE[String(found.item.planItemId)] === undefined) {
+                    ensureExpectedWaste(found.item, function () {
+                        redrawWorkRow(reqId);
+                    });
+                }
+            }
         });
     });
 
+    wireWaste();
+}
+
+// Locate the { mat, item } pair for a requirement id across the loaded order.
+function matItemByReqId(reqId) {
+    var hit = null;
+    (DATA && DATA.plans ? DATA.plans : []).forEach(function (p) {
+        (p.items || []).forEach(function (i) {
+            i.planId = p.planId; // same stamp render() applies
+            (i.materials || []).forEach(function (m) {
+                if (String(m.reqId) === String(reqId)) hit = { mat: m, item: i };
+            });
+        });
+    });
+    return hit;
+}
+
+// Redraw one requirement's working <tr> in place, keeping it open.
+function redrawWorkRow(reqId) {
+    var row = document.getElementById('work-' + reqId);
+    if (!row) return;
+    var found = matItemByReqId(reqId);
+    if (!found) return;
+    var cell = row.querySelector('td');
+    if (!cell) return;
+    cell.innerHTML = found.mat.isFabric
+        ? renderFabricLine(found.mat, found.item)
+        : renderNonFabric(found.mat, found.item);
     wireWaste();
 }
 
@@ -1472,11 +1674,10 @@ function applyOrderFilter() {
 // TAB: MATERIAL USED
 //
 // What the order actually ate, against what it was planned to eat. Its own
-// Custom API, fetched the first time the tab is opened - getAdminCalculation
-// already calls getStoreMaterialRequirements once and getExpectedWaste per item
-// through thisapp, and folding a second report into it is how the statement
-// limit gets hit. That limit is not catchable: it kills the script and the
-// widget gets a bare 500 with no error card at all.
+// Custom API, fetched the first time the tab is opened - kept separate from
+// getAdminCalculation because folding a second report into one script is how the
+// statement limit gets hit. That limit is not catchable: it kills the script and
+// the widget gets a bare 500 with no error card at all.
 // =====================================================================
 
 var USED = null;
@@ -1751,6 +1952,10 @@ function load(soId) {
         CUT_QTY = {};
         ASSUME_PICKS = {};
         DATA = parsed;
+        // The audited order's own plan ids, for bucketFor's isThisOrder flag -
+        // the Deluge used to stamp that server-side off the store function's
+        // lines; now bucketFor synthesises the bucket and needs the same list.
+        MY_PLAN_IDS = (parsed.plans || []).map(function (p) { return String(p.planId); });
         loadLive(render);
     }).catch(function (err) {
         console.error('invokeCustomApi error:', err);

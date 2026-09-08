@@ -1109,6 +1109,10 @@ function renderItemCard(plan, item, index) {
             <div class="item-header-info">
                 <h2>${item.name}${
 									item.sku ? `<span class="item-sku">${item.sku}</span>` : ""
+								}${
+									item.size ? `<span class="item-attr">${item.size}</span>` : ""
+								}${
+									item.color ? `<span class="item-attr">${item.color}</span>` : ""
 								}</h2>
                 <div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem;">
                     <span class="item-qty">${item.qty} ${Number(item.qty) === 1 ? "pc" : "pcs"} to produce</span>

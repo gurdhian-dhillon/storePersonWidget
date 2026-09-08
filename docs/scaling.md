@@ -241,11 +241,23 @@ This is a fix, but it is a change.
 
 ## Still open
 
-**`Waste_Master[Status == "Available"]` never drains** — `getStoreMaterialRequirements`,
-`getAdminCalculation`. A remnant too small or too odd for any order sits at `Available` for ever;
-there is no ageing sweep and no periodic scrap. This is a **business-policy gap surfacing as a
-query cost**, and it also quietly degrades the allocator. *Needs a rack policy from the client —
-scrap below a size, or older than N months — before any code.*
+**`Waste_Master[Status == "Available"]` never drains** — `getStoreMaterialRequirements`.
+(`getAdminCalculation` no longer has this scan — see below.) A remnant too small or too odd for
+any order sits at `Available` for ever; there is no ageing sweep and no periodic scrap. This is a
+**business-policy gap surfacing as a query cost**, and it also quietly degrades the allocator.
+*Needs a rack policy from the client — scrap below a size, or older than N months — before any code.*
+
+**`getAdminCalculation` no longer calls `getStoreMaterialRequirements` or `getExpectedWaste`.**
+The order-audit widget's Calculation-check tab is pure-read now: calculation 2 (the live
+allocation) is run in the browser by the store screen's own allocator over `ApiExperiment.run()`
+(`app/js/api-experiment.js`, JS Data API), and the audit synthesises its buckets from that
+(`bucketFor` in `app/admin/js/main.js`). Calculation 3 (`getExpectedWaste`) is fetched by the
+widget lazily, one item at a time, when a fabric line's working is opened — the Deluge used to
+make ~110 cross-calls in one execution for a Faire order, straight into the statement limit. Two
+unbounded scans went with PART 1: `Production_Planning[open]` + per-plan `Material_Requirement`,
+and `Waste_Master[Status=="Available"]`. `getAdminCalculation` is now the order + its plans/items
++ `Issue_Lines` lot history, bounded by one order. **`getStoreMaterialRequirements` has no callers
+left and can be deleted** once its `.dg` and Custom API are removed in Creator.
 
 **`getProductionWidgetData` has three inline `sort by` in `for each` headers** (lines 53, 141,
 619), which CLAUDE.md forbids. All on master data, works today, so it is a rule violation rather

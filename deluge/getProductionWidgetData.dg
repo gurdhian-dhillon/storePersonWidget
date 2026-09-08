@@ -530,11 +530,16 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 				// Item_Sku is a LOOKUP to Item_Master, so the field itself holds a
 				// record id. This shipped the id as "sku" on every item, which
 				// nobody noticed only because nothing rendered it. The code the
-				// shop floor recognises lives on the master record.
+				// shop floor recognises lives on the master record - and so do
+				// the finished-product Size and Color, neither copied onto Plan_Item.
 				sku = "";
+				itemSize = "";
+				itemColor = "";
 				for each  imR in Item_Master[ID == itm.Item_Sku]
 				{
 					sku = ifnull(imR.SKU,"").toString().replaceAll("\"","'");
+					itemSize = ifnull(imR.Size,"").toString().trim().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," ");
+					itemColor = ifnull(imR.Color,"").toString().trim().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," ");
 				}
 
 				// Read once here rather than inline in the JSON line, because the
@@ -1123,7 +1128,7 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 				// double quote away from breaking JSON.parse for the WHOLE
 				// Production tab, every plan on it, not just this item's card.
 				itemNameTxt = ifnull(itm.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," ");
-				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"name\":\"" + itemNameTxt + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"isAlteration\":" + isAltTxt + ",\"canCloseAlteration\":" + canCloseTxt + ",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "]}";
+				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"size\":\"" + itemSize + "\",\"color\":\"" + itemColor + "\",\"name\":\"" + itemNameTxt + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"isAlteration\":" + isAltTxt + ",\"canCloseAlteration\":" + canCloseTxt + ",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "]}";
 				}
 			}
 

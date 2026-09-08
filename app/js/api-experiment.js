@@ -203,6 +203,7 @@ var ApiExperiment = (function () {
                 if (OPEN_STATUSES.indexOf(str(p.Order_Status).trim()) === -1) return;
                 openPlan[String(p.ID)] = {
                     salesOrder: lookupText(p.Sales_Order, 'Sales_Order'),
+                    planNo: str(p.Plan_No).trim(),
                     priorityKey: num(p.Priority_Key),
                     // Store-screen default supervisor ORDER, tie-break rung.
                     // Plan_Start_Date is a date (no time), set once at plan
@@ -420,6 +421,7 @@ var ApiExperiment = (function () {
                     mrqId: String(mr.ID),
                     planId: planId,
                     salesOrder: (openPlan[planId] || {}).salesOrder || '',
+                    planNo: (openPlan[planId] || {}).planNo || '',
                     // The plan's Priority_Key and Plan_Start_Date, carried onto
                     // every line of every material. Store-screen default
                     // supervisor ORDER needs both per plan (best source rank,
@@ -721,6 +723,9 @@ var ApiExperiment = (function () {
     }
 
     // ---- compare against the custom function ---------------------------
+    // DEV-ONLY A/B diagnostic, not wired to any screen. It is the last thing
+    // that calls getStoreMaterialRequirements - once that Custom API is deleted
+    // in Creator this stops working, which is fine; delete compare() then.
     function compare() {
         if (!have() || typeof ZOHO.CREATOR.DATA.invokeCustomApi !== 'function') {
             console.warn('[api-experiment] compare needs getRecords AND invokeCustomApi');
