@@ -238,6 +238,22 @@ function renderMaterialRow(m, i) {
         '<span class="unit">' + escapeHtml(m.unit) + '</span></span>';
 
     var hasBreakdown = m.orders && m.orders.length > 0;
+
+    // WHICH HANDOVER(S) THIS ROW CAME FROM. A material row is merged across
+    // every SIV that still owes it, so there can be more than one. Each is a
+    // link into the Handovers tab, where he sees that SIV's full cut list.
+    //
+    // The id goes in a data- attribute read by a delegated listener (bound
+    // once, below) — NOT an inline onclick with the id spliced into a JS string
+    // literal. Record ids are numeric today, but a data- attribute is the safe
+    // way regardless, and it is the pattern to copy if ids ever change shape.
+    var sivTags = (m.vouchers || []).filter(function (v) {
+        return v.no && /^\d+$/.test(String(v.id));
+    }).map(function (v) {
+        return '<button type="button" class="siv-tag" data-vid="' + escapeHtml(v.id) + '" ' +
+            'title="Open this handover">' + escapeHtml(v.no) + '</button>';
+    }).join('');
+
     var nameCell =
         '<td class="material-name-cell">' +
             '<div class="mat-name-row">' +
@@ -249,6 +265,7 @@ function renderMaterialRow(m, i) {
                 '<div class="mat-name">' + escapeHtml(m.material) +
                     (m.isFabric ? '<span class="fabric-badge">Fabric</span>' : '') +
                     (m.isReissue === true ? '<span class="reissue-tag">incl. reissue</span>' : '') +
+                    sivTags +
                 '</div>' +
             '</div>' +
         '</td>';
@@ -435,11 +452,16 @@ function renderPrintedRow(p, i) {
         actionCell = '<span class="status-pill status-partial">Awaiting check</span>';
     }
 
+    var sivTag = (p.voucherNo && /^\d+$/.test(String(p.voucherId)))
+        ? ' <button type="button" class="siv-tag" data-vid="' + escapeHtml(p.voucherId) + '" ' +
+          'title="Open this handover">' + escapeHtml(p.voucherNo) + '</button>'
+        : '';
+
     return '' +
         '<tr id="' + printedRowId(i) + '">' +
             '<td class="material-name-cell">' +
                 '<div class="mat-name">&#9851; ' + escapeHtml(p.material) +
-                    '<span class="fabric-badge">Printed</span>' +
+                    '<span class="fabric-badge">Printed</span>' + sivTag +
                 '</div>' +
                 '<div class="mat-sku">' + escapeHtml(p.salesOrder || p.planNo) +
                     ' &middot; piece ' + fmt(p.qty * 100) + ' cm</div>' +
@@ -1292,6 +1314,21 @@ function loadMaterials() {
         content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Failed to load</h2><p>Check the browser console for details.</p></div>';
     });
 }
+
+// SIV tags open the Handovers tab. One delegated listener on the content
+// container rather than an inline handler per tag — the container is replaced
+// on every render but this listener is bound once and survives it, because it
+// sits on #rcv-content's PARENT (the panel), which is never rebuilt.
+(function () {
+    var panel = document.getElementById('panel-receive');
+    if (!panel) return;
+    panel.addEventListener('click', function (e) {
+        var tag = e.target && e.target.closest && e.target.closest('.siv-tag');
+        if (!tag) return;
+        var vid = tag.getAttribute('data-vid');
+        if (vid && typeof openHandover === 'function') openHandover(vid);
+    });
+})();
 
 // The shell owns the picker and Refresh. Receive only says how to load itself.
 TAB_LOADERS.receive = function () {

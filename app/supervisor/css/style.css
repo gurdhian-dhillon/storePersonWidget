@@ -687,6 +687,12 @@ tbody tr.row-issued .col-strong {
     color: #b45309;
 }
 
+/* Blue "ready / moving" pill — material is here and work can start. */
+.status-info {
+    background-color: #dbeafe;
+    color: #1d4ed8;
+}
+
 .status-shortfall {
     background-color: var(--status-danger-bg);
     color: var(--status-danger);
@@ -4615,4 +4621,207 @@ th.col-num {
     #panel-order-overview .item-body .tables-container {
         padding: 0.35rem !important;
     }
+}
+
+/* ============================================================================
+ * HANDOVERS TAB  (handover-detail.js)
+ * One SIV at a time: header, cloth table, cloth -> order -> item cut list.
+ * Reuses .mat-section / .section-title / .section-note / .table-wrapper /
+ * .bd-order* / .bd-item-table / .bd-roll-tag / .status-pill / .reissue-tag.
+ * ========================================================================== */
+.hd-toolbar { margin-bottom: 1rem; }
+
+/* An SIV picker is a stand-in identity for the handover, same as the plan
+   picker on Production - let it grow to the number, not sit at input width. */
+#hd-select { min-width: 22rem; max-width: 100%; }
+
+.hd-hint,
+.hd-empty {
+    padding: 2.5rem 1.5rem;
+    text-align: center;
+    color: var(--text-muted);
+}
+.hd-empty {
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+}
+.hd-empty h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-main);
+    margin-bottom: 0.35rem;
+}
+.hd-empty .icon { font-size: 1.6rem; }
+
+.hd-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem 1.25rem;
+    padding: 0.9rem 1rem;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 1rem;
+}
+.hd-header-main { flex: 1 1 16rem; }
+.hd-header-main h2 {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text-main);
+}
+.hd-header-meta {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    margin-top: 0.15rem;
+}
+.hd-header-pills { flex: 0 0 auto; }
+.hd-header-nums {
+    flex: 1 1 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem;
+    padding-top: 0.55rem;
+    border-top: 1px solid #eef2f6;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+.hd-header-nums b { color: var(--text-main); font-weight: 700; }
+.hd-header-nums .is-short b { color: var(--danger, #c0392b); }
+
+/* ---- Cloth table: the lot cell shows one line per lot, "L1 -> R1, R2, R3" ---- */
+.hd-lots {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+.hd-lot-line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    line-height: 1.35;
+}
+.hd-lot-name { color: #1d4ed8; font-weight: 700; }
+.hd-lot-arrow { color: var(--text-muted); }
+.hd-roll-list { color: var(--text-main); }
+.hd-roll-none {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.hd-sub {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    font-weight: 400;
+}
+
+/* ---- Cut list: item-card accordions (same shell as Production) ---- */
+.hd-cutlist {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+.hd-order-list { padding: 0.15rem 0 0.35rem; }
+.hd-order + .hd-order { border-top: 1px solid #eef2f6; }
+.hd-order-head {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    width: 100%;
+    padding: 0.55rem 1.15rem;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+}
+.hd-order-head:hover { background: #f8fafc; }
+.hd-order-chev {
+    display: inline-flex;
+    width: 0.9rem;
+    height: 0.9rem;
+    color: var(--primary);
+    flex: 0 0 auto;
+    transition: transform 0.15s ease;
+}
+.hd-order-chev svg { width: 100%; height: 100%; }
+.hd-order-chev.is-open { transform: rotate(90deg); }
+.hd-order-name { font-weight: 600; color: var(--text-main); font-size: 0.95rem; }
+.hd-order-meta {
+    margin-left: auto;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.hd-order-items {
+    padding: 0 1.15rem 0.7rem 2.25rem;
+    overflow-x: auto;
+}
+
+/* Two shapes: .is-fabric has the cut columns, .is-trim does not. Column
+   alignment is set per class so header and cell always line up. */
+.hd-item-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    table-layout: fixed;
+}
+.hd-item-table th {
+    text-align: left;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 0.35rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    background: #f8fafc;
+}
+.hd-item-table td {
+    padding: 0.45rem 0.6rem;
+    border-bottom: 1px solid #eef2f6;
+    vertical-align: middle;
+}
+.hd-item-table tr:last-child td { border-bottom: none; }
+
+/* column widths + alignment */
+.hd-i-name { width: auto; }
+.hd-i-name .mat-name { font-weight: 500; color: var(--text-main); }
+.hd-i-num  { width: 6rem;  text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hd-i-num b { color: var(--text-main); }
+.hd-i-cut  { width: 9.5rem; white-space: nowrap; }
+.hd-i-roll { width: 8.5rem; }
+.hd-i-status { width: 8rem; }
+th.hd-i-num { text-align: right; }
+.hd-item-table.is-trim .hd-i-num { width: 8rem; }
+
+@media (max-width: 820px) {
+    .hd-item-table.is-fabric { table-layout: auto; min-width: 40rem; }
+    .hd-item-table.is-trim { table-layout: auto; min-width: 24rem; }
+}
+
+/* The SIV tag on a Receive-tab material row - a button that links here */
+.siv-tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    background: #eef4ff;
+    color: #2451b3;
+    border: 1px solid #d3e2fb;
+    border-radius: 3px;
+    padding: 0.05rem 0.4rem;
+    margin-left: 0.4rem;
+    cursor: pointer;
+}
+.siv-tag:hover {
+    background: #dce9fe;
+    text-decoration: underline;
+}
+
+@media (max-width: 640px) {
+    #hd-select { min-width: 0; width: 100%; }
+    .hd-header-nums { gap: 0.75rem 1rem; }
 }

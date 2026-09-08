@@ -249,6 +249,7 @@ var ReceiveRead = (function () {
 
         issues.forEach(function (mi) {
             var voucherId = String(mi.ID);
+            var voucherNo = flat(mi.Voucher_No) || '';
             var lines = mi.Issue_Lines || [];
             (Array.isArray(lines) ? lines : []).forEach(function (ln) {
                 var qty = num(ln.Qty);
@@ -298,6 +299,7 @@ var ReceiveRead = (function () {
                     printedPieces.push({
                         issueLineId: String(ln.ID),
                         voucherId: voucherId,
+                        voucherNo: voucherNo,
                         materialId: matId,
                         material: rm.name || flat(ln.Material_Name),
                         unit: unit,
@@ -328,7 +330,8 @@ var ReceiveRead = (function () {
                         // numeric-looking label like "1" would silently reorder).
                         rollsByLot: {},
                         rollOrderByLot: {},
-                        voucherIds: {}
+                        voucherIds: {},
+                        voucherNoById: {}
                     };
                     mat[matId] = cur;
                     matOrder.push(matId);
@@ -336,6 +339,7 @@ var ReceiveRead = (function () {
                 cur.pending = r2(cur.pending + owed);
                 cur.lots[lotLabel] = r2((cur.lots[lotLabel] || 0) + owed);
                 cur.voucherIds[voucherId] = 1;
+                if (voucherNo) cur.voucherNoById[voucherId] = voucherNo;
 
                 if (rollLabelTxt) {
                     var rolls = cur.rollsByLot[lotLabel] || (cur.rollsByLot[lotLabel] = {});
@@ -580,6 +584,7 @@ var ReceiveRead = (function () {
                     lineCount: e.lineCount, lotRolls: e.lotRolls
                 };
             });
+            var voucherIdList = Object.keys(c.voucherIds);
             return {
                 materialId: matId,
                 material: c.name,
@@ -589,7 +594,12 @@ var ReceiveRead = (function () {
                 pending: c.pending,
                 lots: lotsArr,
                 orders: ordersArr,
-                voucherIds: Object.keys(c.voucherIds)
+                voucherIds: voucherIdList,
+                // [{ id, no }] - the SIV number beside the id, so the receive
+                // card can name the handover and link into the Handovers tab.
+                vouchers: voucherIdList.map(function (vid) {
+                    return { id: vid, no: c.voucherNoById[vid] || '' };
+                })
             };
         }).filter(function (m) { return m.pending > 0; });
 

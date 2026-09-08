@@ -30,6 +30,12 @@
             <button type="button" class="tab-btn is-active" data-tab="receive">
                 Receive<span class="tab-count hidden" id="count-receive"></span>
             </button>
+            <!-- Reference view, one handover (SIV) at a time: the cloth he was
+                 given and, per material, the order/item cut list it feeds. Read
+                 while cutting. No badge - nothing is "waiting" here. -->
+            <button type="button" class="tab-btn" data-tab="handovers">
+                Handovers
+            </button>
             <!-- Read-only decision view: his open orders with customer, delivery
                  date and status, so he can pick what to produce next before
                  opening the Production tab. -->
@@ -87,6 +93,15 @@
                 </div>
             </section>
 
+            <section class="tab-panel" id="panel-handovers">
+                <div class="hd-toolbar">
+                    <select id="hd-select" class="sup-select" aria-label="Choose handover" disabled>
+                        <option value="">-- Select a handover --</option>
+                    </select>
+                </div>
+                <div id="hd-content"></div>
+            </section>
+
             <section class="tab-panel" id="panel-order-overview"></section>
             <section class="tab-panel" id="panel-reissue"></section>
             <section class="tab-panel" id="panel-history"></section>
@@ -113,6 +128,10 @@
          USE_JS_RECEIVE_READ in receive.js; getSupervisorMaterials is the fallback. -->
     <script src="js/receive-read.js"></script>
     <script src="js/receive.js"></script>
+    <!-- After receive.js: reuses escapeHtml / fmt. The Handovers tab - one SIV
+         at a time, its cloth + per-material order/item cut list. Pure getRecords
+         reads (HandoverDetail.cutList). No Deluge, no Custom API. -->
+    <script src="js/handover-detail.js"></script>
     <script src="js/production.js"></script>
     <script src="js/tabs.js"></script>
     <!-- After production.js: "Open in Production" calls productionSelectPlan by
