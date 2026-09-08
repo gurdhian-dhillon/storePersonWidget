@@ -472,6 +472,45 @@ console.log('\n=== F. GREIGE THE ATOM RULE STRANDED (regression) ===');
   const w4 = S4.window.__summary.toWash || [];
   ok('never asks to wash more than the job needs', w4.length === 1 && w4[0].qty <= 5.0001,
     'qty=' + (w4[0] && w4[0].qty) + ' over a 900m greige pile for a 5m job');
+
+  // REGRESSION. A bought bill lands in Unallocated_Qty, never straight into a
+  // lot — a person has to allocate it. The buy row said so while the row was
+  // still on the purchase list ("N unallocated — allocate to a lot first"),
+  // but the moment its PO resolved and it dropped to a wash-only row, that
+  // note had nowhere to render: the wash row never looked at e.unallocated at
+  // all. The real sequence this produced — raise PO, bill lands, wash the
+  // lot, still short, with nothing on screen saying a step was skipped — is
+  // exactly the report that triggered this fix.
+  const S5 = load();
+  S5.render([sup('A', 'A', [fabric({
+    availableStock: 0, unwashedStock: 14.6, unallocatedQty: 743.77,
+    lots: [lotOf('L3', { wash: 0, unwash: 14.6, rolls: [roll('r3', 14.6)] })],
+    lines: [{ planId: 'pA', planItemId: 'iA', mrqId: 'mA', cutW: 150, cutL: 100, reqPieces: 20, issPieces: 0 }]
+  })])]);
+  const w5 = S5.window.__summary.toWash || [];
+  ok('a wash row still exists for the leftover greige', w5.length === 1, 'toWash=' + w5.length);
+  if (w5.length === 1) {
+    const html = S5.summaryRow(w5[0], 0);
+    ok('the wash row NAMES the unallocated stock', /743\.77/.test(html) && /unallocated/i.test(html),
+      'html did not mention the 743.77 sitting unallocated — the store person has no way to know why washing will not close the gap');
+    ok('and it says what to do about it', /lot/i.test(html),
+      'the note must point at the fix (put it into a lot), not just report the number');
+  }
+
+  // The note must NOT appear when nothing is unallocated — it is a real
+  // blocker, not decoration on every wash row.
+  const S6 = load();
+  S6.render([sup('A', 'A', [fabric({
+    availableStock: 0, unwashedStock: 14.6, unallocatedQty: 0,
+    lots: [lotOf('L3', { wash: 0, unwash: 14.6, rolls: [roll('r3', 14.6)] })],
+    lines: [{ planId: 'pA', planItemId: 'iA', mrqId: 'mA', cutW: 150, cutL: 100, reqPieces: 20, issPieces: 0 }]
+  })])]);
+  const w6 = S6.window.__summary.toWash || [];
+  if (w6.length === 1) {
+    const html6 = S6.summaryRow(w6[0], 0);
+    ok('no unallocated note when there is nothing unallocated',
+      !/unallocated/i.test(html6), 'note appeared with unallocatedQty=0');
+  }
 }
 
 console.log('\n========================================');

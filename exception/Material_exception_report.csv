@@ -1,0 +1,25 @@
+Type,SKU,Supervisor,Required Qty,Available_Qty,Note,Status
+Wash_Needed,RM-00002,,14.60,3737.34,"08-Sep 00:00 - washed 6.43, request closed",Resolved
+Wash_Needed,RM-00002,,0.00,3729.20,"08-Sep 00:00 - washed 8.14, request closed",Resolved
+Wash_Needed,RM-00001,,0.00,600.00,"08-Sep 00:00 - washed 151.50, request closed",Resolved
+Wash_Needed,RM-00002,,14.60,3000.00,"08-Sep 00:00 - washed 729.20, request closed",Resolved
+Shortage,RM-00018,,10050.00,10000.00,"Draft PO PO-00040 raised for 50 Pcs
+08-Sep 00:00 - PO PO-00040 received, stock now 10050.00 (needed 10050.00) - request closed",Resolved
+Shortage,RM-00015,,6135.00,6000.00,"Draft PO PO-00040 raised for 135 Cone
+08-Sep 00:00 - PO PO-00040 received, stock now 6135.00 (needed 6135.00) - request closed",Resolved
+Shortage,RM-00020,,3140.00,3000.00,"Draft PO PO-00040 raised for 140 Pcs
+08-Sep 00:00 - PO PO-00040 received, stock now 3140.00 (needed 3140.00) - request closed",Resolved
+Shortage,RM-00013,,3150.00,3000.00,"Draft PO PO-00040 raised for 150 Cone
+08-Sep 00:00 - PO PO-00040 received, stock now 3150.00 (needed 3150.00) - request closed",Resolved
+Shortage,RM-00001,,759.00,600.00,"Draft PO PO-00040 raised for 151.5 Mtr
+Asked for less than the 159.0 outstanding; raised to cover it.",Open
+Shortage,RM-00014,,12388.00,12000.00,"Draft PO PO-00040 raised for 388 Cone
+08-Sep 00:00 - PO PO-00040 received, stock now 12388.00 (needed 12388.00) - request closed",Resolved
+Shortage,RM-00019,,12388.00,12000.00,"Draft PO PO-00040 raised for 388 Pcs
+08-Sep 00:00 - PO PO-00040 received, stock now 12388.00 (needed 12388.00) - request closed",Resolved
+Shortage,RM-00002,,3729.54,3000.00,"Draft PO PO-00040 raised for 743.77 Mtr
+08-Sep 00:00 - PO PO-00040 received, stock now 3743.77 (needed 3729.54) - request closed",Resolved
+Shortage,RM-00012,,6049.00,5000.00,"Draft PO PO-00040 raised for 1049 Cone
+08-Sep 00:00 - PO PO-00040 received, stock now 6049.00 (needed 6049.00) - request closed",Resolved
+Shortage,RM-00016,,9701.00,8000.00,"Draft PO PO-00040 raised for 1701 Cone
+08-Sep 00:00 - PO PO-00040 received, stock now 9701.00 (needed 9701.00) - request closed",Resolved

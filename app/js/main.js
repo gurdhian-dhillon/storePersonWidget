@@ -3158,6 +3158,98 @@ function redrawCards() {
     if (firstCard) firstCard.classList.add('open');
 }
 
+// THE ONE TRUE "STILL SHORT" FIGURE FOR A FABRIC MATERIAL, in metres.
+//
+// Σ over every order that the allocator either SKIPPED or seated only PART of,
+// of the marker-row metres for the pieces still owed — per cut size, because
+// one order commonly spans several. This used to be computed twice, by two
+// different routes that were not the same calculation:
+//
+//   the BUY figure   — this walk, over `e.orderOutcomes` (why + shortPieces).
+//   the WASH top-up  — a second walk, over `e.lines`, of RAW
+//                      `reqPieces - issPieces` with no reference to what the
+//                      allocator had already committed to a lot.
+//
+// The second one double-counted. An order the allocator commits to a lot
+// under `afterWash` (the atom rule: it covers the order WHOLE once that lot's
+// greige is washed) is already spoken for — its pieces are not "still short",
+// they are "short until this wash lands", and `washByLot` already carries
+// exactly that commitment. Summing raw outstanding pieces on top of it asked
+// the wash for MORE than the material actually needed: a lot could receive a
+// legitimate 729.20 m committed-wash row from real orders AND a second,
+// independent 14.57 m top-up computed from the same orders' raw pieces before
+// wash-fill got involved — an order to wash something the committed pass had
+// already accounted for, over cloth that was never short by that amount in
+// the first place.
+//
+// So there is one function now, called once per material, and BOTH the wash
+// top-up and the buy figure read its answer rather than each deriving their
+// own.
+function fabricShortMetres(e) {
+    var fw = Number(e.fabricWidthCm) || 0;
+    var perRowFab = function (cutW) {
+        var cw = Number(cutW) || 0;
+        return (fw > 0 && cw > 0 && fw >= cw) ? Math.floor(fw / cw) : 0;
+    };
+
+    // Cut length per plan — FALLBACK ONLY, for an outcome with no `cuts[]` (an
+    // older cached payload from before the allocator started emitting per-cut
+    // breakdowns). orderOutcomes carries pieces + planId; the cut geometry is
+    // on the lines.
+    var cutByPlan = {};
+    (e.lines || []).forEach(function (l) {
+        var pid = String(l.planId || '');
+        if (!pid) return;
+        var cw = Number(l.cutW) || 0, cl = Number(l.cutL) || 0;
+        if (cw > 0 && cl > 0 && !cutByPlan[pid]) {
+            cutByPlan[pid] = { cutW: cw, cutL: cl };
+        }
+    });
+
+    var outcomes = e.orderOutcomes || [];
+    var shortMetres = 0;
+    outcomes.forEach(function (o) {
+        var pid = String(o.planId || '');
+
+        if (o.cuts && o.cuts.length) {
+            o.cuts.forEach(function (c) {
+                var owedHere = o.why === 'skipped'
+                    ? (Number(c.pieces) || 0)
+                    : (Number(c.shortPieces) || 0);
+                if (owedHere <= 0) return;
+                var pr = perRowFab(c.cutW);
+                if (pr > 0) {
+                    shortMetres += Math.ceil(owedHere / pr) * (Number(c.cutL) || 0) / 100;
+                }
+            });
+            return;
+        }
+
+        // FALLBACK — no per-cut breakdown on this outcome.
+        var owedPieces = 0;
+        if (o.why === 'skipped') {
+            owedPieces = Number(o.pieces) || 0;
+        } else {
+            owedPieces = Number(o.shortPieces) || 0;
+        }
+        if (owedPieces <= 0) return;
+        var geo = cutByPlan[pid];
+        if (geo) {
+            var pr2 = perRowFab(geo.cutW);
+            if (pr2 > 0) {
+                shortMetres += Math.ceil(owedPieces / pr2) * geo.cutL / 100;
+            } else if (Number(o.needMetres) > 0) {
+                shortMetres += Number(o.needMetres);
+            }
+        } else if (Number(o.needMetres) > 0) {
+            // No cut geometry for this plan — fall back to the allocator's own
+            // metres figure for the order.
+            shortMetres += Number(o.needMetres);
+        }
+    });
+    return round2(shortMetres);
+}
+
 // ---- End-of-page shortfall summary ----
 //
 // The per-supervisor cards deliberately show every supervisor the TRUE stock
@@ -3364,6 +3456,10 @@ function buildShortfallSummary(data) {
         (e.lots || []).forEach(function (l) { byLotId[String(l.lotId)] = l; });
 
         var washedLots = {};
+        // Per-lot: how much of THIS lot's ask above came from real committed
+        // orders (washByLot), so the top-up below can ask for the REST of that
+        // same lot's greige rather than skipping a lot it already touched.
+        var committedByLot = {};
         if (e.isFabric) {
             Object.keys(e.washByLot || {})
                 .map(function (id) { return e.washByLot[id]; })
@@ -3375,80 +3471,107 @@ function buildShortfallSummary(data) {
                     var q = round2(Math.min(w.qty, Number(l.unwash) || 0));
                     if (q <= 0) return;
                     washedLots[String(w.lotId)] = true;
+                    committedByLot[String(w.lotId)] = q;
                     toWash.push({ e: e, qty: q, kind: 'wash', lot: l });
                 });
 
-            // ---- GREIGE ON A LOT NO ORDER COULD COMMIT TO ----
+            // ---- GREIGE THE COMMITTED PASS DID NOT ASK FOR ----
             //
-            // `washByLot` only carries lots an order was actually COMMITTED to,
-            // and an order is only committed to a lot that covers it WHOLE (the
-            // atom rule — see chooseLotForOrder). So a lot holding 15 m of greige
-            // against a 40 m demand is a candidate in NEITHER tier: the order is
-            // skipped, nothing is committed, `washByLot` stays empty, and this
-            // list offered no wash at all. The screen said "buy 40" over 15 m of
-            // the right shade sitting unwashed on the rack.
+            // Two separate shapes land here, and both are real:
             //
-            // That is the atom rule working correctly on the ISSUE side — those
-            // 15 m genuinely cannot finish the order, and committing them would
-            // burn the shade on a job that still could not ship. But "what is
-            // missing" is a different question from "what can I hand over today".
-            // Washing owned cloth is free of the atom rule: it converts greige
-            // this shade into washed cloth this shade, it is the cheapest way to
-            // shrink the purchase, and it is an action he can take now.
+            //   1. A lot no order could commit to at all. `washByLot` only
+            //      carries lots an order was COMMITTED to, and an order is only
+            //      committed to a lot that covers it WHOLE (the atom rule — see
+            //      chooseLotForOrder). A lot holding 15 m of greige against a
+            //      40 m demand is a candidate in NEITHER tier: the order is
+            //      skipped, nothing is committed, `washByLot` stays empty, and
+            //      this list offered no wash at all. The screen said "buy 40"
+            //      over 15 m of the right shade sitting unwashed on the rack.
             //
-            // So every lot with greige left gets a row, capped at what the lot
-            // holds AND at what the material is still short — never more than the
-            // job needs. Lots already covered above are skipped so one lot cannot
-            // appear twice.
+            //   2. A lot the committed pass PARTLY asked for. A big new lot
+            //      (743.77 m greige, one roll) can have some of its orders
+            //      committed to it (729.20 m worth) while OTHER orders for the
+            //      same material were seated elsewhere or skipped — the
+            //      remaining 14.57 m of that same lot's greige is real,
+            //      genuinely still needed, and was never asked for at all,
+            //      because `washedLots` excluded the lot outright the moment
+            //      ANY committed row touched it. Confirmed against a live
+            //      case: 743.77 m booked in, first wash request asked for only
+            //      729.20 m, and the missing 14.57 m never resurfaced as one
+            //      figure — it trickled out as two more small requests (8.14,
+            //      6.43) that still did not close it, because each of THOSE
+            //      was itself sized off the material-wide remainder rather
+            //      than off what this lot specifically still held.
             //
-            // The PO below is UNAFFECTED and deliberately so: it is derived from
-            // the allocator's own unseated pieces, which already counts a wash
-            // that has not happened as not-yet-available. Washing these 15 m and
-            // re-loading moves them into `wash`, the allocator re-runs, and the
-            // purchase figure falls out smaller on its own.
+            // Both are "the atom rule working correctly on the ISSUE side" —
+            // that cloth genuinely cannot finish an order alone. But "what is
+            // missing" is a different question from "what can I hand over
+            // today". Washing owned cloth is free of the atom rule: it
+            // converts greige this shade into washed cloth this shade, it
+            // shrinks the purchase, and it is an action he can take now,
+            // whether or not any single order can use the whole lot yet.
             //
-            // THE CAP IS THE ROWS' OWN OUTSTANDING METRES, NOT `e.needed`.
-            // `e.needed` is only assigned for fabric further down, in the BUY
-            // branch — reading it here gets 0 and the whole block silently never
-            // fires, which is exactly how the first cut of this fix failed to do
-            // anything at all.
+            // So every lot with greige LEFT AFTER ITS OWN COMMITTED ASK gets a
+            // row, capped at what the lot still holds AND at what the
+            // MATERIAL is still short overall — never more than the job
+            // needs, and never a second time for greige already offered.
             //
-            // Derived from the OUTSTANDING PIECES, converted to whole marker
-            // rows per cut size — the same conversion the buy figure uses below,
-            // and the only correct one: fabric fulfilment is counted in cut
-            // pieces, and a line's metres depend on its own cut geometry. A line
-            // with no countable geometry contributes nothing rather than a
-            // guess.
-            var fwWash = Number(e.fabricWidthCm) || 0;
-            var stillShort = 0;
-            (e.lines || []).forEach(function (l) {
-                var owedPc = (Number(l.reqPieces) || 0) - (Number(l.issPieces) || 0);
-                if (owedPc <= 0) return;
-                var cw = Number(l.cutW) || 0, cl = Number(l.cutL) || 0;
-                if (!(fwWash > 0 && cw > 0 && cl > 0 && fwWash >= cw)) return;
-                var perRow = Math.floor(fwWash / cw);
-                if (perRow <= 0) return;
-                stillShort += Math.ceil(owedPc / perRow) * cl / 100;
+            // THE MATERIAL-WIDE FIGURE IS `fabricShortMetres(e)`, THE SAME ONE
+            // THE BUY ROW USES — not a second, independent count of raw
+            // outstanding pieces. That second count was the actual bug: it
+            // summed every order's raw `reqPieces - issPieces` with no
+            // reference to what the committed-wash pass had already resolved,
+            // so a lot could receive a legitimate 729.20 m committed row AND
+            // an unrelated top-up computed as if none of those orders had a
+            // lot yet — asking to wash cloth that had already been accounted
+            // for once, while the genuine 14.57 m remainder on that same lot
+            // went unmentioned because the lot was already in `washedLots`.
+            //
+            // Committed rows are subtracted from the material figure before
+            // the lot walk starts, so the two halves add up to one number
+            // instead of two that can each be short or long on their own.
+            var stillShort = fabricShortMetres(e);
+            Object.keys(committedByLot).forEach(function (lotId) {
+                stillShort = round2(stillShort - committedByLot[lotId]);
             });
-            stillShort = round2(stillShort);
+            if (stillShort < 0) stillShort = 0;
+
             if (stillShort > 0) {
                 (e.lots || [])
                     .filter(function (l) {
-                        return !l.blocked && !washedLots[String(l.lotId)] &&
-                               l.form !== 'Pieces' && round2(Number(l.unwash) || 0) > 0;
+                        var already = committedByLot[String(l.lotId)] || 0;
+                        var left = round2((Number(l.unwash) || 0) - already);
+                        return !l.blocked && l.form !== 'Pieces' && left > 0;
                     })
                     .sort(function (a, b) {
-                        return (Number(b.unwash) || 0) - (Number(a.unwash) || 0);
+                        var aLeft = round2((Number(a.unwash) || 0) - (committedByLot[String(a.lotId)] || 0));
+                        var bLeft = round2((Number(b.unwash) || 0) - (committedByLot[String(b.lotId)] || 0));
+                        return bLeft - aLeft;
                     })
                     .forEach(function (l) {
                         if (stillShort <= 0.0001) return;
-                        var q = round2(Math.min(Number(l.unwash) || 0, stillShort));
+                        var already = committedByLot[String(l.lotId)] || 0;
+                        var left = round2((Number(l.unwash) || 0) - already);
+                        if (left <= 0) return;
+                        var q = round2(Math.min(left, stillShort));
                         if (q <= 0) return;
                         stillShort = round2(stillShort - q);
-                        toWash.push({ e: e, qty: q, kind: 'wash', lot: l,
-                                      // Nothing is committed to this lot — washing
-                                      // it is an offer, not a job an order is
-                                      // already waiting on. The dialog says so.
+                        // The row's own greige figure is what is LEFT on the
+                        // lot, not the lot's raw total — a lot already
+                        // carrying a committed row must not show its whole
+                        // pile as available a second time in the dialog's
+                        // "this lot only has N unwashed" math.
+                        var lotForRow = already > 0
+                            ? Object.assign({}, l, { unwash: left })
+                            : l;
+                        toWash.push({ e: e, qty: q, kind: 'wash', lot: lotForRow,
+                                      // No ORDER is waiting on this specific
+                                      // slice — washing it is an offer, not a
+                                      // job already committed to. The dialog
+                                      // says so. (A lot can appear once here
+                                      // AND once above, as two rows: one
+                                      // committed, one uncommitted top-up on
+                                      // the same physical lot.)
                                       uncommitted: true });
                     });
             }
@@ -3487,87 +3610,13 @@ function buildShortfallSummary(data) {
             // Issue-invariant: an order handed over leaves `orderOutcomes`
             // covered (its requirement pieces are issued, the allocator seats
             // the rest), so the gap does not move as material goes out.
-            var fw = Number(e.fabricWidthCm) || 0;
-            var perRowFab = function (cutW) {
-                var cw = Number(cutW) || 0;
-                return (fw > 0 && cw > 0 && fw >= cw) ? Math.floor(fw / cw) : 0;
-            };
-
-            // Cut length per plan — FALLBACK ONLY, for an outcome with no
-            // `cuts[]` (an older cached payload from before the allocator
-            // started emitting per-cut breakdowns). orderOutcomes carries
-            // pieces + planId; the cut geometry is on the lines.
-            var cutByPlan = {};
-            (e.lines || []).forEach(function (l) {
-                var pid = String(l.planId || '');
-                if (!pid) return;
-                var cw = Number(l.cutW) || 0, cl = Number(l.cutL) || 0;
-                if (cw > 0 && cl > 0 && !cutByPlan[pid]) {
-                    cutByPlan[pid] = { cutW: cw, cutL: cl };
-                }
-            });
-
-            // orderOutcomes is written by the allocator per supervisor CARD
-            // (allocateMaterial runs once per card against a shared draining
-            // ledger); byMat merged every card's array above, once each, so
-            // this is now every order from every supervisor that mentioned
-            // the material — not just the first card's.
+            //
+            // Shared with the wash top-up above — fabricShortMetres(e) — so
+            // the two can never derive two different "still short" answers
+            // for the same material again. See its own header for why that
+            // used to happen.
             var outcomes = e.orderOutcomes || [];
-
-            // PER CUT SIZE, NOT PER PLAN. One order (plan) commonly spans many
-            // distinct cut sizes — a bulk order can carry a hundred of them,
-            // from small trims to large panels — and each needs its OWN
-            // marker-row rounding: pieces / perRow(cutW), rounded up, times
-            // cutL. Collapsing them into one aggregate piece count and
-            // applying a single guessed cut size (the plan's first line)
-            // wildly distorted the metres figure — confirmed against a real
-            // 515-piece / ~100-cut-size order where the old per-plan guess
-            // read 1,308 m against a true per-cut total of 660 m, because it
-            // applied one large cut's geometry (279x254) to hundreds of much
-            // smaller pieces that would have needed far fewer marker rows.
-            var shortMetres = 0;
-            var shortSeenPlans = {};
-            outcomes.forEach(function (o) {
-                var pid = String(o.planId || '');
-                if (pid) shortSeenPlans[pid] = true;
-
-                if (o.cuts && o.cuts.length) {
-                    o.cuts.forEach(function (c) {
-                        var owedHere = o.why === 'skipped'
-                            ? (Number(c.pieces) || 0)
-                            : (Number(c.shortPieces) || 0);
-                        if (owedHere <= 0) return;
-                        var pr = perRowFab(c.cutW);
-                        if (pr > 0) {
-                            shortMetres += Math.ceil(owedHere / pr) * (Number(c.cutL) || 0) / 100;
-                        }
-                    });
-                    return;
-                }
-
-                // FALLBACK — no per-cut breakdown on this outcome.
-                var owedPieces = 0;
-                if (o.why === 'skipped') {
-                    owedPieces = Number(o.pieces) || 0;
-                } else {
-                    owedPieces = Number(o.shortPieces) || 0;
-                }
-                if (owedPieces <= 0) return;
-                var geo = cutByPlan[pid];
-                if (geo) {
-                    var pr2 = perRowFab(geo.cutW);
-                    if (pr2 > 0) {
-                        shortMetres += Math.ceil(owedPieces / pr2) * geo.cutL / 100;
-                    } else if (Number(o.needMetres) > 0) {
-                        shortMetres += Number(o.needMetres);
-                    }
-                } else if (Number(o.needMetres) > 0) {
-                    // No cut geometry for this plan — fall back to the
-                    // allocator's own metres figure for the order.
-                    shortMetres += Number(o.needMetres);
-                }
-            });
-            shortMetres = round2(shortMetres);
+            var shortMetres = fabricShortMetres(e);
 
             // USABLE STOCK — what the allocator actually could and did place
             // against today's orders, in metres. `o.metres` is only nonzero
@@ -3761,6 +3810,22 @@ function summaryRow(entry, idx) {
             (((entry.lot ? Number(entry.lot.inWash) : Number(e.inWash)) || 0) > 0
                 ? '<div class="sum-inwash">+' +
                 fmt(entry.lot ? entry.lot.inWash : e.inWash) + ' at wash</div>'
+                : '') +
+            // A PO WAS RAISED, THE BILL LANDED, AND WASHING THIS LOT STILL WILL
+            // NOT CLOSE THE GAP — because the bought cloth is not on this lot at
+            // all. syncPurchaseInflow deliberately credits an arrived bill to
+            // Unallocated_Qty, never straight into a lot: which lot a roll
+            // belongs to is a tone decision only a person can make, so the sync
+            // cannot guess it. The buy row said so while the row was still on
+            // the purchase list, but the moment the PO resolves and the row
+            // drops to wash-only, that note had nowhere to render — a wash row
+            // never looked at `e.unallocated` at all. Without it, the sequence
+            // "raise PO, bill lands, wash the lot, still short" repeats with
+            // nothing on screen explaining that a step was skipped.
+            (e.isFabric && (Number(e.unallocated) || 0) > 0.0001
+                ? '<div class="sum-lot-short">' + fmt(e.unallocated) +
+                ' from your last PO is unallocated &mdash; put it into a lot ' +
+                'first, or washing will not close this</div>'
                 : '') +
             '</td>'
             : '') +

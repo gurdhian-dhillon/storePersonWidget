@@ -1508,9 +1508,18 @@ th.col-num {
    screen in this app, reuse is the good outcome.
    ONE SHORT LINE EACH now that the two are split apart (used to be one
    wrapped "Lot X · Carton Y" line, hence the old fixed height) — natural
-   height off the shared min-height rule above is enough. */
+   height off the shared min-height rule above is enough.
+   NO margin-top HERE. There was one (0.35rem), left over from before the
+   shared `min-height: 2.4rem` rule existed to keep every sub-line the same
+   height across LOT / ROLL / TOTAL STOCK / ISSUE NOW / "To be issued". That
+   rule is what makes pick N line up with pick N in every column now — the
+   `.tbi-waste-size` badge in "To be issued" has no matching margin, so this
+   line grew 0.35rem taller than its own row on every waste pick and the
+   drift compounded: two picks, 0.7rem out, visibly below where LOT/ROLL said
+   it should be. The `min-height` box's own `align-items: center` already
+   centres the line within its row; a margin on top of that box is what broke
+   it. */
 .waste-where {
-    margin-top: 0.35rem;
     padding: 0.3rem 0.5rem;
     background: #f8fafb;
     border-left: 2px solid #047857;

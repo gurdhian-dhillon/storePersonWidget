@@ -44,7 +44,7 @@ function extract(name) {
 }
 
 const fns = ['fmt', 'qty', 'isPieceTracked', 'isFullyIssued', 'exTypeFor',
-             'openRequestFor', 'requestState', 'buildShortfallSummary']
+             'openRequestFor', 'requestState', 'fabricShortMetres', 'buildShortfallSummary']
   .map(extract).join('\n');
 
 const sandbox = {

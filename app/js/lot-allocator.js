@@ -2476,14 +2476,27 @@ function shortReasonFor(m, r, lots) {
             }
         });
         if (big) {
-            // `short` is what THIS ROW is still missing, the same figure the
-            // top of this function used to decide the row is short at all —
-            // carried through so the screen can say "issuing most of it today,
-            // still short N" instead of leaving him to read a lot box showing
-            // real progress right next to a warning and work out for himself
-            // that they are both true at once.
+            // `short` IS `need` HERE, AND THAT WAS THE BUG.
+            //
+            // `want - got` is the whole ROW's remaining fresh-cloth demand —
+            // right when the row has one order left to explain, wrong the
+            // moment other orders on the same row were covered by REMNANTS
+            // rather than a lot. Offcuts reduce `m.remaining` (fresh cloth
+            // only) without touching `r.noFitSmallest`, which is the METRES
+            // THE STUCK ORDER ITSELF NEEDS — so a row where two OTHER orders
+            // were served from waste read "still short 7.5" next to "closest
+            // is L2" (7.5 m free) while the order actually stuck there needed
+            // 9 m and L2 could never have covered it. He reads the two
+            // numbers as the same fact and concludes 7.5 m more should close
+            // it; it would not have.
+            //
+            // `r.noFitSmallest` is exactly the right figure already — it is
+            // the smallest refused order's own metres, tracked at the point
+            // the allocator gave up on it (line ~1491) — and was already
+            // being computed and printed as `need`. `short` only ever needed
+            // to read the same value; there is no second figure to compute.
             return { kind: 'nofit', lot: big.lotNumber, have: big.qty,
-                     need: round2(r.noFitSmallest), short: round2(want - got) };
+                     need: round2(r.noFitSmallest), short: round2(r.noFitSmallest) };
         }
     }
 
