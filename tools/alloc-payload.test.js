@@ -196,5 +196,43 @@ console.log('\n=== P8: TOTAL CONSERVATION — payload metres == what left the ra
   check('400 randomised payloads conserve metres', bad===0, bad+' violations');
 }
 
+console.log('\n=== P9: each allocation carries rollLabel as a READY-BUILT STRING ===');
+{
+  // issueMaterialsApply reads a.get("rollLabel") to stamp
+  // Material_Requirement.Roll_Label - it must NOT have to parse a.rolls.
+  // Single roll -> bare label; multi-roll -> "L-R1 5m, L-R2 3m".
+  const m1 = mkMat({
+    lots:[{lotId:'L1',lotNumber:'L1',wash:1000,unwash:0,inWash:0,blocked:false,
+           rolls:[roll('R1',500)],form:'Roll'}],
+    lines:[{planId:'p1',planItemId:'i1',mrqId:'m1',cutW:150,cutL:100,reqPieces:5,issPieces:0}]
+  });
+  allocateEveryCard([{supervisorId:'A',supervisorName:'A',materials:[m1]}]);
+  const o1 = buildFabricIssueLine(m1, []);
+  const a1 = (o1.allocations||[])[0] || {};
+  check('single-roll rollLabel is the bare label', a1.rollLabel === 'R1',
+    'rollLabel=' + JSON.stringify(a1.rollLabel));
+  check('rollLabel is a string', typeof a1.rollLabel === 'string', typeof a1.rollLabel);
+
+  const m2 = mkMat({
+    lots:[{lotId:'L2',lotNumber:'L2',wash:1000,unwash:0,inWash:0,blocked:false,
+           rolls:[roll('R1',6),roll('R2',6)],form:'Roll'}],
+    lines:[{planId:'p1',planItemId:'i1',mrqId:'m1',cutW:150,cutL:100,reqPieces:8,issPieces:0}]
+  });
+  allocateEveryCard([{supervisorId:'A',supervisorName:'A',materials:[m2]}]);
+  const o2 = buildFabricIssueLine(m2, []);
+  const a2 = (o2.allocations||[])[0] || {};
+  check('multi-roll rollLabel joins "<label> <m>m"',
+    /R\d \d/.test(String(a2.rollLabel)) && String(a2.rollLabel).indexOf(',') > -1,
+    'rollLabel=' + JSON.stringify(a2.rollLabel));
+  // and it must match what buildHandoverSummary would put on the Issue_Line
+  const s2 = (typeof sb.buildHandoverSummary === 'function')
+    ? sb.buildHandoverSummary([o2]) : null;
+  if (s2 && s2.lines && s2.lines[0]) {
+    check('payload rollLabel == handover-line Roll_Label',
+      String(a2.rollLabel) === String(s2.lines[0].rollLabel),
+      'payload=' + JSON.stringify(a2.rollLabel) + ' handover=' + JSON.stringify(s2.lines[0].rollLabel));
+  }
+}
+
 console.log('\n' + (fails===0?'ALL PAYLOAD CHECKS HELD':fails+' FAILURE(S)'));
 process.exit(fails===0?0:1);

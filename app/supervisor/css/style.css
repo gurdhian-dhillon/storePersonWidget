@@ -2043,6 +2043,20 @@ th.col-num {
     color: var(--text-muted);
 }
 
+/* Lot & roll cell in the production "Materials for this item" table -
+   "L2 -> R1, R2" per lot, stacked. Same shape as the Handovers tab. */
+.prod-lotroll-cell { line-height: 1.4; }
+.prod-lot-line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    font-size: 0.82rem;
+}
+.prod-lot-line + .prod-lot-line { margin-top: 0.15rem; }
+.prod-lot-name { color: #1d4ed8; font-weight: 700; }
+.prod-lot-arrow { color: var(--text-muted); }
+.prod-roll-list { color: var(--text-main); }
+
 /* ---- Supervisor shell ---- */
 
 .app-header-left {
@@ -2729,76 +2743,6 @@ th.col-num {
 .day-bar-sub {
     margin-left: auto;
     font-size: 0.8125rem;
-    color: var(--text-muted);
-}
-
-/* ---- "Material you received" per-item split ---- */
-
-/* A material with a per-item breakdown is click-to-expand. The main row shows a
-   chevron and an "N items" hint; its sub-rows start hidden. */
-.recv-mat-row.is-expandable {
-    cursor: pointer;
-}
-
-.recv-mat-row.is-expandable:hover .mat-name {
-    color: var(--primary);
-}
-
-.recv-chevron {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 0.9rem;
-    height: 0.9rem;
-    margin-right: 0.4rem;
-    vertical-align: -0.1rem;
-    color: var(--text-muted);
-    transition: transform 0.12s ease;
-}
-
-.recv-chevron svg {
-    width: 0.6rem;
-    height: 0.6rem;
-    display: block;
-}
-
-.recv-mat-row.is-open .recv-chevron {
-    transform: rotate(90deg);
-    color: var(--primary);
-}
-
-.recv-item-count {
-    font-size: 0.7rem;
-    font-weight: 600;
-    color: var(--text-muted);
-    margin-left: 0.4rem;
-}
-
-/* The store fanned one press of Issue across several of his items. Each of
-   those sub-rows sits under its material line, lightly recessed so it reads as
-   a breakdown of the row above and not as another material. */
-.recv-split-row td {
-    border-top: none;
-    padding-top: 0.15rem;
-    padding-bottom: 0.15rem;
-    background: #f8fafc;
-}
-
-.recv-split-item {
-    font-size: 0.8125rem;
-    color: var(--text-muted);
-    padding-left: 0.6rem;
-}
-
-.recv-split-sku {
-    font-size: 0.7rem;
-    font-weight: 600;
-    color: var(--text-muted);
-    opacity: 0.75;
-}
-
-.recv-split-status {
-    font-size: 0.75rem;
     color: var(--text-muted);
 }
 
@@ -3558,6 +3502,24 @@ th.col-num {
 }
 .w-lot {
     min-width: 8rem;
+}
+
+/* Waste-dialog number inputs: no spinner arrows - they crowd a narrow cell
+   and nobody clicks them. Plain right-aligned boxes. */
+#waste-modal input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+    width: 6rem;
+    text-align: right;
+    font: inherit;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+}
+#waste-modal input[type="number"]::-webkit-outer-spin-button,
+#waste-modal input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
 }
 
 /* Closing an alteration batch. The declared return count is the only figure in

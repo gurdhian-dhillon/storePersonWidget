@@ -1779,78 +1779,31 @@ function load(soId) {
 // A widget's Custom API calls are not metered, so extra calls cost nothing.
 var LIVE = null;
 
-// getStoreMaterialRequirements now PAGES by Material_Requirement row budget,
-// not by a fixed plan count - see that function's own header comment for
-// why a fixed plan count was tried first and proven wrong. Contract is
-// {"plans":[...],"plansConsumed":N}; the audit screen needs the FULL
-// picture (it exists specifically to catch discrepancies, so silently
-// auditing only the first budget-worth of plans would be actively
-// misleading, not just incomplete) so this walks every page the same way
-// the store screen's app/js/main.js does. Not shared code with that file -
-// this widget's widget.html does not load app/js/main.js, only
-// lot-allocator.js and its own main.js - so the merge helper is duplicated
-// here rather than reaching across widgets for it.
-function mergeLiveRequirementPages(target, page) {
-    for (var i = 0; i < page.length; i++) {
-        var block = page[i];
-        var existing = null;
-        for (var j = 0; j < target.length; j++) {
-            if (target[j].supervisorId === block.supervisorId) {
-                existing = target[j];
-                break;
-            }
-        }
-        if (existing) {
-            existing.materials = existing.materials.concat(block.materials);
-        } else {
-            target.push(block);
-        }
-    }
-}
-
+// The live requirements come from ApiExperiment.run() (../js/api-experiment.js) -
+// the SAME JS-Data-API port the store screen runs on. It returns the FULL
+// unpaged {plans:[...]} in one call, every supervisor, in the exact shape the
+// old getStoreMaterialRequirements custom function returned - so applyLotAllocation
+// and everything reading LIVE below are unchanged. The audit needs the whole
+// picture (it exists to catch discrepancies), which run() gives directly; the
+// old row-budget paging walk is gone with the Deluge function.
 function loadLive(done) {
     LIVE = [];
-    var MAX_CALLS = 40; // safety cap - real stop condition is plansConsumed===0
 
-    function fetchPage(skipCount, callsSoFar) {
-        if (callsSoFar >= MAX_CALLS) {
-            console.error('loadLive: hit MAX_CALLS safety cap, stopping');
-            return Promise.resolve();
-        }
-        return ZOHO.CREATOR.DATA.invokeCustomApi({
-            api_name: 'getStoreMaterialRequirements',
-            http_method: 'POST',
-            payload: {
-                skipCountTxt: String(skipCount),
-                // Creator Custom API args are all MANDATORY - "" = legacy
-                // chained mode (this audit walk stays sequential; it is a
-                // background load, not the store person waiting on a screen).
-                pagePlansTxt: ''
-            }
-        }).then(function (response) {
-            var parsed = JSON.parse(response.result);
-            mergeLiveRequirementPages(LIVE, parsed.plans || []);
-            var consumed = parsed.plansConsumed || 0;
-            if (consumed > 0) {
-                return fetchPage(skipCount + consumed, callsSoFar + 1);
-            }
-        });
-    }
-
-    fetchPage(0, 0).then(function () {
+    ApiExperiment.run().then(function (out) {
+        LIVE = (out && out.plans) || [];
         try {
             // The store screen's own pass, unchanged. Everything the audit
             // reads below is what it writes onto the material entries.
             applyLotAllocation(LIVE);
         } catch (e) {
-            console.error('live allocation parse failed:', e);
+            console.error('live allocation pass failed:', e);
             LIVE = null;
         }
         done();
     }).catch(function (err) {
         // The plan-time half of this screen is still worth showing, so a failure
         // here is reported in the step rather than replacing the page.
-        console.error('getStoreMaterialRequirements error:', err);
+        console.error('ApiExperiment.run error:', err);
         LIVE = null;
         done();
     });

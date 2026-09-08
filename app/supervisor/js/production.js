@@ -17,6 +17,45 @@ function isCuttingPhase(name) {
 	return String(name || "").trim() === "Cutting";
 }
 
+// LOT & ROLL CELL for a fabric material row. mat.lotRolls is
+// [{lot:"L2", rolls:["R1","R2 4m"]}, ...] from getProductionWidgetData - one
+// entry per Issued_Lot, each roll string possibly carrying a per-roll metre
+// suffix ("R2 4m") when the row drew from several rolls. Rendered "L2 -> R1, R2"
+// per lot, stacked. Same convention as the Handovers tab. Empty -> "-".
+function lotRollCellHtml(mat) {
+	const lots = (mat && mat.lotRolls) || [];
+	if (!Array.isArray(lots) || lots.length === 0) {
+		return '<span class="is-muted">&mdash;</span>';
+	}
+	return lots
+		.map((lr) => {
+			const names = (lr.rolls || [])
+				.map((r) => {
+					// Strip a trailing " <number>m" suffix to just the label.
+					const s = String(r).trim();
+					const sNoM = s.slice(-1) === "m" ? s.slice(0, -1) : s;
+					const sp = sNoM.lastIndexOf(" ");
+					if (sp > 0 && !isNaN(Number(sNoM.slice(sp + 1).trim()))) {
+						return escapeHtml(sNoM.slice(0, sp).trim());
+					}
+					return escapeHtml(s);
+				})
+				.filter(Boolean);
+			// No roll recorded for this lot -> just show the lot, no arrow.
+			if (!names.length) {
+				return `<div class="prod-lot-line"><b class="prod-lot-name">${escapeHtml(
+					lr.lot,
+				)}</b></div>`;
+			}
+			return `<div class="prod-lot-line"><b class="prod-lot-name">${escapeHtml(
+				lr.lot,
+			)}</b><span class="prod-lot-arrow">&rarr;</span><span class="prod-roll-list">${names.join(
+				", ",
+			)}</span></div>`;
+		})
+		.join("");
+}
+
 // A batch of garments the checker sent back to be fixed rather than remade.
 //
 // Everything that differs about it hangs off this ONE server flag and never off
@@ -1153,6 +1192,7 @@ function renderItemCard(plan, item, index) {
                         <tr>
                             <th>Material</th>
                             <th>Per piece size <span class="cut-axis">(L &times; W)</span></th>
+                            <th>Lot &amp; roll</th>
                             <th>Material You have</th>
                             <th>Pieces to cut</th>
                         </tr>
@@ -1243,6 +1283,13 @@ function renderItemCard(plan, item, index) {
 					? `<b>${cutCount}</b> <span class="unit">pcs</span>`
 					: `<span class="is-muted">&mdash;</span>`;
 
+			// Lot & roll: fabric off fresh cloth only. An offcut row names its
+			// own piece size instead; a trim has no lot.
+			const lotRollCell =
+				!mat.isWaste && mat.isFabric
+					? lotRollCellHtml(mat)
+					: '<span class="is-muted">&mdash;</span>';
+
 			matHtml += `
                 <tr${
 									mat.isWaste
@@ -1253,6 +1300,7 @@ function renderItemCard(plan, item, index) {
 								}>
                     <td class="material-name-cell">${nameCell}</td>
                     <td>${cutCell}</td>
+                    <td class="prod-lotroll-cell">${lotRollCell}</td>
                     <td class="col-strong">${haveCell}</td>
                     <td>${cutCountCell}</td>
                 </tr>
@@ -1262,9 +1310,9 @@ function renderItemCard(plan, item, index) {
 		// An empty table on a rejected batch is not a gap in the record — it is
 		// the batch's own state, and saying "no materials logged" would read as
 		// something having gone missing.
-		matHtml += `<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">Nothing asked for yet. Raise it on the <b>Reissue</b> tab and the store will see it.</td></tr>`;
+		matHtml += `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Nothing asked for yet. Raise it on the <b>Reissue</b> tab and the store will see it.</td></tr>`;
 	} else {
-		matHtml += `<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No materials logged against this item.</td></tr>`;
+		matHtml += `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No materials logged against this item.</td></tr>`;
 	}
 
 	matHtml += `</tbody></table></div>`;
@@ -2020,6 +2068,17 @@ function renderItemCard(plan, item, index) {
 		});
 	}
 
+	// "Preview expected waste" lives in the MATERIALS section at the top of the
+	// item body - NOT inside a stage card. It was wired inside the
+	// phaseCards.forEach loop below (querying each `.stage-card` for it, finding
+	// null every time), so the click did nothing. It hangs off `body`.
+	const btnWastePreview = body.querySelector(".btn-waste-preview");
+	if (btnWastePreview) {
+		btnWastePreview.addEventListener("click", () => {
+			openWasteDialog(plan, item, Number(item.qty) || 0, true);
+		});
+	}
+
 	// Attach event listeners
 	const phaseCards = body.querySelectorAll(".stage-card[data-phase]");
 	phaseCards.forEach((card) => {
@@ -2215,13 +2274,6 @@ function renderItemCard(plan, item, index) {
 				);
 			});
 		});
-
-		const btnWastePreview = card.querySelector(".btn-waste-preview");
-		if (btnWastePreview) {
-			btnWastePreview.addEventListener("click", () => {
-				openWasteDialog(plan, item, Number(item.qty) || 0, true);
-			});
-		}
 
 		const btnsSave = card.querySelectorAll(".btn-save");
 		btnsSave.forEach((btnSave) => {
@@ -2921,6 +2973,19 @@ function lotCellHtml(r, preview) {
 	const lots = wasteLotsByMat[String(r.materialId)] || [];
 	const disabled = preview || !r.keep;
 
+	// PREVIEW is read-only: always plain text, never a <select>.
+	if (preview) {
+		const named = lots.find((l) => String(l.lotId) === String(r.lotId));
+		const label = named
+			? named.lotNumber || "—"
+			: lots.length === 1
+				? lots[0].lotNumber || "—"
+				: r.lotId
+					? "—"
+					: "not recorded";
+		return `<span class="w-lot-fixed">${escapeHtml(label)}</span>`;
+	}
+
 	// The prediction already placed this piece — show what it decided rather
 	// than asking again. He can still change it by editing the row's fabric.
 	if (r.lotId) {
@@ -2963,25 +3028,44 @@ function renderWasteDialog(errors) {
 
 	const rows = wasteDraft
 		.map((r) => {
+			// PREVIEW is read-only — render plain values, not disabled form
+			// controls. The greyed-out <select> and spinner <input>s read as
+			// "you can edit this but it's locked", which is not what a
+			// prediction is.
+			if (preview) {
+				const matName =
+					(opts.find((o) => o.materialId === r.materialId) || {}).material ||
+					r.materialId;
+				return `
+            <tr data-key="${r.key}">
+                <td>${escapeHtml(matName)}</td>
+                <td>${lotCellHtml(r, true)}</td>
+                <td class="col-num">${fmt(r.length)}</td>
+                <td class="col-num">${fmt(r.width)}</td>
+                <td class="col-num"><b>${r.count}</b></td>
+                <td></td>
+            </tr>`;
+			}
+
 			const sel = opts
 				.map(
 					(o) =>
 						`<option value="${o.materialId}" ${o.materialId === r.materialId ? "selected" : ""}>${o.material}</option>`,
 				)
 				.join("");
-			const rowDisabled = preview || !r.keep;
+			const rowDisabled = !r.keep;
 			// Discarding does NOT delete the row — it flips it to scrap, which is
 			// still written so "how much did we throw away this month" stays
 			// answerable. A deleted row is silent loss.
 			return `
             <tr data-key="${r.key}" class="${r.keep ? "" : "w-discarded"}">
                 <td><select class="w-mat" ${rowDisabled ? "disabled" : ""}>${sel}</select></td>
-                <td>${lotCellHtml(r, preview)}</td>
+                <td>${lotCellHtml(r, false)}</td>
                 <td><input type="number" class="w-length" min="0" step="0.01" value="${r.length}" ${rowDisabled ? "disabled" : ""}></td>
                 <td><input type="number" class="w-width" min="0" step="0.01" value="${r.width}" ${rowDisabled ? "disabled" : ""}></td>
                 <td><input type="number" class="w-count" min="1" step="1" value="${r.count}" ${rowDisabled ? "disabled" : ""}></td>
                 <td class="w-actions">
-                    ${preview ? "" : `<button type="button" class="btn btn-secondary w-del">${r.keep ? "Discard" : "Keep"}</button>`}
+                    <button type="button" class="btn btn-secondary w-del">${r.keep ? "Discard" : "Keep"}</button>
                 </td>
             </tr>
         `;

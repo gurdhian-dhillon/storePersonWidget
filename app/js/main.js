@@ -4602,6 +4602,23 @@ function buildFabricIssueLine(m, picks) {
         // at this too. Waste first (scarcer, already paid for), then fresh.
         if (wst > owed) { wst = owed; }
         if (raw > owed - wst) { raw = Math.max(0, owed - wst); }
+        // The per-row roll picture as a READY-BUILT STRING, exactly the shape
+        // issueMaterialsHandover already gets in its `rollLabel` field:
+        // "R1" for one roll, "R1 5m, R2 1.05m" for several. issueMaterialsApply
+        // reads THIS to stamp Material_Requirement.Roll_Label - it must not
+        // parse the `rolls` array itself, because .toString() on a nested
+        // Deluge list-of-maps is not valid JSON and .toJSONList() then yields
+        // nothing (which is why Roll_Label was silently never written). `rolls`
+        // stays for the fan's per-roll decrement, which needs the metres.
+        var rrList = rollsByMrq[q] || [];
+        var rollLabelStr = '';
+        if (rrList.length === 1) {
+            rollLabelStr = String(rrList[0].label || '');
+        } else if (rrList.length > 1) {
+            rollLabelStr = rrList.map(function (rl) {
+                return String(rl.label || '') + ' ' + round2(Number(rl.metres) || 0) + 'm';
+            }).join(', ');
+        }
         return {
             mrqId: q,
             planId: planByMrq[q] || '',
@@ -4613,11 +4630,12 @@ function buildFabricIssueLine(m, picks) {
             // Which physical roll(s) this row's fresh cloth came off — empty
             // for a row served entirely by offcuts, and ALSO empty on a
             // rollsShared (hand-edited) lot, where no row-level share exists
-            // to report. issueMaterialsHandover reads this to stamp
-            // Issue_Lines.Roll_Label; sharedLot tells buildHandoverSummary to
-            // fall back to the lot-level answer instead of this row's (empty)
-            // one for those lines.
-            rolls: rollsByMrq[q] || [],
+            // to report. issueMaterialsHandover reads `rollLabel` (the string)
+            // to stamp Issue_Lines.Roll_Label; sharedLot tells
+            // buildHandoverSummary to fall back to the lot-level answer instead
+            // of this row's (empty) one for those lines.
+            rolls: rrList,
+            rollLabel: rollLabelStr,
             sharedLot: sharedLotByMrq[q] || ''
         };
     });

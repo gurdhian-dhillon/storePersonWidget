@@ -311,6 +311,40 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 			wantPlan = firstPlan;
 		}
 
+		// LAZY lot-number cache. Material_Requirement.Issued_Lot holds a record
+		// id; the cutting screen wants the label ("L2"). Resolved once per lot
+		// across the whole call - a plan touches a handful of lots at most.
+		lotNameById = Map();
+
+		// ROLL FALLBACK INDEX, "materialId|lotId" -> Roll_Label, built ONCE from
+		// this supervisor's handover lines. Used only when a fabric requirement
+		// row has a lot but no Roll_Label of its own (a hand-edited lot issued
+		// before issueMaterialsApply's shared-lot fallback existed) - the
+		// Issue_Lines row for the same material x lot got the roll even when the
+		// requirement row did not. Bounded by his own vouchers; no per-item
+		// query. Skipped entirely for the cross-floor (empty supervisorId) call.
+		ilRollByMatLot = Map();
+		if(supTxt != "" && supTxt.isNumber())
+		{
+			for each  ilMi in Material_Issue[Issued_To == supTxt.toLong()]
+			{
+				for each  ilLn in ilMi.Issue_Lines
+				{
+					ilLnMat = ifnull(ilLn.Material,"").toString().trim();
+					ilLnLot = ifnull(ilLn.Lot,"").toString().trim();
+					ilLnRoll = ifnull(ilLn.Roll_Label,"").toString().trim();
+					if(ilLnMat != "" && ilLnLot != "" && ilLnRoll != "")
+					{
+						ilFbKey = ilLnMat + "|" + ilLnLot;
+						if(ilRollByMatLot.get(ilFbKey) == null)
+						{
+							ilRollByMatLot.put(ilFbKey,ilLnRoll);
+						}
+					}
+				}
+			}
+		}
+
 		for each plan in pendingPlans
 		{
 			soNo = "";
@@ -738,6 +772,18 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 							aCur.put("reqPieces",0);
 							aCur.put("fromWaste",0);
 							aCur.put("fromRaw",0);
+							// WHICH LOT + ROLL to cut this row from - the tone
+							// pin issueMaterialsApply wrote onto Issued_Lot /
+							// Roll_Label. Several requirement rows can feed one
+							// aggregate entry and name different lots/rolls, so
+							// this is a list of "L2 -> R1, R2" style lines, one
+							// per distinct lot, deduped on lot+roll. Fresh
+							// collections built into their own vars first, same
+							// as the opStages loop above.
+							aNewLotOrd = List();
+							aNewLotMap = Map();
+							aCur.put("lotOrder",aNewLotOrd);
+							aCur.put("lotRolls",aNewLotMap);
 
 							// Set once, from the key. Every row under this entry
 							// has the same source by construction, so there is
@@ -756,6 +802,81 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 						aCur.put("fromWaste",aCur.get("fromWaste") + ifnull(mrA.Pieces_From_Waste,0));
 						aCur.put("fromRaw",aCur.get("fromRaw") + ifnull(mrA.Pieces_From_Raw,0));
 
+						// Fabric only carries a meaningful lot. Resolve the label
+						// once per lot into lotNameById, then fold this row's
+						// (lot, roll) pair into the aggregate's lotRolls map.
+						// Every .get() is assigned to its own variable before it
+						// is iterated or has a method called on it - Deluge does
+						// not reliably parse a method chain straight off .get().
+						aFab = ifnull(mrA.Is_Fabric,false);
+						aLotId = ifnull(mrA.Issued_Lot,"").toString().trim();
+						aLotIsNum = false;
+						if(aLotId != "")
+						{
+							aLotIsNum = aLotId.isNumber();
+						}
+						if(aFab == true && aLotIsNum == true)
+						{
+							aLotSeen = lotNameById.get(aLotId);
+							if(aLotSeen == null)
+							{
+								aLotLbl = "";
+								for each  lref in Raw_Material_Lot[ID == aLotId.toLong()]
+								{
+									aLotLbl = ifnull(lref.Lot_Number,"").toString().replaceAll("\"","'").trim();
+								}
+								lotNameById.put(aLotId,aLotLbl);
+								aLotSeen = aLotLbl;
+							}
+							aLotName = ifnull(aLotSeen,"").toString();
+							if(aLotName == "")
+							{
+								aLotName = "Lot " + aLotId;
+							}
+							aLotMap = aCur.get("lotRolls");
+							aLotOrd = aCur.get("lotOrder");
+							aLotList = aLotMap.get(aLotName);
+							if(aLotList == null)
+							{
+								aLotList = List();
+								aLotMap.put(aLotName,aLotList);
+								aLotOrd.add(aLotName);
+								aCur.put("lotRolls",aLotMap);
+								aCur.put("lotOrder",aLotOrd);
+							}
+							aRollTxt = ifnull(mrA.Roll_Label,"").toString().replaceAll("\"","'").trim();
+
+							// FALLBACK for a row issued on a hand-edited lot
+							// before issueMaterialsApply's shared-lot fallback
+							// existed: Material_Requirement.Roll_Label is empty
+							// but the Issue_Lines row for the same material x lot
+							// DID get one (buildHandoverSummary's own lotMoves
+							// fallback). ilRollByMatLot is built once per call
+							// (top of the try) - keyed "materialId|lotId" -> the
+							// first non-empty Roll_Label seen. No per-row query.
+							if(aRollTxt == "")
+							{
+								ilKey = (mrA.Material + "") + "|" + aLotId;
+								ilFbTxt = ilRollByMatLot.get(ilKey);
+								if(ilFbTxt != null)
+								{
+									aRollTxt = ilFbTxt.toString().replaceAll("\"","'").trim();
+								}
+							}
+
+							aRollSeen = false;
+							if(aRollTxt != "")
+							{
+								aRollSeen = aLotList.contains(aRollTxt);
+							}
+							if(aRollTxt != "" && aRollSeen == false)
+							{
+								aLotList.add(aRollTxt);
+								aLotMap.put(aLotName,aLotList);
+								aCur.put("lotRolls",aLotMap);
+							}
+						}
+
 						mAgg.put(aKey,aCur);
 					}
 				}
@@ -764,6 +885,35 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 				for each aK in mOrder
 				{
 					mr = mAgg.get(aK);
+
+					// lotRolls JSON: [{"lot":"L2","rolls":["R1","R2 4m"]}, ...]
+					// one entry per distinct Issued_Lot on this aggregate, its
+					// Roll_Label strings unparsed (the widget splits a multi-
+					// roll "R1 8m, R2 4m" the same way it does on the handover
+					// screen). Empty [] for a trim or an offcut-only row.
+					// .get() results assigned before iterating - never iterate
+					// straight off .get() in Deluge.
+					lrJson = "";
+					lrOrder = mr.get("lotOrder");
+					lrMap = mr.get("lotRolls");
+					if(lrOrder != null)
+					{
+						for each  lrLot in lrOrder
+						{
+							lrRollsJson = "";
+							lrRollList = lrMap.get(lrLot);
+							if(lrRollList != null)
+							{
+								for each  lrRoll in lrRollList
+								{
+									if(lrRollsJson != "") { lrRollsJson = lrRollsJson + ","; }
+									lrRollsJson = lrRollsJson + "\"" + lrRoll.toString().replaceAll("\"","'") + "\"";
+								}
+							}
+							if(lrJson != "") { lrJson = lrJson + ","; }
+							lrJson = lrJson + "{\"lot\":\"" + lrLot.toString().replaceAll("\"","'") + "\",\"rolls\":[" + lrRollsJson + "]}";
+						}
+					}
 
 					if(matsJson != "") { matsJson = matsJson + ","; }
 					// Cut detail carried for fabric. The supervisor is about to
@@ -774,7 +924,7 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 					// reads as one undifferentiated requirement, and the supervisor
 					// has no way to tell that half his pieces are coming off
 					// offcuts he has to handle differently.
-					matsJson = matsJson + "{\"materialId\":\"" + mr.get("materialId") + "\",\"name\":\"" + mr.get("name") + "\",\"received\":" + mr.get("received") + ",\"unit\":\"" + mr.get("unit") + "\",\"isFabric\":" + mr.get("isFabric") + ",\"isWaste\":false,\"isReissue\":" + mr.get("isReissue") + ",\"requiredPieces\":" + mr.get("reqPieces") + ",\"piecesFromWaste\":" + mr.get("fromWaste") + ",\"piecesFromRaw\":" + mr.get("fromRaw") + ",\"cutWidth\":" + mr.get("cutWidth") + ",\"cutLength\":" + mr.get("cutLength") + "}";
+					matsJson = matsJson + "{\"materialId\":\"" + mr.get("materialId") + "\",\"name\":\"" + mr.get("name") + "\",\"received\":" + mr.get("received") + ",\"unit\":\"" + mr.get("unit") + "\",\"isFabric\":" + mr.get("isFabric") + ",\"isWaste\":false,\"isReissue\":" + mr.get("isReissue") + ",\"requiredPieces\":" + mr.get("reqPieces") + ",\"piecesFromWaste\":" + mr.get("fromWaste") + ",\"piecesFromRaw\":" + mr.get("fromRaw") + ",\"cutWidth\":" + mr.get("cutWidth") + ",\"cutLength\":" + mr.get("cutLength") + ",\"lotRolls\":[" + lrJson + "]}";
 				}
 
 				// Waste pieces carry their own Plan_Item now, so no cross-match

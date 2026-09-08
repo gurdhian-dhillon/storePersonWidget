@@ -769,7 +769,7 @@ function loadSupHistory() {
             return;
         }
         renderSupHistory(parsed.items || [], parsed.stageCount || 0,
-            parsed.producedTotal || 0, parsed.receipts || []);
+            parsed.producedTotal || 0);
     }).catch(function (err) {
         console.error('getSupervisorProductionHistory error:', err);
         panel.innerHTML = '<div class="panel-placeholder"><h2>Failed to load</h2><p>Check the browser console.</p></div>';
@@ -835,204 +835,14 @@ function histBar(items, stageCount, producedTotal) {
         '</div>';
 }
 
-// What the store handed him over the same days.
-//
-// ONE ROW PER MATERIAL, not per handover. Material_Issue carries one Issue_Line
-// per plan item, so a single delivery repeats the same material several times —
-// the first version of this listed them inline and produced a cell reading
-// "DMC Embroidery Thread 30 Cone · DMC Embroidery Thread 30 Cone · DMC…" that
-// ran off the side of the table.
-//
-// He carried that thread once. His own Receive tab already states the rule —
-// "one line per physical thing, not per order" — so this follows it rather than
-// inventing a third way to lay out the same event.
-//
-// EACH MATERIAL ROW KEEPS ITS PER-ITEM SPLIT as forItems[], rolled up from the
-// same lines by (itemName, itemStatus). This is the "how was this handover
-// divided" detail — the store fanned one press of Issue across several of his
-// items, and this is which line went where. It is honest per line: Issue_Lines
-// carries Plan_Item on every row (getSupervisorProductionHistory now emits it),
-// unlike Material_Issue.Plan on the header, which is why the row itself still
-// names no single order. Lines with no item fold into one blank-name bucket.
-function supReceiptRows(receipts) {
-    var rows = [];
-
-    (receipts || []).forEach(function (r) {
-        var byMat = {};
-        var order = [];
-
-        (r.lines || []).forEach(function (l) {
-            // Unit is part of the key: the same name in Mtr and in Pcs is two
-            // different things and must never be added together.
-            //
-            // JSON.stringify, not a separator character. A material name is
-            // free text, and any sentinel picked out of it could appear
-            // inside it.
-            var key = JSON.stringify([l.material || '', l.unit || '']);
-            if (!byMat[key]) {
-                byMat[key] = {
-                    material: l.material || '—', unit: l.unit || '', qty: 0,
-                    itemsByKey: {}, itemOrder: []
-                };
-                order.push(key);
-            }
-            var g = byMat[key];
-            g.qty += Number(l.qty) || 0;
-
-            var iName = l.itemName || '';
-            var iSku = l.itemSku || '';
-            var iStat = l.itemStatus || '';
-            var iKey = JSON.stringify([iName, iSku, iStat]);
-            if (!g.itemsByKey[iKey]) {
-                g.itemsByKey[iKey] = { name: iName, sku: iSku, status: iStat, qty: 0 };
-                g.itemOrder.push(iKey);
-            }
-            g.itemsByKey[iKey].qty += Number(l.qty) || 0;
-        });
-
-        order.forEach(function (k) {
-            var g = byMat[k];
-            var forItems = g.itemOrder.map(function (ik) { return g.itemsByKey[ik]; });
-            // Nothing to show if the whole material went to a single unnamed
-            // bucket — that is the old pre-Plan_Item handover, and a one-row
-            // breakdown repeating the material name earns nothing.
-            var hasSplit = forItems.length > 1 ||
-                (forItems.length === 1 && forItems[0].name !== '');
-            rows.push({
-                time: r.time || '—',
-                settled: r.status === 'Received',
-                material: g.material,
-                unit: g.unit,
-                qty: g.qty,
-                forItems: hasSplit ? forItems : []
-            });
-        });
-    });
-
-    return rows;
-}
-
-function renderSupReceipts(receipts) {
-    var rows = supReceiptRows(receipts);
-    if (rows.length === 0) return '';
-
-    // No date column — every row on this screen is the same day, and a column
-    // that repeats one value is a column that earns nothing. Time stays: two
-    // handovers in a morning are worth telling apart.
-    //
-    // ACCORDION: a material with a per-item split (Issue_Lines.Plan_Item) is
-    // click-to-expand. The main row carries a chevron and toggles the sibling
-    // "→ item" rows, which start hidden. A material that went to a single named
-    // item (or no named item) has no split and is a plain row. One material at a
-    // time is not enforced — he may want two open to compare.
-    var html = rows.map(function (r, ri) {
-        var hasSplit = (r.forItems || []).length > 0;
-        var gid = 'recv-grp-' + ri;
-
-        var mainRow = '<tr class="recv-mat-row' + (hasSplit ? ' is-expandable' : '') + '"' +
-            (hasSplit ? ' onclick="toggleRecvGroup(\'' + gid + '\', this)"' : '') + '>' +
-            '<td>' + escapeHtml(r.time) + '</td>' +
-            '<td class="material-name-cell">' +
-                '<div class="mat-name">' +
-                    (hasSplit
-                        ? '<span class="recv-chevron" aria-hidden="true">' +
-                          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
-                          'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg></span>'
-                        : '') +
-                    escapeHtml(r.material) +
-                    (hasSplit
-                        ? ' <span class="recv-item-count">' + r.forItems.length + ' item' +
-                          (r.forItems.length === 1 ? '' : 's') + '</span>'
-                        : '') +
-                '</div>' +
-            '</td>' +
-            '<td class="col-num col-strong">' + fmt(r.qty) +
-                '<span class="unit">' + escapeHtml(r.unit) + '</span></td>' +
-            // Never the raw Issue_Status. "Issued" is the store's word for its
-            // own action and tells him nothing about what he still has to do.
-            '<td><span class="status-pill ' + (r.settled ? 'status-sufficient' : 'status-partial') + '">' +
-                (r.settled ? 'Received' : 'Awaiting your check') +
-            '</span></td>' +
-        '</tr>';
-
-        var splitRows = (r.forItems || []).map(function (it) {
-            var lbl = itemStatusLabel(it.status);
-            return '<tr class="recv-split-row hidden" data-recv-grp="' + gid + '">' +
-                '<td></td>' +
-                '<td class="recv-split-item">&rarr; ' +
-                    escapeHtml(it.name || 'Unassigned') +
-                    (it.sku ? ' <span class="recv-split-sku">' +
-                        escapeHtml(it.sku) + '</span>' : '') + '</td>' +
-                '<td class="col-num">' + fmt(it.qty) +
-                    '<span class="unit">' + escapeHtml(r.unit) + '</span></td>' +
-                '<td>' + (lbl ? '<span class="recv-split-status">' +
-                    escapeHtml(lbl) + '</span>' : '') + '</td>' +
-            '</tr>';
-        }).join('');
-
-        return mainRow + splitRows;
-    }).join('');
-
-    var handovers = (receipts || []).length;
-
-    // Collapsed by default. What he came to this tab for is what he PRODUCED;
-    // material in is context, and seventeen lines of it pushed the first item
-    // card off the bottom of the screen. The count stays in the header, so the
-    // card answers "did anything arrive today" without being opened.
-    return '' +
-        '<div class="item-card" id="sup-recv-card">' +
-            '<div class="item-header" onclick="toggleSupReceipts()">' +
-                '<div class="item-header-info">' +
-                    '<h2>Material you received</h2>' +
-                    '<div class="item-meta-line"><span>' + rows.length +
-                        (rows.length === 1 ? ' line' : ' lines') + ' across ' + handovers +
-                        (handovers === 1 ? ' handover' : ' handovers') + '</span></div>' +
-                '</div>' +
-                '<div class="item-header-right">' +
-                    '<span class="chevron" aria-hidden="true">' +
-                        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" ' +
-                            'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
-                    '</span>' +
-                '</div>' +
-            '</div>' +
-            '<div class="item-body">' +
-                '<div class="tables-container">' +
-                    '<div class="table-wrapper">' +
-                        '<table><thead><tr>' +
-                            '<th>Time</th><th>Material</th><th class="col-num">Qty</th>' +
-                            '<th>Status</th>' +
-                        '</tr></thead><tbody>' + html + '</tbody></table>' +
-                    '</div>' +
-                '</div>' +
-            '</div>' +
-        '</div>';
-}
-
-function toggleSupReceipts() {
-    var card = document.getElementById('sup-recv-card');
-    if (card) card.classList.toggle('open');
-}
-
-// Expand / collapse one material's per-item rows in "Material you received".
-function toggleRecvGroup(gid, rowEl) {
-    var subs = document.querySelectorAll('tr[data-recv-grp="' + gid + '"]');
-    var open = false;
-    for (var i = 0; i < subs.length; i++) {
-        subs[i].classList.toggle('hidden');
-        if (!subs[i].classList.contains('hidden')) open = true;
-    }
-    if (rowEl) rowEl.classList.toggle('is-open', open);
-}
-
-function renderSupHistory(items, stageCount, producedTotal, receipts) {
+function renderSupHistory(items, stageCount, producedTotal) {
     var panel = document.getElementById('panel-history');
     var bar = histBar(items, stageCount, producedTotal);
-    var recv = renderSupReceipts(receipts);
 
     if (items.length === 0) {
         // Material in but nothing produced is a real state, not an empty one —
         // it is exactly what a day spent waiting on cloth looks like.
-        panel.innerHTML = bar + recv +
+        panel.innerHTML = bar +
             '<div class="panel-placeholder">' +
                 '<h2>Nothing produced on this day</h2>' +
                 '<p>Only finished stages are listed. Work still in progress is on the Production tab.</p>' +
@@ -1130,7 +940,7 @@ function renderSupHistory(items, stageCount, producedTotal, receipts) {
             '</div>';
     }).join('');
 
-    panel.innerHTML = bar + recv + cards;
+    panel.innerHTML = bar + cards;
 }
 
 TAB_LOADERS.history = loadSupHistory;

@@ -194,34 +194,17 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 					// Built the same way buildHandoverSummary's rollLabel is: the
 					// single label, or every roll this row drew from joined the same
 					// way the allocator's own on-screen summary reads.
-					rollsForRow = ifnull(a.get("rolls"),"[]").toString().toJSONList();
-					rowRollLabel = "";
-					if(rollsForRow.size() == 1)
-					{
-						for each  rfr in rollsForRow
-						{
-							rfrM = rfr.toMap();
-							rowRollLabel = ifnull(rfrM.get("label"),"").toString().trim();
-						}
-					}
-					else if(rollsForRow.size() > 1)
-					{
-						for each  rfr2 in rollsForRow
-						{
-							rfrM2 = rfr2.toMap();
-							rfrLbl = ifnull(rfrM2.get("label"),"").toString().trim();
-							rfrMtrStr = ifnull(rfrM2.get("metres"),"0").toString().trim();
-							if(rfrMtrStr == "")
-							{
-								rfrMtrStr = "0";
-							}
-							if(rowRollLabel != "")
-							{
-								rowRollLabel = rowRollLabel + ", ";
-							}
-							rowRollLabel = rowRollLabel + rfrLbl + " " + rfrMtrStr.toDecimal() + "m";
-						}
-					}
+					// READ THE READY-BUILT STRING, exactly as issueMaterialsHandover
+					// reads its own `rollLabel` field. The old code tried to parse
+					// a.get("rolls") (a nested array) with .toString().toJSONList()
+					// - and .toString() on a Deluge list-of-maps is
+					// "[{label=R1, metres=6.75}]", NOT valid JSON, so .toJSONList()
+					// yielded nothing and Material_Requirement.Roll_Label was
+					// silently never written even though Issue_Lines.Roll_Label
+					// (fed the same way the handover is) always got it. The widget
+					// now sends the string; `rolls` stays only for the per-roll
+					// metre decrement in section 3.
+					rowRollLabel = ifnull(a.get("rollLabel"),"").toString().replaceAll("\"","'").trim();
 					mrqRecs = Material_Requirement[ID == mrqId.toLong()];
 					if(mrqId == "" || mrqRecs.count() == 0)
 					{
