@@ -3041,6 +3041,9 @@ function defaultPriorityOrder(data) {
 // when Issue is actually pressed.
 var __priorityOrder = null;
 var __draftOrder = null;
+// Set while Apply re-renders, so render() does not force the first card
+// open mid-reorder. Fresh loads leave it false and keep the auto-open.
+var __suppressFirstOpen = false;
 
 // Sort `data` into the order the allocation should walk. Falls back to the
 // server's own order for any supervisor the saved order does not name, so a
@@ -3110,6 +3113,9 @@ function applyPriorityOrder() {
     if (!__draftOrder) return;
     __priorityOrder = __draftOrder.slice();
     __draftOrder = null;
+    // Keep whatever is open (during a reorder that is nothing) — do not
+    // force the first card open the way a fresh load does.
+    __suppressFirstOpen = true;
     render(window.__rawData || window.__reqData);
 }
 
@@ -3142,6 +3148,10 @@ function priorityBarHtml() {
 
 // Repaint the card list in the draft order WITHOUT touching the allocation.
 // Everything it draws comes from figures already computed by the last render.
+//
+// Deliberately opens NOTHING: an arrow click rebuilds the DOM, and forcing
+// the first card open there yanks the screen away from the card he was
+// reordering. He opens what he needs by hand.
 function redrawCards() {
     var content = document.getElementById('dynamic-content');
     if (!content) return;
@@ -3154,8 +3164,6 @@ function redrawCards() {
         ordered.map(renderSupervisorCard).join('') +
         renderShortfallSummary(window.__rawData || ordered);
     ordered.forEach(function (_, idx) { refreshCardState(idx); });
-    var firstCard = document.getElementById('sup-card-0');
-    if (firstCard) firstCard.classList.add('open');
 }
 
 // THE ONE TRUE "STILL SHORT" FIGURE FOR A FABRIC MATERIAL, in metres.
@@ -4307,8 +4315,15 @@ function render(data) {
     // here runs it for cards that do not exist and reads past the end.
     actionable.forEach(function (_, idx) { refreshCardState(idx); });
 
-    var firstCard = document.getElementById('sup-card-0');
-    if (firstCard) firstCard.classList.add('open');
+    // Fresh loads auto-open the first card. Apply sets
+    // __suppressFirstOpen first, so a reorder keeps whatever is open
+    // (nothing, mid-reorder) instead of yanking the first card open.
+    if (__suppressFirstOpen) {
+        __suppressFirstOpen = false;
+    } else {
+        var firstCard = document.getElementById('sup-card-0');
+        if (firstCard) firstCard.classList.add('open');
+    }
 }
 
 // ---- Issue action ----

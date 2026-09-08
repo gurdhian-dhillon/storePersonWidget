@@ -1510,15 +1510,17 @@ th.col-num {
    wrapped "Lot X · Carton Y" line, hence the old fixed height) — natural
    height off the shared min-height rule above is enough.
    NO margin-top HERE. There was one (0.35rem), left over from before the
-   shared `min-height: 2.4rem` rule existed to keep every sub-line the same
-   height across LOT / ROLL / TOTAL STOCK / ISSUE NOW / "To be issued". That
-   rule is what makes pick N line up with pick N in every column now — the
-   `.tbi-waste-size` badge in "To be issued" has no matching margin, so this
-   line grew 0.35rem taller than its own row on every waste pick and the
-   drift compounded: two picks, 0.7rem out, visibly below where LOT/ROLL said
-   it should be. The `min-height` box's own `align-items: center` already
-   centres the line within its row; a margin on top of that box is what broke
-   it. */
+   min-height rule below existed to keep every sub-line the same height
+   across LOT / ROLL / TOTAL STOCK / ISSUE NOW / "To be issued" — a margin on
+   top of that box added extra height nothing on the "To be issued" side
+   gained, and it compounded per pick. Removing it was necessary but NOT
+   sufficient on its own: the two sides still didn't line up, because
+   `.lot-line-row`'s own padding + content pushed its NATURAL height past
+   2.4rem while the plainer `.tbi-*` boxes sat right at the min-height floor
+   — so `min-height: 2.4rem` was a no-op on this side and the real (taller)
+   floor here. See the `.tbi-head` / `.tbi-spacer` / `.tbi-waste-size` rule,
+   which now matches that real height at 2.7rem rather than the two rules
+   sharing one number that only worked for one of them. */
 .waste-where {
     padding: 0.3rem 0.5rem;
     background: #f8fafb;
@@ -2453,12 +2455,20 @@ th.col-num {
 
 /* "To be issued" is a stacked column when the row carries waste: the fresh
    metres on top, blank spacers for each fresh lot line, then one green size per
-   waste pick — each spacer/size the same 2.4rem as a .lot-line-cell so pick N
-   lines up with pick N in LOT / TOTAL STOCK / ISSUE NOW. */
+   waste pick — each spacer/size sized to match .lot-line-row's LOT / TOTAL
+   STOCK / ISSUE NOW so pick N lines up with pick N there.
+   2.7rem, NOT the 2.4rem `.lot-line-cell` uses. `.lot-line-row` (the LOT
+   column's own box) carries padding + text that pushes its real height past
+   2.4rem — that number was only ever the floor for the plainer boxes
+   (.lot-line-cell / .lot-line-filler), never what LOT actually renders at.
+   This side has to match the taller one or the alignment breaks per pick,
+   compounding with every waste line on the row. If LOT's own padding/font
+   ever changes, re-measure this number against it — the two are matched by
+   hand, not derived from one shared rule. */
 .tbi-head,
 .tbi-spacer,
 .tbi-waste-size {
-    min-height: 2.4rem;
+    min-height: 2.7rem;
     box-sizing: border-box;
     display: flex;
     align-items: center;
