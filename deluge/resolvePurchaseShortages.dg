@@ -52,6 +52,49 @@ string resolvePurchaseShortages()
 				needStr = "0";
 			}
 			needQty = needStr.toDecimal();
+
+			//--------------------------------------------------------------
+			// THE TICKET CLOSES ON TOTAL OUTSTANDING DEMAND, NOT ON WHAT WAS
+			// ORDERED, and the difference is a live bug when a PO covers only
+			// part of the gap.
+			//
+			// Required_Qty now carries whole outstanding demand
+			// (raiseBulkPurchaseOrder sums it off the lines), but tickets
+			// raised BEFORE that change carry the ordered amount instead, and
+			// so does any ticket raised by a caller that sends no lines. So
+			// the lines are re-read here and the LARGER figure wins: an old
+			// ticket is judged on what its orders still want, a new one agrees
+			// with its own Required_Qty, and neither can close while orders are
+			// still waiting.
+			//
+			// Outstanding_Qty is written by raiseMaterialException as
+			// required - issued at raise time. It is a snapshot, not live - the
+			// orders behind it may have been partly issued since - which makes
+			// this err towards leaving the ticket OPEN. That is the safe
+			// direction: an open ticket is visible on the My requests tab and
+			// can be closed by hand, while one closed early takes its
+			// poCoveredQty with it and puts the material back in "What is
+			// missing" with no PO against it.
+			//--------------------------------------------------------------
+			lineNeed = 0.0;
+			for each  exLn in ex.Exception_Lines
+			{
+				lnOutS = ifnull(exLn.Outstanding_Qty,"0").toString().trim();
+				if(lnOutS == "")
+				{
+					lnOutS = "0";
+				}
+				lnOut = lnOutS.toDecimal();
+				if(lnOut > 0)
+				{
+					lineNeed = lineNeed + lnOut;
+				}
+			}
+			if(lineNeed > needQty)
+			{
+				needQty = lineNeed;
+			}
+
 			if(needQty <= 0)
 			{
 				// Nothing was actually asked for - close it, it cannot be

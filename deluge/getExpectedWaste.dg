@@ -110,6 +110,54 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 			{
 				lnqW = "0";
 			}
+
+			//--------------------------------------------------------------
+			// THE CLOTH HE IS ACTUALLY HOLDING, NOT WHAT THE STORE SENT.
+			//
+			// This function predicts the remnants a cutting run throws off,
+			// and the TAIL - what is left on the roll once the marker rows are
+			// cut - is a straight metres figure. Read off Issued_Qty it is the
+			// store's number; read off Received_Qty it is his.
+			//
+			// They are different whenever a handover came up short.
+			// receiveFanOut credits Received_Qty and deliberately leaves
+			// Issued_Qty alone ("room on a requirement row is Issued_Qty -
+			// Received_Qty"), so the gap sits there as an open Stock_Dispute
+			// until somebody resolves it. Issue 10m, receive 8m, and the
+			// dialog offered a 5m tail where the true tail is 3m - a 2m
+			// remnant that does not exist, pre-filled as a default and
+			// therefore likely to be accepted. saveWasteFromCutting writes
+			// whatever it is given with no cap, so it lands as a
+			// Pending_Receipt Waste_Master row, and the store then raises an
+			// INBOUND dispute over a piece nobody ever cut.
+			//
+			// The side strip and the part-filled row are driven by PIECES, so
+			// they were always right; only the tail moved. Capping the metres
+			// at what arrived fixes the tail and leaves the rest untouched.
+			//
+			// THE MINIMUM, not a swap. Received_Qty is 0 on a row issued but
+			// not yet confirmed - the ordinary state while cloth is in transit
+			// - and the supervisor can legitimately end Cutting before he has
+			// pressed Confirm on the receive screen. Taking Received_Qty alone
+			// would predict no tail at all for him. So: use the smaller of the
+			// two ONLY when a receipt has actually been recorded, and fall back
+			// to Issued_Qty when none has. A dispute later resolved Found
+			// raises Received_Qty back and the next preview widens again on its
+			// own.
+			//
+			// UNDER-PREDICTING IS THE SAFE DIRECTION. He is holding the cloth:
+			// a remnant the dialog missed he adds by hand in the same dialog,
+			// while one it invented he has to notice and delete.
+			//--------------------------------------------------------------
+			lnrW = ifnull(rqLotE.Received_Qty,"0").toString().trim();
+			if(lnrW == "")
+			{
+				lnrW = "0";
+			}
+			if(lnrW.toDecimal() > 0 && lnrW.toDecimal() < lnqW.toDecimal())
+			{
+				lnqW = lnrW;
+			}
 			if(lnMatW != "" && lnLotW != "")
 			{
 				qKeyW = lnMatW + "|" + lnLotW;
@@ -187,6 +235,32 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 						// strip the trailing "m" and split label from metres
 						// on the last space, since a label itself may contain
 						// spaces (unlikely, but typed by a person).
+						//
+						// SCALED WHEN THE RECEIPT CAME UP SHORT. Roll_Label records
+						// what the store CUT off each roll; if less than that arrived,
+						// the shortfall cannot be pinned to any ONE roll - nothing
+						// anywhere records which roll the missing metres came off, and
+						// guessing would put a tail on the wrong physical piece. So
+						// every segment is scaled by the same ratio, which keeps the
+						// per-roll shares summing to the cloth he is actually holding.
+						//
+						// Exactly 1.0 when the receipt was complete or none has been
+						// recorded yet - lnqW is Issued_Qty in both cases - so the
+						// ordinary path is arithmetically untouched.
+						rlScaleW = 1.0;
+						rlIssW = ifnull(rqLotE.Issued_Qty,"0").toString().trim();
+						if(rlIssW == "")
+						{
+							rlIssW = "0";
+						}
+						if(rlIssW.toDecimal() > 0)
+						{
+							rlScaleW = lnqW.toDecimal() / rlIssW.toDecimal();
+						}
+						if(rlScaleW > 1)
+						{
+							rlScaleW = 1.0;
+						}
 						for each  rlSeg in rlParts
 						{
 							rlSegT = rlSeg.trim();
@@ -217,7 +291,7 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 									{
 										rPrevQ2 = "0";
 									}
-									rollQtyByKey.put(rkKey2,rPrevQ2.toDecimal() + rlSegMtrTxt.toDecimal());
+									rollQtyByKey.put(rkKey2,rPrevQ2.toDecimal() + (rlSegMtrTxt.toDecimal() * rlScaleW));
 								}
 							}
 						}

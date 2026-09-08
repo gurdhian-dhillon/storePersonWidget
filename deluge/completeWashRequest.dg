@@ -179,7 +179,7 @@ void completeWashRequest()
 				capHere = inwQty + unwQty;
 				if(hasLotHere == true)
 				{
-					// AND capped at what THIS LOT holds. If the parent is out of sync 
+					// AND capped at what THIS LOT holds. If the parent is out of sync
 					// (e.g. from baseline resets), we trust the lot to let the wash complete.
 					capHere = lotInWash + lotUnw;
 				}
@@ -193,16 +193,67 @@ void completeWashRequest()
 
 				if(moveQty > 0)
 				{
-					// In-wash first, greige for whatever is left over.
-					fromInWash = moveQty;
-					if(fromInWash > inwQty)
+					//------------------------------------------------------
+					// THE SPLIT IS DECIDED BY THE LOT WHENEVER THERE IS ONE,
+					// AND THE PARENT COPIES IT. The two must not each work out
+					// their own in-wash/greige division from their own figures.
+					//
+					// The cap above is already the LOT's (lotInWash + lotUnw),
+					// deliberately, so a parent that has drifted low cannot
+					// block a wash the lot can cover. But the split below then
+					// measured against the PARENT's In_Wash_Qty, and any
+					// shortfall there fell through to `fromGreige` - taking the
+					// difference out of OTHER LOTS' unwashed cloth. Lot says
+					// 100 at the wash, parent tracks 40, and 60 metres of
+					// unrelated greige silently became washed. Ported to node
+					// and confirmed before changing anything.
+					//
+					// Deriving both from the lot keeps them consistent by
+					// construction: the same metres come off the same counter
+					// on both records, which is the invariant the whole
+					// lot/parent pair rests on. Each side is still clamped to
+					// its own holdings afterwards so neither can go negative
+					// while the other is out of sync.
+					//------------------------------------------------------
+					if(hasLotHere == true)
 					{
-						fromInWash = inwQty;
+						fromInWash = moveQty;
+						if(fromInWash > lotInWash)
+						{
+							fromInWash = lotInWash;
+						}
+					}
+					else
+					{
+						fromInWash = moveQty;
+						if(fromInWash > inwQty)
+						{
+							fromInWash = inwQty;
+						}
 					}
 					fromGreige = moveQty - fromInWash;
 
-					matRec.In_Wash_Qty = inwQty - fromInWash;
-					matRec.Unwash_Quantity = unwQty - fromGreige;
+					// Clamped to what the PARENT actually holds, so a drifted
+					// parent is driven to zero rather than negative. The lot
+					// keeps the true split; the parent absorbs the drift, which
+					// reconcileRawMaterial is the thing that reports.
+					parFromInWash = fromInWash;
+					if(parFromInWash > inwQty)
+					{
+						parFromInWash = inwQty;
+					}
+					parFromGreige = fromGreige;
+					if(parFromGreige > unwQty)
+					{
+						parFromGreige = unwQty;
+					}
+					if(parFromInWash + parFromGreige < moveQty)
+					{
+						info "parent counters short of the lot on wash " + lotIdTxt + ": moved " + moveQty + " but parent could only source " + (parFromInWash + parFromGreige) + " - Raw_Material has drifted, run reconcileRawMaterial.";
+					}
+
+					matRec.In_Wash_Qty = inwQty - parFromInWash;
+					matRec.Unwash_Quantity = unwQty - parFromGreige;
 					matRec.Wash_Quantity = wshQty + moveQty;
 					qW = ifnull(matRec.Wash_Quantity,"0").toString().trim();
 					qU = ifnull(matRec.Unwash_Quantity,"0").toString().trim();
@@ -211,14 +262,18 @@ void completeWashRequest()
 
 					// The same move on the lot, in the same pass, so the lot and
 					// the maintained parent total cannot disagree.
+					//
+					// REUSES THE SPLIT COMPUTED ABOVE rather than working out its
+					// own. The two blocks derived the same division independently
+					// - the parent from its counters, the lot from the lot's - and
+					// that is precisely how they came to disagree. `fromInWash` /
+					// `fromGreige` ARE the lot's split now (see the block above),
+					// so this applies the identical figures the parent was just
+					// asked to mirror.
 					if(hasLotHere == true)
 					{
-						lotFromWash = moveQty;
-						if(lotFromWash > lotInWash)
-						{
-							lotFromWash = lotInWash;
-						}
-						lotFromGreige = moveQty - lotFromWash;
+						lotFromWash = fromInWash;
+						lotFromGreige = fromGreige;
 
 						for each  wLotUpd in Raw_Material_Lot[ID == lotIdTxt.toLong()]
 						{

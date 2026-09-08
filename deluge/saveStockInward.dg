@@ -441,16 +441,24 @@ string saveStockInward(string inwardJson)
 					mcwS = "0";
 				}
 
+				// THE WHOLE qty LANDS ON THE STATE COUNTER, same as the lot
+				// above - fromNew/fromUnalloc only decide how much of it came
+				// OUT OF Unallocated_Qty, never how much reaches Wash/Unwash.
+				// Crediting fromNew alone left a pure Unallocated->lot move
+				// (fromUnalloc == qty, fromNew == 0) adding nothing here: the
+				// metres landed on the lot's roll but no parent counter ever
+				// held them, so Quantity (Wash+Unwash+Unallocated) fell short
+				// of the rack by exactly the moved amount.
 				if(state == "Wash")
 				{
-					rmUpd.Wash_Quantity = mcwS.toDecimal() + fromNew;
+					rmUpd.Wash_Quantity = mcwS.toDecimal() + qty;
 					matUnwashOut = mcuS.toDecimal();
-					matWashOut = mcwS.toDecimal() + fromNew;
+					matWashOut = mcwS.toDecimal() + qty;
 				}
 				else
 				{
-					rmUpd.Unwash_Quantity = mcuS.toDecimal() + fromNew;
-					matUnwashOut = mcuS.toDecimal() + fromNew;
+					rmUpd.Unwash_Quantity = mcuS.toDecimal() + qty;
+					matUnwashOut = mcuS.toDecimal() + qty;
 					matWashOut = mcwS.toDecimal();
 				}
 

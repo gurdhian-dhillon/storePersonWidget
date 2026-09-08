@@ -187,15 +187,81 @@ string raiseBulkPurchaseOrder(string vendorId, string shortItemsJsonTxt)
 					exPayload.put("materialId",exMap2.get("materialId"));
 					exPayload.put("type","Shortage");
 					exPayload.put("unit",exMap2.get("unit"));
-					// Required is the shortfall being ordered - this ticket is
-					// "a PO is out for N", not a re-derivation of total demand.
-					exPayload.put("required",exMap2.get("qty"));
+					//----------------------------------------------------------
+					// REQUIRED IS TOTAL OUTSTANDING DEMAND; SHORTFALL IS WHAT WAS
+					// ORDERED. They are different numbers and conflating them is
+					// what let a PO close its own ticket early.
+					//
+					// Required_Qty used to carry the ordered amount too, on the
+					// reasoning that this ticket says "a PO is out for N" rather
+					// than re-deriving demand. But Required_Qty is the figure
+					// resolvePurchaseShortages closes the ticket against
+					// (onHand >= Required_Qty), so a PO covering part of the gap
+					// resolved the moment the PART landed - poCoveredQty then
+					// dropped to zero and the still-uncovered orders reappeared
+					// as short with no PO against them and nothing saying why.
+					//
+					// getStoreMaterialRequirements already judges its own netting
+					// against whole remaining demand for exactly this reason (see
+					// its "Judged against the material's WHOLE remaining demand"
+					// note). This makes the ticket carry the figure that reader
+					// already assumes, so the two agree.
+					//
+					// Summed off the LINES, which are the per-plan outstanding
+					// figures the store screen derived. Falls back to the ordered
+					// quantity when a caller sends no lines - the third-party and
+					// print screens do not, and for those "a PO is out for N" was
+					// always the right reading.
+					//----------------------------------------------------------
+					exTotalNeed = 0.0;
+					// Assigned first, never chained straight into the "for each"
+					// header - nothing else in this repo iterates a method call
+					// inline like that, every other loop walks a variable already
+					// holding a List, and this is not the file to be the first
+					// test of whether Creator's parser accepts it.
+					exLinesList = exMap2.get("lines").toString().toJSONList();
+					for each  exLnRaw in exLinesList
+					{
+						exLn = exLnRaw.toMap();
+						exLnReqS = ifnull(exLn.get("required"),"0").toString().trim();
+						if(exLnReqS == "")
+						{
+							exLnReqS = "0";
+						}
+						exLnIssS = ifnull(exLn.get("issued"),"0").toString().trim();
+						if(exLnIssS == "")
+						{
+							exLnIssS = "0";
+						}
+						exLnOut = exLnReqS.toDecimal() - exLnIssS.toDecimal();
+						if(exLnOut > 0)
+						{
+							exTotalNeed = exTotalNeed + exLnOut;
+						}
+					}
+					exOrderedS = ifnull(exMap2.get("qty"),"0").toString().trim();
+					if(exOrderedS == "")
+					{
+						exOrderedS = "0";
+					}
+					// Never BELOW what was ordered. A fabric PO is raised for
+					// marker-row-rounded metres, which can legitimately exceed the
+					// plain per-line outstanding sum - taking the smaller of the
+					// two would close the ticket before the cloth that was
+					// actually bought had landed.
+					if(exTotalNeed < exOrderedS.toDecimal())
+					{
+						exTotalNeed = exOrderedS.toDecimal();
+					}
+					exPayload.put("required",exTotalNeed);
 					exPayload.put("available",exMap2.get("available"));
 					exPayload.put("unwashed",0);
 					exPayload.put("shortfall",exMap2.get("qty"));
 					exPayload.put("poNumber",poNumber);
 					exPayload.put("note","Draft PO " + poNumber + " raised for " + exMap2.get("qty") + " " + exMap2.get("unit"));
-					exPayload.put("lines",exMap2.get("lines").toString().toJSONList());
+					// Reuses the same parsed list rather than parsing the JSON
+					// string a second time.
+					exPayload.put("lines",exLinesList);
 
 					exRes = thisapp.raiseMaterialException(exPayload.toString());
 					exResMap = exRes.toMap();

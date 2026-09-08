@@ -107,7 +107,15 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 		// party that has vanished from the picker can still be named on the
 		// stage it is holding rather than simply being absent.
 		//------------------------------------------------------------------
-		for each tp in Third_Party[ID != 0] sort by Party_Name
+		// "sort by" on its own assignment, never inline in a "for each" header
+		// - the repo rule, applied here too rather than left as one of the
+		// exceptions to it. Deployed and apparently working inline, but a
+		// function that silently fails to save is indistinguishable from one
+		// that saved and did nothing, and this file already pays for one
+		// correct example (below) to sit sixteen lines under a comment stating
+		// the rule while three violations of it stood above unfixed.
+		tpSorted = Third_Party[ID != 0] sort by Party_Name;
+		for each tp in tpSorted
 		{
 			// Iterated as a list rather than split off toString() - a
 			// multi-select rendered to a string is not a shape worth relying
@@ -195,7 +203,9 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 		//
 		//    role is the Designation text, so the widget can fall back to "all
 		//    operators" on a stage the admin has not assigned.
-		for each emp in Employee[ID != 0] sort by Employee_Name
+		// Same fix as the Third_Party loop above - sort on its own line.
+		empSorted = Employee[ID != 0] sort by Employee_Name;
+		for each emp in empSorted
 		{
 			empStgJson = "";
 			empStgList = opStages.get(emp.ID + "");
@@ -252,7 +262,12 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 				spName = "Unknown";
 				for each  spEmp in Employee[ID == spId]
 				{
-					spName = spEmp.Employee_Name;
+					// Escaped, same as the escaped-emps list above (:214) - this
+					// is the SAME field, read a second time for the picker, and
+					// it was left raw here while the other read of it was fixed.
+					// One double quote in a name breaks JSON.parse for every
+					// plan on the screen, not just this row.
+					spName = ifnull(spEmp.Employee_Name,"Unknown").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," ");
 				}
 				if(supsJson != "") { supsJson = supsJson + ","; }
 				supsJson = supsJson + "{\"id\":\"" + spId + "\",\"name\":\"" + spName + "\"}";
@@ -813,7 +828,10 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 				// Stage logs - now their own records, queried by Plan_Item
 				// rather than filtered out of a subform by SKU.
 				logsJson = "";
-				for each trk in Stage_Log[Plan_Item == itm.ID] sort by Sequence_No
+				// Same fix as the two loops above - sort on its own line, not
+				// inline in the "for each" header.
+				trkSorted = Stage_Log[Plan_Item == itm.ID] sort by Sequence_No;
+				for each trk in trkSorted
 				{
 					if(logsJson != "") { logsJson = logsJson + ","; }
 					opId = "";
@@ -950,7 +968,12 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 					}
 				}
 
-				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"name\":\"" + itm.Item_Name + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"isAlteration\":" + isAltTxt + ",\"canCloseAlteration\":" + canCloseTxt + ",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "]}";
+				// Item_Name is typed at sales-order entry, free text like every
+				// other name field in this app - unescaped here, it is the one
+				// double quote away from breaking JSON.parse for the WHOLE
+				// Production tab, every plan on it, not just this item's card.
+				itemNameTxt = ifnull(itm.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," ");
+				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"name\":\"" + itemNameTxt + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"isAlteration\":" + isAltTxt + ",\"canCloseAlteration\":" + canCloseTxt + ",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "]}";
 				}
 			}
 
@@ -968,8 +991,14 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 			// which row is the real one.
 			statsJson = "{\"count\":" + statCount + ",\"toProduce\":" + statToProduce + ",\"produced\":" + statProduced + ",\"doneCount\":" + statDone + ",\"remakeQty\":" + statRemake + "}";
 
+			// Plan_No and the resolved sales-order number are both free text on
+			// their source forms (not enforced formats), and both were going
+			// into the header row raw. Same failure as the item name above: one
+			// quote in either and the whole tab's JSON.parse throws.
+			planNoTxt = ifnull(plan.Plan_No,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," ");
+			soNoTxt = ifnull(soNo,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," ");
 			if(plansJson != "") { plansJson = plansJson + ","; }
-			plansJson = plansJson + "{\"id\":\"" + plan.ID + "\",\"planNo\":\"" + plan.Plan_No + "\",\"salesOrder\":\"" + soNo + "\",\"planDate\":\"" + planDateTxt + "\",\"orderStatus\":\"" + ifnull(plan.Order_Status,"") + "\",\"assignedTo\":\"" + ifnull(plan.Assigned_To,"") + "\",\"hasDetail\":" + hasDetail + ",\"itemStats\":" + statsJson + ",\"itemTotal\":" + itemTotal + ",\"itemSkip\":" + itemSkipOut + ",\"itemLimit\":" + pgLimit + ",\"items\":[" + itemsJson + "]}";
+			plansJson = plansJson + "{\"id\":\"" + plan.ID + "\",\"planNo\":\"" + planNoTxt + "\",\"salesOrder\":\"" + soNoTxt + "\",\"planDate\":\"" + planDateTxt + "\",\"orderStatus\":\"" + ifnull(plan.Order_Status,"") + "\",\"assignedTo\":\"" + ifnull(plan.Assigned_To,"") + "\",\"hasDetail\":" + hasDetail + ",\"itemStats\":" + statsJson + ",\"itemTotal\":" + itemTotal + ",\"itemSkip\":" + itemSkipOut + ",\"itemLimit\":" + pgLimit + ",\"items\":[" + itemsJson + "]}";
 		}
 	}
 	catch (e)

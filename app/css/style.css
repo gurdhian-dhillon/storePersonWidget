@@ -2633,6 +2633,72 @@ th.col-num {
     white-space: normal;
 }
 
+/* THE EDITABLE ASK, on both the wash and the purchase dialog. Defaulted to the
+   computed figure and floored there; a wash is additionally capped at the chosen
+   lot's greige. The unit sits beside the box rather than inside the label, so
+   the row reads as one quantity the way every other figure on these screens
+   does. */
+.exc-qty-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.exc-qty-input {
+    width: 9rem;
+    flex: 0 0 auto;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.exc-qty-unit {
+    font-size: 0.8rem;
+    color: var(--text-muted, #64748b);
+}
+
+/* Empty unless the typed figure breaks a bound. Amber, not red: both cases are
+   warnings about a number he can still choose to send, not errors. */
+.exc-qty-note:not(:empty) {
+    font-size: 0.8rem;
+    color: #b45309;
+    padding-top: 0.4rem;
+    white-space: normal;
+}
+
+/* Per-line quantity on the bulk PO dialog. Right-aligned and tabular so a
+   column of them still reads as numbers. */
+.po-qty-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    justify-content: flex-end;
+}
+
+.po-qty-input {
+    width: 7rem;
+    padding: 0.35rem 0.5rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-main);
+    background: #ffffff;
+    border: 1px solid var(--border);
+    border-radius: 0.35rem;
+}
+
+.po-qty-input:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+.po-qty-note:not(:empty) {
+    font-size: 0.75rem;
+    color: #b45309;
+    padding-top: 0.3rem;
+    white-space: normal;
+}
+
 /* Pinned to a lot that has run out. The row cannot be issued at all, so this
    replaces an empty Lot column that otherwise reads as a rendering fault. */
 .lot-dry {

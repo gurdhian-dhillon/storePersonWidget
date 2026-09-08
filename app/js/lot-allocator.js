@@ -428,11 +428,35 @@ function chooseLotForOrder(lots, demands, fab) {
     // lot an order is cut from is the most consequential change this file can
     // make, and it is not one to slip in behind a bug fix. Decide it on purpose,
     // then re-baseline that test in the same pass.
+    // TIES ARE BROKEN BY LOT ID, NOT BY WHICHEVER ROW ARRIVED FIRST.
+    //
+    // `size < bestSize` alone keeps the first lot seen, so two lots holding the
+    // same metres made the TONE DECISION depend on the order
+    // getStoreMaterialRequirements happened to return its rows in — and that is
+    // `sort by Added_Time` on Raw_Material_Lot, which is stable in practice but
+    // is not a guarantee this file is entitled to lean on. Two lots booked in the
+    // same second, a re-index, or any future change to that sort silently moves
+    // an order onto a different shade.
+    //
+    // It matters more than a tie between equals sounds. The lot is a TONE: the
+    // order is served whole off whichever this picks, its remake is PINNED to
+    // that choice for ever after, and nothing on screen says a coin was flipped.
+    // Two runs over an unchanged rack must agree, or the audit screen — whose
+    // whole job is to reproduce the issue decision — can disagree with the store
+    // screen and neither is wrong.
+    //
+    // Lot id is the tie-break because it is stable, server-assigned and unique.
+    // Compared as TEXT, deliberately: Creator ids are 18-digit and exceed
+    // Number.MAX_SAFE_INTEGER, so comparing them numerically silently rounds
+    // and can call two distinct lots equal. String order is arbitrary but
+    // consistent, which is the entire requirement here.
     var smallest = function (list) {
         var best = null, bestSize = 0;
         list.forEach(function (l) {
             var size = round2((Number(l.wash) || 0) + (Number(l.unwash) || 0));
-            if (best === null || size < bestSize) { best = l; bestSize = size; }
+            if (best === null || size < bestSize) { best = l; bestSize = size; return; }
+            if (size === bestSize &&
+                String(l.lotId) < String(best.lotId)) { best = l; bestSize = size; }
         });
         return best;
     };

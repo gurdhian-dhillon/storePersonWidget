@@ -92,6 +92,47 @@ string raiseMaterialException(string payloadJson)
 	unwQty = unwStr.toDecimal();
 	shortQty = shortStr.toDecimal();
 
+	//----------------------------------------------------------------------
+	// THE ASK MAY BE RAISED BY HAND BUT NEVER LOWERED BELOW WHAT IS SHORT.
+	//
+	// The store screen offers an editable quantity on both the wash and the
+	// purchase dialog, defaulted to the computed figure with that figure as its
+	// floor. Ordering or washing MORE is a real decision - a round purchase
+	// quantity, a vendor minimum, or washing a whole lot while it is at the
+	// washer anyway. Less is not: it cannot clear the shortage, so the row
+	// returns on the next load with a ticket already open against it, and
+	// openRequestFor then greys out the button that would have re-raised it.
+	// The material ends up neither covered nor re-raisable.
+	//
+	// Enforced HERE and not only on the input, because this is a Custom API and
+	// is callable from anywhere - the number input's `min` marks a value
+	// invalid, it does not prevent one being sent.
+	//
+	// THE FLOOR IS `required - available`, NOT `required`, and the difference
+	// matters because the two figures do not mean the same thing on the two
+	// kinds of row. On a non-fabric purchase the screen sends Required_Qty as
+	// GROSS demand and Shortfall_Qty as demand minus what is owned - so a
+	// shortfall legitimately below required is the normal case, not an edit,
+	// and flooring at required would silently double a trim order every time.
+	// On fabric the two arrive equal (the allocator's own short-metres figure
+	// is both), so the floor lands on the same number either way.
+	//
+	// Floored, not refused. The caller's intent is unambiguous (it named the
+	// material and the requirement) and refusing would lose the report over a
+	// figure the function can correct. The note says it happened.
+	//----------------------------------------------------------------------
+	askFloor = reqQty - availQty;
+	if(askFloor < 0)
+	{
+		askFloor = 0;
+	}
+	askRaised = false;
+	if(shortQty > 0 && askFloor > 0 && shortQty < askFloor)
+	{
+		shortQty = askFloor;
+		askRaised = true;
+	}
+
 	// Nothing complex in a for-each header - hoisted into its own variable.
 	// WHICH LOT'S GREIGE IS GOING TO THE WASH. Wash tickets only.
 	//
@@ -103,6 +144,21 @@ string raiseMaterialException(string payloadJson)
 	// Empty is tolerated: a purchase ticket has no lot, and a wash ticket raised
 	// by an older widget lands on the parent alone, exactly as it did before.
 	lotIdTxt = ifnull(inp.get("lotId"),"").toString().trim();
+
+	// Said in the note rather than only in an info log - the log is gone the
+	// moment the execution ends, and the ticket is the thing anybody reads back.
+	if(askRaised == true)
+	{
+		floorNote = "Asked for less than the " + shortQty + " outstanding; raised to cover it.";
+		if(note == "")
+		{
+			note = floorNote;
+		}
+		else
+		{
+			note = note + "\n" + floorNote;
+		}
+	}
 
 	lines = ifnull(inp.get("lines"),"[]").toString().toJSONList();
 
@@ -425,6 +481,44 @@ string raiseMaterialException(string payloadJson)
 				{
 					washQty = 0;
 					info "Wash_Request NOT queued for " + matName + ": lot " + lotIdTxt + " is printed cloth held as pieces, and washing pieces is not built yet. The exception stands; the row is short.";
+				}
+
+				//----------------------------------------------------------
+				// A TICKET WITH NO JOB BEHIND IT CANNOT BE CLOSED BY ANYTHING,
+				// so it is not left Open.
+				//
+				// Both exits above set washQty to 0 - a Pieces lot (refused),
+				// and a lot whose greige has already gone (capped to nothing).
+				// The exception itself was still written and left Open, and the
+				// ONLY things that resolve a Wash_Needed ticket are
+				// completeWashRequest and cancelWashRequest, both of which run
+				// off a Wash_Request record. No request, no exit: the ticket
+				// sits on the My requests tab for ever reading as work in hand,
+				// and the store screen's openRequestFor sees it and greys out
+				// the button, so the lot can never be re-raised either. That is
+				// worse than not raising it - it hides the row it was meant to
+				// report.
+				//
+				// Resolved immediately with the reason on the note, so the
+				// record of the attempt survives and the screen re-offers the
+				// row on the next load. The store person still sees the
+				// shortage; he just sees it as short rather than as requested.
+				//----------------------------------------------------------
+				if(washQty <= 0 && exRec != null)
+				{
+					whyNoJob = "no greige left on the lot";
+					if(washFormTxt == "Pieces")
+					{
+						whyNoJob = "the lot is printed cloth held as pieces, and washing pieces is not built yet";
+					}
+					noJobNote = ifnull(exRec.Note,"").toString();
+					addNoJob = zoho.currentdate.toString("dd-MMM HH:mm") + " - no wash job could be queued: " + whyNoJob + ". Closed so the row is offered again rather than reading as requested.";
+					if(noJobNote != "")
+					{
+						addNoJob = noJobNote + "\n" + addNoJob;
+					}
+					exRec.Note = addNoJob;
+					exRec.Status = "Resolved";
 				}
 
 				if(washQty > 0)

@@ -130,11 +130,16 @@ function qty(n, unit, opts) {
 // `remaining` is the FRESH metres still wanted after offcuts are credited, and
 // `lotLines` are the fresh metres allocated, so the two compare like with like.
 //
-// Non-fabric has no lots and no rows: the shelf figure is the whole answer. So
-// is a fabric row the allocator has not reached yet.
+// Non-fabric has no lots and no rows, so the figure is a plain metres total —
+// but it is the CARD'S share, not the rack. Two supervisors wanting 60 each of
+// 100 cones must not both read "In stock": the second cannot be issued in full,
+// and a green pill over a row whose ceiling is 40 is the same lie the fabric
+// branch of this function was written to stop telling. stockForCard falls back
+// to the rack when there is no ledger figure, so a fabric row the allocator has
+// not reached yet still behaves as it did.
 function issuableTotal(material) {
     if (!material.isFabric || !material.lotLines) {
-        return round2(Math.max(0, Number(material.availableStock) || 0));
+        return round2(Math.max(0, stockForCard(material)));
     }
     var t = 0;
     material.lotLines.forEach(function (ln) { t += Number(ln.qty) || 0; });
@@ -161,8 +166,17 @@ function stockStatus(material) {
     return { cls: 'status-shortfall', label: 'No stock' };
 }
 
+// THE CEILING IS WHAT IS LEFT FOR THIS CARD, NOT WHAT IS ON THE RACK.
+//
+// `availableStock` is the whole rack and the server sends it to every card
+// unchanged, so using it here let two supervisors each be offered the same
+// cones: 100 in stock, 60 wanted apiece, both rows capped at 60, 120 issued.
+// applyStockAllocation now drains a shared counter in priority order and leaves
+// each card's remainder on the row; stockForCard reads it, and falls back to the
+// rack figure when the field is absent (fabric, or a payload from before the
+// ledger existed).
 function maxIssuable(material) {
-    return round2(Math.max(0, Math.min(material.remaining, material.availableStock)));
+    return round2(Math.max(0, Math.min(material.remaining, stockForCard(material))));
 }
 
 // What to pre-fill the input with. For fabric the server has already worked out
@@ -509,21 +523,42 @@ function wasteInputId(supIdx, matIdx, pickIdx) {
 function wasteRowId(supIdx, matIdx, pickIdx) {
     return 'waste-row-' + supIdx + '-' + matIdx + '-' + pickIdx;
 }
-// ---- Soft allocation (UI-level, first-come-first-served) ----
+// ---- Non-fabric (trim) allocation ----
 //
-// Stock is shared, so a material contested by two supervisors would let the
-// store person issue it twice over and only discover the shortfall afterwards.
-// Walking supervisors in card order and subtracting what earlier ones still
-// need gives the first supervisor the real stock figure and every later one
-// what is genuinely left for them.
+// THE SAME RESERVATION FABRIC ALREADY HAS, FOR EVERYTHING THAT IS NOT FABRIC.
 //
-// This is advisory only - nothing is reserved in Creator, and the Deluge
-// function still validates against true live stock at issue time.
+// This used to be advisory only. Its own comment said so: "nothing is reserved
+// in Creator, and the Deluge function still validates against true live stock
+// at issue time." Both halves were true and neither one closed the hole.
+//
+// The rack figure is sent to EVERY card — the server does not divide stock up —
+// and `maxIssuable` clamped at that figure. So 100 cones wanted 60 apiece by two
+// supervisors gave BOTH a ceiling of 60, both rows were issuable, and 120 could
+// go out against 100. What the store person got instead was a warning naming the
+// other supervisor, which tells him there is a conflict without telling him what
+// is left for the card he is looking at, and does not stop him.
+//
+// "The Deluge function validates at issue time" is not the answer either. It
+// re-checks against live stock, so the SECOND handover fails — after the first
+// has gone out, at a counter, with the material already picked. The point of a
+// ledger is that the screen never offers what is not there.
+//
+// So trims now walk the same shape fabric walks in allocateEveryCard: seed once
+// from the rack, then spend down in priority order. It is much simpler here —
+// no lots, no rolls, no marker rows, no wash state — so it is one metres counter
+// per material rather than the four the fabric side keeps.
+//
+// PRIORITY ORDER IS THE CONTROL, exactly as it is for fabric. A card is short
+// because the store person put someone else first, and he can move them up; the
+// whole screen re-runs when he does. Nothing is reserved server-side — this is a
+// pure function of (rack, order), and issueMaterials still re-checks every
+// figure when Issue is actually pressed.
 function applyStockAllocation(data) {
-    // Stock is shared. Rather than hiding stock from later supervisors, we show
-    // the true stock to everyone and attach a warning about who else needs it.
-
-    // 1. Gather all demand across all supervisors
+    // ---- Pass 1: gather demand, for the contested warning ----
+    //
+    // Kept, and still computed over EVERY card including the ones that will be
+    // served in full. The warning answers "who else is waiting on this", which
+    // is a fact about the material, not about what happens to be left.
     var demand = {};
     data.forEach(function (sup) {
         sup.materials.forEach(function (m) {
@@ -538,7 +573,24 @@ function applyStockAllocation(data) {
         });
     });
 
-    // 2. Attach contention info without altering available stock
+    // ---- Pass 2: seed the ledger from the rack, once ----
+    //
+    // Separate from the spending pass below, and that separation IS the
+    // reservation: every counter holds the full rack before the first card takes
+    // anything. The `=== undefined` guard means a second card mentioning the
+    // same material cannot re-inflate a counter the first is about to spend.
+    var stockLeft = {};
+    data.forEach(function (sup) {
+        sup.materials.forEach(function (m) {
+            if (m.isFabric) return;
+            var key = String(m.materialId);
+            if (stockLeft[key] === undefined) {
+                stockLeft[key] = round2(Number(m.availableStock) || 0);
+            }
+        });
+    });
+
+    // ---- Pass 3: spend it, in card order ----
     data.forEach(function (sup) {
         sup.materials.forEach(function (m) {
             var key = String(m.materialId);
@@ -546,12 +598,51 @@ function applyStockAllocation(data) {
                 return d.name !== sup.supervisorName;
             });
 
+            // The true rack figure, kept for the columns that mean "what exists"
+            // rather than "what this card may take".
             m.totalStock = Number(m.availableStock) || 0;
             m.contestedBy = others;
             // heldByOthers is used for the card header 'X contested' badge
             m.heldByOthers = others.reduce(function (sum, d) { return sum + d.needed; }, 0);
+
+            if (m.isFabric) return;
+
+            // WHAT IS LEFT FOR THIS CARD, BEFORE IT TAKES ANY OF IT — the same
+            // rule allocateEveryCard applies for fabric. Read before spending,
+            // so the top-priority card still reads the full rack and each one
+            // after it reads what the cards above left.
+            var have = stockLeft[key];
+            if (have === undefined) have = round2(Number(m.availableStock) || 0);
+            m.stockLeftForCard = round2(Math.max(0, have));
+
+            // A ROW THAT IS ALREADY ISSUED SPENDS NOTHING. Its material has left
+            // the shelf, so `availableStock` no longer counts it — charging the
+            // ledger again would take it off twice and starve the next card of
+            // stock that is genuinely there.
+            if (isFullyIssued(m)) return;
+
+            var want = Number(m.remaining) || 0;
+            if (want <= 0) return;
+
+            var take = Math.min(want, m.stockLeftForCard);
+            if (take < 0) take = 0;
+            stockLeft[key] = round2(Math.max(0, have - take));
         });
     });
+}
+
+// WHAT A NON-FABRIC ROW MAY ACTUALLY BE ISSUED, after the cards above it have
+// taken their share. Falls back to the raw rack figure for a payload that
+// predates the ledger, which is the old behaviour rather than a hard zero.
+//
+// Fabric never comes through here — it has its own per-lot ledger and its own
+// ceiling (see issueCeiling), and a metres balance over lots would be the wrong
+// question anyway.
+function stockForCard(m) {
+    if (!m || m.isFabric) return Number(m && m.availableStock) || 0;
+    return m.stockLeftForCard !== undefined
+        ? round2(Number(m.stockLeftForCard) || 0)
+        : round2(Number(m.availableStock) || 0);
 }
 
 // ---- Row-level issue input handling ----
@@ -1266,17 +1357,59 @@ function renderVendorPoLines() {
             (rows.length ? ' · ' + rows.length + ' item' + (rows.length === 1 ? '' : 's') : '');
     }
 
-    body.innerHTML = rows.map(function (item) {
+    // EVERY LINE IS EDITABLE, FLOORED AT THE COMPUTED SHORTFALL. Same rule as
+    // the single-material dialog: below the computed figure the PO cannot clear
+    // the shortage, so the row returns and the ticket already open against it
+    // greys out the button. Above it is his call — a round order quantity, a
+    // minimum the vendor imposes, or cloth bought ahead.
+    //
+    // No upper bound. The cloth does not exist yet, so there is nothing to
+    // measure a ceiling against.
+    body.innerHTML = rows.map(function (item, i) {
         var e = item.e;
+        var floorQty = round2(Number(item.qty) || 0);
         return '<tr>' +
             '<td class="material-name-cell">' +
                 '<div class="mat-name">' + escapeHtml(e.material) + '</div>' +
                 (e.sku ? '<div class="mat-sku">' + escapeHtml(e.sku) + '</div>' : '') +
+                '<div class="po-qty-note" id="po-qty-note-' + i + '"></div>' +
             '</td>' +
-            '<td class="col-num col-strong">' + fmt(item.qty) +
-                ' <span class="unit">' + escapeHtml(e.unit || '') + '</span></td>' +
+            '<td class="col-num col-strong">' +
+                '<span class="po-qty-cell">' +
+                '<input type="number" class="po-qty-input" id="po-qty-' + i + '" ' +
+                    'step="0.01" min="' + floorQty + '" value="' + floorQty + '" ' +
+                    'data-floor="' + floorQty + '" ' +
+                    'oninput="onPoQtyChange(' + i + ')" />' +
+                '<span class="unit">' + escapeHtml(e.unit || '') + '</span>' +
+                '</span>' +
+            '</td>' +
         '</tr>';
     }).join('');
+}
+
+// Warn below the floor; submitBulkPO clamps. Same shape as onExcQtyChange.
+function onPoQtyChange(i) {
+    var inp = document.getElementById('po-qty-' + i);
+    var box = document.getElementById('po-qty-note-' + i);
+    if (!inp || !box) return;
+    var floorQty = round2(Number(inp.getAttribute('data-floor')) || 0);
+    var val = Number(inp.value);
+    box.innerHTML = (inp.value !== '' && val >= 0 && val + 0.0001 < floorQty)
+        ? '&#9888; Below the ' + fmt(floorQty) + ' still short &mdash; the ' +
+          'shortage stays open and this comes back.'
+        : '';
+}
+
+// What to order for line i, floored at the computed shortfall. A blank or
+// below-floor box means the computed amount — the safe reading of "he did not
+// choose", and the same rule excQtyValue applies.
+function poQtyValue(i, item) {
+    var inp = document.getElementById('po-qty-' + i);
+    var floorQty = round2(Number(item.qty) || 0);
+    if (!inp) return floorQty;
+    var val = Number(inp.value);
+    if (!(val > 0) || val + 0.0001 < floorQty) return floorQty;
+    return round2(val);
 }
 
 function closeVendorModal() {
@@ -1331,9 +1464,63 @@ function openVendorModal() {
     });
 }
 
+// ONE EXCEPTION LINE PER PLAN, summed across that plan's requirement rows.
+//
+// `e.lines` is one entry per Material_Requirement row — a plan wanting a trim
+// at four cut sizes contributes four, and a FABRIC material with many small
+// orders can carry a hundred or more (the exact case that put 105 rows on a
+// single Wash_Needed ticket for one lot of Dusty Gold — the whole reason this
+// exists is not the PO screen alone). The ticket's question is "which ORDERS
+// wanted this and how much", so the grain it needs is the plan, and repeating
+// a plan several times over is what made a request read as needed by 105
+// orders when a handful of distinct plans actually wanted it.
+//
+// SHARED by both raise paths — submitSummaryException (wash and single-material
+// purchase) and submitBulkPO (the multi-material PO). One shape, one place that
+// decides what "which orders wanted this" means, so the wash ticket and the
+// purchase ticket for the same shortage cannot disagree about it.
+//
+// planId is what getStoreMaterialRequirements reads back as `planIds`, so a
+// line with no plan is dropped rather than written blank — a blank Plan lookup
+// would be silently skipped there anyway and only take up a subform row.
+function exceptionLinesFor(e) {
+    var byPlan = {};
+    var order = [];
+    (e.lines || []).forEach(function (l) {
+        var pid = String(l.planId || '');
+        if (!pid) return;
+        if (!byPlan[pid]) {
+            byPlan[pid] = {
+                planId: pid,
+                salesOrder: l.salesOrder || '',
+                planItemId: '',
+                supervisorId: l.supervisorId || '',
+                required: 0,
+                issued: 0
+            };
+            order.push(pid);
+        }
+        // planItemId is deliberately left empty on a collapsed line. It names ONE
+        // Plan_Item, and this line now speaks for every row of the plan — stamping
+        // whichever happened to come first would point the ticket at an arbitrary
+        // one of them.
+        byPlan[pid].required = round2(byPlan[pid].required + (Number(l.required) || 0));
+        byPlan[pid].issued = round2(byPlan[pid].issued + (Number(l.issued) || 0));
+    });
+    return order.map(function (pid) { return byPlan[pid]; });
+}
+
 function submitBulkPO() {
     var vendorId = document.getElementById('vendor-select').value;
     if (!vendorId) return;
+
+    // READ THE TYPED QUANTITIES BEFORE THE MODAL GOES. closeVendorModal only
+    // adds a `hidden` class today, so the inputs would survive the read either
+    // way — but that is an implementation detail of a function three hundred
+    // lines away, and the moment it starts emptying the modal this call would
+    // silently fall back to every floor value with no error anywhere.
+    var s = window.__summary || { toBuy: [] };
+    var orderQty = s.toBuy.map(function (item, i) { return poQtyValue(i, item); });
 
     closeVendorModal();
     if (typeof showProgressModal === 'function') {
@@ -1347,19 +1534,36 @@ function submitBulkPO() {
         function (b) { b.disabled = true; }
     );
 
-    var s = window.__summary || { toBuy: [] };
-    var payload = s.toBuy.map(function(item) {
-        // NO per-order lines. A common trim is on dozens of open plans, so
-        // item.e.lines has dozens/hundreds of entries — and a PO is not split
-        // per order anyway, so they only made the "N orders waiting" figure on
-        // the My requests tab read as "212". The exception still records
-        // Required_Qty / Shortfall_Qty / PO_Number, which is what procurement
-        // acts on. No rate: this screen has none, so raiseBulkPurchaseOrder
-        // falls back to the catalogue Rate; the third-party / print screens
-        // pass a UI rate here instead.
+    var payload = s.toBuy.map(function(item, i) {
+        // ONE LINE PER PLAN, NOT PER REQUIREMENT ROW — and the lines are NOT
+        // optional, which is what this call learned the hard way.
+        //
+        // They were dropped entirely once, on the reasoning that a PO is not
+        // split per order so procurement does not act on them, and that a
+        // common trim on dozens of plans made the "N orders waiting" figure on
+        // the My requests tab read as "212". Both observations were true. The
+        // conclusion was not: `Exception_Lines.Plan` is what
+        // getStoreMaterialRequirements builds `planIds` from, and `planIds` is
+        // what requestState asks "does this ticket already cover every order
+        // waiting". An empty list does not mean "covers nothing in
+        // particular" — it means EVERY plan reads as uncovered, so the row is
+        // permanently 'stale', `poRaisedThisSession` is never true, and the
+        // material can never settle. That is the whole "PO raised but an order
+        // still shows pending" fault.
+        //
+        // COLLAPSED PER PLAN, which answers the 212 without dropping anything.
+        // A plan wanting a trim on four requirement rows is ONE order waiting,
+        // and its quantities are summed rather than repeated — so the ticket
+        // reads "which orders wanted this and how much", which is exactly what
+        // raiseMaterialException's own header says the lines are for.
+        //
+        // No rate: this screen has none, so raiseBulkPurchaseOrder falls back
+        // to the catalogue Rate; the third-party / print screens pass a UI rate
+        // here instead.
         return {
             materialId: item.e.materialId,
-            quantity: item.qty
+            quantity: orderQty[i],
+            lines: exceptionLinesFor(item.e)
         };
     });
 
@@ -1555,8 +1759,38 @@ function washLotPickerHtml(e, entry) {
 // Warned, not blocked: he can see the rack and may have a reason.
 function onWashLotChange(want) {
     var box = document.getElementById('exc-lot-short');
-    if (!box) return;
     var sel = document.getElementById('exc-lot');
+
+    // THE QUANTITY CEILING MOVES WITH THE LOT. The box is capped at the chosen
+    // lot's greige, so picking a different lot has to re-cap it — otherwise a
+    // ceiling from the previously selected lot stays on the field and either
+    // blocks a larger legitimate ask or permits one that will be trimmed.
+    //
+    // The typed value is left alone when it still fits. Only a value now above
+    // the new lot's greige is pulled down, and never below the floor: those two
+    // bounds can genuinely conflict (a lot too small to cover the requirement),
+    // and when they do the floor wins and the note says the wash will fall
+    // short. Silently lowering it under the requirement would hide exactly the
+    // shortfall this screen is for.
+    if (sel) {
+        var inp = document.getElementById('exc-qty');
+        var cap = washCapFor();
+        if (inp) {
+            if (cap > 0) {
+                inp.setAttribute('max', cap);
+            } else {
+                inp.removeAttribute('max');
+            }
+            var floorQty = round2(Number(inp.getAttribute('data-floor')) || 0);
+            var cur = Number(inp.value);
+            if (cap > 0 && cur > cap + 0.0001) {
+                inp.value = round2(Math.max(cap, floorQty));
+            }
+        }
+        onExcQtyChange('wash');
+    }
+
+    if (!box) return;
     if (!sel) { box.innerHTML = ''; return; }
 
     var entry = window.__excLots || {};
@@ -1568,6 +1802,91 @@ function onWashLotChange(want) {
     box.innerHTML = '&#9888; This lot only has <b>' + fmt(have) +
         '</b> unwashed, so only that much will be washed &mdash; not the ' +
         fmt(want) + ' asked for. The rest stays short.';
+}
+
+// THE EDITABLE QUANTITY FIELD, and the rules that bound it.
+//
+// `min` is the computed figure for both kinds — see the call site for why less
+// than the requirement is never a useful answer. `max` is only set for a wash,
+// at the chosen lot's greige.
+//
+// Both bounds are re-checked in excQtyValue() as well as on the input, because
+// a number input's min/max do not stop a typed value; they only mark it
+// invalid. The wash ceiling is additionally enforced server-side by
+// raiseMaterialException, which is the one that actually counts — this is the
+// courtesy that tells him before he presses, not the guard.
+function excQtyFieldHtml(kind, entry, e) {
+    var isWash = kind === 'wash';
+    var floorQty = round2(Number(entry.qty) || 0);
+    var capQty = isWash ? washCapFor(entry) : 0;
+
+    var label = isWash ? 'How much to send' : 'How much to order';
+
+    return '' +
+        '<label class="exc-label" for="exc-qty">' + label + '</label>' +
+        '<div class="exc-qty-row">' +
+        '<input type="number" id="exc-qty" class="note-input exc-qty-input" ' +
+        'step="0.01" min="' + floorQty + '" ' +
+        (capQty > 0 ? 'max="' + capQty + '" ' : '') +
+        'value="' + floorQty + '" ' +
+        'data-floor="' + floorQty + '" ' +
+        'oninput="onExcQtyChange(\'' + kind + '\')" />' +
+        '<span class="exc-qty-unit">' + escapeHtml(e.unit || '') + '</span>' +
+        '</div>' +
+        '<div class="exc-qty-note" id="exc-qty-note"></div>';
+}
+
+// What the CHOSEN lot can actually give. Falls back to the entry's own lot for
+// the first render, before the dropdown exists.
+function washCapFor(entry) {
+    var sel = document.getElementById('exc-lot');
+    if (sel && window.__excLots) {
+        var v = Number(window.__excLots[String(sel.value)]);
+        if (v >= 0) return round2(v);
+    }
+    return entry && entry.lot ? round2(Number(entry.lot.unwash) || 0) : 0;
+}
+
+// Warn, and for the floor also correct. Never silently — the note says what
+// happened, because a field that snaps back with no explanation reads as broken.
+function onExcQtyChange(kind) {
+    var box = document.getElementById('exc-qty-note');
+    var inp = document.getElementById('exc-qty');
+    if (!box || !inp) return;
+
+    var floorQty = round2(Number(inp.getAttribute('data-floor')) || 0);
+    var val = Number(inp.value);
+    var msgs = [];
+
+    if (inp.value !== '' && val >= 0 && val + 0.0001 < floorQty) {
+        msgs.push('&#9888; Below the ' + fmt(floorQty) +
+            ' the orders need. Raising less than this leaves the shortage open ' +
+            'and the row comes straight back.');
+    }
+
+    if (kind === 'wash') {
+        var cap = washCapFor();
+        if (cap > 0 && val > cap + 0.0001) {
+            msgs.push('&#9888; This lot only has <b>' + fmt(cap) +
+                '</b> unwashed, so only that much will be washed.');
+        }
+    }
+
+    box.innerHTML = msgs.join('<br />');
+}
+
+// The figure to send. Clamped to the floor — a blank or below-floor box means
+// the computed amount, which is the safe reading of "he did not choose".
+// The wash ceiling is NOT clamped here: raiseMaterialException trims it against
+// live greige, which may have moved since the page loaded, and a stale
+// client-side cap would be the wrong number to argue with.
+function excQtyValue(entry) {
+    var inp = document.getElementById('exc-qty');
+    var floorQty = round2(Number(entry.qty) || 0);
+    if (!inp) return floorQty;
+    var val = Number(inp.value);
+    if (!(val > 0) || val + 0.0001 < floorQty) return floorQty;
+    return round2(val);
 }
 
 function openSummaryException(kind, idx) {
@@ -1610,6 +1929,24 @@ function openSummaryException(kind, idx) {
             : '') +
         '<span class="exc-strong">' + actionLabel + ' <b>' + fmt(entry.qty) + ' ' + escapeHtml(e.unit) + '</b></span>' +
         '</div>' +
+        // THE QUANTITY IS EDITABLE, FLOORED AT WHAT THE SCREEN WORKED OUT.
+        //
+        // The computed figure is what the orders actually need, so going BELOW
+        // it can only re-create the fault this whole screen exists to report -
+        // he would raise a request that cannot clear the shortage and the row
+        // would come straight back, with a ticket already open against it
+        // greying out the button. Going ABOVE is a real decision he is entitled
+        // to make: buying a round 500 instead of 431.6, or washing a whole lot
+        // while it is at the washer anyway.
+        //
+        // So: default = computed, floor = computed, and the ceiling differs by
+        // kind. A PO has none - the cloth does not exist yet and he may order as
+        // much as he likes. A wash is capped at the CHOSEN LOT'S greige,
+        // because washing converts one lot's cloth and there is no more of it;
+        // raiseMaterialException caps there anyway and says nothing, so a
+        // figure above it is silently trimmed. The cap moves with the lot
+        // dropdown - see onWashLotChange.
+        excQtyFieldHtml(kind, entry, e) +
         // Said out loud, because the figure is deliberately MORE than the
         // shortfall and would otherwise read as an arithmetic fault.
         (isWash && entry.qty > round2(e.needed - e.stock) + 0.0001
@@ -1617,6 +1954,18 @@ function openSummaryException(kind, idx) {
             fmt(round2(e.needed - e.stock)) + ' ' + escapeHtml(e.unit) +
             ' short, so it can all be issued off one lot &mdash; one tone. ' +
             'The washed stock on the other lots keeps for a later order.</div>'
+            : '') +
+        // NO ORDER IS WAITING ON THIS LOT, and he has to be told, or the wash
+        // reads as the thing that unblocks the job. It is not: this lot cannot
+        // cover any waiting order whole, so nothing commits to it and nothing
+        // will issue off it the moment it comes back. Washing it is still worth
+        // doing — it is owned cloth in this shade and it shrinks the purchase —
+        // but the order still needs the rest buying.
+        (isWash && entry.uncommitted
+            ? '<div class="exc-why-more">No order is waiting on this lot &mdash; it ' +
+            'cannot cover one on its own, so nothing is committed to it. Washing it ' +
+            'still turns owned greige into cloth you can cut and reduces what has to ' +
+            'be bought, but it will not finish an order by itself.</div>'
             : '') +
         '<div class="exc-plain">' + plainMsg + '</div>' +
         // Wash only. A purchase ticket has no lot — the cloth does not
@@ -1645,6 +1994,9 @@ function submitSummaryException(kind, idx) {
     var e = entry.e;
     var btn = document.getElementById('exc-send');
 
+    // What he actually asked for, floored at the computed requirement.
+    var askQty = excQtyValue(entry);
+
     btn.disabled = true;
     btn.textContent = 'Raising…';
     if (typeof showProgressModal === 'function') {
@@ -1659,18 +2011,33 @@ function submitSummaryException(kind, idx) {
                 materialId: e.materialId,
                 type: kind === 'wash' ? 'Wash_Needed' : 'Shortage',
                 // The total, not one supervisor's slice — this is the whole
-                // point of raising it from here.
+                // point of raising it from here. `required` stays the computed
+                // requirement even when he asks for more: it is what the ORDERS
+                // want, and resolvePurchaseShortages closes the ticket against
+                // it. Rounding a purchase up to a convenient number must not
+                // also raise the bar the ticket has to clear before it closes.
                 required: e.needed,
                 available: e.stock,
                 unwashed: e.unwashed,
-                shortfall: entry.qty,
+                // What he chose to ask for — at least the computed figure, and
+                // possibly more. This is the number acted on: the metres bought,
+                // or the greige sent to the wash.
+                shortfall: askQty,
                 unit: e.unit,
                 note: document.getElementById('exc-note').value,
                 // Wash only, and only when a lot was offered. completeWashRequest
                 // moves the cloth inside this lot; without it the parent total
                 // moves on its own and the lots underneath drift short of it.
                 lotId: washLotChoice(kind),
-                lines: e.lines || []
+                // COLLAPSED PER PLAN, same as the bulk PO path — see
+                // exceptionLinesFor. `e.lines` is one row per requirement, and a
+                // fabric material spread over a hundred small orders put a
+                // hundred rows on one ticket: 105 lines for one lot of one
+                // material, all saying "this order needs this fabric", none of
+                // them summarising anything a person reads. One line per plan
+                // is the same information at the grain the ticket is actually
+                // asked about.
+                lines: exceptionLinesFor(e)
             })
         }
     }).then(function (response) {
@@ -1799,7 +2166,8 @@ function raiseAllWashRequests() {
                     unit: e.unit,
                     note: '',
                     lotId: job.lotId,
-                    lines: e.lines || []
+                    // Collapsed per plan — same reason as submitSummaryException.
+                    lines: exceptionLinesFor(e)
                 })
             }
         }).then(function (response) {
@@ -1849,8 +2217,28 @@ function raiseAllWashRequests() {
 // The test is total demand against what is actually on the shelf. For fabric
 // that means WASHED stock, matching the shortfall summary: if the gap is only
 // coverable by washing, the row is genuinely contested until the wash lands.
+// WORTH WARNING ABOUT ONLY WHEN THE CLOTH CANNOT GO ROUND. Two supervisors
+// wanting 30 each of 100 are not in contention; they both get served.
+//
+// FOR A TRIM THE LEDGER HAS ALREADY DECIDED THIS, so the test is simply whether
+// this card was left short of what it wants. That is the honest question now:
+// the ceiling is the card's own remainder, so a warning means "you will not be
+// able to issue this row in full", which is exactly the fact he needs. The old
+// gross test (total demand > rack) fired on every card of a contested material
+// including the ones served in full, which is why the warnings read as
+// wallpaper.
+//
+// Fabric keeps the gross test — its ledger is per lot and per roll, so "is this
+// card short" is answered by the allocator's own outcomes rather than by a
+// metres balance, and a warning here would double up on the lot-level reasons
+// the fabric rows already print.
 function isContested(m) {
     if (!m.contestedBy || m.contestedBy.length === 0) return false;
+    if (!m.isFabric && m.stockLeftForCard !== undefined) {
+        var want = Number(m.remaining) || 0;
+        if (want <= 0) return false;
+        return round2(stockForCard(m)) + 0.0001 < round2(want);
+    }
     var totalWanted = (Number(m.remaining) || 0) + (Number(m.heldByOthers) || 0);
     return totalWanted > (Number(m.availableStock) || 0) + 0.0001;
 }
@@ -2248,9 +2636,17 @@ function lotShortHtml(m, supIdx, matIdx) {
         // owes him, is the shortfall itself and that the shelf cannot cover
         // it — the actual why (this lot's cloth is in short pieces) belongs on
         // the allocator's audit screen, not here.
+        //
+        // "NO LOT", NOT "NOT ON L3". `why.lot` is the BEST of every lot this
+        // material has — chooseLotForOrder walked all of them and this is
+        // whichever held the longest cuttable piece — so naming it as though it
+        // were the one lot checked reads as "go look at a different one", which
+        // is backwards: every lot was checked and L3 already won. Named
+        // separately, as where the closest piece happens to be, not as the
+        // subject of the sentence.
         return '<div class="lot-dry">Still short ' + fmt(why.short) + ' ' + u +
-            ' of this shade &mdash; the cloth left on <b>' + escapeHtml(why.lot) +
-            '</b> is not in one piece long enough to cut. Needs fresh stock.</div>';
+            ' of this shade &mdash; no lot has a piece long enough to cover the ' +
+            'whole order (closest is <b>' + escapeHtml(why.lot) + '</b>). Needs fresh stock.</div>';
     }
     if (why.kind === 'blocked') {
         return '<div class="lot-dry">' + fmt(why.qty) + ' ' + u + ' on <b>' +
@@ -2308,7 +2704,18 @@ function renderQtyIssueRow(m, supIdx, matIdx, labelBadge) {
             '<td class="col-num">' + qty(m.availableStock, m.unit) + '</td>' +
             '<td class="col-num">' + qty(Number(m.unwashedStock) || 0, m.unit) + '</td>';
     } else {
-        stockCells = '<td class="col-num">' + qty(m.availableStock, m.unit) + '</td>';
+        // WHAT IS LEFT FOR THIS CARD, not the whole rack — the same figure the
+        // ceiling is enforced at, so the column and the input agree. Showing the
+        // rack total beside a box that will not accept it invites him to type
+        // 100 over a row that can only take 40 and be refused.
+        //
+        // JUST THE NUMBER. A second line underneath naming the rack total
+        // ("9,701 on the rack, rest spoken for") was tried and removed: the
+        // fabric rows say nothing of the kind, so it made the trim rows look
+        // like they were reporting a problem when they are reporting an
+        // ordinary share, and it repeated a figure he can see on the shelf
+        // anyway. One number per column, the same on every row.
+        stockCells = '<td class="col-num">' + qty(stockForCard(m), m.unit) + '</td>';
     }
 
     var warning = '';
@@ -2956,6 +3363,7 @@ function buildShortfallSummary(data) {
         var byLotId = {};
         (e.lots || []).forEach(function (l) { byLotId[String(l.lotId)] = l; });
 
+        var washedLots = {};
         if (e.isFabric) {
             Object.keys(e.washByLot || {})
                 .map(function (id) { return e.washByLot[id]; })
@@ -2966,8 +3374,84 @@ function buildShortfallSummary(data) {
                     if (!l) return;
                     var q = round2(Math.min(w.qty, Number(l.unwash) || 0));
                     if (q <= 0) return;
+                    washedLots[String(w.lotId)] = true;
                     toWash.push({ e: e, qty: q, kind: 'wash', lot: l });
                 });
+
+            // ---- GREIGE ON A LOT NO ORDER COULD COMMIT TO ----
+            //
+            // `washByLot` only carries lots an order was actually COMMITTED to,
+            // and an order is only committed to a lot that covers it WHOLE (the
+            // atom rule — see chooseLotForOrder). So a lot holding 15 m of greige
+            // against a 40 m demand is a candidate in NEITHER tier: the order is
+            // skipped, nothing is committed, `washByLot` stays empty, and this
+            // list offered no wash at all. The screen said "buy 40" over 15 m of
+            // the right shade sitting unwashed on the rack.
+            //
+            // That is the atom rule working correctly on the ISSUE side — those
+            // 15 m genuinely cannot finish the order, and committing them would
+            // burn the shade on a job that still could not ship. But "what is
+            // missing" is a different question from "what can I hand over today".
+            // Washing owned cloth is free of the atom rule: it converts greige
+            // this shade into washed cloth this shade, it is the cheapest way to
+            // shrink the purchase, and it is an action he can take now.
+            //
+            // So every lot with greige left gets a row, capped at what the lot
+            // holds AND at what the material is still short — never more than the
+            // job needs. Lots already covered above are skipped so one lot cannot
+            // appear twice.
+            //
+            // The PO below is UNAFFECTED and deliberately so: it is derived from
+            // the allocator's own unseated pieces, which already counts a wash
+            // that has not happened as not-yet-available. Washing these 15 m and
+            // re-loading moves them into `wash`, the allocator re-runs, and the
+            // purchase figure falls out smaller on its own.
+            //
+            // THE CAP IS THE ROWS' OWN OUTSTANDING METRES, NOT `e.needed`.
+            // `e.needed` is only assigned for fabric further down, in the BUY
+            // branch — reading it here gets 0 and the whole block silently never
+            // fires, which is exactly how the first cut of this fix failed to do
+            // anything at all.
+            //
+            // Derived from the OUTSTANDING PIECES, converted to whole marker
+            // rows per cut size — the same conversion the buy figure uses below,
+            // and the only correct one: fabric fulfilment is counted in cut
+            // pieces, and a line's metres depend on its own cut geometry. A line
+            // with no countable geometry contributes nothing rather than a
+            // guess.
+            var fwWash = Number(e.fabricWidthCm) || 0;
+            var stillShort = 0;
+            (e.lines || []).forEach(function (l) {
+                var owedPc = (Number(l.reqPieces) || 0) - (Number(l.issPieces) || 0);
+                if (owedPc <= 0) return;
+                var cw = Number(l.cutW) || 0, cl = Number(l.cutL) || 0;
+                if (!(fwWash > 0 && cw > 0 && cl > 0 && fwWash >= cw)) return;
+                var perRow = Math.floor(fwWash / cw);
+                if (perRow <= 0) return;
+                stillShort += Math.ceil(owedPc / perRow) * cl / 100;
+            });
+            stillShort = round2(stillShort);
+            if (stillShort > 0) {
+                (e.lots || [])
+                    .filter(function (l) {
+                        return !l.blocked && !washedLots[String(l.lotId)] &&
+                               l.form !== 'Pieces' && round2(Number(l.unwash) || 0) > 0;
+                    })
+                    .sort(function (a, b) {
+                        return (Number(b.unwash) || 0) - (Number(a.unwash) || 0);
+                    })
+                    .forEach(function (l) {
+                        if (stillShort <= 0.0001) return;
+                        var q = round2(Math.min(Number(l.unwash) || 0, stillShort));
+                        if (q <= 0) return;
+                        stillShort = round2(stillShort - q);
+                        toWash.push({ e: e, qty: q, kind: 'wash', lot: l,
+                                      // Nothing is committed to this lot — washing
+                                      // it is an offer, not a job an order is
+                                      // already waiting on. The dialog says so.
+                                      uncommitted: true });
+                    });
+            }
         }
 
         // ---- BUY ----
@@ -4542,20 +5026,58 @@ function issueForSupervisor(supIdx) {
     var RETRY_WAITS_MS = [3000, 8000, 20000, 45000, 60000]; // then give up
     var retryCount = 0;
 
+    // IS THIS A THROTTLE, OR A REAL FAILURE WEARING A THROTTLE'S NUMBERS?
+    //
+    // Zoho surfaces throttling inconsistently — an HTTP 429, a body code
+    // (4834 / "too many requests"), or a plain network-ish failure — so the
+    // match has to be broad. But it must not match a DIGIT SEQUENCE that
+    // happens to appear inside something else, and that is exactly what a bare
+    // `indexOf('429')` did.
+    //
+    // THREE OF issueMaterialsApply's OWN ERROR STRINGS EMBED AN 18-DIGIT
+    // CREATOR RECORD ID: "requirement <id> not found", "lot <id> not found",
+    // "roll <label> (<id>) not found on lot <id>". Those come back as a normal
+    // HTTP 200 carrying errors[], and `delugeThrottled` runs this predicate
+    // over that text. An id containing "429" anywhere in its eighteen digits —
+    // roughly one row in forty — turned a permanent, non-retryable failure
+    // into a rate-limit retry: the same doomed chunk replayed five times over
+    // ~2 minutes of backoff, the store person watching "Rate-limited —
+    // retrying…" for a material that will never issue, and the real error
+    // ("requirement not found") never surfacing because the retry path returns
+    // before it is added to allErrors. A metres figure like "4.29" was safe
+    // only by luck of the decimal point.
+    //
+    // So the numeric codes are matched as CODES — a whole token, not a
+    // substring — while the word forms stay as plain contains. `\b` is no use
+    // against a run of digits (429 inside 3955559000000429001 has no word
+    // boundary), so the token test requires a non-digit either side.
+    //
+    // The status fields are checked first and remain authoritative: a genuine
+    // HTTP 429 never depends on this string matching at all.
     function isRateLimited(err) {
+        if (!err) return false;
+        if (err.status === 429 || err.statusCode === 429 || err.code === 429) return true;
+        if (err.status === 4834 || err.statusCode === 4834 || err.code === 4834) return true;
+
         var s = '';
         try { s = JSON.stringify(err); } catch (e) { s = String(err); }
         s = (s + ' ' + (err && err.message ? err.message : '')).toLowerCase();
-        return err && (
-            err.status === 429 || err.statusCode === 429 || err.code === 429 ||
-            s.indexOf('429') >= 0 ||
+
+        // A bare code, not a digit run inside a longer number or an id. The
+        // boundary is NON-ALPHANUMERIC rather than merely non-digit: a size
+        // prints as "429x120" and a lot as "L429", where the neighbour is a
+        // letter and a digit-only guard would still read 429 as a code. A real
+        // throttle code is always delimited by whitespace or punctuation.
+        var hasCode = function (code) {
+            return new RegExp('(^|[^a-z0-9])' + code + '([^a-z0-9]|$)').test(s);
+        };
+
+        return hasCode('429') || hasCode('4834') ||
             s.indexOf('too many request') >= 0 ||
             s.indexOf('rate limit') >= 0 ||
             s.indexOf('rate-limit') >= 0 ||
-            s.indexOf('4834') >= 0 ||
             s.indexOf('throttl') >= 0 ||
-            s.indexOf('limit exceeded') >= 0
-        );
+            s.indexOf('limit exceeded') >= 0;
     }
 
     // THE HANDOVER RECORD FOR WHAT ACTUALLY LANDED.
@@ -4766,8 +5288,32 @@ function issueForSupervisor(supIdx) {
             // A Deluge-side rate-limit can also come back INSIDE the payload as
             // a DELUGE: error rather than a rejected promise. Treat that the
             // same — retry the chunk, don't record it as a permanent failure.
+            //
+            // ONLY THE THROWN-EXCEPTION ERRORS ARE EVEN CANDIDATES, and that
+            // narrowing is what makes this safe to test with a string match at
+            // all. issueMaterialsApply emits two shapes into errors[]:
+            //
+            //   "DELUGE: <message>"  — the outer catch. A real thrown exception,
+            //                          and the only shape a Zoho throttle can
+            //                          arrive in.
+            //   "<sku>: requirement <id> not found" / "lot <id> not found" /
+            //   "roll <label> (<id>) not found on lot <id>" /
+            //   "lot <n> has <x> washed, asked <y> - clamped"
+            //                        — per-row problems it collected and kept
+            //                          going. PERMANENT. Retrying replays the
+            //                          same doomed chunk.
+            //
+            // The second group embeds 18-digit record ids and free-form lot
+            // numbers, so it is exactly the text a numeric code match trips
+            // over — and none of it can ever be a throttle. Testing only the
+            // "DELUGE:" rows removes the whole class of false positive rather
+            // than trying to out-guess the id space.
             var delugeThrottled = parsed && parsed.errors &&
-                parsed.errors.some(function (e) { return isRateLimited({ message: e }); });
+                parsed.errors.some(function (e) {
+                    var t = String(e || '');
+                    if (t.indexOf('DELUGE:') !== 0) return false;
+                    return isRateLimited({ message: t });
+                });
             if (delugeThrottled) {
                 scheduleRetry({ message: parsed.errors.join(' ') });
                 return;

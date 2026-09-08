@@ -73,19 +73,23 @@ function totalOwned(rec) {
 function shelf(rec) { return d2(rd(rec.Wash_Quantity) + rd(rec.Unwash_Quantity) + rd(rec.Unallocated_Qty)); }
 
 // ---- ports ---------------------------------------------------------------------
-// saveStockInward.dg:287-318 - fromNew into the state, part out of Unallocated.
+// saveStockInward.dg:287-318 - the WHOLE qty lands on the state counter
+// (Wash/Unwash), same as the lot's roll; fromUnalloc/fromNew only decide how
+// much of it came OUT OF Unallocated_Qty. Crediting fromNew alone (the old
+// bug) left a pure Unallocated->lot move net -qty on the parent: the metres
+// landed on the lot but no parent counter held them, so Quantity fell short
+// of the rack by exactly the moved amount.
 function storeInward(rec, state, qty, unallocHave) {
   let fromUnalloc = qty;
   if (fromUnalloc > unallocHave) fromUnalloc = unallocHave;
   if (fromUnalloc < 0) fromUnalloc = 0;
-  const fromNew = qty - fromUnalloc;
   let matUnwashOut = 0.0, matWashOut = 0.0;
   if (state === 'Wash') {
-    rec.Wash_Quantity = rd(rec.Wash_Quantity) + fromNew;
+    rec.Wash_Quantity = rd(rec.Wash_Quantity) + qty;
     matUnwashOut = rd(rec.Unwash_Quantity);
     matWashOut = rd(rec.Wash_Quantity);
   } else {
-    rec.Unwash_Quantity = rd(rec.Unwash_Quantity) + fromNew;
+    rec.Unwash_Quantity = rd(rec.Unwash_Quantity) + qty;
     matUnwashOut = rd(rec.Unwash_Quantity);
     matWashOut = rd(rec.Wash_Quantity);
   }
@@ -163,6 +167,21 @@ test('Q1 inward: shelf rises by the booking, Quantity tracks it', () => {
   storeInward(r, 'Unwash', 20, 0);
   assertShelf(r, 'after greige inward');
   assert.strictEqual(d2(r.Quantity), 70);
+});
+
+test('Q1b PURE MOVE (allocating unallocated stock, unallocHave === qty, fromNew === 0): the whole qty must still land on the state counter', () => {
+  // CONFIRMED live bug: allocating exactly what Unallocated_Qty holds into a
+  // new lot (fromUnalloc == qty, fromNew == 0) used to credit Wash/Unwash
+  // with ONLY fromNew (0) - the lot's roll got the full 743.77 but no parent
+  // counter ever held it, so Quantity (Wash+Unwash+Unallocated) fell short
+  // of the real rack (L1+L2+L3) by exactly the moved amount.
+  const r = mat({ Wash_Quantity: 3000, Unwash_Quantity: 0, Unallocated_Qty: 743.77 });
+  r.Quantity = 3743.77; // Wash 3000 + Unallocated 743.77, matching the real report
+  storeInward(r, 'Unwash', 743.77, 743.77);
+  assert.strictEqual(d2(r.Unwash_Quantity), 743.77, 'the moved metres must land in Unwash, not vanish');
+  assert.strictEqual(d2(r.Unallocated_Qty), 0, 'Unallocated correctly drained to 0');
+  assert.strictEqual(d2(r.Quantity), 3743.77, 'Quantity must still equal the whole rack after a pure move');
+  assertShelf(r, 'after pure-move inward');
 });
 
 test('Q2 the wash cycle: greige-through is shelf-neutral, in-wash returns RAISE the shelf they had left', () => {

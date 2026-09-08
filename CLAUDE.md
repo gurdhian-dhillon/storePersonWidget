@@ -1072,44 +1072,47 @@ blow the statement limit at 111 plans even after the `matPlanIdx` fix, confirmed
     still describes the whole order. The "hide finished originals once a plan has a QC remake"
     filter moved server-side so pager counts match the cards. Search is a case-insensitive
     substring on item name AND sku (sku hop only when a term is present).
-  - **`getExpectedWaste` fold-in: ARITHMETIC ONLY.** `getProductionWidgetData` now attaches
-    `item.expectedWaste` (`{fabrics:[{materialId,waste:[{count,length,width}]}]}`) computed in
-    its existing per-item loop — Pass 1 over received waste pieces, Pass 2 fresh cloth **as one
-    continuous block**. The lot-resolution machinery (`Material_Issue`/`Issue_Lines` walk,
-    `Raw_Material_Lot` lookups, per-lot fresh-cloth split) is the heavy part and is **NOT**
-    ported — the inline "Expected waste" cell only renders `count / L×W`. `getExpectedWaste.dg`
-    is unchanged and still called by the cutting-waste dialog, which needs lots.
-    Cross-checked against `getExpectedWaste.dg`'s no-lot path in
-    `tools/`-style node script (8 cases, exact match).
-  - `production.js` reads `item.expectedWaste` directly (zero calls); falls back to the per-item
-    `getExpectedWaste` call only when the field is absent (deploy gap). Pager ported from the
-    store widget's `pagerHtml`/`pageListFor`. Search box lives in `.plan-header-controls`.
+  - **The `getExpectedWaste` fold-in was REMOVED, and there is now exactly one waste number.**
+    `getProductionWidgetData` briefly attached `item.expectedWaste`, computed inline with fresh
+    cloth as ONE CONTINUOUS BLOCK, to avoid ~110 `getExpectedWaste` POSTs a page. Under the rolls
+    model that approximation **understates a lot split across several rolls** — one predicted tail
+    where the truth is one per roll — so the card would have quietly disagreed with the figure the
+    dialog gives at End Stage. Neither the attach nor the inline cell exists any more.
+    `production.js` renders no auto-fetched preview; the card carries a **"Preview expected waste"**
+    button that calls the same `getExpectedWaste` the dialog does, read-only. One call, one number,
+    on demand.
+  - Pager ported from the store widget's `pagerHtml`/`pageListFor`. Search box lives in
+    `.plan-header-controls`.
   - **MANUAL: add `itemPageJson` to `getProductionWidgetData`'s Custom API argument list** in
     the same pass as the `.dg` paste — a call with an arg count the deployed function lacks
     fails "Number of params/datatype mismatch".
   - **Still to do (separate session):** `getCheckingQueue` (also a statement-limit risk — walks
     `Plan_Item[Item_Status == "Awaiting_Check"]` factory-wide) and `getFinishingItems`. Full
     plan: `docs/production-pagination-plan.md`.
-- **`resolveStockDispute.dg`** is a legacy form workflow duplicating `resolveDispute`. It has
-  none of the current logic. **Delete it in Creator.**
-- **`resolveDispute` does NOT wind back `Issue_Lines.Settled_Qty` or `Material_Issue.Issue_Status`,
-  and does not move Zoho Inventory on a `Store_Correction`.** Both are pre-existing — the receive
-  path settles the WHOLE owed amount into `Settled_Qty` and disputes the gap, so on a
-  `Store_Correction` / `Lost` resolution the requirement re-opens (`Issued_Qty` / `Received_Qty` /
-  `Pieces_From_*` rolled back correctly) but:
-  > 1. the handover's `Issue_Line` still reads `Settled_Qty == Qty` and its voucher still reads
-  >    `Issue_Status == "Received"` — the Material Issue Report shows the voucher as fully received
-  >    when part of it was corrected back.
-  > 2. `postTransferOrders` already moved the disputed metres to Production (they were in
-  >    `Settled_Qty − Transferred_Qty`), and `resolveDispute` only queues a `Write_Off` on `Lost`,
-  >    not on `Store_Correction` — so after a store-correction Inventory says Production while
-  >    Creator says the cloth is back on the shelf.
+- **`resolveStockDispute.dg`** was a legacy form workflow duplicating `resolveDispute`. It is
+  **deleted from the repo**; `resolveDispute` is the single implementation. If the workflow is
+  still present in Creator, **delete it there** — that is the last remaining step.
+- **`resolveDispute` does not move Zoho Inventory on a `Store_Correction`.** It queues a
+  `Write_Off` on `Lost` only (outbound, non-waste — an inbound dispute is offcuts, which never
+  entered Inventory at all). `postTransferOrders` has already moved the disputed metres to
+  Production, so after a store-correction Inventory says Production while Creator says the cloth
+  is back on the shelf.
+  > **The `Issue_Lines` half of this gap is CLOSED.** `resolveDispute` §3a now winds the
+  > material × lot `Issue_Line` back: on `Found` it moves the metres from `Disputed_Qty` to
+  > `Received_Qty` and re-queues the voucher's `Transfer_Status` so `postTransferOrders` picks up
+  > the newly confirmed cloth (it skips `Done` vouchers); on `Correction` / `Lost` it leaves the
+  > recorded split alone — a historical fact — and sets `Line_Status = "Received"` so nothing
+  > reads the line as still owed. Outbound, non-waste, and only when the dispute carries a
+  > voucher; a pre-migration dispute has none and is handled by the legacy per-requirement path.
+  >
+  > What is left is the Inventory leg alone. To fix: queue a move for `Store_Correction` too,
+  > Production → Main Warehouse, mirroring the `Lost` block at the foot of the function.
   >
   > The store/supervisor screen optimisations (allocation-applier issue, settlement-applier
-  > receive, per-voucher `Issue_Status`, chunked/resumable finalize) did NOT introduce this — the
-  > old fan also settled the full owed amount and the old `resolveDispute` also ignored
-  > `Issue_Lines`. The dispute raise/display/net/resolve-requirement paths were all traced and are
-  > correct after the optimisation.
+  > receive, per-voucher `Issue_Status`, chunked/resumable finalize) did NOT introduce any of
+  > this. The dispute raise/display/net/resolve paths are covered end to end by
+  > `tools/dispute-cycle.test.js` — both directions, every ending, the authorisation matrix, and
+  > widget/server option alignment.
   >
   > **To fix later:** `resolveDispute` needs to (a) wind back the oldest matching `Issue_Line`'s
   > `Settled_Qty` by the resolved qty, (b) re-derive that voucher's `Issue_Status` from its lines,

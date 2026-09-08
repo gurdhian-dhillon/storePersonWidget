@@ -878,12 +878,53 @@ function submitReceipt() {
         notify: 'Wrapping up…'
     };
 
+    // IS THIS A THROTTLE, OR A REAL FAILURE WEARING A THROTTLE'S NUMBERS?
+    //
+    // The numeric codes are matched as CODES — a whole token with a non-digit
+    // either side — never as a bare substring. `indexOf('429')` fires on any
+    // eighteen-digit Creator id that happens to contain those three digits, and
+    // this receive path puts ids and free figures straight into errors[]:
+    //
+    //   "Printed piece <id> not found"                     — an id
+    //   "Waste piece 429x120: 2 of 5 not received …"        — a DIMENSION
+    //   "Waste piece 40x80: 4.29 of 9 not received …"       — a QUANTITY
+    //
+    // The second and third are not even failures — they are the ordinary
+    // dispute notices a short receipt is SUPPOSED to produce. Matching them
+    // sent a perfectly normal partial receipt into the retry loop: the same
+    // call replayed five times over ~2 minutes of backoff, the supervisor
+    // watching "Store is busy — retrying…", and then an abort telling him to
+    // press Confirm again. The receipt had in fact already been settled
+    // (receiveHandover is idempotent), so nothing was corrupted — but the run
+    // never reached receiveFanOut, so the requirement rows were never fanned,
+    // readiness never recomputed, and the material sat received-but-not-ready.
+    //
+    // `\b` is useless against a digit run (429 inside 3955559000000429001 has
+    // no word boundary), hence the explicit non-digit guards.
     function isRateLimited(err) {
+        if (!err) return false;
+        if (err.status === 429 || err.statusCode === 429 || err.code === 429) return true;
+        if (err.status === 4834 || err.statusCode === 4834 || err.code === 4834) return true;
+
         var msg = ((err && (err.message || err.error || err.toString())) || '')
             .toString().toLowerCase();
-        return msg.indexOf('429') >= 0 || msg.indexOf('too many request') >= 0 ||
-            msg.indexOf('rate limit') >= 0 || msg.indexOf('4834') >= 0 ||
-            msg.indexOf('throttl') >= 0 || msg.indexOf('limit exceeded') >= 0;
+
+        // The boundary is NON-ALPHANUMERIC, not merely non-digit. A waste
+        // dimension prints as "429x120", where the "x" is not a digit — so a
+        // digit-only guard still read 429 as a bare code and sent an ordinary
+        // dispute notice into the retry loop. A real throttle code is always
+        // delimited by whitespace or punctuation ("HTTP 429", "code 429:",
+        // "429 Too Many Requests"), never welded to a letter.
+        var hasCode = function (code) {
+            return new RegExp('(^|[^a-z0-9])' + code + '([^a-z0-9]|$)').test(msg);
+        };
+
+        return hasCode('429') || hasCode('4834') ||
+            msg.indexOf('too many request') >= 0 ||
+            msg.indexOf('rate limit') >= 0 ||
+            msg.indexOf('rate-limit') >= 0 ||
+            msg.indexOf('throttl') >= 0 ||
+            msg.indexOf('limit exceeded') >= 0;
     }
 
     function post(receiptsJson, onOk) {
@@ -900,7 +941,24 @@ function submitReceipt() {
             var parsed;
             try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
             if (parsed && parsed.errors && parsed.errors.length > 0) {
-                if (parsed.errors.some(function (e) { return isRateLimited({ message: e }); })) {
+                // ONLY A THROWN EXCEPTION CAN BE A THROTTLE, and only those are
+                // tested. errors[] on this path carries two very different
+                // things: "DELUGE: <message>" from the outer catch (a real
+                // failure, and the only shape a Zoho throttle arrives in), and
+                // per-row NOTICES the receipt is supposed to produce — "Waste
+                // piece 40x80: 2 of 5 not received - dispute raised", "Printed
+                // piece <id> not found". Those are permanent by construction:
+                // replaying the call cannot change them, and the dispute ones
+                // are the normal outcome of a short receipt, not a fault at all.
+                //
+                // Scanning them for throttle codes turned an ordinary partial
+                // receipt into a retry loop whenever a dimension, a quantity or
+                // a record id happened to contain 429 — five replays over ~2
+                // minutes, then an abort, with the fan-out never running.
+                if (parsed.errors.some(function (e) {
+                    var t = String(e || '');
+                    return t.indexOf('DELUGE:') === 0 && isRateLimited({ message: t });
+                })) {
                     scheduleRetry({ message: parsed.errors.join(' ') });
                     return;
                 }
@@ -931,7 +989,24 @@ function submitReceipt() {
             var parsed;
             try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
             if (parsed && parsed.errors && parsed.errors.length > 0) {
-                if (parsed.errors.some(function (e) { return isRateLimited({ message: e }); })) {
+                // ONLY A THROWN EXCEPTION CAN BE A THROTTLE, and only those are
+                // tested. errors[] on this path carries two very different
+                // things: "DELUGE: <message>" from the outer catch (a real
+                // failure, and the only shape a Zoho throttle arrives in), and
+                // per-row NOTICES the receipt is supposed to produce — "Waste
+                // piece 40x80: 2 of 5 not received - dispute raised", "Printed
+                // piece <id> not found". Those are permanent by construction:
+                // replaying the call cannot change them, and the dispute ones
+                // are the normal outcome of a short receipt, not a fault at all.
+                //
+                // Scanning them for throttle codes turned an ordinary partial
+                // receipt into a retry loop whenever a dimension, a quantity or
+                // a record id happened to contain 429 — five replays over ~2
+                // minutes, then an abort, with the fan-out never running.
+                if (parsed.errors.some(function (e) {
+                    var t = String(e || '');
+                    return t.indexOf('DELUGE:') === 0 && isRateLimited({ message: t });
+                })) {
                     scheduleRetry({ message: parsed.errors.join(' ') });
                     return;
                 }
@@ -1175,6 +1250,17 @@ function loadMaterials() {
     var emptyState = document.getElementById('rcv-empty');
     var refreshBtn = document.getElementById('refresh-btn');
     var supId = document.getElementById('sup-select').value;
+
+    // A DRILL-DOWN IS A SNAPSHOT OF ONE FETCH, and it must not outlive it.
+    // BD_CACHE is keyed planId|materialId and nothing ever cleared it, so a
+    // breakdown fetched before a Confirm went right on being served after one
+    // — drill into an order, receive it, re-open the same order, and the box
+    // still shows the pre-receipt figures with no refetch. Every path that
+    // gets fresh data from the server routes through here (Refresh, a
+    // supervisor switch, and finishOk() after Confirm), so clearing it once,
+    // here, is the one fix that covers all three rather than three separate
+    // ones that could drift out of step.
+    BD_CACHE = {};
 
     emptyState.classList.add('hidden');
     refreshBtn.disabled = true;
