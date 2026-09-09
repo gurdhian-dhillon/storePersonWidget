@@ -41,44 +41,15 @@
 
         <div class="tab-panel is-active" id="panel-calc">
 
-        <!-- The three calculations are not the same number and are constantly
-             mistaken for each other. Saying so once, at the top, prevents the
-             most common false alarm: "the plan says 12m but the store was only
-             asked for 7m". -->
-        <div class="legend">
-            <div class="legend-item">
-                <span class="legend-dot dot-plan"></span>
-                <div>
-                    <b>Planned requirement</b>
-                    <span>Settled when the plan was made and never recomputed. Assumes no offcuts exist.</span>
-                </div>
-            </div>
-            <div class="legend-item">
-                <span class="legend-dot dot-issue"></span>
-                <div>
-                    <b>Allocated right now</b>
-                    <span>Re-decided every time this screen loads, before anything is issued. One lot per order, its own offcuts first — so it is normally lower than the plan, and it moves with the rack.</span>
-                </div>
-            </div>
-            <div class="legend-item">
-                <span class="legend-dot dot-waste"></span>
-                <div>
-                    <b>Waste this will throw off</b>
-                    <span>Predicted, not recorded. The side strip, part row and tail the cutting is expected to leave.</span>
-                </div>
-            </div>
-            <!-- The only one of the four that is a RECORD rather than a
-                 calculation. The three above answer "what should happen"; this
-                 answers "what did", and it is the only place a lot that was
-                 overridden by hand can be seen at all. -->
-            <div class="legend-item">
-                <span class="legend-dot dot-issued"></span>
-                <div>
-                    <b>What actually went out</b>
-                    <span>Recorded at the counter, lot by lot. Does not move, and says whether every handover matched the lot the order started in.</span>
-                </div>
-            </div>
-        </div>
+        <!-- THE GLOSSARY OF THE FOUR STEPS USED TO LIVE HERE, as four cards
+             taking a full screen height above the data. It said the same thing
+             on every order, every item, every row, for ever — so the admin paid
+             a screenful to be told, again, what the columns mean.
+
+             The steps still carry their numbered tags and their colours, which
+             is what the cards were really keying. What the numbers MEAN is now
+             said where it can be acted on: a mismatch states its case in full,
+             an agreement is a tick. -->
 
         <main id="content"></main>
 
@@ -101,6 +72,11 @@
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
     <script src="../js/lot-allocator.js"></script>
     <script src="../js/api-experiment.js"></script>
+    <!-- The reason trail behind extra material demand. A pure read over the JS
+         Data API — Material_Requirement.Reason, Plan_Item.Remake_Reason and
+         Item_Check.Rejection_Remarks — none of which getOrderConsumption
+         returns. Loaded before main.js, which calls it. -->
+    <script src="js/consumption-detail.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

@@ -31,6 +31,19 @@ var PIPELINE_TOTAL_PAGES = 1;
 var PIPELINE_PAGE_SIZE = 25;
 var PIPELINE_TOTAL_ORDERS = 0;
 var PROD_SEARCH_TERM = '';
+
+// URGENCY BY DEFAULT, not newest-first.
+//
+// A hundred and seven orders sorted by date answers "what is newest", and the
+// question an admin actually arrives with is "what needs me". Soonest delivery
+// leads; an order with no delivery date sorts last rather than being ranked as
+// if it were overdue. Switchable to date or order number from the header.
+var PIPELINE_SORT = 'urgency';
+
+// The risk filter, when one of the risk chips is clicked: '', 'late', 'blocked',
+// 'stuck', 'due'. Narrows the current status bucket rather than replacing it,
+// so "In Production AND late" is one click from "In Production".
+var PIPELINE_RISK = '';
 var PENDING_SEARCH_TERM = '';
 
 // Sales orders still at "Pending" — the ones the CreateProductionPlan batch
@@ -782,6 +795,73 @@ function updateOrderDrawerInPlace(soId, shouldToggle) {
     }
 }
 
+// A delivery date, short. "12 Sep" is read at a glance in a column; the full
+// ISO string is not, and the year only matters when it is not this one.
+function fmtDue(v) {
+    if (typeof PipelineData === 'undefined') return String(v || '');
+    var d = PipelineData.parseDate(v);
+    if (!d) return String(v || '');
+    var mons = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var s = d.getDate() + ' ' + mons[d.getMonth()];
+    if (d.getFullYear() !== new Date().getFullYear()) s += ' ' + d.getFullYear();
+    return s;
+}
+
+// WHAT NEEDS ME TODAY — counted across the orders on screen, as clickable
+// filters onto the bucket already showing.
+//
+// The status tiles answer "where is the work". They cannot answer "which of
+// these hundred and seven should I look at", because every order In Production
+// is In Production. This is that second question, and it is the one an admin
+// actually arrives with. Each chip narrows the current bucket rather than
+// replacing it, so "In Production and late" is one click away.
+//
+// Counted over the loaded page, and it says so: claiming a factory-wide figure
+// from a page of 25 would be a number that changes as you paginate, which is
+// worse than no number.
+function renderRiskBar(orders) {
+    if (typeof PipelineData === 'undefined' || !orders || !orders.length) return '';
+
+    var tally = { late: 0, blocked: 0, stuck: 0, due: 0 };
+    orders.forEach(function (o) {
+        var seen = {};
+        PipelineData.risk(o).forEach(function (r) {
+            if (tally[r.level] === undefined || seen[r.level]) return;
+            seen[r.level] = true;
+            tally[r.level]++;
+        });
+    });
+
+    var defs = [
+        { key: 'late', label: 'overdue', why: 'past the expected delivery date and not yet packed' },
+        { key: 'blocked', label: 'awaiting material', why: 'items the store has not issued cloth for' },
+        { key: 'stuck', label: 'no movement 14d+', why: 'no stage has started or finished in a fortnight' },
+        { key: 'due', label: 'due within 3 days', why: 'delivery is today or in the next three days' }
+    ];
+
+    var any = defs.some(function (d) { return tally[d.key] > 0; });
+
+    var h = '<div class="risk-bar">';
+    if (!any) {
+        h += '<span class="risk-clear">✓ Nothing on this page is overdue, blocked or stalled.</span>';
+    } else {
+        h += '<span class="risk-bar-label">Needs attention</span>';
+        defs.forEach(function (d) {
+            if (!tally[d.key]) return;
+            var on = PIPELINE_RISK === d.key;
+            h += '<button type="button" class="risk-chip risk-' + d.key + (on ? ' is-on' : '') +
+                '" data-risk="' + d.key + '" title="' + esc(d.why) + '">' +
+                '<b>' + tally[d.key] + '</b> ' + esc(d.label) + '</button>';
+        });
+        if (PIPELINE_RISK) {
+            h += '<button type="button" class="risk-chip risk-clear-btn" data-risk="">Show all</button>';
+        }
+        h += '<span class="risk-scope">on this page</span>';
+    }
+    h += '</div>';
+    return h;
+}
+
 function renderPipeline(targetSoId) {
     var el = document.getElementById('pipeline-section');
     if (!el) return;
@@ -1029,6 +1109,14 @@ function getSearchedInProgressOrders() {
             return matchesOrderQuery(o, PROD_SEARCH_TERM, false);
         });
     }
+    // The risk chips narrow whatever bucket is showing. Applied here rather
+    // than per renderer because this is the single funnel they all read, so
+    // the table, the counts and the pager cannot disagree about what is listed.
+    if (orders && PIPELINE_RISK && typeof PipelineData !== 'undefined') {
+        orders = orders.filter(function (o) {
+            return PipelineData.risk(o).some(function (r) { return r.level === PIPELINE_RISK; });
+        });
+    }
     return orders;
 }
 
@@ -1071,7 +1159,16 @@ function renderInProgressOrdersBody() {
             '</div>';
     }
 
-    var h = '<div class="table-wrapper"><table class="progress-table"><thead><tr>';
+    // The risk summary is built from the FULL bucket, not the filtered view —
+    // otherwise clicking "3 overdue" would recount to "3 overdue" out of 3 and
+    // the other chips would vanish, leaving no way back except a reset button.
+    var h = renderRiskBar(rawOrders);
+
+    if (PIPELINE_RISK && (!orders || !orders.length)) {
+        return h + '<p class="progress-empty">Nothing in this bucket matches that filter.</p>';
+    }
+
+    h += '<div class="table-wrapper"><table class="progress-table"><thead><tr>';
 
     if (PIPELINE_STATUS === 'Dispatched') {
         h += '<th>Sales order</th><th>Customer</th><th>Plan</th><th>Order date</th><th class="r">Dispatched / ordered</th><th>Next step</th></tr></thead><tbody>';
@@ -1132,7 +1229,7 @@ function renderInProgressOrdersBody() {
                 '<td class="td-status"><span class="pill pill-so-status so-packed">' + esc(order.nextStep || 'Ready for Dispatch') + '</span></td></tr>';
         });
     } else {
-        h += '<th>Sales order</th><th>Plan</th><th>Supervisor</th><th>Item Level Progress</th>' +
+        h += '<th>Sales order</th><th>Due</th><th>Supervisor</th><th>Progress</th>' +
             '<th class="r">Produced / ordered</th><th>Items</th></tr></thead><tbody>';
 
         orders.forEach(function (order) {
@@ -1162,18 +1259,70 @@ function renderInProgressOrdersBody() {
 
             var btnText = isOpen ? 'Hide Items ▲' : ('Inspect Items (' + itemCount + ') ▼');
 
-            h += '<tr class="so-card-row">' +
+            // THE FLAG THAT SAYS WHY THIS ROW MIGHT NEED HIM. Worst-first, one
+            // word, on the order number where the eye already is. A row with
+            // nothing wrong carries nothing — the absence is the good news.
+            var rk = (typeof PipelineData !== 'undefined') ? PipelineData.worstRisk(order) : null;
+            var riskTxt = rk
+                ? ' <span class="risk-flag risk-' + rk.level + '" title="' + esc(rk.why) + '">' +
+                  esc(rk.label) + '</span>'
+                : '';
+
+            // DUE DATE, which this screen has never shown despite the field
+            // existing on Sales_Order since the plan builder started copying it
+            // to Plan_End_Date. Without it there is no late and no due-soon,
+            // which is most of what an order-status board is for.
+            var dueHtml = '<span class="is-muted">—</span>';
+            if (order.dueDate) {
+                var dd = order.daysToDue;
+                var dcls = '', dnote = '';
+                if (dd !== null && order.status !== 'Packed' && order.status !== 'Dispatched') {
+                    if (dd < 0) { dcls = 'due-late'; dnote = Math.abs(dd) + 'd late'; }
+                    else if (dd === 0) { dcls = 'due-today'; dnote = 'today'; }
+                    else if (dd <= 3) { dcls = 'due-soon'; dnote = 'in ' + dd + 'd'; }
+                    else { dnote = 'in ' + dd + 'd'; }
+                }
+                dueHtml = '<span class="due-cell ' + dcls + '">' + esc(fmtDue(order.dueDate)) +
+                    (dnote ? '<span class="due-note">' + esc(dnote) + '</span>' : '') + '</span>';
+            }
+
+            // PROGRESS AS A BAR, not just a ratio. "0 / 10" and "9 / 10" read
+            // as the same shape of thing in a column of numbers; a bar does not.
+            var pct = order.orderedQty > 0
+                ? Math.round((order.producedQty / order.orderedQty) * 100) : 0;
+            if (pct > 100) pct = 100;
+            var blockedTxt = (Number(order.blocked) || 0) > 0
+                ? '<span class="blocked-chip" title="These items have no material, so no work can start on them">' +
+                  order.blocked + ' awaiting material</span>'
+                : '';
+            var stageTxt = order.currentStage
+                ? '<span class="stage-chip">' + esc(order.currentStage) +
+                  (order.currentStageStatus === 'In_Progress' ? '' : ' ✓') + '</span>'
+                : '';
+
+            h += '<tr class="so-card-row' + (rk ? ' has-risk risk-row-' + rk.level : '') + '">' +
                 '<td class="td-so-header">' +
                     '<div class="so-title-line">' +
-                        '<div class="so-num-wrap"><strong>' + soDisplay + '</strong>' + remTxt + '</div>' +
+                        '<div class="so-num-wrap"><strong>' + soDisplay + '</strong>' + remTxt + riskTxt + '</div>' +
                         qtyBadgeMobile +
                     '</div>' +
                     itemSub +
+                    '<div class="so-sub-line">' +
+                        (order.customerName ? '<span class="so-cust">' + esc(order.customerName) + '</span>' : '') +
+                        (order.planNo ? '<span class="so-plan">' + esc(order.planNo) + '</span>' : '') +
+                        stageTxt + blockedTxt +
+                    '</div>' +
                     metaMobile +
                 '</td>' +
-                '<td class="td-plan desktop-only">' + esc(order.planNo || '—') + '</td>' +
+                '<td class="td-due desktop-only">' + dueHtml + '</td>' +
                 '<td class="td-sup desktop-only">' + esc(order.supervisor || '—') + '</td>' +
-                '<td class="td-progress">' + itemProgHtml + '</td>' +
+                '<td class="td-progress">' +
+                    '<div class="prog-wrap" title="' + n(order.producedQty) + ' of ' + n(order.orderedQty) + ' pieces produced">' +
+                        '<div class="prog-bar"><span style="width:' + pct + '%"></span></div>' +
+                        '<span class="prog-pct">' + pct + '%</span>' +
+                    '</div>' +
+                    itemProgHtml +
+                '</td>' +
                 '<td class="td-qty desktop-only r">' + n(order.producedQty) + ' / ' + n(order.orderedQty) + '</td>' +
                 '<td class="td-actions"><button type="button" class="ghost-btn btn-toggle-drawer' + (isOpen ? ' is-open-btn' : '') + '" data-so-id="' + esc(soId) + '">' +
                 btnText + '</button></td></tr>';
@@ -1418,6 +1567,20 @@ function renderPendingOrders() {
 
 function bindTableEvents(rootEl) {
     if (!rootEl) return;
+
+    // The risk chips. Filtering happens entirely in memory over the page that
+    // is already loaded, so this never refetches — it is a redraw.
+    Array.prototype.forEach.call(rootEl.querySelectorAll('[data-risk]'), function (btn) {
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var want = btn.getAttribute('data-risk') || '';
+            // Clicking the chip that is already on turns it off, so the filter
+            // is its own way back and does not need a separate control.
+            PIPELINE_RISK = (PIPELINE_RISK === want) ? '' : want;
+            renderPipeline();
+        });
+    });
 
     // Bind drawer toggles with in-place DOM updates (zero full-screen flicker)
     Array.prototype.forEach.call(rootEl.querySelectorAll('.btn-toggle-drawer'), function (btn) {
@@ -1807,8 +1970,15 @@ function activateTab(name) {
 function loadPipeline() {
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getOrderPipelineCounts',
-        // Required for this externally hosted widget: it tells the SDK which
-        // Creator workspace owns the custom API endpoint shown in Creator.
+        // NOT required, despite what this comment used to claim. Four calls on
+        // this page pass it and five do not, and all nine work — getEmployeeReport,
+        // getAdminCalculation and getRawMaterialsList have been serving the tabs
+        // beside this one without it. The SDK infers the workspace.
+        //
+        // Left on the calls that already carry it rather than stripped: removing
+        // a parameter that demonstrably works buys nothing, and the claim was
+        // the only real problem — it invited somebody to "fix" the other five by
+        // hardcoding the org name into every call on the page.
         workspace_name: 'livelinenstore',
         http_method: 'POST',
         payload: {}
@@ -1891,6 +2061,25 @@ function loadPipelineFromOrderAudit(originalError) {
     });
 }
 
+// THE PIPELINE, OFF THE JS DATA API.
+//
+// This used to call `getSalesOrderProgress` — 630 lines of Deluge that did, per
+// page of 25 orders, per plan: every Stage_Log for the plan, every Item_Check
+// with a NESTED Finishing_Data query per check, and all ~110 Plan_Item rows. One
+// Faire order anywhere on the page could push the execution past Creator's
+// statement limit, and that limit IS NOT CATCHABLE — it kills the script, the
+// function's try/catch never runs, and the widget gets a bare HTTP 500 with no
+// error card. The tab would just go blank at volume with nothing saying why.
+//
+// PipelineData does the same joins over getRecords, which has no statement
+// limit, in nine calls for the whole page rather than nine per order. It is a
+// pure read, so nothing needed a Creator paste.
+//
+// The .dg is left in the repo unused rather than deleted, so the old path is one
+// revert away until this is confirmed in production.
+//
+// Every state variable below is unchanged, and renderPipeline() is untouched —
+// the payload is shaped to the contract the renderers already read.
 function loadSalesOrderProgress(statusFilter, page) {
     var targetStatus = statusFilter || PIPELINE_STATUS || 'In Progress';
     PIPELINE_PAGE = Number(page) || 1;
@@ -1898,36 +2087,34 @@ function loadSalesOrderProgress(statusFilter, page) {
     DATA.progressOrders = null;
     renderPipeline();
 
-    ZOHO.CREATOR.DATA.invokeCustomApi({
-        api_name: 'getSalesOrderProgress',
-        workspace_name: 'livelinenstore',
-        http_method: 'POST',
-        content_type: 'application/json',
-        payload: { salesOrderId: 'PAGE:' + PIPELINE_PAGE, statusFilter: targetStatus }
-    }).then(function (response) {
-        try {
-            var result = response && response.result !== undefined ? response.result : response;
-            var data = typeof result === 'string' ? JSON.parse(result) : result;
-            if (data && data.data !== undefined) data = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
-            if (data && data.error) throw new Error(data.error);
-            if (!data || !Array.isArray(data.orders)) throw new Error('Response did not contain order progress');
-            DATA = DATA || {};
-            DATA.progressOrders = data.orders;
-            DATA.progressError = '';
-            PIPELINE_PAGE = Math.max(1, Math.floor(Number(data.page) || PIPELINE_PAGE || 1));
-            PIPELINE_PAGE_SIZE = Math.max(1, Math.floor(Number(data.pageSize) || 25));
-            PIPELINE_TOTAL_ORDERS = Math.max(0, Math.floor(Number(data.total) || (data.orders ? data.orders.length : 0)));
-            PIPELINE_TOTAL_PAGES = Math.max(1, Math.ceil(PIPELINE_TOTAL_ORDERS / PIPELINE_PAGE_SIZE));
-            renderPipeline();
-        } catch (e) {
-            console.error('getSalesOrderProgress parse failed:', e, response);
-            DATA = DATA || {};
-            DATA.progressOrders = [];
-            DATA.progressError = e.message || String(e);
-            renderPipeline();
-        }
+    if (typeof PipelineData === 'undefined') {
+        DATA.progressOrders = [];
+        DATA.progressError = 'PipelineData did not load — check that js/pipeline-data.js is on the page.';
+        renderPipeline();
+        return;
+    }
+
+    PipelineData.page({
+        status: targetStatus,
+        page: PIPELINE_PAGE,
+        pageSize: PIPELINE_PAGE_SIZE || 25,
+        search: PROD_SEARCH_TERM || '',
+        sort: PIPELINE_SORT || 'urgency'
+    }).then(function (data) {
+        DATA = DATA || {};
+        DATA.progressOrders = data.orders || [];
+        // A report link name that did not resolve is reported without emptying
+        // the screen: some forms may have joined fine, and half a pipeline is
+        // more use than an error page.
+        DATA.progressError = (data.notes && data.notes.length)
+            ? 'Some detail could not be read: ' + data.notes.join('; ')
+            : '';
+        PIPELINE_PAGE = Math.max(1, Math.floor(Number(data.page) || PIPELINE_PAGE || 1));
+        PIPELINE_TOTAL_ORDERS = Math.max(0, Math.floor(Number(data.total) || 0));
+        PIPELINE_TOTAL_PAGES = Math.max(1, Math.floor(Number(data.totalPages) || 1));
+        renderPipeline();
     }).catch(function (err) {
-        console.error('getSalesOrderProgress error:', err);
+        console.error('PipelineData.page failed:', err);
         DATA = DATA || {};
         DATA.progressOrders = [];
         DATA.progressError = (err && (err.message || err.toString())) || 'Request failed';
@@ -2203,11 +2390,28 @@ function load() {
             if (payload && payload.data !== undefined) {
                 payload = typeof payload.data === 'string' ? JSON.parse(payload.data) : payload.data;
             }
-            var existingPipeline = DATA && DATA.pipeline;
-            var existingProgress = DATA && DATA.progressOrders;
-            DATA = payload;
-            if (!DATA.pipeline && existingPipeline) DATA.pipeline = existingPipeline;
-            if (!DATA.progressOrders && existingProgress) DATA.progressOrders = existingProgress;
+            // DATA IS SHARED BY THREE TABS, so replacing it wholesale drops
+            // whatever the other two had put there.
+            //
+            // This rescued `pipeline` and `progressOrders` and silently lost
+            // `pipelineError` and `progressError` — so a pipeline that had
+            // FAILED to load had its explanation wiped the moment somebody
+            // changed the employee-report day, and that tab then showed an empty
+            // state with nothing saying why it was empty. A screen that fails
+            // silently is the one failure this dashboard keeps making.
+            //
+            // Carried by name rather than by a spread of the old object: the
+            // employee payload legitimately owns `errors`, `worked`, `noLogs`
+            // and `totals`, and a blanket merge would let a stale day's rows
+            // survive a load that returned none.
+            var carried = {};
+            ['pipeline', 'pipelineError', 'progressOrders', 'progressError'].forEach(function (k) {
+                if (DATA && DATA[k] !== undefined) carried[k] = DATA[k];
+            });
+            DATA = payload || {};
+            Object.keys(carried).forEach(function (k) {
+                if (DATA[k] === undefined) DATA[k] = carried[k];
+            });
         } catch (e) {
             console.error('getEmployeeReport parse failed:', e, response);
             DATA = { errors: ['Could not read the response — see the browser console.'], worked: [], noLogs: [], totals: {} };
@@ -2222,7 +2426,16 @@ function load() {
         // bare 500 with no message at all is usually the statement-execution
         // limit, which cannot be caught server-side.
         console.error('getEmployeeReport error:', err);
-        DATA = { errors: ['Could not load: ' + err], worked: [], noLogs: [], totals: {}, pipeline: (DATA && DATA.pipeline) || {} };
+        // Same rule as the success path: an employee-report failure must not
+        // take the other two tabs' state — or their error messages — with it.
+        DATA = {
+            errors: ['Could not load: ' + err],
+            worked: [], noLogs: [], totals: {},
+            pipeline: (DATA && DATA.pipeline) || {},
+            pipelineError: (DATA && DATA.pipelineError) || '',
+            progressOrders: (DATA && DATA.progressOrders) || null,
+            progressError: (DATA && DATA.progressError) || ''
+        };
         setBusy(false);
         renderPipeline();
         renderTiles();

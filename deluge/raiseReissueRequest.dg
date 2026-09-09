@@ -239,16 +239,47 @@ string raiseReissueRequest(string payloadJson)
 		// agreeing or the tab and the button disagree about whether there is work.
 		alreadyAsked = false;
 
+		// Suppressed because a damage report already stands for this batch, as
+		// opposed to suppressed because the store has genuinely been asked. Two
+		// different things to tell him, so they are tracked apart.
+		mergedIntoDamage = false;
+
 		if(isLossBatch == true)
 		{
 			if(Material_Requirement[Plan_Item == itemId].count() > 0)
 			{
 				alreadyAsked = true;
 			}
+
+			// AND AN OPEN DAMAGE REPORT POINTING AT THIS BATCH COUNTS TOO.
+			//
+			// The same test getReissueDrafts uses to suppress the duplicate card and
+			// getSupervisorCounts to keep the badge level with the tab. A report whose
+			// Remake_Item is this batch is already the request for it - the damage
+			// card raises its lines against this very item - so letting the remake
+			// path run as well would write the whole BOM on top of them and the store
+			// would be asked twice for one loss. The requirement test above cannot
+			// catch it: it only becomes true after one of the two has been pressed.
+			//
+			// Guarded here and not only on screen, because a Custom API is callable
+			// from anywhere - the same reason every other server-side guard exists.
+			if(Material_Damage[Remake_Item == itemId && Status == "Open"].count() > 0)
+			{
+				alreadyAsked = true;
+				mergedIntoDamage = true;
+			}
 		}
 		else if(Material_Requirement[Plan_Item == itemId && Source == "Check_Remake"].count() > 0)
 		{
 			alreadyAsked = true;
+		}
+
+		// A stale tab is the ordinary way to arrive here, so the message has to say
+		// which of the two happened. "Already asked" over a card he has not pressed
+		// reads as a bug; naming the damage report tells him where the button is.
+		if(mergedIntoDamage == true)
+		{
+			return "{\"success\":false,\"error\":\"" + itemName.replaceAll("\"","'") + " is already on the damage report for this loss. Raise it from that card - asking here as well would order the material twice.\"}";
 		}
 
 		if(alreadyAsked == true)

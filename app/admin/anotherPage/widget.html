@@ -74,6 +74,11 @@
     </div>
 
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <!-- The sales order pipeline, over the JS Data API. Replaces the
+         getSalesOrderProgress Custom API, whose per-plan Stage_Log / Item_Check
+         / Plan_Item walks could hit Creator's uncatchable statement limit on a
+         page containing one large order. Pure read; loaded before main.js. -->
+    <script src="js/pipeline-data.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

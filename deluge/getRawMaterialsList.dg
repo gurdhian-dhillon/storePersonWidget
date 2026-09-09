@@ -3,7 +3,27 @@ string getRawMaterialsList()
 	res = "{\"errors\":[\"Nothing ran\"]}";
 	try
 	{
-		allLots = Raw_Material_Lot[ID != 0] sort by Added_Time;
+		//------------------------------------------------------------------
+		// LOTS THAT STILL HOLD SOMETHING, not every lot ever created.
+		//
+		// This was Raw_Material_Lot[ID != 0] with no filter at all, on every
+		// open of the Raw Materials tab. Lots grow with every purchase and an
+		// emptied one is never deleted, so the screen paid for the whole
+		// purchase history of the factory to print the lots that currently have
+		// cloth on them - the exact shape docs/scaling.md flags, and the one
+		// getAdminCalculation was rewritten to stop doing (its header: "this
+		// audit screen paid for the whole purchase history of the factory to
+		// print a few lot numbers").
+		//
+		// Filtered on the five quantity fields the row itself reports. A lot
+		// with nothing in any of them has nothing to say on a stock screen: it
+		// is spent, and it is exactly what accumulates for ever.
+		//
+		// Deliberately NOT filtered on Status: an emptied lot and a blocked lot
+		// are different things, and a blocked lot holding cloth must still show
+		// - it is the one somebody is looking for when stock seems to be missing.
+		//------------------------------------------------------------------
+		allLots = Raw_Material_Lot[Unwash_Quantity > 0 || Wash_Quantity > 0 || In_Transit_Qty > 0 || Disputed_Qty > 0 || In_Wash_Qty > 0] sort by Added_Time;
 		lotJsonByMat = Map();
 		for each  lt in allLots
 		{
@@ -75,12 +95,12 @@ string getRawMaterialsList()
 			
 			matType = ifnull(rm.Type_field, "").toString().trim().replaceAll("\"", "'");
 			matPattern = ifnull(rm.Pattern, "").toString().trim().replaceAll("\"", "'");
+			// One read. This tested rm.Color and then fell back to rm.Color -
+			// the SAME field as its own fallback, so the branch could never do
+			// anything. Dead code, and worse than dead: it read as though a
+			// second source existed and was being consulted.
 			matColor = ifnull(rm.Color, "").toString().trim().replaceAll("\"", "'");
-			if(matColor == "")
-			{
-				matColor = ifnull(rm.Color, "").toString().trim().replaceAll("\"", "'");
-			}
-			
+
 			unitVal = ifnull(rm.Unit, "").toString().trim().replaceAll("\"", "'");
 			
 			washQty = 0.0;

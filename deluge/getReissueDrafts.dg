@@ -63,6 +63,18 @@ string getReissueDrafts(string supervisorId)
 	itemMeta = Map();
 	itemOrder = List();
 
+	// Batches a damage report is already asking for. A damage card keyed on a
+	// loss batch IS that batch's request, so the derived remake card below must
+	// not be drawn for it as well - see the note where this is read.
+	damageCoversBatch = Map();
+
+	// The shortfall context for such a batch, worked out by the remake pass and
+	// spliced onto its damage card at assembly. The BANNER AND THE SHIP-SHORT
+	// ACTION MUST SURVIVE the card being merged - a production loss that can be
+	// dismissed is the exact silent-short-shipment this whole mechanism exists to
+	// prevent - so suppressing the duplicate card moves them, it never drops them.
+	lossExtraByItem = Map();
+
 	// Newest first - the damage he is most likely to act on is the damage he
 	// just reported. "sort by" must sit on its own assignment; inline in a
 	// for-each header it does not reliably parse.
@@ -75,10 +87,27 @@ string getReissueDrafts(string supervisorId)
 
 	for each  dmg in openDamage
 	{
+		// THE CARD IS KEYED ON THE ITEM THE MATERIAL IS ACTUALLY FOR, which is
+		// the remake batch whenever the damage report spawned one - exactly the
+		// target raiseReissueRequest resolves (Remake_Item, falling back to
+		// Plan_Item). Keying on Plan_Item instead put ONE event on the tab TWICE:
+		// the damage card under the ROOT item, and the derived Production_Loss
+		// card under the BATCH, with different planItemIds so the widget could not
+		// tell they were the same thing. He saw the same remake twice - one
+		// carrying the ship-short action, one an ordinary reissue.
+		//
+		// saveMaterialDamage writes Remake_Item on every report that follows a
+		// stage closing short, which is the ordinary flow: the dialog is only
+		// offered after the phase has saved, so the batch always exists first.
 		itemKey = "";
 		if(dmg.Plan_Item != null)
 		{
 			itemKey = dmg.Plan_Item.toString();
+		}
+		if(dmg.Remake_Item != null)
+		{
+			itemKey = dmg.Remake_Item.toString();
+			damageCoversBatch.put(itemKey,"1");
 		}
 
 		// A damage record with no item cannot be raised against anything, so it
@@ -250,8 +279,15 @@ string getReissueDrafts(string supervisorId)
 				//
 				// count(), not size() - this is a query result, not a List.
 				//----------------------------------------------------
-				rbReason = ifnull(rb.Remake_Reason,"").toString().trim();
-				alreadyAsked = false;
+					rbReason = ifnull(rb.Remake_Reason,"").toString().trim();
+					alreadyAsked = false;
+
+					// Suppressed because a damage card already stands for this batch,
+					// as opposed to suppressed because the store has genuinely been
+					// asked. The two are not the same: the first still owes the
+					// supervisor a shortfall banner and a way to ship short, on the
+					// card that absorbed it.
+					mergedBatch = false;
 
 				if(rbReason == "Production_Loss")
 				{
@@ -265,6 +301,25 @@ string getReissueDrafts(string supervisorId)
 					if(Material_Requirement[Plan_Item == rb.ID].count() > 0)
 					{
 						alreadyAsked = true;
+					}
+
+					// AND A DAMAGE REPORT ALREADY ASKING FOR THIS BATCH COUNTS TOO.
+					//
+					// Not a second guard bolted on - it is the same "has this batch
+					// been asked for yet" question, one step earlier. A damage card
+					// keyed on this batch (Material_Damage.Remake_Item) IS the request
+					// for it, and raiseReissueRequest writes its rows against this
+					// very item. Drawing the derived card beside it put one event on
+					// the tab twice, and raising both would ask the store for the
+					// ruined material AND the whole BOM for one loss.
+					//
+					// The requirement test above cannot catch this on its own: it only
+					// becomes true AFTER he presses the button, and the duplicate is
+					// on screen before he presses anything.
+					if(damageCoversBatch.get(rb.ID.toString()) != null)
+					{
+						alreadyAsked = true;
+						mergedBatch = true;
 					}
 				}
 				else if(Material_Requirement[Plan_Item == rb.ID && Source == "Check_Remake"].count() > 0)
@@ -447,6 +502,79 @@ string getReissueDrafts(string supervisorId)
 						remakeCount = remakeCount + 1;
 					}
 				}
+				else if(mergedBatch == true && rbReason == "Production_Loss")
+				{
+					//--------------------------------------------------------------
+					// THE CARD WAS ABSORBED, THE WARNING MUST NOT BE.
+					//
+					// A damage report stands for this batch, so its card is the one
+					// on screen - but that card knows nothing about the customer being
+					// short, and a production loss he cannot see is the silent
+					// under-shipment this whole mechanism exists to stop. So the
+					// shortfall and the ship-short action are worked out here and
+					// spliced onto the damage card at assembly.
+					//
+					// Same arithmetic as the card above, deliberately: the batch's own
+					// Qty_Ordered IS the shortfall, and the root line's Qty_Ordered is
+					// what the customer asked for.
+					//--------------------------------------------------------------
+					mQtyS = ifnull(rb.Qty_Ordered,"0").toString().trim();
+					if(mQtyS == "")
+					{
+						mQtyS = "0";
+					}
+
+					mOrdered = 0;
+					mLostAt = "";
+
+					if(rb.Remake_Of != null)
+					{
+						for each  mRootQ in Plan_Item[ID == rb.Remake_Of]
+						{
+							mRoQS = ifnull(mRootQ.Qty_Ordered,"0").toString().trim();
+							if(mRoQS == "")
+							{
+								mRoQS = "0";
+							}
+							mOrdered = mRoQS.toDecimal().toLong();
+						}
+
+						for each  mLgQ in Stage_Log[Plan_Item == rb.Remake_Of && Stage_Status == "Done"]
+						{
+							mQiS = ifnull(mLgQ.Qty_In,"0").toString().trim();
+							if(mQiS == "")
+							{
+								mQiS = "0";
+							}
+							mQoS = ifnull(mLgQ.Qty_Out,"0").toString().trim();
+							if(mQoS == "")
+							{
+								mQoS = "0";
+							}
+
+							mGap = mQiS.toDecimal().toLong() - mQoS.toDecimal().toLong();
+
+							if(mGap > 0)
+							{
+								if(mLostAt != "")
+								{
+									mLostAt = mLostAt + ", ";
+								}
+								mLostAt = mLostAt + ifnull(mLgQ.Phase_Name,"").toString().replaceAll("\"","'") + " (" + mGap + ")";
+							}
+						}
+					}
+
+					mDeliver = mOrdered - mQtyS.toDecimal().toLong();
+					if(mDeliver < 0)
+					{
+						mDeliver = 0;
+					}
+
+					// A fragment, not an object - it is spliced into the damage card's
+					// header at assembly, so it carries no braces of its own.
+					lossExtraByItem.put(rb.ID.toString(),"\"remakeReason\":\"Production_Loss\",\"salesOrderId\":\"" + ifnull(planOrderIdCache.get(rbPlanKey),"").toString() + "\",\"qty\":" + mQtyS + ",\"ordered\":" + mOrdered + ",\"deliverable\":" + mDeliver + ",\"lostAt\":\"" + mLostAt + "\"");
+				}
 			}
 		}
 	}
@@ -471,11 +599,20 @@ string getReissueDrafts(string supervisorId)
 				itemsJson = itemsJson + ",";
 			}
 
+			// A damage card standing in for a suppressed Production_Loss card
+			// carries that batch's shortfall too, so the banner and the ship-short
+			// action appear exactly once - on the one card the event now has.
+			lossExtra = ifnull(lossExtraByItem.get(k),"").toString();
+			if(lossExtra != "")
+			{
+				lossExtra = "," + lossExtra;
+			}
+
 			// The header Map holds a complete object, so its closing brace is
 			// dropped to splice the lines in. Building the JSON by hand is not a
 			// style choice here - Map.toString() does not emit valid JSON once
 			// the structure nests Map -> List -> Map.
-			itemsJson = itemsJson + head.removeLastOccurence("}") + ",\"lines\":[" + lines + "]}";
+			itemsJson = itemsJson + head.removeLastOccurence("}") + lossExtra + ",\"lines\":[" + lines + "]}";
 
 			pendingLines = pendingLines + 1;
 		}

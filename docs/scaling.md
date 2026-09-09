@@ -149,7 +149,23 @@ so per-material querying would be hundreds of queries. It got a row filter inste
 
 ## What is already right — do NOT "fix" these
 
-**`Material_Requirement` is never scanned.** Every read is a criteria query on an indexed lookup.
+**`Material_Requirement` is never scanned *in Deluge*.** Every read there is a criteria
+query on an indexed lookup.
+
+> **THE ONE EXCEPTION, and it is a real one: `app/js/api-experiment.js`.** Its
+> `run()` calls `getAll(RPT.reqs, null)` and `getAll(RPT.planItems, null)` with **no
+> criteria** — a full-report cursor walk — then filters to open plans client-side.
+> Both the store screen and the order-audit widget run it, the audit on every order
+> the admin clicks.
+>
+> It is not a statement-limit risk (a JS `getRecords` walk has no statement limit),
+> which is why it was acceptable. It is a *payload* risk: `Material_Requirement`
+> grows with every plan and is never pruned, so this gets slowly worse for ever.
+>
+> Recorded here because the flat claim above was false and reading it would have
+> let somebody "prove" the scan could not exist. Fixing it is a store-screen
+> decision — filter both by the open-plan set the way `RPT.plans` already is — not
+> a change to make from the audit widget alone.
 Creator filters before it fetches, so 500,000 rows cost what 500 do.
 
 **The hot path is bounded by open work.** The driving query in `getStoreMaterialRequirements`,

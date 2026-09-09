@@ -131,40 +131,238 @@ body {
 .primary-btn:hover { background: var(--primary-hover); }
 .primary-btn:disabled { opacity: 0.55; cursor: default; }
 
-/* ---- legend ---- */
+/* ---- legend ----
+   The four glossary cards that stood above the data are gone, and with them
+   .legend / .legend-item / .legend-dot / .dot-*. The step colours they keyed
+   are still used, by .step-plan / .step-issue / .step-waste / .step-issued
+   further down this file — those are the live consumers of --plan, --issue,
+   --waste and --issued, so the variables stay.
 
-.legend {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 10px;
-    margin: 16px 0 20px;
-}
+   .ans-legend below is a DIFFERENT class (the Material-used tab's footnote)
+   and is still in use. The comment beside it explains why the names differ. */
 
-.legend-item {
+/* ---- the verdict ----
+   What replaced the glossary cards in this space: not an explanation of the
+   screen, but the screen's conclusion about the order in front of it. */
+
+.verdict {
     display: flex;
-    gap: 10px;
-    padding: 10px 14px;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 14px 16px;
+    margin: 16px 0 20px;
     background: var(--surface);
     border: 1px solid var(--border);
+    border-left: 4px solid var(--border);
     border-radius: var(--radius);
     box-shadow: var(--shadow-sm);
 }
 
-.legend-dot {
+.verdict > div { flex: 1 1 auto; min-width: 0; }
+.verdict b { display: block; font-size: 0.875rem; margin-bottom: 2px; }
+.verdict > div > span { display: block; font-size: 0.75rem; color: var(--text-muted); }
+
+.verdict-mark {
     flex: 0 0 auto;
-    width: 10px;
-    height: 10px;
-    margin-top: 5px;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
+    font-size: 13px;
+    font-weight: 700;
+    color: #fff;
 }
 
-.dot-plan { background: var(--plan); }
-.dot-issue { background: var(--issue); }
-.dot-waste { background: var(--waste); }
-.dot-issued { background: var(--issued); }
+.verdict-ok { border-left-color: var(--status-success); }
+.verdict-ok .verdict-mark { background: var(--status-success); }
+.verdict-bad { border-left-color: var(--status-danger); }
+.verdict-bad .verdict-mark { background: var(--status-danger); }
+.verdict-note { border-left-color: var(--status-warning); }
+.verdict-note .verdict-mark { background: var(--status-warning); }
 
-.legend-item b { display: block; font-size: 0.8125rem; }
-.legend-item span { color: var(--text-muted); font-size: 0.75rem; }
+.verdict-list {
+    list-style: none;
+    margin: 10px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+/* Each finding is a control, not a bullet: it opens its own evidence. Styled to
+   say so — hover state, pointer, and a left edge in its severity colour. */
+.vf {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-color);
+    cursor: pointer;
+}
+
+.vf:hover { background: #fff; border-color: #cbd5e1; }
+.vf-bad { border-left-color: var(--status-danger); }
+.vf-note { border-left-color: var(--status-warning); }
+
+.vf b { display: block; font-size: 0.8125rem; margin-bottom: 1px; color: var(--text-main); }
+.vf-where { display: block; font-size: 0.6875rem; font-weight: 600; color: var(--text-muted); }
+.vf-detail { display: block; font-size: 0.6875rem; color: var(--text-muted); line-height: 1.45; }
+
+/* The badge on a collapsed item card. Collapsing the clean items only helps if
+   the ones that are left still say why they are worth opening. */
+.item-finding-badge {
+    padding: 1px 7px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    border-radius: 10px;
+}
+
+.item-finding-badge.is-bad { background: var(--status-danger-bg); color: #991b1b; }
+.item-finding-badge.is-note { background: var(--status-warning-bg); color: #92400e; }
+
+.item-card.has-bad { border-left: 3px solid var(--status-danger); }
+.item-card.has-note { border-left: 3px solid var(--status-warning); }
+
+/* A column that cannot apply to this row, as opposed to one that is empty.
+   Lighter than a real dash so the eye skips it instead of checking it. */
+.cell-na { color: #cbd5e1; }
+
+/* IN TRANSIT — issued and not yet confirmed. Amber rather than red: nothing has
+   gone wrong yet, it is cloth on a trolley, and it becomes a problem only if it
+   stays that way. It reads beside .is-lost, which is red and IS a fault. */
+.is-transit { color: #b45309; }
+
+/* ---- the account: one material's quantities in and out ---- */
+
+.account { margin-bottom: 14px; }
+
+.acc-line, .acc-sub, .acc-total {
+    display: grid;
+    grid-template-columns: 190px 130px 1fr;
+    gap: 10px;
+    align-items: baseline;
+    padding: 4px 0;
+    font-size: 0.75rem;
+}
+
+.acc-line + .acc-line { border-top: 1px dotted var(--border); }
+.acc-label { color: var(--text-main); }
+.acc-qty { text-align: right; font-family: var(--mono); }
+.acc-why { color: var(--text-muted); font-size: 0.6875rem; }
+
+.acc-key .acc-qty { font-weight: 700; }
+.acc-extra .acc-label { color: #b45309; }
+.acc-bad .acc-label, .acc-bad .acc-qty { color: var(--status-danger); }
+
+.acc-sub { border-top: 1px solid var(--border); }
+
+.acc-total {
+    border-top: 2px solid var(--text-main);
+    margin-top: 2px;
+    padding-top: 6px;
+}
+
+.acc-note {
+    grid-column: 1 / -1;
+    padding: 4px 0 4px 200px;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+}
+
+.acc-verdict {
+    margin-top: 8px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    line-height: 1.45;
+}
+
+.acc-verdict.is-ok { background: var(--status-success-bg); color: #065f46; }
+.acc-verdict.is-warn { background: var(--status-warning-bg); color: #92400e; }
+.acc-verdict.is-bad { background: var(--status-danger-bg); color: #991b1b; }
+
+/* ---- the reason trail ---- */
+
+.trail { margin-bottom: 14px; }
+
+.cause-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+
+.cause-chip {
+    padding: 2px 8px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    border-radius: 10px;
+    background: var(--bg-color);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+}
+
+/* One colour per cause. They are genuinely different conversations — a checker
+   rejection is not a supervisor ruining cloth — and the whole point of this
+   panel is that they stopped being one anonymous "Reissued" figure. */
+.cause-Reissue { background: var(--waste-bg); border-color: #fcd34d; color: #92400e; }
+.cause-Check_Remake { background: var(--status-danger-bg); border-color: #fca5a5; color: #991b1b; }
+.cause-Production_Remake { background: #ede9fe; border-color: #c4b5fd; color: #5b21b6; }
+.cause-Alteration { background: var(--issue-bg); border-color: #a5f3fc; color: #155e75; }
+
+.trail-event {
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    background: var(--bg-color);
+    border-radius: 6px;
+}
+
+.trail-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 0.75rem; }
+.trail-item { color: var(--text-muted); font-size: 0.6875rem; }
+
+.trail-line {
+    margin-top: 5px;
+    padding-left: 2px;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--text-main);
+}
+
+.trail-tag {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 1px 6px;
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    border-radius: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+}
+
+.trail-tag.is-check { background: var(--status-danger-bg); border-color: #fca5a5; color: #991b1b; }
+.trail-tag.is-damage { background: var(--waste-bg); border-color: #fcd34d; color: #92400e; }
+
+.trail-figs { display: block; margin-top: 1px; font-size: 0.6875rem; color: var(--text-muted); }
+
+.detail-note code {
+    padding: 1px 4px;
+    background: var(--bg-color);
+    border-radius: 3px;
+    font-family: var(--mono);
+}
+
+/* A group heading inside the Material-used table. Fabric is metres against a
+   marker and a trim is a count per garment — two questions that were being
+   interleaved row by row. */
+.grp-row td {
+    padding: 6px 10px !important;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: var(--bg-color);
+    border-top: 1px solid var(--border);
+}
 
 /* ---- empty / skeleton ---- */
 
@@ -377,7 +575,37 @@ body {
 }
 
 .step-head h4 { margin: 0; font-size: 13px; font-weight: 700; }
-.step-note { font-size: 12px; color: var(--text-muted); }
+
+/* PREDICTED vs RECORDED, the one distinction worth carrying in a heading.
+   .step-note — a full sentence of subtitle under every step, on every material,
+   on every item — is gone; this is what survived of it, because a remnant table
+   read as a record rather than a forecast sends somebody looking for pieces
+   that do not exist yet. */
+.step-qual {
+    margin-left: 6px;
+    padding: 1px 6px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: var(--bg-color);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    vertical-align: middle;
+}
+
+/* Which of the four numbered steps this line does not have, and why. The steps
+   are numbered, so a working that jumps 1 -> 4 reads as a fault without it. */
+.steps-skipped {
+    padding: 8px 16px 12px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    border-top: 1px dashed var(--border);
+}
+
+.steps-skipped b { font-weight: 600; color: var(--text-muted); }
 
 .step-tag {
     display: grid;
@@ -885,36 +1113,9 @@ tr.mine { background: #eff6ff; box-shadow: inset 3px 0 0 var(--primary); }
         white-space: nowrap !important;
     }
 
-    /* Single vertical column for legend cards to prevent text congestion */
-    .legend {
-        display: flex !important;
-        flex-direction: column !important;
-        gap: 8px !important;
-        margin: 10px 0 14px !important;
-    }
-
-    .legend-item {
-        display: flex !important;
-        gap: 10px !important;
-        padding: 10px 12px !important;
-        border-radius: 8px !important;
-        background: var(--surface) !important;
-        border: 1px solid var(--border) !important;
-    }
-
-    .legend-item b {
-        display: block !important;
-        font-size: 13px !important;
-        margin-bottom: 2px !important;
-        color: var(--text-main) !important;
-    }
-
-    .legend-item span {
-        display: block !important;
-        font-size: 12px !important;
-        line-height: 1.4 !important;
-        color: var(--text-muted) !important;
-    }
+    /* The legend cards this block stacked no longer exist — they were four
+       glossary panels above the data, and on a phone they were the entire first
+       screen. Removed with them. */
 
     .plan-card {
         margin-bottom: 14px !important;
@@ -993,18 +1194,11 @@ tr.mine { background: #eff6ff; box-shadow: inset 3px 0 0 var(--primary); }
         padding: 10px 8px !important;
     }
 
+    /* Stays a single row now. It was stacked into a column purely to give
+       .step-note — a full sentence of subtitle — a line of its own; the heading
+       that remains is a tag, a title and one small qualifier, which fits. */
     .step-head {
-        flex-direction: column !important;
-        align-items: flex-start !important;
-        gap: 4px !important;
         margin-bottom: 8px !important;
-    }
-
-    .step-note {
-        display: block !important;
-        width: 100% !important;
-        margin-top: 2px !important;
-        font-size: 11px !important;
     }
 
     /* Stack stat input chips vertically on mobile */

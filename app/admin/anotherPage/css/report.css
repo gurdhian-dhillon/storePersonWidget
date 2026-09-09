@@ -2272,3 +2272,152 @@
 }
 
 
+
+/* ==========================================================================
+   THE PIPELINE, ENRICHED
+   What the status tiles cannot answer. They say WHERE the work is; every order
+   In Production is In Production, so on a hundred and seven of them the tiles
+   say nothing about which one needs attention. These are that second question.
+   ========================================================================== */
+
+.risk-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.risk-bar-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.risk-scope { font-size: 11px; color: var(--text-muted); margin-left: auto; }
+.risk-clear { font-size: 13px; color: #065f46; font-weight: 600; }
+
+.risk-chip {
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--bg-color);
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.risk-chip b { font-weight: 700; }
+.risk-chip:hover { border-color: #94a3b8; }
+.risk-chip.is-on { box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25); }
+
+.risk-chip.risk-late    { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
+.risk-chip.risk-blocked { background: #ffedd5; border-color: #fdba74; color: #9a3412; }
+.risk-chip.risk-stuck   { background: #ede9fe; border-color: #c4b5fd; color: #5b21b6; }
+.risk-chip.risk-due     { background: #fef3c7; border-color: #fcd34d; color: #92400e; }
+.risk-clear-btn         { background: transparent; }
+
+/* The flag on the row itself, beside the order number where the eye already
+   is. A row with nothing wrong carries nothing — the absence is the good news. */
+.risk-flag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 10px;
+    vertical-align: middle;
+}
+
+.risk-flag.risk-late    { background: #fee2e2; color: #991b1b; }
+.risk-flag.risk-blocked { background: #ffedd5; color: #9a3412; }
+.risk-flag.risk-stuck   { background: #ede9fe; color: #5b21b6; }
+.risk-flag.risk-due     { background: #fef3c7; color: #92400e; }
+.risk-flag.risk-short   { background: #e2e8f0; color: #334155; }
+
+/* A left edge on the row carries the same signal down a long table, where the
+   flag beside the order number has scrolled out of the eye's path. */
+.so-card-row.has-risk td:first-child { border-left: 3px solid transparent; }
+.so-card-row.risk-row-late td:first-child    { border-left-color: var(--status-danger); }
+.so-card-row.risk-row-blocked td:first-child { border-left-color: #f97316; }
+.so-card-row.risk-row-stuck td:first-child   { border-left-color: #8b5cf6; }
+.so-card-row.risk-row-due td:first-child     { border-left-color: var(--status-warning); }
+
+/* ---- the due date, which this screen never showed ---- */
+
+.due-cell { display: inline-flex; flex-direction: column; line-height: 1.25; }
+.due-note { font-size: 10px; color: var(--text-muted); }
+.due-cell.due-late  { color: #991b1b; font-weight: 700; }
+.due-cell.due-late .due-note  { color: #991b1b; }
+.due-cell.due-today { color: #92400e; font-weight: 700; }
+.due-cell.due-today .due-note { color: #92400e; }
+.due-cell.due-soon  { color: #92400e; }
+
+/* ---- progress as a bar ----
+   "0 / 10" and "9 / 10" read as the same shape of thing in a column of
+   numbers. A bar does not. */
+
+.prog-wrap { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+
+.prog-bar {
+    flex: 1 1 auto;
+    min-width: 60px;
+    height: 6px;
+    background: #e2e8f0;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.prog-bar span {
+    display: block;
+    height: 100%;
+    background: var(--primary);
+    border-radius: 3px;
+}
+
+.prog-pct { font-size: 11px; color: var(--text-muted); min-width: 30px; text-align: right; }
+
+/* ---- the sub-line under the order number ---- */
+
+.so-sub-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    margin-top: 3px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.so-sub-line .so-cust { font-weight: 600; }
+.so-sub-line .so-plan { font-family: ui-monospace, Menlo, Consolas, monospace; }
+
+.stage-chip {
+    padding: 1px 7px;
+    background: var(--bg-color);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+/* AWAITING MATERIAL is the blocker that matters: those items cannot be worked
+   on at all, and that is invisible on a produced/ordered ratio. */
+.blocked-chip {
+    padding: 1px 7px;
+    background: #ffedd5;
+    border: 1px solid #fdba74;
+    color: #9a3412;
+    font-weight: 600;
+    border-radius: 10px;
+}
+
+@media (max-width: 900px) {
+    .risk-scope { margin-left: 0; width: 100%; }
+    .prog-wrap { margin-bottom: 4px; }
+}

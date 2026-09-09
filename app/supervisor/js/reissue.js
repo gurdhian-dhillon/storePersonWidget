@@ -803,15 +803,54 @@ function damageCardHtml(it, idx) {
             '</tr>';
     }).join('');
 
-    return '<div class="item-card ri-card">' +
+    // A DAMAGE CARD CAN BE STANDING IN FOR A PRODUCTION LOSS.
+    //
+    // When a stage closes short the server opens the loss batch and the damage
+    // report points at it, so ONE event used to draw TWO cards — the damage under
+    // the root item, the derived remake under the batch, with different ids so
+    // nothing could tell they were the same thing. getReissueDrafts now keys the
+    // damage card on the batch and suppresses the derived one, which means this
+    // card inherits the batch's shortfall: the banner and the ship-short action
+    // move here rather than disappearing with the card that carried them.
+    var isLoss = it.remakeReason === 'Production_Loss';
+    var ordered = Number(it.ordered) || 0;
+    var deliverable = Number(it.deliverable) || 0;
+    var shortQty = Number(it.qty) || 0;
+
+    return '<div class="item-card ri-card' + (isLoss ? ' ri-loss' : '') + '">' +
+
+        (isLoss
+            ? '<div class="ri-short-banner">' +
+              '<div class="ri-short-title">' + escapeHtml(it.salesOrder || 'This order') +
+              ' will ship short</div>' +
+              '<div class="ri-short-nums">' +
+              '<span>Ordered <b>' + fmt(ordered) + '</b></span>' +
+              '<span>Can deliver <b>' + fmt(deliverable) + '</b></span>' +
+              '<span class="ri-short-gap"><b>' + fmt(shortQty) + '</b> short</span>' +
+              '</div>' +
+              (it.lostAt
+                  ? '<div class="ri-short-where">Lost at ' + escapeHtml(it.lostAt) + '</div>'
+                  : '') +
+              '</div>'
+            : '') +
+
         '<div class="ri-head">' +
         '<div>' +
         '<h2>' + escapeHtml(it.item || 'Item') + '</h2>' +
         '<div class="ri-sub">' + escapeHtml(it.salesOrder || '') + '</div>' +
         '</div>' +
+        '<div class="ri-head-acts">' +
+        // Same order as the remake card: making the pieces is the ordinary
+        // answer, under-delivering is the exception that has to be argued for.
+        (isLoss
+            ? '<button type="button" class="ghost-btn ri-shortclose" data-item="' + idx + '">' +
+              'Ship order short' +
+              '</button>'
+            : '') +
         '<button type="button" class="primary-btn ri-raise" data-item="' + idx + '">' +
         'Ask the store' +
         '</button>' +
+        '</div>' +
         '</div>' +
         '<div class="table-wrapper">' +
         '<table>' +

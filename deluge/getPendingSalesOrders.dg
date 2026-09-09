@@ -45,12 +45,23 @@ string getPendingSalesOrders()
 				}
 				else
 				{
-					for each  cu in Customer[ID == custId.toLong()]
+					// CUSTOMER_MASTER, not Customer. This queried a form that does
+					// not exist in this app, and a query against a missing form
+					// returns nothing SILENTLY - so custTxt stayed empty and every
+					// row on the Pending tab showed a blank customer, with no error
+					// anywhere to say why.
+					//
+					// Display_Name is the field, not Customer_Name: it is the one
+					// syncSingleSalesOrder and seedSalesOrders look customers up BY
+					// (Customer_Master[Display_Name == ...]), so it is the field
+					// this org actually fills. Company_Name is kept only as a
+					// fallback for a record that predates it.
+					for each  cu in Customer_Master[ID == custId.toLong()]
 					{
-						custTxt = ifnull(cu.Customer_Name,"").toString().replaceAll("\"","'");
+						custTxt = ifnull(cu.Display_Name,"").toString().replaceAll("\"","'");
 						if(custTxt == "")
 						{
-							custTxt = ifnull(cu.Name,"").toString().replaceAll("\"","'");
+							custTxt = ifnull(cu.Company_Name,"").toString().replaceAll("\"","'");
 						}
 					}
 					custNameById.put(custId,custTxt);

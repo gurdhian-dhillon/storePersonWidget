@@ -81,6 +81,24 @@ string getSupervisorCounts(string supervisorId)
 	// batches of the same plan.
 	cntSupCache = Map();
 
+	// BATCHES A DAMAGE REPORT IS ALREADY ASKING FOR, so one event is counted once.
+	//
+	// getReissueDrafts keys a damage card on Material_Damage.Remake_Item when the
+	// report spawned a batch - the same target raiseReissueRequest writes against -
+	// so the damage card IS that batch's request and the derived card is suppressed.
+	// The header is already counted by the Material_Damage count above, so counting
+	// the batch as well would put the badge one ahead of the tab for every stage
+	// that closed short. Built from the same open records that count feeds on.
+	cntDmgBatch = Map();
+
+	for each  cdmg in Material_Damage[Supervisor == supId && Status == "Open"]
+	{
+		if(cdmg.Remake_Item != null)
+		{
+			cntDmgBatch.put(cdmg.Remake_Item.toString(),"1");
+		}
+	}
+
 	for each  drb in Plan_Item[Item_Status == "Awaiting_Material" && (Remake_Reason == "Check_Reject" || Remake_Reason == "Production_Loss")]
 	{
 		drbPlanKey = "";
@@ -124,6 +142,15 @@ string getSupervisorCounts(string supervisorId)
 					if(Material_Requirement[Plan_Item == drb.ID].count() == 0)
 					{
 						drbUnasked = true;
+					}
+
+					// A damage card already stands for this batch on the tab, and its
+					// header is counted above - so counting the batch too would read
+					// one ahead of what he can see. Same test getReissueDrafts applies
+					// to suppress the duplicate card.
+					if(cntDmgBatch.get(drb.ID.toString()) != null)
+					{
+						drbUnasked = false;
 					}
 				}
 				else if(Material_Requirement[Plan_Item == drb.ID && Source == "Check_Remake"].count() == 0)

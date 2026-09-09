@@ -18,22 +18,25 @@
 //
 // (1) and (2) are re-derived from server inputs. (3) is computed here outright,
 // because it hangs off a piece count the admin types and a round trip per
-// keystroke would make the screen unusable. It mirrors getExpectedWaste step for
-// step; if that function changes, this has to change with it.
+// keystroke would make the screen unusable.
 //
-// AND THAT INSTRUCTION WAS NOT FOLLOWED, WHICH IS WHY THE MIRROR IS NOW CHECKED
-// RATHER THAN TRUSTED. getExpectedWaste learned to split the fresh-cloth pass per
-// LOT — a lot is a separate roll, so it ends on a whole marker row and the next
-// starts a new one, giving each its own side strip and its own part-filled row.
-// This file went on predicting one combined block, and under-predicted the
-// remnants on every multi-lot item while presenting itself as the working behind
-// the real number.
+// THE MIRROR IS CHECKED, NOT TRUSTED. deriveWaste mirrors getExpectedWaste step
+// for step, and it once fell behind it — that function learned to split the
+// fresh-cloth pass per LOT (a lot is a separate roll, so it ends on a whole
+// marker row and the next starts a new one, each with its own side strip) while
+// this file went on predicting one combined block. So the real answer per item
+// is fetched from getExpectedWaste itself (ensureExpectedWaste, lazily, when a
+// fabric line's working is opened) and serverWasteCheck says on screen when the
+// two disagree. A comment asking the next person to remember something is not a
+// mechanism; that is.
 //
-// The real answer per item comes from getExpectedWaste, fetched lazily by the
-// widget when a fabric line's working is opened (ensureExpectedWaste).
-// serverWasteCheck compares it to the derivation and says on screen when the two
-// disagree. A comment asking the next person to remember something is not a
-// mechanism; this is.
+// WHAT THIS SCREEN DOES NOT SAY. It used to carry a glossary of the four steps
+// in cards above the data, a sentence of subtitle under every step heading, and
+// a paragraph explaining the columns under every item's table — text that said
+// the same thing on every order, every item, every row, for ever. That is gone.
+// Explanation now fires on a condition: a mismatch states its case in full, an
+// agreement is a tick, a step with nothing to say is not drawn, and the column
+// glossary lives in title attributes on the headings that raise the question.
 
 var DATA = null;
 // The audited order's plan ids - filled in load(), read by bucketFor.
@@ -352,11 +355,49 @@ function factRow(label, basis, result) {
         '</div>';
 }
 
+// WHERE THIS LINE IS IN ITS LIFE, which decides which steps are worth drawing.
+//
+// The four steps used to render at equal weight on every row regardless of
+// whether they had anything to say about it. A fully-issued line got step 2
+// explaining that there was nothing left to allocate and step 3 predicting the
+// waste from cloth that was cut weeks ago — two paragraphs of hypothesis about
+// a line whose story is already told, sitting above the one step (4) that
+// actually records what happened.
+//
+// `live` decides step 2: it is the allocator's outcome for this order, and its
+// absence IS the answer that nothing is outstanding. Step 3 is a forecast, so it
+// is worth drawing while there is still something to cut and not afterwards.
+// Step 4 is a record, so it is worth drawing once there is one.
+function lineStage(mat, item, bucket) {
+    var issued = parseFloat(mat.issuedQty) || 0;
+    var live = bucket ? liveFor(bucket, item.planId) : null;
+
+    // Outstanding pieces is the honest test for "still to come", not metres:
+    // fabric is counted in cut pieces, and a row can read fully-issued on
+    // metres while still owing pieces. CLAUDE.md's first rule.
+    var outstanding = 0;
+    if (live) outstanding = parseInt(live.o.pieces, 10) || 0;
+
+    return {
+        live: live,
+        // Step 2 answers "which lot, and how much goes out today". Only a live
+        // allocation can answer it; without one there is no decision being made.
+        showAlloc: !!live,
+        // Step 3 forecasts the cutting. Still useful while cloth is outstanding,
+        // and still useful before anything is issued at all — it is how the
+        // admin sees what an order will throw off. Once the line is fully issued
+        // the forecast is about the past and getExpectedWaste is the record.
+        showWaste: !!live || issued <= 0,
+        // Step 4 is the counter's record: worth drawing once anything has been
+        // committed to a lot or crossed the counter.
+        showIssued: !!mat.pinLot || (mat.issuedLots || []).length > 0 || issued > 0
+    };
+}
+
 function renderPlanStep(mat, item) {
     var d = derivePlan(mat, item.qtyOrdered);
     var h = '<div class="step step-plan"><div class="step-head"><span class="step-tag tag-plan">1</span>' +
-        '<h4>Planned requirement</h4>' +
-        '<span class="step-note">Settled when the plan was made and never recomputed — assumes no offcuts exist</span></div>';
+        '<h4>Planned requirement</h4></div>';
 
     h += '<div class="inputs">' +
         '<div class="input-chip"><span>Fabric width</span><b>' +
@@ -403,7 +444,12 @@ function renderPlanStep(mat, item) {
             'this is a <b>reissue</b>, replacing material damaged in production. It is costed from the pieces reported ' +
             'spoiled, not from the order, so it is not expected to match the figure above.</div>';
     } else if (same(d.metres, mat.storedRequiredQty)) {
-        h += '<div class="check ok">Stored on the requirement: <b>' + num(mat.storedRequiredQty, 3) + ' m</b> — matches.</div>';
+        // AGREEMENT IS A TICK, NOT A SENTENCE. This is the overwhelmingly common
+        // outcome, so a full line of prose saying "— matches" was the single
+        // most-repeated text on the screen while carrying the least. The
+        // disagreement below keeps every word of its explanation: that is the
+        // one an admin has to act on and the one that needs the why.
+        h += '<div class="check ok"><b>&#10003;</b> Stored: <b>' + num(mat.storedRequiredQty, 3) + ' m</b></div>';
     } else {
         h += '<div class="check bad">Stored on the requirement: <b>' + num(mat.storedRequiredQty, 3) + ' m</b>, but the inputs above give <b>' +
             num(d.metres, 3) + ' m</b>. The requirement was written at plan time and is never recomputed, so a cut size or fabric width changed after this plan was created.</div>';
@@ -519,11 +565,14 @@ function renderLotDecision(bucket, item) {
 
 function renderAllocStep(mat, bucket, item) {
     var h = '<div class="step step-issue"><div class="step-head"><span class="step-tag tag-issue">2</span>' +
-        '<h4>Allocated right now</h4>' +
-        '<span class="step-note">Re-decided on every load, before anything is issued — one lot per order, its own offcuts first</span></div>';
+        '<h4>Allocated right now</h4></div>';
 
+    // A line with no bucket has nothing outstanding, and lineStage no longer
+    // draws this step for one. Kept as a guard rather than deleted: the step is
+    // also reached from rerenderWaste and redrawWorkRow, and a renderer that
+    // assumes its caller filtered is one refactor away from a blank card.
     if (!bucket) {
-        h += '<div class="aside">This line is not in the live allocation. Either its plan is closed, or every piece on it has already been issued — there is nothing left to allocate.</div></div>';
+        h += '<div class="aside">Nothing outstanding on this line, so no allocation is being made for it today.</div></div>';
         return h;
     }
 
@@ -752,9 +801,11 @@ function renderWasteStep(mat, item, bucket) {
 
     var w = deriveWaste(mat, pieces, sources);
 
+    // "Predicted" stays in the heading itself. It is the one word that has to
+    // survive: everything in this step is a forecast, and an admin reading a
+    // remnant table without knowing that would go looking for the pieces.
     var h = '<div class="step step-waste"><div class="step-head"><span class="step-tag tag-waste">3</span>' +
-        '<h4>Waste this will throw off</h4>' +
-        '<span class="step-note">Predicted from the pieces cut, not recorded — nothing here has happened yet</span></div>';
+        '<h4>Waste this will throw off <span class="step-qual">predicted</span></h4></div>';
 
     h += '<div class="qty-box">' +
         '<label for="q-' + esc(key) + '">Pieces cut</label>' +
@@ -1198,11 +1249,23 @@ function matAnswerRow(mat, item, idx) {
             }
         }
     } else {
+        // NOTHING OUTSTANDING IS A DASH, NOT A ZERO — and it has to be the same
+        // dash a fabric line uses. A fully-issued fabric row printed "—" here
+        // while a fully-issued trim printed "0.000", two spellings of one state
+        // sitting in the same column, on the summary row where the eye lands.
+        // A dash is the right one: 0 is a measurement, absence is not.
         var rem = (parseFloat(mat.storedRequiredQty) || 0) - (parseFloat(mat.issuedQty) || 0);
-        nowNeeded = num(rem > 0 ? rem : 0, 3);
+        nowNeeded = rem > 0.0005 ? num(rem, 3) : '—';
     }
 
-    return '<tr class="ans-row" data-ans="' + esc(mat.reqId) + '">' +
+    // LOT and FROM OFFCUTS CANNOT APPLY TO A TRIM. Thread has no shade to match
+    // and no offcut to reuse — the columns exist for cloth. They printed "—" on
+    // every trim row, which reads as "we looked and there is none" rather than
+    // "the question does not arise", and on the screenshot's item three of the
+    // four rows were trims. Muted so the eye skips them instead of checking them.
+    var naCell = '<span class="cell-na" title="Does not apply to a non-fabric material">—</span>';
+
+    return '<tr class="ans-row' + (mat.isFabric ? '' : ' is-trim') + '" data-ans="' + esc(mat.reqId) + '">' +
         '<td class="ans-mat">' +
             '<div class="ans-name">' + esc(mat.material) + '</div>' +
             '<div class="ans-sub">' + (mat.sku ? esc(mat.sku) : '') +
@@ -1214,8 +1277,8 @@ function matAnswerRow(mat, item, idx) {
         '<td class="r">' + planned + '</td>' +
         '<td class="r">' + num(mat.storedRequiredQty, 3) + '</td>' +
         '<td class="r ' + cls + '" title="' + esc(note) + '">' + mark + '</td>' +
-        '<td class="lot-cell">' + lot + '</td>' +
-        '<td class="r offcut-cell">' + offcuts + '</td>' +
+        '<td class="lot-cell">' + (mat.isFabric ? lot : naCell) + '</td>' +
+        '<td class="r offcut-cell">' + (mat.isFabric ? offcuts : naCell) + '</td>' +
         '<td class="r strong">' + nowNeeded + '</td>' +
         '<td class="r">' + num(mat.issuedQty, 3) + '</td>' +
         '<td class="r">' + num(mat.receivedQty, 3) + '</td>' +
@@ -1239,29 +1302,42 @@ function renderItemMaterials(item) {
         return '<div class="aside">No materials on this item' +
             (item.hasBom ? '' : ' — it has no BOM, so nothing was ever required') + '.</div>';
     }
+    // THE GLOSSARY MOVED ONTO THE COLUMNS. Each `title` is the sentence that
+    // used to sit in the paragraph below the table, attached to the heading that
+    // raises the question — so it is read when it is asked rather than once,
+    // above, before it has occurred to anybody. The one on "Now needed" is the
+    // load-bearing one: subtracting it from Planned and calling the difference a
+    // discrepancy is the most common way to conclude this app's maths is broken
+    // when it is not.
     var h = '<div class="table-wrapper"><table class="ans-table"><thead><tr>' +
         '<th>Material</th><th class="r">Unit</th>' +
-        '<th class="r">Planned</th><th class="r">Stored</th><th class="r">Check</th>' +
+        '<th class="r" title="The requirement fixed when the plan was made. Derived here from the cut size and fabric width.">Planned</th>' +
+        '<th class="r" title="What was actually written on the requirement at plan time. Must agree with Planned.">Stored</th>' +
+        '<th class="r" title="Whether Planned and Stored agree. They are the same calculation, so a cross means a cut size or fabric width changed after the plan was made.">Check</th>' +
         // LOT, not "Shade". Every other screen in the app calls this a lot — the
         // store's issue column, the Lot_Number field, the L1/L2 the store person
         // reads off the rack — and one screen using a private word for it made
         // the audit harder to check against the thing it audits. The shade is WHY
         // the lot matters, not another name for it, so the word survives where it
         // is doing that job and nowhere else.
-        '<th>Lot</th>' +
-        '<th class="r">From offcuts</th>' +
-        '<th class="r">Now needed</th><th class="r">Issued</th><th class="r">Received</th><th></th>' +
+        '<th title="The roll this order is committed to. One order is cut from one lot so its pieces match in colour; the reason it was chosen is in the working.">Lot</th>' +
+        '<th class="r" title="What the store is about to be offered off that same lot, read live from the store screen. Advisory — a higher-priority supervisor can claim the same remnant first.">From offcuts</th>' +
+        '<th class="r" title="The LIVE allocation, recalculated whenever offcut stock moves. It is a different calculation from Planned and is meant to be lower — the difference is not a discrepancy.">Now needed</th>' +
+        '<th class="r">Issued</th><th class="r">Received</th><th></th>' +
         '</tr></thead><tbody>';
     item.materials.forEach(function (mat, i) { h += matAnswerRow(mat, item, i); });
-    h += '</tbody></table></div>' +
-        '<div class="aside ans-legend"><b>Planned</b> and <b>Stored</b> are the same calculation — the requirement fixed ' +
-        'when the plan was made — so they are the pair that must agree. <b>Now needed</b> is the live allocation, ' +
-        'recalculated whenever offcut stock moves; it is meant to be lower and is not a discrepancy. ' +
-        '<b>Lot</b> is the roll this order is committed to — one order is cut from one lot so its pieces match ' +
-        'in colour — and the reason that lot was chosen is in the working. ' +
-        '<b>From offcuts</b> is what the store is about to be offered off that same lot — read live from the ' +
-        'store screen itself, so it is visible before anything is issued. It is advisory: the same remnant can ' +
-        'be claimed by a higher-priority supervisor first. Open a row for the working behind any of it.</div>';
+    h += '</tbody></table></div>';
+
+    // THE COLUMN GLOSSARY THAT USED TO SIT HERE IS GONE. It was a five-sentence
+    // paragraph explaining Planned / Stored / Now needed / Lot / From offcuts,
+    // and it printed once PER ITEM — so a ten-item order carried ten identical
+    // copies of it and a Faire order carried a hundred and ten.
+    //
+    // What it was really protecting against is one specific false alarm:
+    // subtracting "Now needed" from "Planned" and reporting the difference as a
+    // discrepancy. That warning now lives on the column that causes it, as a
+    // title attribute, where it is read at the moment of the question instead of
+    // a paragraph below it.
     return h;
 }
 
@@ -1314,9 +1390,10 @@ function orderLots(mat) {
 }
 
 function renderIssuedStep(mat) {
+    // "Recorded" is the counterpart of step 3's "predicted", and the pair is the
+    // whole distinction this screen turns on. Two words, kept.
     var h = '<div class="step step-issued"><div class="step-head"><span class="step-tag tag-issued">4</span>' +
-        '<h4>What actually went out</h4>' +
-        '<span class="step-note">Recorded at the counter — not re-derived, and it does not move</span></div>';
+        '<h4>What actually went out <span class="step-qual">recorded</span></h4></div>';
 
     var rows = mat.issuedLots || [];
     var unit = mat.isFabric ? 'Mtr' : (mat.unit || '');
@@ -1400,17 +1477,249 @@ function renderIssuedStep(mat) {
 
 function renderFabricLine(mat, item) {
     var bucket = bucketFor(mat.bucketKey);
+    var stage = lineStage(mat, item, bucket);
     var h = '<div class="line">';
 
+    // Step 1 always draws: the plan-time requirement exists for every line from
+    // the moment the plan does, and it is the half of the Planned/Stored pair
+    // the CHECK column reports on.
     h += renderPlanStep(mat, item);
-    h += renderAllocStep(mat, bucket, item);
-    h += renderWasteStep(mat, item, bucket);
-    // Last, deliberately. The three above are what the machine WOULD do; this is
-    // the only record of what a person actually did, and it is what the other
-    // three are checked against.
-    h += renderIssuedStep(mat);
+
+    if (stage.showAlloc) h += renderAllocStep(mat, bucket, item);
+    if (stage.showWaste) h += renderWasteStep(mat, item, bucket);
+
+    // Last, deliberately. The steps above are what the machine WOULD do; this is
+    // the only record of what a person actually did, and it is what the others
+    // are checked against.
+    if (stage.showIssued) h += renderIssuedStep(mat);
+
+    // A STEP THAT IS ABSENT MUST SAY IT WAS SKIPPED, NOT JUST VANISH. The four
+    // are numbered, so a working that jumps 1 → 4 reads as a rendering fault to
+    // anyone who has seen the full set — and "why is there no step 2 on this
+    // row" is exactly the question the numbering was meant to stop.
+    //
+    // One muted line, naming what was skipped and why, is cheaper than either
+    // the paragraphs it replaced or the doubt it prevents.
+    var skipped = [];
+    if (!stage.showAlloc) skipped.push('<b>2 Allocated right now</b> — nothing outstanding, so no lot is being decided today');
+    if (!stage.showWaste) skipped.push('<b>3 Waste this will throw off</b> — a forecast, and this line is already cut');
+    if (!stage.showIssued) skipped.push('<b>4 What actually went out</b> — nothing has crossed the counter yet');
+    if (skipped.length) {
+        h += '<div class="steps-skipped">Not shown: ' + skipped.join(' · ') + '</div>';
+    }
+
     h += '</div>';
     return h;
+}
+
+// =====================================================================
+// THE VERDICT — every check this screen can make, run over the whole order
+// at once, stated before any of the working.
+//
+// WHY THIS EXISTS. The screen could already detect nine distinct kinds of
+// problem, and exactly two of them (stored-vs-derived, on fabric and on trims)
+// reached the answer table's CHECK column. The other seven — an order cut from
+// two lots, a handover that disagrees with its pin, a lot overridden by hand,
+// cloth issued with no lot recorded at all — were each rendered inside a step,
+// behind a chevron, on one material of one item. So the admin could only find
+// them by already suspecting them, on the right order out of a hundred and
+// seven, and the most expensive finding on the list (mixed shade, which cannot
+// be undone once it has happened) was the most deeply buried.
+//
+// This is a pure pass over DATA. It deliberately does NOT read LIVE: the
+// allocator's own disagreements are a different class of thing — they move with
+// the rack, they resolve themselves, and a banner that changed between two loads
+// of the same order would teach the admin to distrust it. Everything reported
+// here is settled fact that will still be true tomorrow. It also means the
+// verdict renders immediately, without waiting on ApiExperiment.run().
+//
+// Severity is two levels and no more. `bad` is something that is wrong and needs
+// a person; `note` is a recorded human decision worth seeing but not a fault. A
+// third level would need a rule for telling them apart that nobody would apply
+// consistently.
+// One finding, built from the location it was found at plus what was found.
+// Written out longhand rather than with Object.assign: this widget is
+// ES5-flavoured throughout (var/function, no arrow, no spread) and the one rule
+// CLAUDE.md gives about widget style is to match the file you are in.
+function finding(where, level, kind, what, detail) {
+    return {
+        planItemId: where.planItemId,
+        reqId: where.reqId,
+        item: where.item,
+        material: where.material,
+        level: level,
+        kind: kind,
+        what: what,
+        detail: detail
+    };
+}
+
+function collectFindings() {
+    var out = [];
+    var plans = (DATA && DATA.plans) ? DATA.plans : [];
+
+    // Mixed shade is asked ONCE PER MATERIAL for the whole order, not per line.
+    // orderLots already answers the order-level question, but it is called from
+    // inside step 4 — so on a four-material item it ran up to four times and
+    // reported the same defect four times. Keyed here so it is stated once.
+    var lotsReported = {};
+
+    plans.forEach(function (plan) {
+        (plan.items || []).forEach(function (item) {
+            item.planId = plan.planId;
+
+            (item.materials || []).forEach(function (mat) {
+                var where = {
+                    planItemId: String(item.planItemId),
+                    reqId: String(mat.reqId),
+                    item: item.itemName || '',
+                    material: mat.material || ''
+                };
+
+                // ---- 1. stored vs derived, the CHECK column's own test ----
+                // A reissue is exempt: it is costed from the pieces reported
+                // spoiled, not from the order, so the order's derivation can
+                // never match it. Same rule the renderers apply.
+                if (mat.isReissue !== true) {
+                    if (mat.isFabric) {
+                        var d = derivePlan(mat, item.qtyOrdered);
+                        if (d.ok && !same(d.metres, mat.storedRequiredQty)) {
+                            out.push(finding(where, 'bad', 'stored',
+                                'Stored requirement disagrees with the derivation',
+                                'stored ' + num(mat.storedRequiredQty, 3) + ' m, derived ' +
+                                num(d.metres, 3) + ' m — a cut size or fabric width changed after the plan was made'));
+                        }
+                    } else if ((parseFloat(mat.perUnit) || 0) > 0) {
+                        var derived = (parseFloat(mat.perUnit) || 0) * (parseInt(item.qtyOrdered, 10) || 0);
+                        if (!same(derived, mat.storedRequiredQty)) {
+                            out.push(finding(where, 'bad', 'stored',
+                                'Stored requirement disagrees with the BOM',
+                                'stored ' + num(mat.storedRequiredQty, 3) + ', BOM gives ' +
+                                num(derived, 3) + ' — the per-unit quantity changed since this plan was created'));
+                        }
+                    }
+                }
+
+                if (!mat.isFabric) return;
+
+                // ---- 2. MIXED SHADE. The one that cannot be undone. ----
+                var lotKey = String(mat.materialId);
+                if (!lotsReported[lotKey]) {
+                    var used = orderLots(mat);
+                    if (used.length > 1) {
+                        lotsReported[lotKey] = true;
+                        out.push(finding(where, 'bad', 'mixedlot',
+                            'Cut from ' + used.length + ' different lots',
+                            used.join(', ') + ' — the finished pieces will not match each other, ' +
+                            'and that cannot be undone'));
+                    }
+                }
+
+                // ---- 3. cloth out with no pin to hold a remake to ----
+                var anyIssued = (parseFloat(mat.issuedQty) || 0) > 0 || (mat.issuedLots || []).length > 0;
+                if (anyIssued && !mat.pinLot) {
+                    out.push(finding(where, 'bad', 'nopin',
+                        'Cloth went out with no lot recorded',
+                        'nothing can hold a later remake or reissue to the right lot'));
+                }
+
+                // ---- 4. per-handover: overrides and silent disagreements ----
+                (mat.issuedLots || []).forEach(function (r) {
+                    if (r.overrideFrom) {
+                        // A DECISION, not a fault — somebody chose this and said
+                        // why. Worth surfacing precisely because the note is the
+                        // only place the reason survives.
+                        out.push(finding(where, 'note', 'override',
+                            'Lot overridden by hand',
+                            'issued off ' + r.lot + ' instead of ' + r.overrideFrom +
+                            (r.note ? ' — ' + r.note : ' — no reason recorded')));
+                    } else if (mat.pinLot && r.lot && r.lot !== 'not recorded' &&
+                               String(r.lot) !== String(mat.pinLot)) {
+                        // No override note and a different lot: this is the shape
+                        // a silent shade switch takes.
+                        out.push(finding(where, 'bad', 'pin',
+                            'A handover disagrees with the pinned lot',
+                            'went out on ' + r.lot + ', pin says ' + mat.pinLot +
+                            ', and no reason was recorded'));
+                    }
+                });
+            });
+        });
+    });
+
+    return out;
+}
+
+// How many material lines the verdict actually examined, so "all agree" can say
+// what it checked. A claim of correctness that does not say over what is not
+// worth much more than silence.
+function countLines() {
+    var n = 0;
+    ((DATA && DATA.plans) ? DATA.plans : []).forEach(function (p) {
+        (p.items || []).forEach(function (i) { n += (i.materials || []).length; });
+    });
+    return n;
+}
+
+function renderVerdict(findings) {
+    var lines = countLines();
+    var bad = findings.filter(function (f) { return f.level === 'bad'; });
+    var notes = findings.filter(function (f) { return f.level === 'note'; });
+
+    if (!findings.length) {
+        return '<div class="verdict verdict-ok">' +
+            '<span class="verdict-mark">&#10003;</span>' +
+            '<div><b>' + lines + ' material line' + (lines === 1 ? '' : 's') + ' checked, all agree.</b>' +
+            '<span>Every stored requirement matches its derivation, and every handover went out on the ' +
+            'lot the order is pinned to. Nothing on this order needs attention.</span></div></div>';
+    }
+
+    var head;
+    if (bad.length && notes.length) {
+        head = bad.length + ' finding' + (bad.length === 1 ? '' : 's') + ' and ' +
+            notes.length + ' recorded decision' + (notes.length === 1 ? '' : 's');
+    } else if (bad.length) {
+        head = bad.length + ' finding' + (bad.length === 1 ? '' : 's');
+    } else {
+        head = notes.length + ' recorded decision' + (notes.length === 1 ? '' : 's') + ', nothing wrong';
+    }
+
+    var h = '<div class="verdict ' + (bad.length ? 'verdict-bad' : 'verdict-note') + '">' +
+        '<span class="verdict-mark">' + (bad.length ? '&#9888;' : 'i') + '</span>' +
+        '<div><b>' + head + ' on this order.</b>' +
+        '<span>Checked ' + lines + ' material line' + (lines === 1 ? '' : 's') + '. ' +
+        'Each one below opens the working it came from.</span>' +
+        '<ul class="verdict-list">';
+
+    // Worst first: an order cut in two shades is not the same size of problem as
+    // a note somebody left deliberately, and the order they are listed in is the
+    // only thing saying so.
+    findings.slice().sort(function (a, b) {
+        if (a.level !== b.level) return a.level === 'bad' ? -1 : 1;
+        return 0;
+    }).forEach(function (f) {
+        h += '<li class="vf vf-' + f.level + '" data-goto="' + esc(f.reqId) + '">' +
+            '<b>' + esc(f.what) + '</b>' +
+            '<span class="vf-where">' + esc(f.item) +
+                (f.material ? ' · ' + esc(f.material) : '') + '</span>' +
+            '<span class="vf-detail">' + esc(f.detail) + '</span>' +
+            '</li>';
+    });
+
+    h += '</ul></div></div>';
+    return h;
+}
+
+// Which items carry a finding — used to decide what stays open. An item with
+// something wrong on it opens; a clean one collapses, so on a mixed order the
+// eye lands on the problem and on a clean order the verdict line is the whole
+// answer. Collapsing everything on a clean order was the other option and it is
+// worse: this is an audit screen, and hiding the work that proves the order
+// clean is the wrong instinct.
+function itemsWithFindings(findings) {
+    var set = {};
+    findings.forEach(function (f) { set[f.planItemId] = true; });
+    return set;
 }
 
 function render() {
@@ -1433,6 +1742,13 @@ function render() {
         h += '<div class="warn top">' + DATA.errors.map(esc).join('<br>') + '</div>';
     }
 
+    // THE VERDICT FIRST. The working below is evidence; this is the conclusion,
+    // and an audit screen that makes you derive the conclusion yourself from a
+    // hundred and seven orders is only half a tool.
+    var findings = collectFindings();
+    var flagged = itemsWithFindings(findings);
+    h += renderVerdict(findings);
+
     DATA.plans.forEach(function (plan) {
         h += '<section class="plan-card"><div class="plan-head">' +
             '<h2>' + esc(plan.planNo) + '</h2>' +
@@ -1444,14 +1760,38 @@ function render() {
         }
 
         plan.items.forEach(function (item, idx) {
-            var open = idx === 0;
+            // WHAT OPENS. An item carrying a finding opens; a clean one is shut.
+            //
+            // It used to be "the first item, always", which on a clean order
+            // opened a screenful of working nobody needed and on a bad order
+            // opened item 1 while the problem sat in item 7. Now the layout
+            // itself points at the thing to look at.
+            //
+            // The fallback matters: an order with NO findings and no flagged
+            // item would otherwise render entirely collapsed, and a screen that
+            // shows nothing on arrival reads as a failure to load. So a clean
+            // order still opens its first item — the verdict says everything
+            // agrees, and the open item is what that claim is made of.
+            var hasFinding = !!flagged[String(item.planItemId)];
+            var open = hasFinding || (!findings.length && idx === 0);
             // The item carries its plan from here down. The lot decision is made
             // PER ORDER, and a supervisor's row in the live allocation holds every
             // order of his for that fabric — so without this the audit would show
             // another order's shade beside this one's numbers. Stamped rather than
             // threaded through five signatures; DATA is re-fetched on every load.
             item.planId = plan.planId;
-            h += '<div class="item-card' + (open ? ' open' : '') + '" data-item="' + esc(item.planItemId) + '">' +
+
+            // How many findings on THIS item, for the header badge. A collapsed
+            // list has to say which cards are worth opening, or collapsing them
+            // has just hidden the findings the verdict promised.
+            var mine = findings.filter(function (f) {
+                return String(f.planItemId) === String(item.planItemId);
+            });
+            var anyBad = mine.some(function (f) { return f.level === 'bad'; });
+
+            h += '<div class="item-card' + (open ? ' open' : '') +
+                (mine.length ? (anyBad ? ' has-bad' : ' has-note') : '') +
+                '" data-item="' + esc(item.planItemId) + '">' +
                 '<div class="item-header" data-toggle="' + esc(item.planItemId) + '">' +
                 '<div class="item-title-row"><span class="item-serial">' + (item.lineNo || idx + 1) + '</span>' +
                 '<div class="item-header-info"><h2>' + esc(item.itemName) + '</h2>' +
@@ -1467,6 +1807,11 @@ function render() {
                 '<div class="item-meta-line">' +
                 '<span class="item-qty">Ordered ' + item.qtyOrdered + ' · produced ' + item.qtyProduced + '</span>' +
                 (item.status ? '<span class="item-status-badge">' + esc(String(item.status).replace(/_/g, ' ')) + '</span>' : '') +
+                (mine.length
+                    ? '<span class="item-finding-badge ' + (anyBad ? 'is-bad' : 'is-note') + '">' +
+                      (anyBad ? '&#9888; ' : '') + mine.length +
+                      (anyBad ? ' finding' : ' note') + (mine.length === 1 ? '' : 's') + '</span>'
+                    : '') +
                 (item.hasBom ? '' : '<span class="no">no BOM</span>') + '</div></div></div>' +
                 '<span class="chevron" aria-hidden="true">' +
                     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
@@ -1543,6 +1888,44 @@ function wire() {
     document.querySelectorAll('[data-toggle]').forEach(function (hd) {
         hd.addEventListener('click', function () {
             hd.parentNode.classList.toggle('open');
+        });
+    });
+
+    // A FINDING JUMPS TO ITS OWN EVIDENCE. The verdict says "each one below opens
+    // the working it came from", and this is what makes that true rather than a
+    // claim — clicking a finding opens the item, opens the material's working
+    // row, fetches the lazy expected-waste payload if that row needs it, and
+    // scrolls it into view.
+    //
+    // Without it the verdict names a material on an item and leaves the admin to
+    // find it by hand, which on a 110-item order is most of the work the banner
+    // was supposed to remove.
+    document.querySelectorAll('[data-goto]').forEach(function (li) {
+        li.addEventListener('click', function () {
+            var reqId = li.getAttribute('data-goto');
+            var work = document.getElementById('work-' + reqId);
+            if (!work) return;
+
+            var card = work.closest('.item-card');
+            if (card) card.classList.add('open');
+
+            work.hidden = false;
+            var btn = document.querySelector('[data-ans-toggle="' + reqId + '"]');
+            if (btn) btn.classList.add('is-open');
+
+            // Same lazy fetch the chevron does, for the same reason — step 3
+            // checks the derivation against getExpectedWaste and that payload is
+            // only fetched when a working is actually opened.
+            var found = matItemByReqId(reqId);
+            if (found && found.mat && found.mat.isFabric &&
+                EXP_WASTE[String(found.item.planItemId)] === undefined) {
+                ensureExpectedWaste(found.item, function () { redrawWorkRow(reqId); });
+            }
+
+            var row = document.querySelector('[data-ans="' + reqId + '"]');
+            if (row && row.scrollIntoView) {
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
         });
     });
 
@@ -1684,6 +2067,13 @@ var USED = null;
 var usedLoadedFor = '';
 var usedOpen = {};
 
+// The reason trail behind extra demand, from ConsumptionDetail (JS Data API).
+// A pure read, fetched beside getOrderConsumption and rendered inside the
+// expanded rows. Null until it lands or if it fails — every renderer that
+// touches it degrades to "quantities only", because the quantities come from
+// getOrderConsumption and do not depend on this at all.
+var USED_DETAIL = null;
+
 function usedFacts(m) {
     // Everything that did not earn a column, shown when a row is opened.
     var bits = [];
@@ -1692,6 +2082,30 @@ function usedFacts(m) {
             (Number(m.piecesFromRaw) || 0) + ' cut from fresh cloth · ' +
             (Number(m.piecesFromWaste) || 0) + ' from offcuts');
     }
+
+    // RECEIPT, stated as a fact rather than left to be inferred from a column
+    // that only appears when something is outstanding. `received` was returned
+    // by getOrderConsumption from the start and rendered nowhere at all.
+    var issued = parseFloat(m.issued) || 0;
+    var received = parseFloat(m.received) || 0;
+    if (issued > 0.005) {
+        if (received + 0.005 >= issued) {
+            bits.push('all ' + num(issued, 3) + ' ' + (m.unit || '') + ' issued was confirmed received');
+        } else {
+            bits.push(num(received, 3) + ' of ' + num(issued, 3) + ' ' + (m.unit || '') +
+                ' confirmed received — ' + num(issued - received, 3) + ' still in transit');
+        }
+    }
+
+    // THE CUTTING ALLOWANCE, which getOrderConsumption has always computed and
+    // this screen threw away. It is the single most-questioned figure in the app
+    // — the legend spent two sentences explaining the surplus it causes — and
+    // the number itself only ever appeared inside the reasons list.
+    if (Number(m.cuttingAllowance) > 0.005) {
+        bits.push(num(m.cuttingAllowance, 3) + ' ' + (m.unit || '') +
+            ' of the surplus is cutting allowance — whole marker rows paid for either way');
+    }
+
     if (Number(m.wasteAreaM2) > 0) {
         bits.push(num(m.wasteAreaM2, 2) + ' m2 of remnant came off this order');
     }
@@ -1710,7 +2124,190 @@ function orDash(val, txt) {
     return Number(val) > 0 ? txt : '<span class="is-muted">—</span>';
 }
 
-function renderUsedRow(m) {
+// WHICH OPTIONAL COLUMNS ARE WORTH DRAWING for this set of materials.
+//
+// The table had eleven columns and on a healthy order SEVEN of them were dashes
+// on every single row — Reissued, Lost, vs plan, Damaged, Waste back, Scrapped,
+// and the in-transit gap that was not there at all. Half the table width spent
+// saying "nothing happened", while the question the admin actually has (did
+// anything go wrong?) needed all eleven read to answer.
+//
+// A column that is empty on every row is not information, it is furniture. Each
+// one now appears only when at least one row has something to put in it, and the
+// verdict above says what the absent ones would have said.
+function usedColumns(mats) {
+    var c = { reissued: false, transit: false, lost: false, variance: false,
+              damaged: false, wasteKept: false, wasteScrap: false };
+    (mats || []).forEach(function (m) {
+        if ((parseFloat(m.reissued) || 0) > 0.005) c.reissued = true;
+        if (((parseFloat(m.issued) || 0) - (parseFloat(m.received) || 0)) > 0.005) c.transit = true;
+        if ((parseFloat(m.lost) || 0) > 0.005) c.lost = true;
+        if (Math.abs(parseFloat(m.variance) || 0) > 0.005) c.variance = true;
+        if ((parseFloat(m.damagedQty) || 0) > 0.005) c.damaged = true;
+        if ((Number(m.wasteKeptPieces) || 0) > 0) c.wasteKept = true;
+        if ((Number(m.wasteScrapPieces) || 0) > 0) c.wasteScrap = true;
+    });
+    return c;
+}
+
+function usedColCount(c) {
+    // Material, Unit, Planned, Issued, Spent, chevron = 6 always-on.
+    var n = 6;
+    ['reissued', 'transit', 'lost', 'variance', 'damaged', 'wasteKept', 'wasteScrap']
+        .forEach(function (k) { if (c[k]) n++; });
+    return n;
+}
+
+// THE ACCOUNT, drawn as a ledger rather than a sentence. One row per movement,
+// in the order the material meets them, so the arithmetic can be followed down
+// the column instead of reconstructed from seven cells spread across a table.
+function renderAccount(m) {
+    var a = materialAccount(m);
+    var u = esc(m.unit || '');
+
+    function line(label, qty, cls, why) {
+        return '<div class="acc-line' + (cls ? ' ' + cls : '') + '">' +
+            '<span class="acc-label">' + esc(label) + '</span>' +
+            '<span class="acc-qty">' + num(qty, 3) + ' ' + u + '</span>' +
+            '<span class="acc-why">' + (why || '') + '</span></div>';
+    }
+
+    var h = '<div class="account"><h5 class="sub">The account for this material</h5>';
+
+    h += line('Planned', a.planned, '', 'what the plan asked for');
+    if (a.extra > 0.005) {
+        h += line('Raised later', a.extra, 'acc-extra', 'demand added after the plan — see below for why');
+        h += '<div class="acc-sub">' +
+            '<span class="acc-label"><b>Total asked for</b></span>' +
+            '<span class="acc-qty"><b>' + num(a.demand, 3) + ' ' + u + '</b></span>' +
+            '<span class="acc-why"></span></div>';
+    }
+
+    h += line('Issued', a.issued, 'acc-key', 'crossed the store counter');
+
+    // The cutting allowance sits here because this is where it arises: whole
+    // marker rows are issued whether or not the last one is filled.
+    if (a.overIssue > 0.005) {
+        h += '<div class="acc-note">' + num(a.overIssue, 3) + ' ' + u +
+            ' more issued than asked for' +
+            (Number(m.cuttingAllowance) > 0.005
+                ? ' — ' + num(m.cuttingAllowance, 3) + ' ' + u +
+                  ' of it is cutting allowance, whole marker rows paid for either way'
+                : (m.isFabric
+                    ? ' — normally the cutting allowance, since cloth is issued in whole marker rows'
+                    : '')) +
+            '</div>';
+    } else if (a.overIssue < -0.005) {
+        h += '<div class="acc-note">' + num(Math.abs(a.overIssue), 3) + ' ' + u +
+            ' less issued than asked for — either still being issued, or the order will run short.</div>';
+    }
+
+    h += line('Confirmed received', a.received, '', 'the supervisor has it');
+    if (a.transit > 0.005) {
+        h += line('Still in transit', a.transit, 'acc-bad',
+            'left the store, nobody has confirmed holding it');
+    }
+    if (a.lost > 0.005) {
+        h += line('Written off', a.lost, 'acc-bad', 'a dispute both sides denied');
+    }
+
+    h += '<div class="acc-total">' +
+        '<span class="acc-label"><b>Spent</b></span>' +
+        '<span class="acc-qty"><b>' + num(a.spent, 3) + ' ' + u + '</b></span>' +
+        '<span class="acc-why">issued plus written off</span></div>';
+
+    // THE BALANCE, stated rather than left to be worked out.
+    if (!a.spentAgrees) {
+        h += '<div class="acc-verdict is-bad">This does not add up: issued ' + num(a.issued, 3) +
+            ' plus written off ' + num(a.lost, 3) + ' is ' + num(a.issued + a.lost, 3) +
+            ', but Spent reads ' + num(a.spent, 3) + '.</div>';
+    } else if (!a.balanced) {
+        h += '<div class="acc-verdict is-warn">Accounted for, except <b>' + num(a.transit, 3) + ' ' + u +
+            '</b> that has not been confirmed received. Until it is, this order is counted as ' +
+            'having spent material nobody has said they hold.</div>';
+    } else {
+        h += '<div class="acc-verdict is-ok">Fully accounted for — everything issued was confirmed received.</div>';
+    }
+
+    h += '</div>';
+    return h;
+}
+
+// WHY THERE WAS EXTRA DEMAND — the reason trail, from ConsumptionDetail.
+//
+// getOrderConsumption reports the QUANTITY of extra demand and collapses its
+// four causes into one figure. This says which cause, and quotes the words the
+// people involved actually typed: raiseReissueRequest's own one-line why, the
+// item's Remake_Reason, and — the thing that was unreachable before — the
+// checker's Rejection_Remarks and Alteration_Remarks off Item_Check.
+function renderReasonTrail(m) {
+    if (!USED_DETAIL || !USED_DETAIL.byMaterial) return '';
+    var d = USED_DETAIL.byMaterial[String(m.materialId)];
+    var dmg = USED_DETAIL.damage || [];
+    if (!d && !dmg.length) return '';
+    if (!d) return '';
+
+    var h = '<div class="trail"><h5 class="sub">Why extra material was needed</h5>';
+
+    // The causes, as a one-line summary before the incidents themselves.
+    var causeKeys = Object.keys(d.causes || {});
+    if (causeKeys.length) {
+        h += '<div class="cause-chips">';
+        causeKeys.forEach(function (k) {
+            var c = ConsumptionDetail.CAUSE[k] || { label: k, hint: '' };
+            h += '<span class="cause-chip cause-' + esc(k) + '" title="' + esc(c.hint) + '">' +
+                esc(c.label) + ' <b>' + num(d.causes[k], 3) + ' ' + esc(d.unit || m.unit || '') + '</b></span>';
+        });
+        h += '</div>';
+    }
+
+    (d.events || []).forEach(function (ev) {
+        h += '<div class="trail-event">' +
+            '<div class="trail-head">' +
+                '<span class="cause-chip cause-' + esc(ev.cause) + '">' + esc(ev.causeLabel) + '</span>' +
+                '<b>' + num(ev.qty, 3) + ' ' + esc(ev.unit || '') + '</b>' +
+                (ev.item ? '<span class="trail-item">' + esc(ev.item) + '</span>' : '') +
+            '</div>';
+
+        // The one-line why raiseReissueRequest wrote onto the row itself.
+        if (ev.reason) {
+            h += '<div class="trail-line"><span class="trail-tag">Raised as</span>' +
+                esc(ev.reason) + '</div>';
+        }
+
+        // The checker's own words. THE POINT OF THIS WHOLE PANEL: these are
+        // mandatory fields somebody filled in at the moment of rejection, and
+        // no screen reporting material consumption could reach them.
+        (ev.checks || []).forEach(function (c) {
+            h += '<div class="trail-line"><span class="trail-tag is-check">Checker' +
+                (c.round ? ', round ' + c.round : '') + '</span>' +
+                esc(c.remarks) +
+                '<span class="trail-figs">' +
+                    (c.inspected ? 'inspected ' + c.inspected : '') +
+                    (c.rejected ? ' · rejected ' + c.rejected : '') +
+                    (c.alteration ? ' · alteration ' + c.alteration : '') +
+                    (c.on ? ' · ' + esc(c.on) : '') +
+                '</span></div>';
+        });
+
+        // The damage report behind this item, if there is one.
+        dmg.filter(function (x) {
+            return String(x.itemId) === String(ev.itemId);
+        }).forEach(function (x) {
+            h += '<div class="trail-line"><span class="trail-tag is-damage">Damage' +
+                (x.stage ? ' at ' + esc(x.stage) : '') + '</span>' +
+                esc(x.reason || 'no reason recorded') +
+                (x.note ? ' — ' + esc(x.note) : '') +
+                '<span class="trail-figs">' + esc(x.who || '') +
+                (x.on ? ' · ' + esc(x.on) : '') + '</span></div>';
+        });
+    });
+
+    h += '</div>';
+    return h;
+}
+
+function renderUsedRow(m, cols) {
     var unit = esc(m.unit || '');
     var v = Number(m.variance) || 0;
     var vCls = v > 0.001 ? 'var-over' : (v < -0.001 ? 'var-under' : 'var-none');
@@ -1718,7 +2315,12 @@ function renderUsedRow(m) {
 
     var reasons = m.reasons || [];
     var facts = usedFacts(m);
-    var canOpen = reasons.length > 0 || facts.length > 0;
+    // EVERY ROW OPENS NOW. It used to open only when there were reasons or
+    // facts to show, so a material that simply went out and came back had no
+    // chevron at all — and that is exactly the row whose account an admin
+    // checking the arithmetic wants to see. renderAccount answers for every
+    // material, including the uneventful ones.
+    var canOpen = true;
     var open = !!usedOpen[m.materialId];
 
     var dmg = num(m.damagedQty, 3) +
@@ -1726,23 +2328,34 @@ function renderUsedRow(m) {
             ? ' <span class="muted">(' + m.damagedPieces + ' pc' + (Number(m.damagedPieces) === 1 ? '' : 's') + ')</span>'
             : '');
 
-    var row = '<tr class="used-row">' +
+    // IN TRANSIT: issued, and not yet confirmed by the supervisor. The server has
+    // always computed `received`; nothing rendered it and nothing compared it to
+    // anything, so cloth on a trolley was reported by this screen as consumed.
+    var transit = (parseFloat(m.issued) || 0) - (parseFloat(m.received) || 0);
+
+    var row = '<tr class="used-row" data-used-row="' + esc(m.materialId) + '">' +
         '<td class="ans-mat">' +
             '<div class="ans-name">' + esc(m.material || '—') + '</div>' +
             '<div class="ans-sub">' + (m.isFabric ? 'fabric' : 'not fabric') + '</div></td>' +
         '<td class="r">' + unit + '</td>' +
         '<td class="r">' + num(m.planned, 3) + '</td>' +
-        '<td class="r">' + orDash(m.reissued, num(m.reissued, 3)) + '</td>' +
+        (cols.reissued ? '<td class="r">' + orDash(m.reissued, num(m.reissued, 3)) + '</td>' : '') +
         '<td class="r">' + num(m.issued, 3) + '</td>' +
-        '<td class="r">' + orDash(m.lost, '<b class="is-lost">' + num(m.lost, 3) + '</b>') + '</td>' +
+        (cols.transit
+            ? '<td class="r">' + (transit > 0.005
+                ? '<b class="is-transit">' + num(transit, 3) + '</b>'
+                : '<span class="is-muted">—</span>') + '</td>'
+            : '') +
+        (cols.lost ? '<td class="r">' + orDash(m.lost, '<b class="is-lost">' + num(m.lost, 3) + '</b>') + '</td>' : '') +
         '<td class="r strong">' + num(m.spent, 3) + '</td>' +
-        '<td class="r ' + vCls + '">' + vTxt + '</td>' +
+        (cols.variance ? '<td class="r ' + vCls + '">' + vTxt + '</td>' : '') +
         // Reported, never netted into the figures on their left - see the damage
         // and waste passes in getOrderConsumption for why.
-        '<td class="r used-sep">' + orDash(m.damagedQty, dmg) + '</td>' +
-        '<td class="r">' + orDash(m.wasteKeptPieces,
-            '<b class="is-reuse">' + m.wasteKeptPieces + '</b> ' + pcs(m.wasteKeptPieces)) + '</td>' +
-        '<td class="r">' + orDash(m.wasteScrapPieces, m.wasteScrapPieces + ' ' + pcs(m.wasteScrapPieces)) + '</td>' +
+        (cols.damaged ? '<td class="r used-sep">' + orDash(m.damagedQty, dmg) + '</td>' : '') +
+        (cols.wasteKept ? '<td class="r">' + orDash(m.wasteKeptPieces,
+            '<b class="is-reuse">' + m.wasteKeptPieces + '</b> ' + pcs(m.wasteKeptPieces)) + '</td>' : '') +
+        (cols.wasteScrap ? '<td class="r">' + orDash(m.wasteScrapPieces,
+            m.wasteScrapPieces + ' ' + pcs(m.wasteScrapPieces)) + '</td>' : '') +
         '<td class="r">' + (canOpen
             ? '<button type="button" class="ans-toggle' + (open ? ' is-open' : '') + '" title="Why" aria-label="Why" ' +
                   'data-used-toggle="' + esc(m.materialId) + '">' +
@@ -1779,8 +2392,338 @@ function renderUsedRow(m) {
             '</div>';
     }).join('');
 
+    // THE ACCOUNT AND THE REASON TRAIL lead the detail; the facts and reason
+    // lines that were already here follow as supporting evidence. Order matters:
+    // "does this add up" and "why was more needed" are the two questions the
+    // row is opened to answer, and they were the two it could not.
+    detail = renderAccount(m) + renderReasonTrail(m) + detail;
+
+    // colspan follows the columns actually drawn. It was hardcoded to 12, which
+    // is now wrong on every order that does not light up every optional column.
     return row + '<tr class="work-row" id="used-' + esc(m.materialId) + '"' + (open ? '' : ' hidden') +
-        '><td colspan="12">' + detail + '</td></tr>';
+        '><td colspan="' + usedColCount(cols) + '">' + detail + '</td></tr>';
+}
+
+// THE VERDICT, for consumption. Same shape and same reasoning as the one on the
+// Calculation check tab: the screen could already surface all of this and made
+// the admin read eleven columns across six materials to conclude "nothing is
+// wrong", which is the answer on almost every order.
+//
+// The findings here are about what the order ATE, not about whether a figure was
+// derived correctly — a different question from the other tab, so a different
+// collector rather than a shared one that would have to know which tab it was
+// serving.
+// IS THIS ORDER STILL EXPECTING MATERIAL? Read off the sales order's own
+// status, which the picker already carries.
+//
+// Sales_Order.Order_Status runs Pending -> In Progress -> Production Complete ->
+// Checking Passed -> Finishing Complete -> Packed -> Dispatched (CLAUDE.md). Up
+// to and including In Progress, more cloth can still legitimately go out, so a
+// line that is short of its plan is mid-flight, not under-served.
+//
+// UNKNOWN COUNTS AS OPEN. If the status cannot be read the shortfall rule stays
+// quiet: a missed real shortfall is a gap, a false one on every unissued line is
+// a screen nobody reads.
+var CLOSED_STATUSES = ['Production Complete', 'Checking Passed',
+                       'Finishing Complete', 'Packed', 'Dispatched'];
+
+function currentOrder() {
+    var sel = document.getElementById('so-select');
+    var id = sel ? sel.value : '';
+    if (!id) return null;
+    var hit = null;
+    (ALL_ORDERS || []).forEach(function (o) {
+        if (String(o.id) === String(id)) hit = o;
+    });
+    return hit;
+}
+
+function orderIsClosed() {
+    var o = currentOrder();
+    if (!o || !o.status) return false;
+    return CLOSED_STATUSES.indexOf(String(o.status).trim()) > -1;
+}
+
+// Nothing has crossed the counter on this order yet. Worth knowing as ONE fact
+// about the order, which is what it is — not as a finding per material.
+function nothingIssuedYet(mats) {
+    if (!mats || !mats.length) return false;
+    return mats.every(function (m) {
+        return (parseFloat(m.issued) || 0) <= 0.005 &&
+               (parseFloat(m.reissued) || 0) <= 0.005;
+    });
+}
+
+function collectUsedFindings(mats) {
+    var out = [];
+
+    (mats || []).forEach(function (m) {
+        var unit = m.unit || '';
+        var where = {
+            materialId: String(m.materialId),
+            item: m.material || '',
+            material: m.material || ''
+        };
+
+        // ---- 1. MATERIAL STILL IN TRANSIT ----
+        //
+        // The one this screen could not say at all. Stock in this app is consumed
+        // at RECEIPT, not at issue (CLAUDE.md) — but `spent` is issued + lost, so
+        // cloth that left the store and has NOT been confirmed by the supervisor
+        // is already counted here as consumed. The server computes `received` and
+        // shipped it; nothing rendered it, and nothing compared it to anything.
+        //
+        // A gap means metres on a trolley: not on the store's shelf, not
+        // confirmed on the supervisor's, and counted by this report as eaten.
+        var issued = parseFloat(m.issued) || 0;
+        var received = parseFloat(m.received) || 0;
+        var transit = issued - received;
+        if (transit > 0.005) {
+            out.push({
+                materialId: where.materialId, material: where.material,
+                level: 'bad', kind: 'transit',
+                what: num(transit, 3) + ' ' + unit + ' issued but never confirmed',
+                detail: 'issued ' + num(issued, 3) + ', received ' + num(received, 3) +
+                    ' — stock is consumed at receipt, so this is counted as spent above ' +
+                    'while nobody has confirmed holding it'
+            });
+        }
+
+        // ---- 2. WRITTEN OFF ----
+        var lost = parseFloat(m.lost) || 0;
+        if (lost > 0.005) {
+            out.push({
+                materialId: where.materialId, material: where.material,
+                level: 'bad', kind: 'lost',
+                what: num(lost, 3) + ' ' + unit + ' written off',
+                detail: 'a dispute both sides denied — it left the store and reached nobody'
+            });
+        }
+
+        // ---- 3. DAMAGED AND REPLACED ----
+        var dmg = parseFloat(m.damagedQty) || 0;
+        if (dmg > 0.005) {
+            out.push({
+                materialId: where.materialId, material: where.material,
+                level: 'note', kind: 'damaged',
+                what: num(dmg, 3) + ' ' + unit + ' had to be replaced',
+                detail: (Number(m.damagedPieces) > 0
+                    ? Number(m.damagedPieces) + ' piece' + (Number(m.damagedPieces) === 1 ? '' : 's') + ' reported damaged — '
+                    : '') + 'reported for reissue, and deliberately not netted off the figures on the left'
+            });
+        }
+
+        // ---- 4. SPENT LESS THAN PLANNED, *ONLY ONCE THAT IS A FAULT* ----
+        //
+        // THIS RULE USED TO FIRE ON EVERY UNISSUED LINE, and it was worse than
+        // useless. An order that had not started issuing reported EVERY material
+        // as "less than planned" — fourteen findings on a fourteen-material
+        // order, all saying the same thing, none of them wrong exactly, none of
+        // them anything. Its own detail text gave the game away: "either the
+        // order is not finished issuing, or it will run short" is a finding that
+        // does not know whether it is one.
+        //
+        // A shortfall is only a fault once nothing more is coming. Three states
+        // were being collapsed into one:
+        //
+        //   nothing issued          the order has not started      not a finding
+        //   part issued, in flight  normal mid-order               not a finding
+        //   short and finished      genuinely under-served         A FINDING
+        //
+        // `orderIsClosed` is the discriminator, off the sales order's own
+        // status. Where the status is unknown the rule stays SILENT rather than
+        // guessing — a false alarm here trains the admin to scroll past the
+        // verdict, which costs more than the finding is worth.
+        var variance = parseFloat(m.variance) || 0;
+        var issuedAny = (parseFloat(m.issued) || 0) > 0.005;
+        if (variance < -0.005 && orderIsClosed() && issuedAny) {
+            out.push({
+                materialId: where.materialId, material: where.material,
+                level: 'bad', kind: 'under',
+                what: num(Math.abs(variance), 3) + ' ' + unit + ' short',
+                detail: 'planned ' + num(m.planned, 3) + ', spent ' + num(m.spent, 3) +
+                    ' — production is finished, so this order was served short'
+            });
+        }
+    });
+
+    return out;
+}
+
+// THE ACCOUNT FOR ONE MATERIAL — every quantity in, every quantity out, and
+// whether the two close.
+//
+// This is what "the accounting should be perfect for an order" means in
+// arithmetic. The screen reported seven figures side by side and never once
+// said whether they agreed with each other, so a gap between them was
+// something the admin had to spot by subtracting columns by eye.
+//
+// Two identities, and they are separate on purpose:
+//
+//   DEMAND    planned + extra demand           should equal what was asked for
+//   FLOW      issued = received + in transit   what left vs what arrived
+//
+// The flow one is the load-bearing test. Stock in this app is consumed at
+// RECEIPT (CLAUDE.md), so anything issued and not confirmed is on a trolley —
+// counted by `spent` as eaten while nobody has said they hold it.
+//
+// WHAT IS DELIBERATELY NOT SUMMED: damaged, waste back and scrapped. They are
+// reported beside the flow and never netted into it, because a ruined panel is
+// often part-salvaged into the waste box AND reported for reissue — both true,
+// both already counted on the left, and netting them without knowing which
+// remnant came from which incident drives the loss negative. That is a
+// documented deliberate gap, not an omission to fix here.
+function materialAccount(m) {
+    var planned = parseFloat(m.planned) || 0;
+    var extra = parseFloat(m.reissued) || 0;
+    var issued = parseFloat(m.issued) || 0;
+    var received = parseFloat(m.received) || 0;
+    var lost = parseFloat(m.lost) || 0;
+    var spent = parseFloat(m.spent) || 0;
+
+    var demand = planned + extra;
+    var transit = issued - received;
+    if (transit < 0.005) transit = 0;
+
+    // Issued against everything it was asked for. A surplus here is the cutting
+    // allowance — whole marker rows are bought whether or not the last one is
+    // filled — and is expected on fabric, not on a trim.
+    var overIssue = issued - demand;
+
+    return {
+        planned: planned,
+        extra: extra,
+        demand: demand,
+        issued: issued,
+        received: received,
+        transit: transit,
+        lost: lost,
+        spent: spent,
+        overIssue: overIssue,
+        // `spent` is issued + lost by the server's definition. Restating it here
+        // is the check: if these ever diverge, one of the two is wrong.
+        spentAgrees: Math.abs((issued + lost) - spent) < 0.005,
+        balanced: transit < 0.005
+    };
+}
+
+// ORDER-LEVEL TOTALS, split by kind. Fabric is metres and trims are cones and
+// pieces, so one "total spent" figure across both would be meaningless — they
+// are counted separately, and only where every row in the group shares a unit.
+function usedTotals(mats) {
+    var t = { fabricLines: 0, trimLines: 0, transit: 0, lost: 0, damaged: 0, reissued: 0,
+              wasteKept: 0, wasteScrap: 0, wasteArea: 0 };
+    (mats || []).forEach(function (m) {
+        if (m.isFabric) { t.fabricLines++; } else { t.trimLines++; }
+        var tr = (parseFloat(m.issued) || 0) - (parseFloat(m.received) || 0);
+        if (tr > 0.005) t.transit += tr;
+        t.lost += parseFloat(m.lost) || 0;
+        t.damaged += parseFloat(m.damagedQty) || 0;
+        t.reissued += parseFloat(m.reissued) || 0;
+        t.wasteKept += Number(m.wasteKeptPieces) || 0;
+        t.wasteScrap += Number(m.wasteScrapPieces) || 0;
+        t.wasteArea += parseFloat(m.wasteAreaM2) || 0;
+    });
+    return t;
+}
+
+// "Extra material was needed" — named by cause where ConsumptionDetail has
+// landed, neutral where it has not. Never guesses at a cause: saying "after
+// damage" about a checker rejection is a claim about an incident that did not
+// happen.
+function causeSummary(total) {
+    if (!USED_DETAIL || !USED_DETAIL.causeTotals) {
+        return 'Extra material was raised after the plan. ';
+    }
+    var keys = Object.keys(USED_DETAIL.causeTotals).filter(function (k) {
+        return USED_DETAIL.causeTotals[k] > 0.005;
+    });
+    if (!keys.length) return 'Extra material was raised after the plan. ';
+
+    var bits = keys.map(function (k) {
+        var c = ConsumptionDetail.CAUSE[k] || { label: k };
+        return c.label.toLowerCase();
+    });
+    var joined = bits.length === 1 ? bits[0]
+        : bits.slice(0, -1).join(', ') + ' and ' + bits[bits.length - 1];
+    return 'Extra material was needed — ' + joined + '. ';
+}
+
+function renderUsedVerdict(mats, findings) {
+    var t = usedTotals(mats);
+    var bad = findings.filter(function (f) { return f.level === 'bad'; });
+    var notes = findings.filter(function (f) { return f.level === 'note'; });
+    var lines = (mats || []).length;
+
+    // The one line that answers "what did this order eat", which the table of
+    // eleven columns never actually stated.
+    var shape = t.fabricLines + ' fabric line' + (t.fabricLines === 1 ? '' : 's') +
+        ' and ' + t.trimLines + ' trim' + (t.trimLines === 1 ? '' : 's');
+
+    var h, cls, mark, head;
+    var notStarted = nothingIssuedYet(mats);
+
+    if (notStarted) {
+        // NOTHING HAS BEEN ISSUED. Stated as the one fact it is, rather than
+        // "consumed as planned" — which would claim a consumption that has not
+        // happened — and rather than one shortfall finding per material, which
+        // is what this screen did before and what made it worth ignoring.
+        cls = 'verdict-note'; mark = 'i';
+        head = 'Nothing issued yet.';
+    } else if (!findings.length) {
+        cls = 'verdict-ok'; mark = '&#10003;';
+        head = lines + ' material' + (lines === 1 ? '' : 's') + ' consumed as planned.';
+    } else {
+        cls = bad.length ? 'verdict-bad' : 'verdict-note';
+        mark = bad.length ? '&#9888;' : 'i';
+        if (bad.length && notes.length) {
+            head = bad.length + ' finding' + (bad.length === 1 ? '' : 's') + ' and ' +
+                notes.length + ' worth noting.';
+        } else if (bad.length) {
+            head = bad.length + ' finding' + (bad.length === 1 ? '' : 's') + ' on this order.';
+        } else {
+            head = notes.length + ' thing' + (notes.length === 1 ? '' : 's') +
+                ' worth noting, nothing wrong.';
+        }
+    }
+
+    h = '<div class="verdict ' + cls + '">' +
+        '<span class="verdict-mark">' + mark + '</span>' +
+        '<div><b>' + head + '</b>' +
+        '<span>' +
+        (notStarted
+            ? 'This order is planned for ' + shape + ', and none of it has crossed the ' +
+              'store counter. The table below is what it will need, not what it has used. '
+            : shape + '. ') +
+        (t.wasteKept > 0
+            ? t.wasteKept + ' offcut piece' + (t.wasteKept === 1 ? '' : 's') + ' went back on the rack' +
+              (t.wasteArea > 0 ? ' (' + num(t.wasteArea, 2) + ' m&sup2;)' : '') + '. '
+            : '') +
+        // NAMES THE CAUSES rather than guessing at one. This said "re-issued
+        // after damage" for every kind of extra demand, including a checker
+        // rejection and an alteration, which is a specific claim about an
+        // incident that may not have happened. ConsumptionDetail knows which of
+        // the four it really was; before it lands, the count says so neutrally.
+        (t.reissued > 0 ? causeSummary(t.reissued) : '') +
+        '</span>';
+
+    if (findings.length) {
+        h += '<ul class="verdict-list">';
+        findings.slice().sort(function (a, b) {
+            if (a.level !== b.level) return a.level === 'bad' ? -1 : 1;
+            return 0;
+        }).forEach(function (f) {
+            h += '<li class="vf vf-' + f.level + '" data-used-goto="' + esc(f.materialId) + '">' +
+                '<b>' + esc(f.what) + '</b>' +
+                '<span class="vf-where">' + esc(f.material) + '</span>' +
+                '<span class="vf-detail">' + esc(f.detail) + '</span>' +
+                '</li>';
+        });
+        h += '</ul>';
+    }
+
+    h += '</div></div>';
+    return h;
 }
 
 function renderUsed() {
@@ -1807,28 +2750,98 @@ function renderUsed() {
         h += '<div class="warn top">' + USED.errors.map(esc).join('<br>') + '</div>';
     }
 
-    h += '<div class="table-wrapper"><table class="ans-table used-table"><thead><tr>' +
+    // A FORM WHOSE REPORT COULD NOT BE FOUND says so here, quietly, naming the
+    // form and every report name that was tried. The quantities on this screen
+    // come from getOrderConsumption and are unaffected — only the reason trail
+    // is missing — so this is a note, not a warning.
+    if (USED_DETAIL && USED_DETAIL.notes && USED_DETAIL.notes.length) {
+        h += '<div class="aside detail-note"><b>The reason trail is incomplete.</b> ' +
+            'Could not find a report for: ' + esc(USED_DETAIL.notes.join('; ')) +
+            '. The quantities below are unaffected — they come from getOrderConsumption. ' +
+            'Add the real report link name to <code>ConsumptionDetail.CANDIDATES</code>.</div>';
+    }
+
+    // The conclusion first, the table as its evidence — same order as the
+    // Calculation check tab.
+    var findings = collectUsedFindings(mats);
+    h += renderUsedVerdict(mats, findings);
+
+    var cols = usedColumns(mats);
+
+    // FABRIC AND TRIMS ARE TWO DIFFERENT QUESTIONS IN ONE TABLE. Fabric is
+    // metres against a marker; a trim is a count per garment. They were
+    // interleaved in requirement order, so on the screenshot's order the two
+    // linen lines sat at rows 1 and 5 with three cones between them, and the
+    // eye had to re-establish which kind of thing each row was on every line.
+    //
+    // Grouped, not split into two tables: they share every column and the
+    // totals below are read across both.
+    var fabrics = mats.filter(function (m) { return m.isFabric; });
+    var trims = mats.filter(function (m) { return !m.isFabric; });
+
+    var head = '<thead><tr>' +
         '<th>Material</th><th class="r">Unit</th>' +
-        '<th class="r">Planned</th><th class="r">Reissued</th><th class="r">Issued</th>' +
-        '<th class="r">Lost</th><th class="r">Spent</th><th class="r">vs plan</th>' +
-        '<th class="r used-sep">Damaged</th><th class="r">Waste back</th><th class="r">Scrapped</th><th></th>' +
-        '</tr></thead><tbody>' +
-        mats.map(renderUsedRow).join('') +
-        '</tbody></table></div>';
+        '<th class="r" title="What the plan said this order would need.">Planned</th>' +
+        (cols.reissued ? '<th class="r" title="Issued again to replace material damaged in production.">Reissued</th>' : '') +
+        '<th class="r" title="What crossed the store counter.">Issued</th>' +
+        (cols.transit ? '<th class="r" title="Issued but not yet confirmed received by the supervisor. Stock is consumed at receipt, so this is counted in Spent while nobody has confirmed holding it.">In transit</th>' : '') +
+        (cols.lost ? '<th class="r" title="A dispute both sides denied — it left the store and reached nobody.">Lost</th>' : '') +
+        '<th class="r" title="Issued plus written off — what actually left the building.">Spent</th>' +
+        (cols.variance ? '<th class="r" title="Spent against planned. A surplus is usually the cutting allowance: cloth is issued in whole marker rows whether or not the last one is filled.">vs plan</th>' : '') +
+        (cols.damaged ? '<th class="r used-sep" title="Material that had to be replaced. Reported here and deliberately NOT netted off the figures on the left.">Damaged</th>' : '') +
+        (cols.wasteKept ? '<th class="r" title="Offcut pieces that went back on the rack and can be reused.">Waste back</th>' : '') +
+        (cols.wasteScrap ? '<th class="r" title="Offcut pieces thrown away.">Scrapped</th>' : '') +
+        '<th></th></tr></thead>';
+
+    var span = usedColCount(cols);
+    var body = '';
+    if (fabrics.length && trims.length) {
+        body += '<tr class="grp-row"><td colspan="' + span + '">Fabric</td></tr>' +
+            fabrics.map(function (m) { return renderUsedRow(m, cols); }).join('') +
+            '<tr class="grp-row"><td colspan="' + span + '">Trims and other materials</td></tr>' +
+            trims.map(function (m) { return renderUsedRow(m, cols); }).join('');
+    } else {
+        body = mats.map(function (m) { return renderUsedRow(m, cols); }).join('');
+    }
+
+    h += '<div class="table-wrapper"><table class="ans-table used-table">' +
+        head + '<tbody>' + body + '</tbody></table></div>';
 
     // THE TWO HALVES OF THIS TABLE DO NOT ADD UP, ON PURPOSE. Saying so on the
     // screen is cheaper than being asked, and it stops somebody "fixing" it.
-    h += '<div class="aside ans-legend">' +
-        '<b>Spent</b> is issued plus written off — what actually left the building. ' +
-        '<b>vs plan</b> is spent against planned; a surplus is usually the cutting allowance, because ' +
-        'cloth is issued in whole marker rows whether or not the last one is filled. Open a row for the reasons.' +
-        '<br><b>Damaged</b>, <b>Waste back</b> and <b>Scrapped</b> sit beside those figures and are ' +
-        'deliberately not added into them. At cutting a ruined panel is often part-salvaged into the waste box ' +
-        '<em>and</em> reported for reissue — both are true, both are already counted on the left, and netting ' +
-        'them without knowing which remnant came from which incident would drive the loss negative.' +
-        '</div>';
+    //
+    // Trimmed to the columns actually on screen: the old paragraph explained
+    // Damaged / Waste back / Scrapped on every order including the ones where
+    // none of those columns existed, which is an explanation of something the
+    // reader cannot see. The rest of the glossary moved onto the column titles.
+    if (cols.damaged || cols.wasteKept || cols.wasteScrap) {
+        h += '<div class="aside ans-legend">' +
+            '<b>Damaged</b>, <b>Waste back</b> and <b>Scrapped</b> sit beside the figures on their left and are ' +
+            'deliberately not added into them. At cutting a ruined panel is often part-salvaged into the waste box ' +
+            '<em>and</em> reported for reissue — both are true, both are already counted on the left, and netting ' +
+            'them without knowing which remnant came from which incident would drive the loss negative.' +
+            '</div>';
+    }
 
     panel.innerHTML = h;
+
+    // A finding jumps to its row, same as the other tab.
+    panel.querySelectorAll('[data-used-goto]').forEach(function (li) {
+        li.addEventListener('click', function () {
+            var id = li.getAttribute('data-used-goto');
+            var row = panel.querySelector('[data-used-row="' + id + '"]');
+            var detail = document.getElementById('used-' + id);
+            if (detail) {
+                detail.hidden = false;
+                usedOpen[id] = true;
+                var b = panel.querySelector('[data-used-toggle="' + id + '"]');
+                if (b) b.classList.add('is-open');
+            }
+            if (row && row.scrollIntoView) {
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        });
+    });
 
     panel.querySelectorAll('[data-used-toggle]').forEach(function (btn) {
         btn.addEventListener('click', function () {
@@ -1844,10 +2857,54 @@ function renderUsed() {
     });
 }
 
+// THE REASON TRAIL, fetched after the quantities and rendered into them.
+//
+// Needs the order's plan ids to bound every query. The Calculation check tab
+// already has them in MY_PLAN_IDS, but this tab can be opened without that tab
+// having loaded — so when they are missing it asks getAdminCalculation for the
+// order, which returns the plans among much else. That is one extra call on a
+// path the admin took deliberately, and Custom API calls from a widget are not
+// metered (CLAUDE.md), so it costs nothing worth optimising.
+function loadUsedDetail(soId) {
+    if (typeof ConsumptionDetail === 'undefined') return;
+
+    function go(planIds) {
+        if (!planIds || !planIds.length) return;
+        ConsumptionDetail.run(planIds).then(function (detail) {
+            // The order may have been changed while this was in flight. Dropping
+            // a late answer is right: rendering it would attach one order's
+            // reasons to another order's quantities, which is the worst kind of
+            // wrong because every figure on it is real, just about something else.
+            if (usedLoadedFor !== String(soId)) return;
+            USED_DETAIL = detail;
+            renderUsed();
+        }).catch(function (err) {
+            console.error('ConsumptionDetail failed:', err);
+        });
+    }
+
+    if (MY_PLAN_IDS && MY_PLAN_IDS.length && DATA && DATA.plans && DATA.plans.length) {
+        go(MY_PLAN_IDS);
+        return;
+    }
+
+    ZOHO.CREATOR.DATA.invokeCustomApi({
+        api_name: 'getAdminCalculation',
+        http_method: 'POST',
+        payload: { salesOrderId: String(soId) }
+    }).then(function (response) {
+        var parsed;
+        try { parsed = JSON.parse(response.result); } catch (e) { return; }
+        go((parsed.plans || []).map(function (p) { return String(p.planId); }));
+    }).catch(function (err) {
+        console.error('could not resolve plans for the consumption detail:', err);
+    });
+}
+
 function loadUsed() {
     var sel = document.getElementById('so-select');
     var soId = sel ? sel.value : '';
-    if (!soId) { USED = null; usedLoadedFor = ''; renderUsed(); return; }
+    if (!soId) { USED = null; USED_DETAIL = null; usedLoadedFor = ''; renderUsed(); return; }
 
     // usedLoadedFor is what makes the tab lazy: coming back to an order already
     // fetched redraws from memory instead of calling again.
@@ -1855,6 +2912,8 @@ function loadUsed() {
 
     var panel = document.getElementById('panel-used');
     panel.innerHTML = '<div class="empty-state"><h2>Loading…</h2></div>';
+
+    USED_DETAIL = null;
 
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'getOrderConsumption',
@@ -1868,7 +2927,14 @@ function loadUsed() {
             USED = { errors: ['Could not read the response — see the browser console.'], materials: [] };
         }
         usedLoadedFor = soId;
+
+        // Quantities first, reasons second. The table is drawn as soon as
+        // getOrderConsumption lands and REDRAWN when the detail arrives — the
+        // reason trail is worth waiting for but not worth waiting in front of a
+        // blank screen for, and a failed detail fetch must leave a complete
+        // quantity report rather than an error page.
         renderUsed();
+        loadUsedDetail(soId);
     }).catch(function (err) {
         console.error('getOrderConsumption error:', err);
         USED = { errors: ['Could not load: ' + err], materials: [] };
@@ -1931,17 +2997,20 @@ function load(soId) {
         http_method: 'POST',
         payload: { salesOrderId: soId || '' }
     }).then(function (response) {
-        console.log('raw response:', response);
         btn.disabled = false;
         var parsed;
         try {
             parsed = JSON.parse(response.result);
         } catch (e) {
+            // The FAILURE is still logged with the raw text — that is the one
+            // moment the payload is worth having, and a bad control character in
+            // a free-text field is invisible without it. The two console.logs
+            // that dumped every successful response are gone; no other widget
+            // does that, and it buried the errors that matter.
             console.error('JSON.parse failed:', e, response.result);
             content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Could not read the response</h2><p>Check the browser console for details.</p></div>';
             return;
         }
-        console.log('parsed:', parsed);
         fillOrders(parsed.orders);
         if (!soId) {
             DATA = null;

@@ -116,6 +116,16 @@ string getAdminCalculation(string salesOrderId)
 		}
 		// status and source are carried so the picker can be filtered on them
 		// without a second call. Both are plain text on the order.
+		//
+		// "status" HAS A SECOND READER OUTSIDE THIS SCREEN - keep it.
+		// app/admin/anotherPage (the Production & Stock Dashboard) falls back to
+		// this function when getOrderPipelineCounts fails, calls it with an empty
+		// salesOrderId, and counts these status values client-side to draw its
+		// pipeline tiles (loadPipelineFromOrderAudit). Dropping the field, or
+		// paging this order list, silently breaks that fallback - it would report
+		// every tile as zero rather than erroring, which is the worst way for it
+		// to fail.
+		//
 		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
 		soJson = soJson + "{\"id\":\"" + so.ID + "\",\"name\":\"" + ifnull(so.Sales_Order,"").toString().replaceAll("\"","'") + "\",\"status\":\"" + ifnull(so.Order_Status,"").toString().replaceAll("\"","'") + "\",\"source\":\"" + ifnull(so.Order_Source,"").toString().replaceAll("\"","'") + "\",\"hasPlans\":" + hasPlan + "}";
 	}
@@ -174,6 +184,13 @@ string getAdminCalculation(string salesOrderId)
 	itemSkuById = Map();
 	itemSizeById = Map();
 	itemColorById = Map();
+
+	// SKU, display name and fabric width per RAW MATERIAL, same lazy-cache
+	// shape and for the same reason. The same fabric sits on many items of one
+	// order, so without this the row was re-read once per item that used it.
+	matSkuById = Map();
+	matDispById = Map();
+	matWidthById = Map();
 
 	for each  plan in orderPlans
 	{
@@ -392,20 +409,49 @@ string getAdminCalculation(string salesOrderId)
 					mCutW = ifnull(mr2.Cut_Size_Width,0);
 					mCutL = ifnull(mr2.Cut_Size_Length,0);
 
-					mSku = "";
-					mDisp = "";
-					mWidthIn = "";
-					mWidthCm = 0.0;
-					for each  rm2 in Raw_Material[ID == mMat]
+					// ONE READ PER DISTINCT MATERIAL, cached for the whole call.
+					//
+					// This was a fetch per requirement row inside the per-item
+					// loop, and the same fabric appears on many items of one
+					// order - a duvet set is cover and shams, all one cloth - so
+					// a 110-item single-fabric order read the SAME Raw_Material
+					// row about a hundred and ten times. Every other hot
+					// function in this app already keys a Map by material id for
+					// exactly this; getAdminCalculation got the Item_Master
+					// cache and not this one.
+					//
+					// Separate maps rather than one delimited value, same shape
+					// as itemSkuById above: a display name can contain any
+					// character, so there is no separator that is safe.
+					//
+					// The MISS is cached too - an unreadable material id must
+					// not be re-queried once per row for the rest of the call.
+					matKey = mMat.toString();
+					if(matSkuById.get(matKey) == null)
 					{
-						mSku = ifnull(rm2.SKU,"").toString();
-						mDisp = ifnull(rm2.Material_Display_Name,"").toString().trim();
-						val2 = rm2.Fabric_Width_Inches;
-						if(val2 != null && val2.trim() != "")
+						matSkuById.put(matKey,"");
+						matDispById.put(matKey,"");
+						matWidthById.put(matKey,"");
+
+						for each  rm2 in Raw_Material[ID == mMat]
 						{
-							mWidthIn = val2.trim();
-							mWidthCm = mWidthIn.toDecimal() * 2.54;
+							matSkuById.put(matKey,ifnull(rm2.SKU,"").toString());
+							matDispById.put(matKey,ifnull(rm2.Material_Display_Name,"").toString().trim());
+							val2 = rm2.Fabric_Width_Inches;
+							if(val2 != null && val2.trim() != "")
+							{
+								matWidthById.put(matKey,val2.trim());
+							}
 						}
+					}
+
+					mSku = ifnull(matSkuById.get(matKey),"").toString();
+					mDisp = ifnull(matDispById.get(matKey),"").toString();
+					mWidthIn = ifnull(matWidthById.get(matKey),"").toString();
+					mWidthCm = 0.0;
+					if(mWidthIn != "")
+					{
+						mWidthCm = mWidthIn.toDecimal() * 2.54;
 					}
 					mName = ifnull(mr2.Material_Name,"").toString().replaceAll("\"","'");
 					if(mDisp != "")
