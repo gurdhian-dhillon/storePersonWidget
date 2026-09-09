@@ -2536,12 +2536,17 @@ function collectUsedFindings(mats) {
         // verdict, which costs more than the finding is worth.
         var variance = parseFloat(m.variance) || 0;
         var issuedAny = (parseFloat(m.issued) || 0) > 0.005;
+        // Against DEMAND (plan + reissue), not the plan alone: a closed order
+        // that raised replacement cloth for a rejected batch or an alteration
+        // and never issued it IS short, and measuring against the plan alone
+        // hid that behind the reissue's own Required_Qty.
+        var demand = (parseFloat(m.demand) || (parseFloat(m.planned) || 0) + (parseFloat(m.reissued) || 0));
         if (variance < -0.005 && orderIsClosed() && issuedAny) {
             out.push({
                 materialId: where.materialId, material: where.material,
                 level: 'bad', kind: 'under',
                 what: num(Math.abs(variance), 3) + ' ' + unit + ' short',
-                detail: 'planned ' + num(m.planned, 3) + ', spent ' + num(m.spent, 3) +
+                detail: 'asked for ' + num(demand, 3) + ', spent ' + num(m.spent, 3) +
                     ' — production is finished, so this order was served short'
             });
         }
@@ -2787,7 +2792,7 @@ function renderUsed() {
         (cols.transit ? '<th class="r" title="Issued but not yet confirmed received by the supervisor. Stock is consumed at receipt, so this is counted in Spent while nobody has confirmed holding it.">In transit</th>' : '') +
         (cols.lost ? '<th class="r" title="A dispute both sides denied — it left the store and reached nobody.">Lost</th>' : '') +
         '<th class="r" title="Issued plus written off — what actually left the building.">Spent</th>' +
-        (cols.variance ? '<th class="r" title="Spent against planned. A surplus is usually the cutting allowance: cloth is issued in whole marker rows whether or not the last one is filled.">vs plan</th>' : '') +
+        (cols.variance ? '<th class="r" title="Spent against everything this order was asked for — the plan PLUS any reissue for a rejected batch, an alteration or damage. A reissue is real cloth the order needs, so it does not count as an overspend here. A surplus that remains is usually the cutting allowance: cloth is issued in whole marker rows whether or not the last one is filled.">vs asked</th>' : '') +
         (cols.damaged ? '<th class="r used-sep" title="Material that had to be replaced. Reported here and deliberately NOT netted off the figures on the left.">Damaged</th>' : '') +
         (cols.wasteKept ? '<th class="r" title="Offcut pieces that went back on the rack and can be reused.">Waste back</th>' : '') +
         (cols.wasteScrap ? '<th class="r" title="Offcut pieces thrown away.">Scrapped</th>' : '') +

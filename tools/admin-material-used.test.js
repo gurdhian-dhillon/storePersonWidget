@@ -153,6 +153,66 @@ check('a surplus raises nothing', f.length === 0,
     JSON.stringify(f.map(function (x) { return x.kind; })));
 
 // ---------------------------------------------------------------
+console.log('\nREISSUE IS NOT AN OVERSPEND (was double-counted as cutting allowance):');
+// SO-2000 in the wild: a checker rejected 1 piece, so 1.35 m was raised as a
+// reissue requirement and not yet issued. The plan cloth had over-issued by
+// exactly 1.35 m of marker-row rounding. getOrderConsumption used to compute
+// variance = spent - PLANNED, attributing the whole 1.35 to cutting allowance
+// AND showing 1.35 in the Reissued column — one number, two conflicting stories.
+// variance is now spent - DEMAND (planned + reissued), so a raised reissue never
+// shows as an overspend.
+const so2000 = {
+    materialId: 'MX', material: 'Linen / Yarn Dyed / Sylph Green', unit: 'Mtr',
+    isFabric: true,
+    planned: 6.75, reissued: 1.35, demand: 8.1,
+    issued: 8.1, received: 8.1, lost: 0, lostPieces: 0,
+    spent: 8.1,
+    // server now: variance = 8.1 - 8.1 = 0, cuttingAllowance = 0
+    variance: 0, cuttingAllowance: 0,
+    requiredPieces: 0, piecesFromRaw: 0, piecesFromWaste: 0,
+    damagedQty: 2.7, damagedPieces: 2, wasteKeptPieces: 1, wasteScrapPieces: 0,
+    wasteAreaM2: 0, reasons: []
+};
+const acc = ctx.materialAccount(so2000);
+check('account: total asked for is plan + reissue', Math.abs(acc.demand - 8.1) < 0.001,
+    'demand=' + acc.demand);
+check('account: issuing exactly the demand is not an over-issue',
+    Math.abs(acc.overIssue) < 0.001, 'overIssue=' + acc.overIssue);
+f = ctx.collectUsedFindings([so2000]);
+check('no shortfall finding — the order was served everything it asked for',
+    !f.some(function (x) { return x.kind === 'under'; }),
+    JSON.stringify(f.map(function (x) { return x.kind; })));
+const so2kCols = ctx.usedColumns([so2000]);
+check('the "vs asked" column stays hidden — nothing was overspent',
+    so2kCols.variance === false);
+check('the Reissued column DOES show — 1.35 m was legitimately raised',
+    so2kCols.reissued === true);
+const facts2 = ctx.usedFacts(so2000);
+check('no cutting-allowance line — the surplus was reissue, not marker-row waste',
+    !facts2.some(function (s) { return s.indexOf('cutting allowance') > -1; }),
+    JSON.stringify(facts2));
+
+// The other side: a reissue that WAS issued on top of a real cutting allowance
+// still shows the true surplus. planned 6.75, reissued 1.35 (issued), plus 0.5 m
+// of genuine marker-row rounding -> issued 8.6, demand 8.1, variance +0.5.
+const withReal = {
+    materialId: 'MY', material: 'Linen', unit: 'Mtr', isFabric: true,
+    planned: 6.75, reissued: 1.35, demand: 8.1,
+    issued: 8.6, received: 8.6, lost: 0, lostPieces: 0, spent: 8.6,
+    variance: 0.5, cuttingAllowance: 0.5,
+    requiredPieces: 0, piecesFromRaw: 0, piecesFromWaste: 0,
+    damagedQty: 0, damagedPieces: 0, wasteKeptPieces: 0, wasteScrapPieces: 0,
+    wasteAreaM2: 0, reasons: []
+};
+check('a real surplus on top of a reissue still shows as +0.5 vs asked',
+    Math.abs((Number(withReal.variance) || 0) - 0.5) < 0.001);
+check('and its column lights up', ctx.usedColumns([withReal]).variance === true);
+const wrFacts = ctx.usedFacts(withReal);
+check('and it is named as cutting allowance',
+    wrFacts.some(function (s) { return s.indexOf('cutting allowance') > -1 && s.indexOf('0.5') > -1; }),
+    JSON.stringify(wrFacts));
+
+// ---------------------------------------------------------------
 console.log('\nSHORTFALL ONLY COUNTS ONCE NOTHING MORE IS COMING:');
 // A real order (SO-01001) that had not started issuing reported EVERY one of
 // its 14 materials as "less than planned" — fourteen findings saying one

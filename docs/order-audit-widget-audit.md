@@ -39,6 +39,32 @@ now states every finding the screen could already detect but buried behind a
 chevron — including mixed-lot, which is unfixable once it has happened and was
 the most deeply buried of the lot. See `tools/admin-audit-steps.test.js` (79).
 
+### 2026-09-09 — "Material used" tab: reissue no longer reads as an overspend
+
+`getOrderConsumption.dg` computed `variance = spent − PLANNED` and
+`cuttingAllowance = variance − lost`. Neither subtracted `reissued`. On an order
+that raised a reissue whose cloth had not gone out yet (a checker rejection, an
+alteration), and whose plan cloth had over-issued by roughly the same amount of
+marker-row rounding, one row told two conflicting stories: the account ledger
+(client-side, always right) showed `planned + raised later = asked for`, balanced;
+the reason trail below it (from the server's `reasons[]`) showed
+`Cutting allowance: <that same number>`. SO-2000's Yarn Dyed fabric was the live
+example — `+1.35` "vs plan" and `1.35` "Reissued" side by side, the same 1.35.
+
+Fixed server-side to match what the widget's `materialAccount` already did:
+`demand = planned + reissued`, `variance = spent − demand`,
+`cuttingAllowance = variance − lost` (clamped ≥ 0). Payload gains a `demand`
+field. The "vs plan" column is relabelled **"vs asked"** — spent against
+everything the order was told it needs, plan plus every reissue — so a legitimately
+raised reissue reads as 0, not as a surplus, and a genuine marker-row allowance on
+top still shows. As a bonus the closed-order shortfall finding now fires when a
+reissue was raised and never issued (previously hidden behind the reissue's own
+`Required_Qty`). `tools/admin-material-used.test.js` +9 (57).
+
+**Redeploy:** `deluge/getOrderConsumption.dg` (paste + **Execute** on SO-2000 to
+confirm), admin widget `app/admin/js/main.js`. No Custom API arg-list change.
+Arithmetic not ported to Node — the change is one subtraction; verify at Execute.
+
 ---
 
 ## What it calls

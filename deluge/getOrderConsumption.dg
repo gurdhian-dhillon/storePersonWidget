@@ -548,15 +548,28 @@ string getOrderConsumption(string salesOrderId)
 		e = agg.get(k);
 
 		plannedV = ifnull(e.get("planned"),0);
+		reissuedV = ifnull(e.get("reissued"),0);
 		issuedV = ifnull(e.get("issued"),0);
 		lostV = ifnull(e.get("lostQty"),0);
 		spentV = issuedV + lostV;
-		varianceV = spentV - plannedV;
+
+		// VARIANCE IS AGAINST EVERYTHING THE ORDER WAS ASKED FOR, not just the
+		// original plan. planned + reissued is the total demand - a rejected
+		// batch, an alteration and a damage reissue are all real cloth this
+		// order genuinely needs. Measuring spent against planned alone reported
+		// every reissue as an overspend, and on an order that reissued exactly
+		// what the cutting allowance rounded up it read as "we overspent by
+		// precisely what we reissued" - the exact conflation the planned /
+		// reissued split above exists to prevent, reintroduced one column over.
+		demandV = plannedV + reissuedV;
+		varianceV = spentV - demandV;
 
 		// Everything the variance is NOT accounted for by a write-off is the
 		// cutting allowance: whole marker rows issued to yield part of a row
 		// of pieces. Named rather than left as a gap, because an unexplained
 		// number invites somebody to go looking for a fault that is not there.
+		// Off the demand-based variance so a raised reissue never lands here -
+		// it is not marker-row waste, it is cloth the order was told it needs.
 		cuttingV = varianceV - lostV;
 		if(cuttingV < 0)
 		{
@@ -606,7 +619,7 @@ string getOrderConsumption(string salesOrderId)
 		//
 		// damaged and waste are reported and NOT rolled into spent or variance -
 		// see the two passes above for why netting them needs provenance first.
-		matJson = matJson + "{\"materialId\":\"" + e.get("matId") + "\",\"material\":\"" + e.get("name") + "\",\"unit\":\"" + ifnull(e.get("unit"),"") + "\",\"isFabric\":" + ifnull(e.get("isFabric"),false) + ",\"planned\":" + plannedV + ",\"reissued\":" + ifnull(e.get("reissued"),0) + ",\"issued\":" + issuedV + ",\"received\":" + ifnull(e.get("received"),0) + ",\"lost\":" + lostV + ",\"lostPieces\":" + ifnull(e.get("lostPieces"),0) + ",\"spent\":" + spentV + ",\"variance\":" + varianceV + ",\"cuttingAllowance\":" + cuttingV + ",\"requiredPieces\":" + ifnull(e.get("reqPieces"),0) + ",\"piecesFromRaw\":" + ifnull(e.get("rawPieces"),0) + ",\"piecesFromWaste\":" + ifnull(e.get("wastePieces"),0) + ",\"damagedQty\":" + ifnull(e.get("damagedQty"),0) + ",\"damagedPieces\":" + ifnull(e.get("damagedPieces"),0) + ",\"wasteKeptPieces\":" + ifnull(e.get("wasteKeptPcs"),0) + ",\"wasteScrapPieces\":" + ifnull(e.get("wasteScrapPcs"),0) + ",\"wasteAreaM2\":" + ifnull(e.get("wasteArea"),0) + ",\"reasons\":[" + reasonsJson + "]}";
+		matJson = matJson + "{\"materialId\":\"" + e.get("matId") + "\",\"material\":\"" + e.get("name") + "\",\"unit\":\"" + ifnull(e.get("unit"),"") + "\",\"isFabric\":" + ifnull(e.get("isFabric"),false) + ",\"planned\":" + plannedV + ",\"reissued\":" + reissuedV + ",\"demand\":" + demandV + ",\"issued\":" + issuedV + ",\"received\":" + ifnull(e.get("received"),0) + ",\"lost\":" + lostV + ",\"lostPieces\":" + ifnull(e.get("lostPieces"),0) + ",\"spent\":" + spentV + ",\"variance\":" + varianceV + ",\"cuttingAllowance\":" + cuttingV + ",\"requiredPieces\":" + ifnull(e.get("reqPieces"),0) + ",\"piecesFromRaw\":" + ifnull(e.get("rawPieces"),0) + ",\"piecesFromWaste\":" + ifnull(e.get("wastePieces"),0) + ",\"damagedQty\":" + ifnull(e.get("damagedQty"),0) + ",\"damagedPieces\":" + ifnull(e.get("damagedPieces"),0) + ",\"wasteKeptPieces\":" + ifnull(e.get("wasteKeptPcs"),0) + ",\"wasteScrapPieces\":" + ifnull(e.get("wasteScrapPcs"),0) + ",\"wasteAreaM2\":" + ifnull(e.get("wasteArea"),0) + ",\"reasons\":[" + reasonsJson + "]}";
 	}
 	}
 	catch (e)

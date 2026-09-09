@@ -62,6 +62,7 @@ map syncSingleSalesOrder(string salesOrderId)
 		}
 	}
 	srcRaw = "";
+	shipAddrRaw = "";
 	cfList = ifnull(salesorder.get("custom_fields"),List());
 	for each  cfRow in cfList
 	{
@@ -70,10 +71,30 @@ map syncSingleSalesOrder(string salesOrderId)
 		{
 			srcRaw = ifnull(cfRow.get("value"),"").toString().trim();
 		}
+		if(cfLabel == "customer shipping address")
+		{
+			shipAddrRaw = ifnull(cfRow.get("value"),"").toString().trim();
+		}
 	}
 	if(srcRaw == "")
 	{
 		srcRaw = ifnull(salesorder.get("source"),"").toString().trim();
+	}
+
+	// THE CONTACT NAME IS THE FIRST COMMA-SEPARATED SEGMENT of the "Customer
+	// Shipping Address" custom field. Shopify writes it as
+	// "<name>, <street>, <area>, <state> <pin>, <country>", so index 0 is the
+	// person. Applied to every order, not just Shopify. A field with no comma is
+	// taken whole; an empty field leaves Customer_Person_Name blank rather than
+	// failing the order.
+	custPersonName = "";
+	if(shipAddrRaw != "")
+	{
+		addrParts = shipAddrRaw.toList(",");
+		if(addrParts.size() > 0)
+		{
+			custPersonName = ifnull(addrParts.get(0),"").toString().trim().replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," ");
+		}
 	}
 	srcCmp = srcRaw.toLowerCase();
 	srcNorm = "";
@@ -164,6 +185,7 @@ map syncSingleSalesOrder(string salesOrderId)
 			Total=salesorder.get("total")
 			Inventory_sales_order_Id=soIdTxt
 			Customer=custId
+			Customer_Person_Name=custPersonName
 			Sales_Order=soNumber
 			Grand_Total=salesorder.get("total")
 			Order_Status="Pending"
@@ -180,6 +202,71 @@ map syncSingleSalesOrder(string salesOrderId)
 	{
 		return {"status":"error","message":"Insert returned null - record not created","salesOrderId":soIdTxt};
 	}
+
+	//----------------------------------------------------------------------
+	// EXPECTED DELIVERY DATE = ORDER DATE + 3 DAYS, SHOPIFY ONLY.
+	//
+	// Inventory's "date" is an ISO string (yyyy-MM-dd). Deluge parses
+	// "dd-MMM-yyyy" the same way whatever the org's locale is set to, while an
+	// ISO or a dd/MM string is read differently in the US than here - so it is
+	// reformatted through its parts first, the same pattern syncPurchaseInflow
+	// uses on the bill date. Set AFTER the insert: a Date field cannot take a
+	// null in the insert block, and this is skipped entirely for non-Shopify.
+	//
+	// A date Inventory sent in a shape we cannot read leaves the field blank
+	// rather than failing the sync - the order still plans, just without the
+	// expected date, and the note below flags it.
+	//----------------------------------------------------------------------
+	delivNote = "";
+	if(srcNorm == "Shopify")
+	{
+		invDateTxt = ifnull(salesorder.get("date"),"").toString().trim();
+		if(invDateTxt.length() > 10)
+		{
+			invDateTxt = invDateTxt.substring(0,10);
+		}
+
+		// The whole parse is wrapped: a malformed date must never fail the sync,
+		// only leave Expected_Delivery_Date blank and say why. .toNumber() on a
+		// non-numeric part and .toDate() on a bad string can both throw.
+		try
+		{
+			isoParts = invDateTxt.toList("-");
+			if(isoParts.size() != 3)
+			{
+				delivNote = "could not split date '" + invDateTxt.replaceAll("\"","'") + "'";
+			}
+			else
+			{
+				monNames = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+				monIdx = isoParts.get(1).toString().toNumber() - 1;
+				if(monIdx < 0 || monIdx > 11)
+				{
+					delivNote = "month out of range in '" + invDateTxt.replaceAll("\"","'") + "'";
+				}
+				else
+				{
+					dmyTxt = isoParts.get(2).toString() + "-" + monNames.get(monIdx) + "-" + isoParts.get(0).toString();
+					baseDate = dmyTxt.toDate();
+					delivDate = baseDate.addDay(3);
+					for each  soUpd in Sales_Order[ID == insertResult]
+					{
+						soUpd.Expected_Delivery_Date = delivDate;
+					}
+					delivNote = "set to " + delivDate.toString("dd-MMM-yyyy") + " (order date + 3)";
+				}
+			}
+		}
+		catch (eDate)
+		{
+			delivNote = "FAILED to parse '" + invDateTxt.replaceAll("\"","'") + "' - " + eDate.toString().replaceAll("\"","'");
+		}
+	}
+	else
+	{
+		delivNote = "not Shopify - left blank";
+	}
+
 	issueCount = 0;
 	rowsHtml = "";
 	if(srcNorm == "")
@@ -207,6 +294,26 @@ map syncSingleSalesOrder(string salesOrderId)
 		issueCount = issueCount + 1;
 		rowsHtml = rowsHtml + "<tr><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:600'>More than one BOM</td><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a'>" + multiBomTxt.replaceAll("\"","'") + "</td></tr>";
 	}
+
+	// A Shopify order whose date could not be read is saved and plans fine, but
+	// its expected delivery date is blank - worth flagging so someone sets it by
+	// hand rather than shipping late without noticing.
+	if(srcNorm == "Shopify" && delivNote.startsWith("set to ") == false)
+	{
+		issueCount = issueCount + 1;
+		rowsHtml = rowsHtml + "<tr><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:600'>Expected delivery date</td><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a'>Could not set it from the Inventory order date (" + delivNote.replaceAll("\"","'") + "). The order is saved without an expected delivery date - set it by hand on the Creator record.</td></tr>";
+	}
+
+	// Flagged for Shopify only: Faire / Custom / PR orders may legitimately not
+	// carry the "Customer Shipping Address" custom field, and a "needs attention"
+	// mail on every one of those would train people to ignore it. The name is
+	// still taken whenever the field is present, whatever the source.
+	if(srcNorm == "Shopify" && custPersonName == "")
+	{
+		issueCount = issueCount + 1;
+		rowsHtml = rowsHtml + "<tr><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:600'>Customer person name</td><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a'>The Inventory order carries no <b>Customer Shipping Address</b> custom field, or it was empty, so no contact name could be taken. Set <b>Customer Person Name</b> by hand on the Creator record.</td></tr>";
+	}
+
 	mailNote = "not needed";
 	if(issueCount > 0)
 	{
@@ -230,5 +337,5 @@ map syncSingleSalesOrder(string salesOrderId)
 			mailNote = "FAILED - " + eMail.toString();
 		}
 	}
-	return {"status":"success","salesOrderId":soIdTxt,"recordId":insertResult.toString(),"salesOrderNumber":soNumber,"orderSource":srcNorm,"orderStatus":"Pending","lineItems":lineCount,"issues":issueCount,"noBom":noBomTxt,"multiBom":multiBomTxt,"notInItemMaster":noItemTxt,"customerUnmatched":custMissTxt,"mail":mailNote};
+	return {"status":"success","salesOrderId":soIdTxt,"recordId":insertResult.toString(),"salesOrderNumber":soNumber,"orderSource":srcNorm,"orderStatus":"Pending","lineItems":lineCount,"issues":issueCount,"noBom":noBomTxt,"multiBom":multiBomTxt,"notInItemMaster":noItemTxt,"customerUnmatched":custMissTxt,"customerPersonName":custPersonName,"expectedDeliveryDate":delivNote,"mail":mailNote};
 }
