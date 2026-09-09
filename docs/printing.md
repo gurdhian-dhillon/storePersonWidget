@@ -1,7 +1,15 @@
 # Printing — plain fabric out, printed pieces back
 
+> **SUPERSEDED for the send/receive side by [printing-v2-plan.md](printing-v2-plan.md).**
+> v2 rebuilds this in the rolls world: printed stock is `Lot_Rolls` (no `Fabric_Piece`),
+> no printed-SKU minting (SKUs come from Zoho Inventory), no `Print_Base` link, no
+> `Pattern`, and the read side is `app/js/print-data.js` (no `getPrintData.dg`). The
+> domain reasoning below — "printed stock is pieces not metres", the three calculations,
+> the loss-is-whole-pieces rule — still holds; the field model and function contract do
+> not. Read v2 first.
+
 Agreed 2026-08-19. Builds on [lots.md](lots.md), [lots-issue-redesign.md](lots-issue-redesign.md)
-and [inventory-integration.md](inventory-integration.md). **Nothing here is built yet.**
+and [inventory-integration.md](inventory-integration.md).
 
 Plain cloth is cut into full-width pieces, sent to an outside printer, and comes back printed. The
 plain SKU's stock goes down, the printed SKU's goes up, and the printed cloth is then issued to

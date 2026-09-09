@@ -1,35 +1,35 @@
 string cancelPrintJob(string payloadJson)
 {
-	// The cloth went out and came back unprinted. This puts it back.
+	// The cloth went out and came back UNPRINTED. This puts it back.
 	//
 	//   { "jobId":"555", "reason":"printer returned it unprinted" }
 	//
-	// WITHOUT THIS THE CLOTH IS STUCK. Metres sitting in In_Print_Qty for ever
-	// keep the SKU total right while nothing can be issued off them - the ledger
-	// balances and the rack is unusable, which is the worst kind of wrong because
-	// no report shows it.
+	// THE PIECES WERE PHYSICALLY CUT AT SEND. You cannot un-cut them, so this
+	// does NOT wind the original source rolls back up. The returned bundle
+	// re-enters the source lot as ONE NEW Lot_Rolls row - full-width cloth, same
+	// width, just shorter, which is RAW MATERIAL by the "width unchanged = raw
+	// material" rule, NOT Waste_Master (booking usable cloth as waste corrupts
+	// Pieces_From_Waste and the scrap report - CLAUDE.md "What NOT to do" #2).
 	//
-	// IT REVERSES THE SEND EXACTLY: In_Print_Qty comes down by Metres_Sent and
-	// the same metres go back to THE COUNTER THEY CAME OFF. That is the only
-	// thing Source_State is stored for. Putting greige cloth back into
-	// Wash_Quantity would claim a wash that never happened - and it is washing
-	// that shifts the tone, which is the whole reason lots exist.
+	// One lump row, not one per piece: nothing needs per-piece detail on a
+	// bounced bundle, and a 20 m job of 3 m pieces would otherwise add 7 rows.
+	// The allocator's shortest-first drain consolidates the rack over the next
+	// few issues anyway.
 	//
-	// AT_PRINTER ONLY, and forward-only for the same reason the plan-to-order
-	// status mirror is: a Received job has already moved the cloth into another
-	// material, so there is nothing left to give back and reversing it would
-	// invent plain cloth out of printed. A Cancelled job would double-credit.
+	// The metres also go back to Wash_Quantity or Unwash_Quantity - THE COUNTER
+	// THEY CAME OFF, which is the only thing Source_State is stored for. Putting
+	// greige cloth back as washed would claim a wash that never happened. Both
+	// move together with the new roll, so Σ Roll_Length == shelf columns holds.
 	//
-	// No printed lot is created and no Fabric_Piece row is written - nothing came
-	// back printed, so there is nothing of the printed SKU to record.
+	// AT_PRINTER ONLY, forward-only: a Received job has moved the cloth into
+	// another material and there is nothing to give back; a Cancelled job would
+	// double-credit.
 	//
-	// ONE EXIT, AT THE BOTTOM, and it is not a style choice. Deluge's "all paths
-	// return" check does NOT count a return that lives inside try/catch, so a
-	// function whose every return sat in the try failed to save with
-	// "Missing return statement" reported against the first line of the body,
-	// nowhere near anything actually wrong. So nothing returns early: errTxt is
-	// set, every later block is guarded on it being empty, and the one return is
-	// after the catch. Same shape as saveStockInward.
+	// Source_Rolls on the job is NOT read here - it is the audit record of what
+	// was cut, not a wind-back instruction.
+	//
+	// ONE EXIT, AT THE BOTTOM. Deluge's "all paths return" check does NOT count a
+	// return inside try/catch. Same shape as saveStockInward.
 
 	res = "";
 	errTxt = "";
@@ -39,8 +39,6 @@ string cancelPrintJob(string payloadJson)
 		inp = payloadJson.toMap();
 
 		jobIdTxt = ifnull(inp.get("jobId"),"").toString().trim();
-		// Escaped once, here, because it is free text and it ends up inside
-		// hand-built JSON as well as in the record.
 		reason = ifnull(inp.get("reason"),"").toString().trim().replaceAll("\"","'");
 
 		if(jobIdTxt == "" || jobIdTxt.isNumber() == false)
@@ -49,20 +47,17 @@ string cancelPrintJob(string payloadJson)
 		}
 
 		//--------------------------------------------------------------------
-		// THE JOB. Initialised BEFORE the guarded blocks: a name first assigned
-		// inside an if is not safe to read after it when that branch did not run.
-		//
-		// Lookup fields hold RECORD IDS, so .toString() on one gives the id and
-		// not the label. They are kept as text and converted at the point of use.
+		// THE JOB. Names first assigned inside an if are not safe to read after
+		// it when that branch did not run. Lookups hold record ids - kept as
+		// text, converted at the point of use.
 		//--------------------------------------------------------------------
-		plainMatTxt = "";
-		plainLotTxt = "";
+		srcMatTxt = "";
+		srcLotTxt = "";
 		srcState = "";
 		metresSent = 0.0;
 
 		if(errTxt == "")
 		{
-			// A query result needs .count() - .size() is a List method.
 			jobRecs = Print_Job[ID == jobIdTxt.toLong()];
 			if(jobRecs.count() == 0)
 			{
@@ -79,13 +74,10 @@ string cancelPrintJob(string payloadJson)
 					}
 					else
 					{
-						plainMatTxt = ifnull(jchk.Plain_Material,"").toString().trim();
-						plainLotTxt = ifnull(jchk.Plain_Lot,"").toString().trim();
+						srcMatTxt = ifnull(jchk.Source_Material,"").toString().trim();
+						srcLotTxt = ifnull(jchk.Source_Lot,"").toString().trim();
 						srcState = ifnull(jchk.Source_State,"").toString().trim();
 
-						// Creator fields that were never written are EMPTY, not
-						// null. ifnull() does not catch empty and toDecimal()
-						// throws on it, so normalise to string, test, convert.
 						msS = ifnull(jchk.Metres_Sent,"0").toString().trim();
 						if(msS == "")
 						{
@@ -97,16 +89,10 @@ string cancelPrintJob(string payloadJson)
 			}
 		}
 
-		//--------------------------------------------------------------------
-		// SOURCE_STATE IS REFUSED WHEN BLANK RATHER THAN GUESSED.
-		//
-		// sendToPrint always writes it, so a blank one means the record has been
-		// damaged. Neither default is safe: guessing Wash books greige cloth as
-		// washed, which is exactly the claim saveStockInward refuses to let anyone
-		// make, and guessing Unwash sends washed cloth back through the wash. Both
-		// are silent. Setting the one field on the job by hand is a smaller job
-		// than finding either of those later.
-		//--------------------------------------------------------------------
+		// Source_State refused when blank rather than guessed. sendToPrint always
+		// writes it, so a blank one means the record was damaged. Guessing Wash
+		// books greige as washed; guessing Unwash sends washed cloth back through
+		// the wash. Both silent.
 		if(errTxt == "" && srcState != "Wash" && srcState != "Unwash")
 		{
 			errTxt = "That job does not say which counter the cloth came off - set Source_State on it before cancelling";
@@ -118,26 +104,21 @@ string cancelPrintJob(string payloadJson)
 		}
 
 		//--------------------------------------------------------------------
-		// THE LEDGER. Lot AND parent, in the same pass, so the lot and the
-		// maintained parent total cannot disagree. The parent is not a derived
-		// roll-up on purpose: recomputing a sum per material on every screen load
-		// is a query per material, and that is the road to the statement limit.
+		// THE LEDGER. Lot AND parent, same pass, so they cannot disagree.
 		//
-		// The SKU total does not change - the cloth was always ours, it only
-		// moves back out of In_Print_Qty and onto the shelf it left.
-		//
-		// A job raised without a plain lot still settles its parent. Older cloth
-		// with no lot behind it behaves exactly as it always did, and
-		// reconcileRawMaterial reports the gap.
+		// The SKU total does not change - the cloth was always ours; it moves
+		// back out of In_Print_Qty and onto the shelf it left. A job raised
+		// without a source lot still settles its parent.
 		//--------------------------------------------------------------------
 		lotWashOut = 0.0;
 		lotInPrintOut = 0.0;
+		newRollLabel = "";
 
 		if(errTxt == "")
 		{
-			if(plainLotTxt != "")
+			if(srcLotTxt != "")
 			{
-				for each  plotUpd in Raw_Material_Lot[ID == plainLotTxt.toLong()]
+				for each  plotUpd in Raw_Material_Lot[ID == srcLotTxt.toLong()]
 				{
 					lipS = ifnull(plotUpd.In_Print_Qty,"0").toString().trim();
 					if(lipS == "")
@@ -154,15 +135,14 @@ string cancelPrintJob(string payloadJson)
 					{
 						luS = "0";
 					}
+					lotNumTxt = ifnull(plotUpd.Lot_Number,"").toString().trim().replaceAll("\"","'");
 
-					// Clamped at zero rather than refused. The cloth is physically
-					// back on the rack either way, and driving a counter negative
-					// leaves the ledger further from the truth than a clamped
-					// figure does - the info line says it happened.
+					// Clamped at zero rather than refused - the cloth is
+					// physically back either way.
 					lipNow = lipS.toDecimal() - metresSent;
 					if(lipNow < 0)
 					{
-						info "cancelPrintJob: lot " + plainLotTxt + " In_Print_Qty would go negative - clamped";
+						info "cancelPrintJob: lot " + srcLotTxt + " In_Print_Qty would go negative - clamped";
 						lipNow = 0;
 					}
 					plotUpd.In_Print_Qty = lipNow;
@@ -178,12 +158,30 @@ string cancelPrintJob(string payloadJson)
 						plotUpd.Unwash_Quantity = luS.toDecimal() + metresSent;
 						lotWashOut = lwS.toDecimal();
 					}
+
+					// THE NEW ROLL. Metres_Sent of full-width cut pieces, back on
+					// the lot as one Available roll. Origin "Returned". Labelled
+					// off the lot number + the job, so it is traceable and cannot
+					// collide with an existing roll.
+					newRollLabel = lotNumTxt + "-C" + jobIdTxt;
+					if(lotNumTxt == "")
+					{
+						newRollLabel = "LOT" + srcLotTxt + "-C" + jobIdTxt;
+					}
+
+					cRow = Raw_Material_Lot.Lot_Rolls();
+					cRow.Roll_Label = newRollLabel;
+					cRow.Roll_Length = metresSent;
+					cRow.Roll_Status = "Available";
+					cRow.Origin = "Returned";
+					cRow.Source_Receipt = jobIdTxt;
+					plotUpd.Lot_Rolls.insert(cRow);
 				}
 			}
 
-			if(plainMatTxt != "")
+			if(srcMatTxt != "")
 			{
-				for each  pmatUpd in Raw_Material[ID == plainMatTxt.toLong()]
+				for each  pmatUpd in Raw_Material[ID == srcMatTxt.toLong()]
 				{
 					mipS = ifnull(pmatUpd.In_Print_Qty,"0").toString().trim();
 					if(mipS == "")
@@ -204,7 +202,7 @@ string cancelPrintJob(string payloadJson)
 					mipNow = mipS.toDecimal() - metresSent;
 					if(mipNow < 0)
 					{
-						info "cancelPrintJob: material " + plainMatTxt + " In_Print_Qty would go negative - clamped";
+						info "cancelPrintJob: material " + srcMatTxt + " In_Print_Qty would go negative - clamped";
 						mipNow = 0;
 					}
 					pmatUpd.In_Print_Qty = mipNow;
@@ -217,17 +215,17 @@ string cancelPrintJob(string payloadJson)
 					{
 						pmatUpd.Unwash_Quantity = muS.toDecimal() + metresSent;
 					}
+					qW = ifnull(pmatUpd.Wash_Quantity,"0").toString().trim();
+					qU = ifnull(pmatUpd.Unwash_Quantity,"0").toString().trim();
+					qA = ifnull(pmatUpd.Unallocated_Qty,"0").toString().trim();
+					pmatUpd.Quantity = if(qW=="",0.0,qW.toDecimal()) + if(qU=="",0.0,qU.toDecimal()) + if(qA=="",0.0,qA.toDecimal());
 				}
 			}
 		}
 
 		//--------------------------------------------------------------------
-		// STAMP THE JOB, last, so a failure anywhere above leaves it At_Printer
-		// and the cancel can simply be done again.
-		//
-		// The reason is APPENDED to Remarks, never written over them: whatever was
-		// noted when the job was sent is the context that makes the cancel
-		// readable a month later.
+		// STAMP THE JOB, last. The reason is APPENDED to Remarks, never written
+		// over them.
 		//--------------------------------------------------------------------
 		if(errTxt == "")
 		{
@@ -248,16 +246,13 @@ string cancelPrintJob(string payloadJson)
 				jUpd.Remarks = addR;
 			}
 
-			info "cancelPrintJob: job " + jobIdTxt + " cancelled, " + metresSent + " back to " + srcState;
+			info "cancelPrintJob: job " + jobIdTxt + " cancelled, " + metresSent + " Mtr back to " + srcState + " on lot as roll " + newRollLabel;
 
-			// Ids forced to string - 18-digit ids break JSON.parse on the widget.
-			res = "{\"success\":true,\"restoredTo\":\"" + srcState + "\",\"metres\":" + metresSent + ",\"lotWash\":" + lotWashOut + ",\"lotInPrint\":" + lotInPrintOut + "}";
+			res = "{\"success\":true,\"restoredTo\":\"" + srcState + "\",\"metres\":" + metresSent + ",\"newRollLabel\":\"" + newRollLabel.replaceAll("\"","'") + "\",\"lotWash\":" + lotWashOut + ",\"lotInPrint\":" + lotInPrintOut + "}";
 		}
 	}
 	catch (e)
 	{
-		// Creator reports every runtime failure to a widget as a generic code 9430,
-		// so the real message has to travel back inside the payload.
 		errTxt = "DELUGE: " + e.toString();
 	}
 

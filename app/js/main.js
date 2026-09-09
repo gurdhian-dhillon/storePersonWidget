@@ -8562,64 +8562,44 @@ function setupAccordionListeners() {
 
 // ---- Print tab ----
 //
-// Plain cloth is cut into full-width pieces, sent to an outside printer, and
-// comes back as a different SKU. This screen is the whole loop: send, receive,
-// cancel.
+// Source cloth is cut into full-width pieces, sent to an outside printer, and
+// comes back as a different (already-existing) SKU. This screen is the whole
+// loop: send, receive, cancel.
 //
-// PRINTED STOCK IS PIECES, AND PIECES ARE NOT METRES. Five 3.00 m pieces are not
-// 15 m: at a 55 cm cut each yields floor(300/55) = 5 rows and strands 25 cm, so
-// 25 pieces against the 27 a continuous roll would give. That is why the send
-// lines are typed as length x count and why this screen scores the tail — see
-// docs/printing.md.
+// NO MINTING — printed SKUs are created in Zoho Inventory and pushed to Creator.
+// He picks a source fabric on the left and an existing printed SKU on the right,
+// filtered to Type "printed fabric" at the same width. There is no system link
+// between the two (no Print_Base); the pairing is his to make.
+//
+// PRINTED STOCK IS SHORT ROLLS. Each returned piece becomes one Lot_Rolls row —
+// ordinary raw material, issued like any other fabric. No Fabric_Piece, no
+// pattern. See docs/printing-v2-plan.md.
 //
 // The lot holds the truth and Raw_Material holds a maintained total; both move
 // server-side in one pass, so nothing here computes a stock balance of its own.
 
-// MIRRORS THE `Pattern` DROPDOWN ON Raw_Material IN CREATOR, and must be updated
-// in the same pass as it — the same rule CLAUDE.md gives for adding a status to
-// a function. Deluge cannot read a picklist's choices, so there is no way to
-// fetch this.
-//
-// A pattern name is HALF OF A PRINTED SKU'S IDENTITY (the pair is Print_Base +
-// Pattern), so choices are ADDED and never renamed. Renaming one orphans every
-// printed SKU created under the old name.
-//
-// The select is built from the union of this list and every pattern already in
-// use, so a pattern somebody added in Creator and forgot to add here still
-// appears rather than silently vanishing from the screen.
-var PRINT_PATTERNS = [];
-
 var PRINT_DATA = null;
 var printFilter = '';
-var printOpenId = null;
+var printOpenId = null;        // source material id whose card is open
 var printJobOpenId = null;
-var printLines = {};      // materialId -> [{len, count}]
-var printRecvLines = {};  // jobId      -> [{len, count, state, carton}]
+var printSendLines = {};       // sourceMatId -> [{ len, count }]
+var printSendPlan = {};        // sourceMatId -> { <rollId>: metresString }  (manual overrides)
+var printSendTarget = {};      // sourceMatId -> targetMatId
+var printSendLot = {};         // sourceMatId -> sourceLotId
+var printSendState = {};       // sourceMatId -> 'Wash' | 'Unwash'
+var printRecvPieces = {};     // jobId -> [{ lineIndex, len, label, state }]  one per PIECE
 
 function loadPrint() {
     var panel = document.getElementById('panel-print');
     panel.innerHTML = '<div class="panel-loading">Loading…</div>';
 
-    ZOHO.CREATOR.DATA.invokeCustomApi({
-        api_name: 'getPrintData',
-        http_method: 'GET'
-    }).then(function (response) {
-        var parsed;
-        try {
-            parsed = JSON.parse(response.result);
-        } catch (e) {
-            console.error('getPrintData parse failed:', e, response.result);
-            panel.innerHTML = '<div class="panel-placeholder"><h2>Could not read the print data</h2><p>Check the browser console.</p></div>';
-            return;
-        }
-        // Deluge returns its real message inside the payload — Creator would
-        // otherwise surface every failure as a bare "code 9430".
-        if (parsed.errors && parsed.errors.length) console.error('getPrintData:', parsed.errors);
-        PRINT_DATA = parsed;
+    PrintData.load().then(function (data) {
+        PRINT_DATA = data;
         renderPrint();
     }).catch(function (err) {
-        console.error('getPrintData error:', err);
-        panel.innerHTML = '<div class="panel-placeholder"><h2>Failed to load</h2><p>Check the browser console.</p></div>';
+        console.error('PrintData.load error:', err);
+        panel.innerHTML = '<div class="panel-placeholder"><h2>Failed to load</h2>' +
+            '<p>Check the browser console.</p></div>';
     });
 }
 
@@ -8634,7 +8614,7 @@ function renderPrint() {
             '<div class="search-input-wrapper">' +
                 '<svg class="search-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>' +
                 '<input type="text" id="print-filter" class="professional-search" ' +
-                    'placeholder="Search plain fabric by SKU or name…" oninput="onPrintFilter()" />' +
+                    'placeholder="Search fabric by SKU or name…" oninput="onPrintFilter()" />' +
             '</div>' +
         '</div>' +
         '<div id="print-list">' + printListHtml() + '</div>';
@@ -8650,38 +8630,11 @@ function renderPrintJobs() {
     if (box) box.innerHTML = printJobsHtml();
 }
 
-// ARRIVING FROM A SHORT ISSUE ROW.
-//
-// The Issue tab prints a **Print…** button on a printed fabric row that has no
-// printed stock while plain cloth sits on the rack (shortReasonFor, kind
-// 'noPrinted'). PRINTING IS TO STOCK — no print job carries a plan — so the
-// button cannot raise anything and does not try to. Its whole job is to put him
-// in front of the send form for the right plain material, which is the one thing
-// the row knows and the Print tab would otherwise make him search for.
-//
-// It goes through showTab and printOpenId, which is the tab's OWN idea of which
-// card is open, rather than a second selection path. A card opened any other way
-// is one printListHtml closes again the next time it redraws.
-function openPrintForBase(baseId) {
-    printOpenId = String(baseId || '');
-    // The search box filters the same list. A stale filter left in place would
-    // hide the card that was just asked for, and an empty tab reads as the button
-    // being broken.
-    printFilter = '';
+// Kept as a shim: the Issue tab's short-reason renderer still references it for
+// a 'noPrinted' row that the rolls-model allocator no longer produces (print
+// base chaining was never ported). If it is ever reached it just opens the tab.
+function openPrintForBase() {
     showTab('print');
-    // First open: showTab loads the tab and renderPrint draws the card open on
-    // its own, because printOpenId is already set. Already open: showTab
-    // re-fetches nothing, so nothing would redraw and the card would stay shut.
-    if (PRINT_DATA) renderPrint();
-    var card = document.getElementById('print-list-card-' + printOpenId);
-    if (card) {
-        card.classList.add('open');
-        if (typeof requestAnimationFrame === 'function') {
-            requestAnimationFrame(function () {
-                card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            });
-        }
-    }
 }
 
 function onPrintFilter() {
@@ -8690,22 +8643,25 @@ function onPrintFilter() {
     renderPrintList();
 }
 
-// Keyed on id, NEVER on list index. The index moves the moment the filter
+// Keyed on id, NEVER on list index — the index moves the moment the filter
 // changes, so an open card would silently become a different material's.
 function togglePrintCard(matId) {
     var card = document.getElementById('print-list-card-' + matId);
     if (!card) return;
     var opening = !card.classList.contains('open');
-
     document.querySelectorAll('#print-list .item-card.open').forEach(function (c) {
         c.classList.remove('open');
     });
-
     if (opening) {
+        printOpenId = String(matId);
         card.classList.add('open');
-        requestAnimationFrame(function () {
-            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        });
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(function () {
+                card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        }
+    } else {
+        printOpenId = null;
     }
 }
 
@@ -8713,16 +8669,19 @@ function togglePrintJob(jobId) {
     var card = document.getElementById('print-job-card-' + jobId);
     if (!card) return;
     var opening = !card.classList.contains('open');
-
     document.querySelectorAll('#print-jobs .item-card.open').forEach(function (c) {
         c.classList.remove('open');
     });
-
     if (opening) {
+        printJobOpenId = String(jobId);
         card.classList.add('open');
-        requestAnimationFrame(function () {
-            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        });
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(function () {
+                card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        }
+    } else {
+        printJobOpenId = null;
     }
 }
 
@@ -8734,9 +8693,19 @@ function printJobById(jobId) {
     return found;
 }
 
-function printMaterialById(matId) {
+function printSourceById(matId) {
     var found = null;
-    ((PRINT_DATA && PRINT_DATA.printed) || []).forEach(function (m) {
+    ((PRINT_DATA && PRINT_DATA.source) || []).forEach(function (m) {
+        if (String(m.id) === String(matId)) found = m;
+    });
+    return found;
+}
+
+function printTargetById(matId) {
+    var found = null;
+    var all = ((PRINT_DATA && PRINT_DATA.source) || [])
+        .concat((PRINT_DATA && PRINT_DATA.target) || []);
+    all.forEach(function (m) {
         if (String(m.id) === String(matId)) found = m;
     });
     return found;
@@ -8750,24 +8719,30 @@ function printJobsHtml() {
         return '<div class="waste-none">Nothing is at the printer.</div>';
     }
 
-    // Initialize all receive lines so we can safely render their bodies
     jobs.forEach(function (j) {
-        if (!printRecvLines[j.jobId]) {
-            printRecvLines[j.jobId] = (j.lines || []).map(function (l) {
-                return {
-                    len: l.lengthCm,
-                    sent: Number(l.count) || 0,
-                    count: l.count,
-                    state: (j.sourceState) || 'Wash',
-                    carton: ''
-                };
+        if (!printRecvPieces[j.jobId]) {
+            // ONE ROW PER PHYSICAL PIECE that went out. Each is a sent size with
+            // an empty roll label he fills in from the cloth; a piece left blank
+            // is one the printer lost. State defaults to what was sent.
+            var pieces = [];
+            (j.sendLines || []).forEach(function (l) {
+                var n = Number(l.count) || 0;
+                for (var k = 0; k < n; k++) {
+                    pieces.push({
+                        lineIndex: l.lineIndex,
+                        len: l.lengthCm,
+                        label: '',
+                        state: j.sourceState || 'Wash'
+                    });
+                }
             });
+            printRecvPieces[j.jobId] = pieces;
         }
     });
 
     return jobs.map(function (j) {
         var open = String(printJobOpenId) === String(j.jobId);
-        var pieces = (j.lines || []).reduce(function (a, l) { return a + (Number(l.count) || 0); }, 0);
+        var pieces = (j.sendLines || []).reduce(function (a, l) { return a + (Number(l.count) || 0); }, 0);
 
         return '' +
             '<div class="item-card' + (open ? ' open' : '') + '" id="print-job-card-' + j.jobId + '">' +
@@ -8778,8 +8753,8 @@ function printJobsHtml() {
                             '<span>' + escapeHtml(j.printerName || 'printer not named') + '</span>' +
                             '<span>' + pieces + (pieces === 1 ? ' piece' : ' pieces') +
                                 ' &middot; ' + fmt(j.metresSent) + ' Mtr</span>' +
-                            '<span>from ' + escapeHtml(j.plainName || j.plainSku || '—') +
-                                ' &middot; lot ' + escapeHtml(j.plainLotNumber || '—') +
+                            '<span>from ' + escapeHtml(j.sourceName || j.sourceSku || '—') +
+                                ' &middot; lot ' + escapeHtml(j.sourceLotNumber || '—') +
                                 ' &middot; ' + escapeHtml(j.sourceState === 'Unwash' ? 'unwashed' : 'washed') + '</span>' +
                         '</div>' +
                     '</div>' +
@@ -8796,55 +8771,34 @@ function printJobsHtml() {
 }
 
 function printReceiveFormHtml(job) {
-    var mat = printMaterialById(job.printedMaterialId);
+    var mat = printTargetById(job.printedMaterialId);
     var lots = (mat && mat.lots || []).filter(function (l) { return !l.blocked; });
 
-    // The lot NUMBER is what is written on the cloth and what he recognises it
-    // by. TYPED, never derived from the job — no rule we invent would match what
-    // is on the roll.
+    // The lot NUMBER is what is written on the cloth. TYPED for a new lot, never
+    // derived from the job.
     var opts = '<option value="">+ New lot</option>' +
         lots.map(function (l) {
             return '<option value="' + l.lotId + '">' + escapeHtml(l.lotNumber) + '</option>';
         }).join('');
 
-    // The width the pieces are stamped with, disabled. This is the figure
-    // receiveFromPrint writes into Fabric_Piece.Piece_Width_Cm, copied from the
-    // printed SKU — which itself copied it from the plain cloth when the material
-    // was minted. Showing it is what lets him catch a printer who returned
-    // something narrower, which is the one thing that breaks the full-width
-    // premise and cannot be detected later.
-    var rWidth = mat ? Number(mat.widthCm) || 0 : 0;
-    var rwCell = '<td><input type="number" class="issue-input" disabled ' +
-                 'value="' + escapeHtml(fmt(rWidth)) + '" /></td>';
-
-    // THE ROWS ARE THE SEND LINES, FIXED. Length and width are both disabled —
-    // a piece comes back the length it left, so the only decision is how many of
-    // each size arrived. The gap is whole pieces the printer lost or ruined, and
-    // it is stated on the row rather than left to be worked out from two numbers.
-    var rows = (printRecvLines[job.jobId] || []).map(function (r, i) {
-        var sent = Number(r.sent) || 0;
-        var got = Number(r.count) || 0;
-        var short = sent - got;
-
+    // ONE ROW PER PIECE. A piece comes back the length it left, so the only
+    // things he decides are the ROLL LABEL (from the cloth) and whether it is
+    // washed. A row he leaves with no label is a piece the printer lost — the
+    // footer tallies those, the row itself just dims.
+    var rows = (printRecvPieces[job.jobId] || []).map(function (p, i) {
+        var lost = !String(p.label || '').trim();
         return '' +
-            '<tr>' +
-                '<td><input type="number" class="issue-input" disabled ' +
-                    'value="' + escapeHtml(r.len) + '" /></td>' +
-                rwCell +
-                '<td class="col-num print-derived">' + sent + '</td>' +
-                '<td><input type="number" step="1" min="0" max="' + sent + '" class="issue-input" ' +
-                    'id="pr-cnt-' + job.jobId + '-' + i + '" value="' + escapeHtml(r.count) + '" ' +
-                    'oninput="onRecvLineChange(\'' + job.jobId + '\')" /></td>' +
-                '<td class="col-num' + (short > 0 ? ' recv-short' : ' print-derived') + '">' +
-                    (short > 0 ? short : '—') + '</td>' +
+            '<tr' + (lost ? ' class="recv-piece-lost"' : '') + '>' +
+                '<td class="col-num print-derived">' + escapeHtml(p.len) + '</td>' +
+                '<td><input type="text" class="note-input" ' +
+                    'id="pr-lbl-' + job.jobId + '-' + i + '" value="' + escapeHtml(p.label) + '" ' +
+                    'placeholder="roll label on the cloth" ' +
+                    'oninput="onRecvPieceChange(\'' + job.jobId + '\')" /></td>' +
                 '<td><select class="note-input" id="pr-st-' + job.jobId + '-' + i + '" ' +
-                        'onchange="onRecvLineChange(\'' + job.jobId + '\')">' +
-                        '<option value="Wash"' + (r.state === 'Wash' ? ' selected' : '') + '>Washed</option>' +
-                        '<option value="Unwash"' + (r.state === 'Unwash' ? ' selected' : '') + '>Unwashed</option>' +
+                        'onchange="onRecvPieceChange(\'' + job.jobId + '\')">' +
+                        '<option value="Wash"' + (p.state === 'Wash' ? ' selected' : '') + '>Washed</option>' +
+                        '<option value="Unwash"' + (p.state === 'Unwash' ? ' selected' : '') + '>Unwashed</option>' +
                     '</select></td>' +
-                '<td><input type="text" class="note-input" id="pr-car-' + job.jobId + '-' + i + '" ' +
-                    'value="' + escapeHtml(r.carton) + '" placeholder="C-12" ' +
-                    'oninput="onRecvLineChange(\'' + job.jobId + '\')" /></td>' +
             '</tr>';
     }).join('');
 
@@ -8863,36 +8817,30 @@ function printReceiveFormHtml(job) {
             '<div class="table-wrapper"><table>' +
                 '<thead><tr>' +
                     '<th class="col-num">Piece length (cm)</th>' +
-                    '<th class="col-num">Width (cm)</th>' +
-                    '<th class="col-num">Sent</th>' +
-                    '<th class="col-num">Came back</th>' +
-                    '<th class="col-num">Lost</th>' +
+                    '<th>Roll label &mdash; leave blank if the printer lost it</th>' +
                     '<th>State</th>' +
-                    '<th>Carton</th>' +
+                    '<th class="col-num">Back?</th>' +
                 '</tr></thead>' +
                 '<tbody>' + rows + '</tbody>' +
             '</table></div>' +
-            // No "+ Another size" and no Remove. The sizes are whatever went to
-            // the printer; nothing can come back that did not go out.
             '<div class="card-footer" id="pr-foot-' + job.jobId + '">' + recvFooterHtml(job) + '</div>' +
         '</div>';
 }
 
-// THE LOSS IS WHOLE PIECES, and it is said in pieces first. The length cannot
-// change — it is not an input — so every missing metre is a piece that did not
-// come back, and "3 pieces short" is what he can take to the printer. The metres
-// follow as the consequence.
+// THE LOSS IS WHOLE PIECES, said in pieces first. A piece with no label did not
+// come back, so "3 pieces short" is what he can take to the printer.
 function recvFooterHtml(job) {
+    var back = recvPiecesBack(job.jobId);
+    var lost = recvPiecesLost(job.jobId);
     var returned = recvMetres(job.jobId);
     var loss = Math.round(((Number(job.metresSent) || 0) - returned) * 100) / 100;
-    var lost = recvPiecesLost(job.jobId);
 
     return '' +
         '<span class="sel-count' + (lost > 0 ? ' is-short' : '') + '">' +
             (lost > 0
                 ? '<b>' + lost + (lost === 1 ? ' piece' : ' pieces') + ' short</b> &mdash; ' +
                   fmt(loss) + ' Mtr written off'
-                : 'All ' + recvPiecesBack(job.jobId) + ' pieces back &middot; ' + fmt(returned) + ' Mtr') +
+                : 'All ' + back + ' pieces back &middot; ' + fmt(returned) + ' Mtr') +
         '</span>' +
         '<button type="button" class="primary-btn is-danger" id="pr-cancel-' + job.jobId + '" ' +
             'onclick="submitCancelJob(\'' + job.jobId + '\')">Came back unprinted</button>' +
@@ -8900,21 +8848,18 @@ function recvFooterHtml(job) {
             'onclick="submitReceivePrint(\'' + job.jobId + '\')">Receive</button>';
 }
 
-// The length is no longer read back from the DOM — it is not an input. It stays
-// on the state object exactly as the job sent it, which is what makes the
-// returned metres impossible to inflate from this screen.
-function readRecvLines(jobId) {
+// Length is NOT read from the DOM — it stays on the piece object exactly as the
+// job sent it, so nothing here can inflate the returned metres.
+function readRecvPieces(jobId) {
     var out = [];
-    (printRecvLines[jobId] || []).forEach(function (r, i) {
-        var c = document.getElementById('pr-cnt-' + jobId + '-' + i);
+    (printRecvPieces[jobId] || []).forEach(function (p, i) {
+        var l = document.getElementById('pr-lbl-' + jobId + '-' + i);
         var s = document.getElementById('pr-st-' + jobId + '-' + i);
-        var k = document.getElementById('pr-car-' + jobId + '-' + i);
         out.push({
-            len: r.len,
-            sent: r.sent,
-            count: c ? c.value : r.count,
-            state: s ? s.value : r.state,
-            carton: k ? k.value : r.carton
+            lineIndex: p.lineIndex,
+            len: p.len,
+            label: l ? l.value : p.label,
+            state: s ? s.value : p.state
         });
     });
     return out;
@@ -8922,64 +8867,52 @@ function readRecvLines(jobId) {
 
 function recvPiecesBack(jobId) {
     var t = 0;
-    (printRecvLines[jobId] || []).forEach(function (r) { t += Number(r.count) || 0; });
+    (printRecvPieces[jobId] || []).forEach(function (p) {
+        if (String(p.label || '').trim()) t += 1;
+    });
     return t;
 }
 
 function recvPiecesLost(jobId) {
     var t = 0;
-    (printRecvLines[jobId] || []).forEach(function (r) {
-        t += Math.max(0, (Number(r.sent) || 0) - (Number(r.count) || 0));
+    (printRecvPieces[jobId] || []).forEach(function (p) {
+        if (!String(p.label || '').trim()) t += 1;
     });
     return t;
 }
 
-// Same trap as the send form: re-rendering the job cards on every keystroke
-// destroys the input being typed in, and the caret leaves after one character.
-// Only the footer is rewritten, and it holds no input.
-function onRecvLineChange(jobId) {
-    printRecvLines[jobId] = readRecvLines(jobId);
-
+// Same trap as the send form: re-rendering the card on every keystroke destroys
+// the input being typed in. Only the footer is rewritten (it holds no input).
+function onRecvPieceChange(jobId) {
+    printRecvPieces[jobId] = readRecvPieces(jobId);
     var job = printJobById(jobId);
     if (!job) return;
     var foot = document.getElementById('pr-foot-' + jobId);
     if (foot) foot.innerHTML = recvFooterHtml(job);
 }
 
-// addRecvLine and removeRecvLine are gone. The rows ARE the send lines and
-// nothing can come back that did not go out — adding a size would be claiming
-// cloth the printer was never given.
-
 function onRecvLotChange(jobId) {
     var sel = document.getElementById('pr-lot-' + jobId);
     var wrap = document.getElementById('pr-num-wrap-' + jobId);
-    // The number only means anything on a lot being CREATED. Topping up an
-    // existing one must not offer to renumber it.
     if (sel && wrap) wrap.style.display = (sel.value === '') ? '' : 'none';
 }
 
 function recvMetres(jobId) {
     var t = 0;
-    (printRecvLines[jobId] || []).forEach(function (r) {
-        var len = Number(r.len) || 0, c = Number(r.count) || 0;
-        if (len > 0 && c > 0) t += (len * c) / 100;
+    (printRecvPieces[jobId] || []).forEach(function (p) {
+        var len = Number(p.len) || 0;
+        if (len > 0 && String(p.label || '').trim()) t += len / 100;
     });
     return Math.round(t * 100) / 100;
 }
 
 // ---- Send to print ----
 
-// ONLY FABRIC THAT IS ACTUALLY IN A LOT. Cloth with no lot has no tone, and
-// cloth with no tone cannot be sent anywhere — the send form would have an empty
-// lot select and the Send button would refuse. A row he can never act on is
-// noise on a screen whose whole job is "what can go to the printer today".
-//
-// Filtered here rather than in getPrintData so the payload stays a plain
-// statement of what exists; this screen decides what is worth showing.
-function printPlainMatches() {
-    var list = ((PRINT_DATA && PRINT_DATA.plain) || []).filter(function (m) {
-        return (m.lots || []).length > 0;
-    });
+// Every fabric that is actually in a lot. Cloth with no lot has no tone and
+// cannot be sent — filtered in print-data.js already, so `source` is exactly
+// this set; the search narrows it.
+function printSourceMatches() {
+    var list = (PRINT_DATA && PRINT_DATA.source) || [];
     if (!printFilter) return list;
     return list.filter(function (m) {
         return (m.sku || '').toLowerCase().indexOf(printFilter) !== -1 ||
@@ -8988,14 +8921,13 @@ function printPlainMatches() {
 }
 
 function printListHtml() {
-    var list = printPlainMatches();
+    var list = printSourceMatches();
     if (!list.length) {
-        return '<div class="waste-none">No plain fabric matches that search.</div>';
+        return '<div class="waste-none">No fabric matches that search.</div>';
     }
 
-    // Initialize all lines so we can safely render their bodies
     list.forEach(function (m) {
-        if (!printLines[m.id]) printLines[m.id] = [{ len: '', count: '' }];
+        if (!printSendLines[m.id]) printSendLines[m.id] = [{ len: '', count: '' }];
     });
 
     return list.map(function (m) {
@@ -9005,7 +8937,8 @@ function printListHtml() {
         var unwash = lots.reduce(function (a, l) { return a + (Number(l.unwash) || 0); }, 0);
         var inPrint = lots.reduce(function (a, l) { return a + (Number(l.inPrint) || 0); }, 0);
 
-        var pillHtml = (inPrint > 0) ? '<span class="status-pill status-warning">' + fmt(inPrint) + ' at the printer</span>' : '';
+        var pillHtml = (inPrint > 0)
+            ? '<span class="status-pill status-warning">' + fmt(inPrint) + ' at the printer</span>' : '';
 
         return '' +
             '<div class="item-card' + (open ? ' open' : '') + '" id="print-list-card-' + m.id + '">' +
@@ -9030,49 +8963,23 @@ function printListHtml() {
     }).join('');
 }
 
-// Every pattern this material could be printed in, from three sources unioned:
-//
-//   1. `patterns` off the server — every Pattern value actually sitting on a
-//      material. This is the one that works on day one, and it is why the select
-//      is not empty before anybody has maintained anything.
-//   2. the printed SKUs' own patterns, which are a subset of (1) but cost
-//      nothing and keep working if the server payload is ever trimmed.
-//   3. PRINT_PATTERNS, for a choice that exists in the Creator dropdown but no
-//      material carries yet — the only case the server cannot see.
-//
-// MINUS THE MATERIAL'S OWN PATTERN. Grey Sheeting / Plain / Grey is already
-// "Plain"; offering to print it in Plain would mint a nonsense SKU.
-function patternsFor(m) {
+// SKUs this source can go into: SAME WIDTH, minus itself. The "printed fabric"
+// Type filter is OFF for now (server-side too — sendToPrint.dg) — width is the
+// only guard, and the store person makes the pairing. `target` first so a
+// printed SKU with no stock yet still shows; `source` fills in the rest.
+// Deduped by id.
+function targetsFor(m) {
+    var w = Number(m.widthCm) || 0;
     var seen = {};
-    var out = [];
-    var own = String((m && m.pattern) || '').trim().toLowerCase();
-    if (own) seen[own] = true;
-
-    function take(p) {
-        var k = String(p || '').trim();
-        if (k && !seen[k.toLowerCase()]) { seen[k.toLowerCase()] = true; out.push(k); }
-    }
-
-    ((PRINT_DATA && PRINT_DATA.patterns) || []).forEach(take);
-    ((PRINT_DATA && PRINT_DATA.printed) || []).forEach(function (p) { take(p.pattern); });
-    PRINT_PATTERNS.forEach(take);
-
-    out.sort();
-    return out;
-}
-
-// The printed SKU is identified by the PAIR (Print_Base, Pattern). Resolving it
-// here is what lets the screen say "this goes into RM-00112" rather than
-// "something will happen" — and say so BEFORE he sends, because minting a
-// material is permanent master data.
-function printedFor(baseId, pattern) {
-    var found = null;
-    var want = String(pattern || '').trim().toLowerCase();
-    ((PRINT_DATA && PRINT_DATA.printed) || []).forEach(function (m) {
-        if (String(m.baseId) === String(baseId) &&
-            String(m.pattern || '').trim().toLowerCase() === want) found = m;
+    var all = ((PRINT_DATA && PRINT_DATA.target) || [])
+        .concat((PRINT_DATA && PRINT_DATA.source) || []);
+    return all.filter(function (t) {
+        if (String(t.id) === String(m.id)) return false;
+        if (seen[t.id]) return false;
+        if (Math.abs((Number(t.widthCm) || 0) - w) >= 0.01) return false;
+        seen[t.id] = true;
+        return true;
     });
-    return found;
 }
 
 function printSendFormHtml(m) {
@@ -9098,22 +9005,18 @@ function printSendFormHtml(m) {
               '<th class="col-num">At printer</th><th>Status</th></tr></thead>' +
               '<tbody>' + lotRows + '</tbody></table></div>';
 
-    // A blocked lot is quarantined cloth. sendToPrint refuses one anyway; this
-    // keeps the screen and the server saying the same thing.
     var lotOpts = lots.filter(function (l) { return !l.blocked; })
         .map(function (l) {
             return '<option value="' + l.lotId + '">' + escapeHtml(l.lotNumber) + '</option>';
         }).join('');
 
-    var pats = patternsFor(m);
-    var patOpts = pats.length
-        ? '<option value="">Choose a pattern…</option>' +
-          pats.map(function (p) {
-              return '<option value="' + escapeHtml(p) + '">' + escapeHtml(p) + '</option>';
+    var tgts = targetsFor(m);
+    var tgtOpts = tgts.length
+        ? '<option value="">Choose the printed SKU…</option>' +
+          tgts.map(function (t) {
+              return '<option value="' + t.id + '">' + escapeHtml(t.sku + ' — ' + t.name) + '</option>';
           }).join('')
-        // An empty select reads as a broken screen and he presses Send and gets
-        // nothing. Say which of the two things is wrong instead.
-        : '<option value="">No patterns on record</option>';
+        : '<option value="">No fabric on record at ' + fmt(m.widthCm) + ' cm</option>';
 
     var printerOpts = '<option value="">Choose a printer…</option>' +
         ((PRINT_DATA && PRINT_DATA.printers) || []).map(function (p) {
@@ -9125,87 +9028,43 @@ function printSendFormHtml(m) {
             lotTable +
             '<div class="print-form">' +
                 '<label class="si-field"><span>Lot</span>' +
-                    '<select id="ps-lot-' + m.id + '" class="note-input" onchange="refreshSendTotals(\'' + m.id + '\')">' +
+                    '<select id="ps-lot-' + m.id + '" class="note-input" onchange="onSendControlChange(\'' + m.id + '\')">' +
                         lotOpts + '</select></label>' +
                 '<label class="si-field"><span>Send</span>' +
-                    '<select id="ps-state-' + m.id + '" class="note-input" onchange="refreshSendTotals(\'' + m.id + '\')">' +
+                    '<select id="ps-state-' + m.id + '" class="note-input" onchange="onSendControlChange(\'' + m.id + '\')">' +
                         '<option value="Wash">Washed</option>' +
                         '<option value="Unwash">Unwashed</option>' +
                     '</select></label>' +
-                '<label class="si-field"><span>Pattern</span>' +
-                    '<select id="ps-pat-' + m.id + '" class="note-input" onchange="onSendPatternChange(\'' + m.id + '\')">' +
-                        patOpts + '</select></label>' +
+                '<label class="si-field"><span>Printed SKU</span>' +
+                    '<select id="ps-tgt-' + m.id + '" class="note-input">' + tgtOpts + '</select></label>' +
                 '<label class="si-field"><span>Printer</span>' +
                     '<select id="ps-printer-' + m.id + '" class="note-input">' + printerOpts + '</select></label>' +
-                // WHAT LEAVES THE LOT, computed, never typed. He is cutting
-                // pieces, not measuring metres, so the figure that actually
-                // moves stock is a consequence of the lines below and he must be
-                // able to read it before he presses Send.
-                '<label class="si-field"><span>Fabric used (Mtr)</span>' +
-                    '<input type="number" class="issue-input" disabled ' +
-                        'id="ps-total-' + m.id + '" value="' + fmt(sendMetres(m.id)) + '" /></label>' +
             '</div>' +
-            '<div id="ps-sku-' + m.id + '">' + printSkuNoteHtml(m) + '</div>' +
             '<div id="ps-lines-' + m.id + '">' + printLinesHtml(m) + '</div>' +
+            '<div id="ps-plan-' + m.id + '">' + rollPlanHtml(m) + '</div>' +
+            '<div class="card-footer print-send-footer" id="ps-foot-' + m.id + '">' + sendFooterHtml(m) + '</div>' +
         '</div>';
 }
 
-// WHICH SKU THIS BECOMES, said before he sends. A pattern that has never been
-// printed on this fabric mints a new material, and that is permanent master
-// data — it is never done silently.
-function printSkuNoteHtml(m) {
-    var patEl = document.getElementById('ps-pat-' + m.id);
-    var pat = patEl ? patEl.value : '';
-    if (!pat) return '';
-
-    var hit = printedFor(m.id, pat);
-    if (hit) {
-        return '<div class="sel-count">Goes into <b>' + escapeHtml(hit.sku) + '</b> &mdash; ' +
-               escapeHtml(hit.name) + '.</div>';
-    }
-    return '<div class="sel-count is-short">' + escapeHtml(m.name) + ' has never been printed in ' +
-           escapeHtml(pat) + '. Sending this <b>creates a new material</b> with the next free ' +
-           'RM- number, ' + fmt(m.widthCm) + ' cm wide like the plain cloth.</div>';
-}
-
-// ONE ROW PER PIECE SIZE. He is cutting full-width pieces off the roll and the
-// only thing that varies is how long each one is, so the line is a length and a
-// count — nothing else is his to decide here.
+// ONE ROW PER PIECE SIZE — a length and a count. He is cutting full-width pieces
+// off the roll and the only thing that varies is how long each one is.
 //
-// NO CUT-LENGTH SCORING. An earlier version asked for the cut length the printed
-// cloth would eventually be panelled at and scored each line's marker rows and
-// leftover tail against it. It was wrong twice over: printing is TO STOCK, so at
-// send time there is no cut length — that cloth may serve several garments at
-// different panel sizes — and the piece length is fixed by the printer's table
-// anyway, so the number it was advising on was not a choice. The real yield is
-// computed at ISSUE, per piece, where it is a fact instead of a guess. Do not
-// put it back.
+// NO CUT-LENGTH SCORING. Printing is TO STOCK: at send time there is no cut
+// length (that cloth may serve several garments), and the piece length is fixed
+// by the printer's table anyway. The real yield is computed at ISSUE. Do not put
+// it back.
 function printLinesHtml(m) {
-    var lines = printLines[m.id] || [];
-
-    // WIDTH IS SHOWN AND DISABLED, on every line. Every piece is the full width
-    // of the roll — that is the premise the whole design rests on, and a figure
-    // he can read is what makes it checkable against the cloth in front of him.
-    // Disabled rather than absent because a missing column reads as a thing the
-    // screen forgot; disabled reads as a thing that is not his to change.
-    //
-    // Length before width, per the app's display rule: sizes are always shown
-    // L x W however the fields are named underneath.
-    var wCell = '<td><input type="number" class="issue-input" disabled ' +
-                'value="' + escapeHtml(fmt(m.widthCm)) + '" /></td>';
+    var lines = printSendLines[m.id] || [];
 
     var rows = lines.map(function (r, i) {
-        var len = Number(r.len) || 0, cnt = Number(r.count) || 0;
-
         return '' +
             '<tr>' +
                 '<td><input type="number" step="1" min="1" class="issue-input" ' +
                     'id="ps-len-' + m.id + '-' + i + '" value="' + escapeHtml(r.len) + '" ' +
-                    'oninput="refreshSendTotals(\'' + m.id + '\')" /></td>' +
-                wCell +
+                    'oninput="onSendLineInput(\'' + m.id + '\')" /></td>' +
                 '<td><input type="number" step="1" min="0" class="issue-input" ' +
                     'id="ps-cnt-' + m.id + '-' + i + '" value="' + escapeHtml(r.count) + '" ' +
-                    'oninput="refreshSendTotals(\'' + m.id + '\')" /></td>' +
+                    'oninput="onSendLineInput(\'' + m.id + '\')" /></td>' +
                 '<td class="col-num print-derived" id="ps-mtr-' + m.id + '-' + i + '">' +
                     lineMetresText(r) + '</td>' +
                 '<td><button type="button" class="raise-btn is-stale" ' +
@@ -9213,23 +9072,21 @@ function printLinesHtml(m) {
             '</tr>';
     }).join('');
 
-    var total = sendMetres(m.id);
-    var avail = sendAvailable(m);
-    var over = total > avail + 0.0001;
-
     return '' +
         '<div class="table-wrapper"><table>' +
             '<thead><tr>' +
                 '<th class="col-num">Piece length (cm)</th>' +
-                '<th class="col-num">Width (cm)</th>' +
                 '<th class="col-num">How many</th>' +
                 '<th class="col-num">Metres</th>' +
                 '<th></th>' +
             '</tr></thead>' +
             '<tbody>' + rows + '</tbody>' +
         '</table></div>' +
-        '<button type="button" class="raise-btn" onclick="addSendLine(\'' + m.id + '\')">+ Another size</button>' +
-        '<div class="card-footer" id="ps-foot-' + m.id + '">' + sendFooterHtml(m) + '</div>';
+        '<div class="print-lines-foot">' +
+            '<button type="button" class="raise-btn" onclick="addSendLine(\'' + m.id + '\')">+ Another size</button>' +
+            '<span class="print-lines-total">Fabric used: <b id="ps-total-' + m.id + '">' +
+                fmt(sendMetres(m.id)) + '</b> Mtr</span>' +
+        '</div>';
 }
 
 function lineMetresText(r) {
@@ -9237,9 +9094,65 @@ function lineMetresText(r) {
     return (len > 0 && cnt > 0) ? fmt((len * cnt) / 100) + ' Mtr' : '—';
 }
 
-// The lot's side of the sum, and the over-draw check. The metres THIS send uses
-// live in the "Fabric used" box up in the form — printing the same figure twice
-// on one card is the fault this project has already recorded twice.
+// WHICH ROLLS TO CUT — auto-planned shortest-first against the chosen lot, and
+// editable. If he leaves it untouched the payload omits rollPlan and the server
+// plans it identically. If he edits, the payload carries the plan and the server
+// validates Σ == metres.
+function rollPlanHtml(m) {
+    var lot = sendLot(m);
+    if (!lot) return '';
+    var total = sendMetres(m.id);
+    if (total <= 0) return '';
+
+    var plan = autoRollPlan(m);
+    if (!plan.length) {
+        return '<div class="lot-dry">Lot ' + escapeHtml(lot.lotNumber) +
+            ' has no cuttable rolls — nothing can be sent.</div>';
+    }
+
+    var over = m.id in printSendPlan ? manualPlanSum(m.id) : total;
+    var mismatch = Math.abs(over - total) > 0.01;
+
+    var rows = plan.map(function (p) {
+        var val = (printSendPlan[m.id] && printSendPlan[m.id][p.rollId] != null)
+            ? printSendPlan[m.id][p.rollId] : fmt(p.metres);
+        var rollName = (p.label || '').indexOf(lot.lotNumber) === 0
+            ? p.label : (lot.lotNumber + ' · ' + (p.label || 'roll'));
+        return '' +
+            '<tr>' +
+                '<td class="material-name-cell"><div class="mat-name">' + escapeHtml(rollName) + '</div>' +
+                    '<div class="mat-sku">' + fmt(p.rollLength) + ' Mtr on this roll</div></td>' +
+                '<td class="col-num"><input type="number" step="0.01" min="0" class="issue-input" ' +
+                    'id="ps-roll-' + m.id + '-' + p.rollId + '" value="' + escapeHtml(val) + '" ' +
+                    'oninput="onRollPlanInput(\'' + m.id + '\')" /></td>' +
+            '</tr>';
+    }).join('');
+
+    return '' +
+        '<div class="print-plan">' +
+            '<div class="print-plan-head">Cut plan &mdash; shortest roll first' +
+                (m.id in printSendPlan
+                    ? ' <span class="print-plan-tag is-edited">edited</span>'
+                    : ' <span class="print-plan-tag">auto</span>') +
+            '</div>' +
+            '<div class="table-wrapper"><table>' +
+                '<thead><tr><th>Roll to cut</th><th class="col-num">Cut (Mtr)</th></tr></thead>' +
+                '<tbody>' + rows + '</tbody>' +
+            '</table></div>' +
+            '<div class="print-plan-foot">' +
+                '<span class="sel-count' + (mismatch ? ' is-short' : '') + '">' +
+                    'plan totals ' + fmt(over) + ' Mtr of ' + fmt(total) + ' Mtr needed' +
+                    (mismatch ? ' &mdash; <b>these must match</b>' : '') +
+                '</span>' +
+                (m.id in printSendPlan
+                    ? '<button type="button" class="raise-btn is-stale" onclick="resetRollPlan(\'' + m.id + '\')">Back to auto</button>'
+                    : '') +
+            '</div>' +
+        '</div>';
+}
+
+// The lot's side of the sum and the over-draw check. What THIS send uses is the
+// "Fabric used" total under the size lines; this line is what the lot holds.
 function sendFooterHtml(m) {
     var over = sendMetres(m.id) > sendAvailable(m) + 0.0001;
     return '' +
@@ -9253,7 +9166,7 @@ function sendFooterHtml(m) {
 
 function readSendLines(matId) {
     var out = [];
-    (printLines[matId] || []).forEach(function (r, i) {
+    (printSendLines[matId] || []).forEach(function (r, i) {
         var l = document.getElementById('ps-len-' + matId + '-' + i);
         var c = document.getElementById('ps-cnt-' + matId + '-' + i);
         out.push({ len: l ? l.value : r.len, count: c ? c.value : r.count });
@@ -9261,124 +9174,192 @@ function readSendLines(matId) {
     return out;
 }
 
-// TYPING MUST NOT REBUILD THE INPUT BEING TYPED IN.
-//
-// This used to re-render the whole lines block on every keystroke, which
-// destroys the element the browser is focused on — the caret jumps out after
-// one character and he cannot type a two-digit number. The Stock In tab carries
-// the same warning above its search box; the same trap, one screen over.
-//
-// So nothing here touches innerHTML on anything containing an input. Only the
-// three derived things are written, and each is addressed by id: the per-line
-// metres cell, the "Fabric used" box, and the footer.
-function refreshSendTotals(matId) {
-    printLines[matId] = readSendLines(matId);
-
-    var mat = null;
-    ((PRINT_DATA && PRINT_DATA.plain) || []).forEach(function (m) {
-        if (String(m.id) === String(matId)) mat = m;
-    });
-    if (!mat) return;
-
-    printLines[matId].forEach(function (r, i) {
-        var cell = document.getElementById('ps-mtr-' + matId + '-' + i);
-        if (cell) cell.textContent = lineMetresText(r);
-    });
-
-    var totalBox = document.getElementById('ps-total-' + matId);
-    if (totalBox) totalBox.value = fmt(sendMetres(matId));
-
-    // The footer holds no input, so replacing it cannot steal focus.
-    var foot = document.getElementById('ps-foot-' + matId);
-    if (foot) foot.innerHTML = sendFooterHtml(mat);
-}
-
-// The pattern select is the one control that changes something other than the
-// arithmetic — which SKU this becomes, or whether it mints a new one.
-function onSendPatternChange(matId) {
-    var mat = null;
-    ((PRINT_DATA && PRINT_DATA.plain) || []).forEach(function (m) {
-        if (String(m.id) === String(matId)) mat = m;
-    });
-    if (!mat) return;
-    var skuBox = document.getElementById('ps-sku-' + matId);
-    if (skuBox) skuBox.innerHTML = printSkuNoteHtml(mat);
-}
-
-// Adding or removing a line genuinely changes the structure, so the table is
-// rebuilt — and that is safe, because a button press is not a caret in a field.
-function onSendChange(matId) {
-    printLines[matId] = readSendLines(matId);
-
-    var mat = null;
-    ((PRINT_DATA && PRINT_DATA.plain) || []).forEach(function (m) {
-        if (String(m.id) === String(matId)) mat = m;
-    });
-    if (!mat) return;
-
-    var skuBox = document.getElementById('ps-sku-' + matId);
-    if (skuBox) skuBox.innerHTML = printSkuNoteHtml(mat);
-    var linesBox = document.getElementById('ps-lines-' + matId);
-    if (linesBox) linesBox.innerHTML = printLinesHtml(mat);
-
-    var totalBox = document.getElementById('ps-total-' + matId);
-    if (totalBox) totalBox.value = fmt(sendMetres(matId));
-}
-
-function addSendLine(matId) {
-    printLines[matId] = readSendLines(matId);
-    printLines[matId].push({ len: '', count: '' });
-    onSendChange(matId);
-}
-
-function removeSendLine(matId, idx) {
-    var rows = readSendLines(matId);
-    rows.splice(idx, 1);
-    if (!rows.length) rows.push({ len: '', count: '' });
-    printLines[matId] = rows;
-    onSendChange(matId);
-}
-
 function sendMetres(matId) {
     var t = 0;
-    (printLines[matId] || []).forEach(function (r) {
+    (printSendLines[matId] || []).forEach(function (r) {
         var len = Number(r.len) || 0, c = Number(r.count) || 0;
         if (len > 0 && c > 0) t += (len * c) / 100;
     });
     return Math.round(t * 100) / 100;
 }
 
-// What the CHOSEN counter of the CHOSEN lot holds. Not the material's total:
-// cloth in the other state, or on another lot, cannot serve this send.
-function sendAvailable(m) {
+// The chosen lot object off the chosen source material.
+function sendLot(m) {
     var lotEl = document.getElementById('ps-lot-' + m.id);
-    var stEl = document.getElementById('ps-state-' + m.id);
-    if (!lotEl) return 0;
+    var want = lotEl ? lotEl.value : (printSendLot[m.id] || '');
+    // Default to the first NON-BLOCKED lot — the <select> only lists those, so
+    // falling back to lots[0] (which may be blocked) would let the availability
+    // line and cut plan describe a lot Submit can never send off.
+    if (!want) {
+        var first = (m.lots || []).filter(function (l) { return !l.blocked; })[0];
+        if (first) want = first.lotId;
+    }
     var lot = null;
-    (m.lots || []).forEach(function (l) {
-        if (String(l.lotId) === String(lotEl.value)) lot = l;
-    });
+    (m.lots || []).forEach(function (l) { if (String(l.lotId) === String(want)) lot = l; });
+    return lot;
+}
+
+// What the CHOSEN counter of the CHOSEN lot holds.
+function sendAvailable(m) {
+    var lot = sendLot(m);
     if (!lot) return 0;
-    var st = stEl ? stEl.value : 'Wash';
+    var stEl = document.getElementById('ps-state-' + m.id);
+    var st = stEl ? stEl.value : (printSendState[m.id] || 'Wash');
     return Number(st === 'Unwash' ? lot.unwash : lot.wash) || 0;
 }
 
-function submitSendToPrint(matId) {
-    var mat = null;
-    ((PRINT_DATA && PRINT_DATA.plain) || []).forEach(function (m) {
-        if (String(m.id) === String(matId)) mat = m;
+// Shortest Available roll first, drain each in full toward the metres needed.
+// Mirrors sendToPrint.dg's auto path: sort by length ascending, and a tie is
+// broken by ORIGINAL POSITION (a stable sort keeps first-seen first) — the .dg
+// does the same, deliberately avoiding a string comparison it cannot verify.
+function autoRollPlan(m) {
+    var lot = sendLot(m);
+    if (!lot) return [];
+    var avail = (lot.rolls || []).filter(function (r) {
+        return r.status === 'Available' && (Number(r.length) || 0) > 0;
     });
-    if (!mat) return;
+    var rolls = avail.map(function (r, i) { return { r: r, i: i }; }).sort(function (a, b) {
+        var d = (Number(a.r.length) || 0) - (Number(b.r.length) || 0);
+        return d !== 0 ? d : a.i - b.i;
+    }).map(function (x) { return x.r; });
+
+    var need = sendMetres(m.id);
+    var out = [];
+    rolls.forEach(function (r) {
+        if (need <= 0.001) return;
+        var take = Math.min(Number(r.length) || 0, need);
+        out.push({ rollId: r.rollId, label: r.label, metres: Math.round(take * 100) / 100,
+                   rollLength: Number(r.length) || 0 });
+        need -= take;
+    });
+    return out;
+}
+
+function manualPlanSum(matId) {
+    var t = 0;
+    var p = printSendPlan[matId] || {};
+    Object.keys(p).forEach(function (k) { t += Number(p[k]) || 0; });
+    return Math.round(t * 100) / 100;
+}
+
+// TYPING MUST NOT REBUILD THE INPUT BEING TYPED IN. Only derived things are
+// written, each addressed by id: the per-line metres cell, the "Fabric used"
+// box, the send footer, and the roll-plan block (which holds inputs, so it is
+// only rebuilt on structural changes — a line add/remove or a lot/state switch,
+// never a keystroke inside it).
+function onSendLineInput(matId) {
+    printSendLines[matId] = readSendLines(matId);
+    var m = printSourceById(matId);
+    if (!m) return;
+
+    printSendLines[matId].forEach(function (r, i) {
+        var cell = document.getElementById('ps-mtr-' + matId + '-' + i);
+        if (cell) cell.textContent = lineMetresText(r);
+    });
+    var totalBox = document.getElementById('ps-total-' + matId);
+    if (totalBox) totalBox.textContent = fmt(sendMetres(matId));
+    var foot = document.getElementById('ps-foot-' + matId);
+    if (foot) foot.innerHTML = sendFooterHtml(m);
+
+    // The line's metres changed, so the auto plan changed. Rebuilding the plan
+    // block is safe here — the caret is in a LINE input, not a plan input.
+    // Drop any manual override: it was against a different total.
+    delete printSendPlan[matId];
+    var planBox = document.getElementById('ps-plan-' + matId);
+    if (planBox) planBox.innerHTML = rollPlanHtml(m);
+}
+
+function onRollPlanInput(matId) {
+    var m = printSourceById(matId);
+    if (!m) return;
+    var plan = autoRollPlan(m);
+    var store = {};
+    plan.forEach(function (p) {
+        var el = document.getElementById('ps-roll-' + matId + '-' + p.rollId);
+        store[p.rollId] = el ? el.value : String(p.metres);
+    });
+    printSendPlan[matId] = store;
+
+    // Only the total line under the plan is derived; the inputs stay put.
+    var planBox = document.getElementById('ps-plan-' + matId);
+    if (planBox) {
+        var total = sendMetres(matId);
+        var sum = manualPlanSum(matId);
+        var mismatch = Math.abs(sum - total) > 0.01;
+        var note = planBox.querySelector('.sel-count');
+        if (note) {
+            note.className = 'sel-count' + (mismatch ? ' is-short' : '');
+            note.innerHTML = 'plan totals ' + fmt(sum) + ' Mtr of ' + fmt(total) + ' Mtr needed' +
+                (mismatch ? ' &mdash; <b>these must match</b>' : '');
+        }
+    }
+}
+
+function resetRollPlan(matId) {
+    delete printSendPlan[matId];
+    var m = printSourceById(matId);
+    var planBox = document.getElementById('ps-plan-' + matId);
+    if (m && planBox) planBox.innerHTML = rollPlanHtml(m);
+}
+
+// A lot or state switch changes availability AND the roll set the plan is built
+// from — rebuild the plan block and clear any override.
+function onSendControlChange(matId) {
+    var m = printSourceById(matId);
+    if (!m) return;
+    var lotEl = document.getElementById('ps-lot-' + matId);
+    var stEl = document.getElementById('ps-state-' + matId);
+    if (lotEl) printSendLot[matId] = lotEl.value;
+    if (stEl) printSendState[matId] = stEl.value;
+    delete printSendPlan[matId];
+
+    var foot = document.getElementById('ps-foot-' + matId);
+    if (foot) foot.innerHTML = sendFooterHtml(m);
+    var planBox = document.getElementById('ps-plan-' + matId);
+    if (planBox) planBox.innerHTML = rollPlanHtml(m);
+}
+
+// Adding or removing a line rebuilds the table — safe, a button press is not a
+// caret in a field.
+function rerenderSendLines(matId) {
+    var m = printSourceById(matId);
+    if (!m) return;
+    delete printSendPlan[matId];
+    var linesBox = document.getElementById('ps-lines-' + matId);
+    if (linesBox) linesBox.innerHTML = printLinesHtml(m);
+    var planBox = document.getElementById('ps-plan-' + matId);
+    if (planBox) planBox.innerHTML = rollPlanHtml(m);
+    var foot = document.getElementById('ps-foot-' + matId);
+    if (foot) foot.innerHTML = sendFooterHtml(m);
+}
+
+function addSendLine(matId) {
+    printSendLines[matId] = readSendLines(matId);
+    printSendLines[matId].push({ len: '', count: '' });
+    rerenderSendLines(matId);
+}
+
+function removeSendLine(matId, idx) {
+    var rows = readSendLines(matId);
+    rows.splice(idx, 1);
+    if (!rows.length) rows.push({ len: '', count: '' });
+    printSendLines[matId] = rows;
+    rerenderSendLines(matId);
+}
+
+function submitSendToPrint(matId) {
+    var m = printSourceById(matId);
+    if (!m) return;
 
     var lotEl = document.getElementById('ps-lot-' + matId);
     var stEl = document.getElementById('ps-state-' + matId);
-    var patEl = document.getElementById('ps-pat-' + matId);
+    var tgtEl = document.getElementById('ps-tgt-' + matId);
     var prEl = document.getElementById('ps-printer-' + matId);
     var btn = document.getElementById('ps-btn-' + matId);
     if (!btn) return;
 
     if (!lotEl || !lotEl.value) { alert('Choose which lot the cloth comes off.'); return; }
-    if (!patEl || !patEl.value) { alert('Choose the pattern it is being printed in.'); return; }
+    if (!tgtEl || !tgtEl.value) { alert('Choose the printed SKU it becomes.'); return; }
     if (!prEl || !prEl.value) { alert('Choose which printer it is going to.'); return; }
 
     var lines = [];
@@ -9393,38 +9374,46 @@ function submitSendToPrint(matId) {
     if (bad) { alert(bad); return; }
     if (!lines.length) { alert('Add at least one line — how long the pieces are and how many.'); return; }
 
-    // Checked here as well as on the server. The server is the one that counts —
-    // a Custom API is callable from anywhere — but catching it before the round
-    // trip tells him while he is looking at the lot it overdrew.
-    if (sendMetres(matId) > sendAvailable(mat) + 0.0001) {
+    if (sendMetres(matId) > sendAvailable(m) + 0.0001) {
         alert('That is more cloth than the lot holds in that state.');
         return;
     }
 
-    var hit = printedFor(matId, patEl.value);
-    if (!hit && !confirm(mat.name + ' has never been printed in ' + patEl.value +
-                         '.\n\nSending this creates a new material with a new SKU. Continue?')) {
-        return;
+    // The roll plan: send it only if he edited it. An edited plan must total the
+    // metres exactly, or the server rejects it — catch it here first.
+    var rollPlan = null;
+    if (matId in printSendPlan) {
+        var auto = autoRollPlan(m);
+        rollPlan = auto.map(function (p) {
+            var v = printSendPlan[matId][p.rollId];
+            return { rollId: p.rollId, label: p.label, metres: Number(v) || 0 };
+        }).filter(function (p) { return p.metres > 0; });
+        var sum = rollPlan.reduce(function (a, p) { return a + p.metres; }, 0);
+        if (Math.abs(sum - sendMetres(matId)) > 0.01) {
+            alert('The cut plan totals ' + fmt(sum) + ' Mtr but the pieces need ' +
+                  fmt(sendMetres(matId)) + ' Mtr. Fix the plan or press "Back to auto".');
+            return;
+        }
     }
 
     btn.disabled = true;
     btn.textContent = 'Sending…';
 
+    var payload = {
+        sourceMaterialId: matId,
+        sourceLotId: lotEl.value,
+        sourceState: stEl ? stEl.value : 'Wash',
+        targetMaterialId: tgtEl.value,
+        printerId: prEl.value,
+        lines: lines,
+        remarks: ''
+    };
+    if (rollPlan) payload.rollPlan = rollPlan;
+
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'sendToPrint',
         http_method: 'POST',
-        payload: {
-            payloadJson: JSON.stringify({
-                plainMaterialId: matId,
-                plainLotId: lotEl.value,
-                sourceState: stEl ? stEl.value : 'Wash',
-                pattern: patEl.value,
-                printedMaterialId: hit ? hit.id : '',
-                printerId: prEl.value,
-                lines: lines,
-                remarks: ''
-            })
-        }
+        payload: { payloadJson: JSON.stringify(payload) }
     }).then(function (response) {
         var parsed;
         try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
@@ -9436,14 +9425,8 @@ function submitSendToPrint(matId) {
             return;
         }
 
-        if (parsed.minted) {
-            alert('Created ' + parsed.printedSku + ' — ' + parsed.printedName + '.');
-        }
-
-        // Refetched rather than patched by hand. The lot balance and the parent
-        // total both moved, and a card patched from the response would be a
-        // second opinion about stock.
-        printLines[matId] = [{ len: '', count: '' }];
+        printSendLines[matId] = [{ len: '', count: '' }];
+        delete printSendPlan[matId];
         printOpenId = null;
         loadPrint();
     }).catch(function (err) {
@@ -9470,54 +9453,36 @@ function submitReceivePrint(jobId) {
         return;
     }
 
-    // Upper-cased, so "p1" cannot slip in beside "P1" and read on screen as a
-    // different lot when it is not.
     if (creating) {
-        var mat = printMaterialById(job.printedMaterialId);
+        var mat = printTargetById(job.printedMaterialId);
         var taken = (mat && mat.lots || []).some(function (l) {
             return String(l.lotNumber || '').trim().toUpperCase() === lotNum.toUpperCase();
         });
         if (taken) { alert('That material already has a lot ' + lotNum + '.'); return; }
     }
 
-    // EVERY SENT LINE IS SENT BACK, including the ones that came back as
-    // nothing — a zero is the record that the size was checked and none of it
-    // arrived. `lineIndex` is what the server matches on; it takes the LENGTH
-    // from its own Send_Lines, so nothing this screen sends can inflate the
-    // metres received.
-    var lines = [];
+    // ONE PIECE = ONE ROLL. The payload is pieces[] — a returned piece is one
+    // that has a roll label. `lineIndex` says which sent size it is; the server
+    // takes the LENGTH from its own Send_Lines and caps the count per size at
+    // what went out. Labels must be non-empty and distinct within the receipt.
+    var pieces = [];
+    var seen = {};
     var bad = '';
-    readRecvLines(jobId).forEach(function (r, i) {
-        var sent = Number(r.sent) || 0;
-        var c = Number(r.count) || 0;
-
-        if (c !== Math.floor(c) || c < 0) {
-            bad = 'Pieces back must be a whole number, or zero.';
+    readRecvPieces(jobId).forEach(function (p) {
+        var label = String(p.label || '').trim();
+        if (!label) return;                       // no label = the printer lost it
+        if (p.state !== 'Wash' && p.state !== 'Unwash') {
+            bad = 'Say whether each returned piece is washed or unwashed.';
             return;
         }
-        if (c > sent) {
-            bad = 'Only ' + sent + ' pieces of ' + r.len + ' cm went out — ' + c + ' cannot come back.';
-            return;
-        }
-        // The carton is required only where pieces actually arrived. A size that
-        // came back as nothing sits on no shelf, and stamping it with a box would
-        // send the next person to an empty one — the same rule the waste receipt
-        // applies to a row the store found none of.
-        if (c > 0 && !String(r.carton || '').trim()) {
-            bad = 'Every size that came back needs a carton — which box it went into.';
-            return;
-        }
-        lines.push({
-            lineIndex: i,
-            lengthCm: Number(r.len) || 0,
-            count: c,
-            state: r.state,
-            carton: String(r.carton || '').trim()
-        });
+        var key = label.toUpperCase();
+        if (seen[key]) { bad = 'Roll label "' + label + '" is used twice.'; return; }
+        seen[key] = true;
+        pieces.push({ lineIndex: p.lineIndex, label: label, state: p.state });
     });
     if (bad) { alert(bad); return; }
-    if (!lines.length) {
-        alert('Nothing to receive. If it came back unprinted, use "Came back unprinted".');
+    if (!pieces.length) {
+        alert('No roll labels entered. If the whole run is lost, use "Came back unprinted".');
         return;
     }
 
@@ -9525,7 +9490,7 @@ function submitReceivePrint(jobId) {
     if (lostPieces > 0 &&
         !confirm(lostPieces + (lostPieces === 1 ? ' piece' : ' pieces') +
                  ' did not come back.\n\nThat cloth is written off against ' +
-                 (job.plainName || 'the plain material') + ' and cannot be put back. Continue?')) {
+                 (job.sourceName || 'the source material') + ' and cannot be put back. Continue?')) {
         return;
     }
 
@@ -9541,7 +9506,7 @@ function submitReceivePrint(jobId) {
                 lotId: creating ? '' : lotSel.value,
                 lotNumber: lotNum,
                 lotLabel: '',
-                lines: lines,
+                pieces: pieces,
                 remarks: ''
             })
         }
@@ -9561,7 +9526,7 @@ function submitReceivePrint(jobId) {
                   fmt(parsed.loss) + ' Mtr. Recorded on the job.');
         }
 
-        delete printRecvLines[jobId];
+        delete printRecvPieces[jobId];
         printJobOpenId = null;
         loadPrint();
     }).catch(function (err) {
@@ -9576,9 +9541,10 @@ function submitCancelJob(jobId) {
     var job = printJobById(jobId);
     if (!job) return;
 
-    if (!confirm('Put ' + fmt(job.metresSent) + ' Mtr back on lot ' + (job.plainLotNumber || '') +
-                 ' as ' + (job.sourceState === 'Unwash' ? 'unwashed' : 'washed') +
-                 ' cloth?\n\nUse this only if it came back unprinted.')) {
+    if (!confirm(fmt(job.metresSent) + ' Mtr of cut pieces go back onto lot ' +
+                 (job.sourceLotNumber || '') + ' as a new roll (' +
+                 (job.sourceState === 'Unwash' ? 'unwashed' : 'washed') +
+                 ').\n\nUse this only if the printer returned it unprinted.')) {
         return;
     }
     var reason = prompt('Why did it come back unprinted?', '');
@@ -9590,9 +9556,7 @@ function submitCancelJob(jobId) {
     ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: 'cancelPrintJob',
         http_method: 'POST',
-        payload: {
-            payloadJson: JSON.stringify({ jobId: jobId, reason: reason })
-        }
+        payload: { payloadJson: JSON.stringify({ jobId: jobId, reason: reason }) }
     }).then(function (response) {
         var parsed;
         try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
@@ -9602,7 +9566,7 @@ function submitCancelJob(jobId) {
             if (btn) { btn.disabled = false; btn.textContent = 'Came back unprinted'; }
             return;
         }
-        delete printRecvLines[jobId];
+        delete printRecvPieces[jobId];
         printJobOpenId = null;
         loadPrint();
     }).catch(function (err) {

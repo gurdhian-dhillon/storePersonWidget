@@ -2304,12 +2304,95 @@ th.col-num {
     font-variant-numeric: tabular-nums;
 }
 
+/* A receive row whose roll label is still blank — not yet entered, or a piece
+   the printer lost. Faintly dimmed so the labelled rows read as the real return;
+   still fully usable (he may be about to type in it). */
+.recv-piece-lost td {
+    opacity: 0.6;
+}
+.recv-piece-lost td:nth-child(2),
+.recv-piece-lost td:nth-child(3) {
+    opacity: 1;
+}
+
 /* Metres is a read-only consequence of the length and the count beside it, so it
    is set apart from the two that are inputs — otherwise the row reads as three
    boxes of which one mysteriously refuses to accept anything. */
 .print-derived {
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
+}
+
+/* ---- Send-to-print: the line editor's foot ----
+   "+ Another size" on the left, the running fabric-used total on the right. */
+.print-lines-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+.print-lines-total {
+    color: var(--text-muted);
+    font-size: 0.92em;
+}
+.print-lines-total b {
+    color: var(--text-main);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---- Send-to-print cut plan ----
+   Which physical roll to cut and how much off it. Auto-planned shortest-first
+   and editable; the foot goes red when an edit does not add up to the metres
+   the pieces need. Green throughout — a print run is a good outcome. */
+.print-plan {
+    margin-top: 14px;
+    padding: 12px 14px 10px;
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+}
+.print-plan-head {
+    font-weight: 700;
+    font-size: 0.95em;
+    margin-bottom: 8px;
+    color: var(--text-main);
+}
+.print-plan-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.78em;
+    font-weight: 600;
+    background: #dcfce7;
+    color: #15803d;
+    vertical-align: middle;
+}
+.print-plan-tag.is-edited {
+    background: #fef9c3;
+    color: #a16207;
+}
+.print-plan .table-wrapper {
+    margin: 0 0 8px;
+    background: #fff;
+    border-radius: 6px;
+}
+.print-plan .issue-input {
+    max-width: 110px;
+}
+.print-plan-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+/* Send button sits under the plan, full-width row, its own space. */
+.print-send-footer {
+    margin-top: 14px;
 }
 
 /* ---- Lots ----
