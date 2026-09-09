@@ -1,5 +1,19 @@
 string issueMaterials(string supervisorId, string issuesJson, string voucherIn)
 {
+	// ============================================================================
+	// RETIRED - DELETED FROM CREATOR (Custom API + function both removed).
+	//
+	// The issue flow was split in two and the widget now calls those directly:
+	//   issueMaterialsHandover  - inserts Material_Issue + Issue_Lines (no stock write)
+	//   issueMaterialsApply     - moves the stock (rolls, lots, In_Transit)
+	// See app/js/main.js processNextChunk(). There is NO fallback to this function
+	// and no USE_SPLIT_ISSUE flag any more.
+	//
+	// This file is kept in the repo ONLY as the reference implementation the two
+	// split functions were carved out of, and as the frozen source a few tests
+	// still read to pin "the old single-function behaviour". Do not re-deploy it.
+	// ============================================================================
+
 	// ALLOCATION-APPLIER. This function no longer decides anything.
 	//
 	// CHUNKED HANDOVERS. One press of Issue against a supervisor holding a big

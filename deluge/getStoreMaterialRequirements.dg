@@ -1,5 +1,18 @@
 string getStoreMaterialRequirements(string skipCountTxt, string pagePlansTxt)
 {
+	// ============================================================================
+	// RETIRED - DELETED FROM CREATOR (Custom API + function both removed).
+	//
+	// The store screen now reads its requirements through the Creator JS Data API
+	// (getRecords) and assembles + allocates them in the browser -
+	// app/js/api-experiment.js (ApiExperiment.run()), called by
+	// app/js/main.js loadRequirements(). There is NO fallback to this function.
+	//
+	// This file is kept in the repo ONLY as the reference implementation of the
+	// data assembly that api-experiment.js ports - if that JS port ever needs to
+	// be checked against the original logic, this is it. Do not re-deploy it.
+	// ============================================================================
+
 	// PARALLEL PAGING. pagePlansTxt is the widget saying "process exactly this
 	// many plans from skipCount, and don't stop early". With it, pages no longer
 	// chain: the widget calls getOpenPlanCount once, computes ceil(count /

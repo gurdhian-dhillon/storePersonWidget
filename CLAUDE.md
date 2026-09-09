@@ -897,6 +897,21 @@ actual pattern — one supervisor can hold the whole queue). This is not a proje
 Execute returned. Three functions were exercised against it; two are fixed and confirmed, one is
 not.
 
+> **FOUR big-path Deluge functions are now RETIRED — deleted from Creator, the `.dg` files kept
+> in the repo as frozen reference only. Do not re-deploy any of them.**
+>
+> | Retired function | Replaced by | Live caller |
+> |---|---|---|
+> | `getStoreMaterialRequirements` | JS Data API assembly + client allocator | `app/js/api-experiment.js` `ApiExperiment.run()` |
+> | `getSupervisorMaterials` | JS Data API assembly | `app/supervisor/js/receive-read.js` `ReceiveRead.run()` |
+> | `issueMaterials` | split in two | `issueMaterialsHandover` + `issueMaterialsApply`, called by `app/js/main.js` |
+> | `receiveMaterials` | split in two | `receiveHandover` + `receiveFanOut`, called by `app/supervisor/js/receive.js` |
+>
+> No fallback flags remain (`USE_SPLIT_ISSUE` / `USE_SPLIT_RECEIVE` both gone). Some tests still
+> `readFileSync` the retired `.dg` files as a frozen behaviour baseline — that is why the files
+> stay. Domain-behaviour notes elsewhere in this doc that say "`receiveMaterials` does X" still
+> describe the *rule*; the code now lives in the split functions.
+
 **`createProductionPlans` → replaced by a Batch Workflow.** The single-script version that scanned
 `Sales_Order[Order_Status=="Pending"]` and looped in one execution hit the statement limit at
 ~100 orders (confirmed, not theoretical). Replaced with a Creator **Batch Workflow** on `Sales_Order`
@@ -921,9 +936,17 @@ session moved on to `issueMaterials` — check `sendProductionPlanSummary.dg` an
 > what actually works, because each per-record call, independently, writes to a row that survives
 > past that call — no shared memory required.
 
-**`getStoreMaterialRequirements` → fixed and confirmed working at 119 plans.** Was a single
-unpaged call; failed at the statement limit once real plan/material/waste volume was reached.
-Fixed by:
+**`getStoreMaterialRequirements` → RETIRED. Deleted from Creator (Custom API + function).**
+The store screen reads its requirements through the Creator JS Data API (`getRecords`) and
+assembles + allocates them in the browser — `app/js/api-experiment.js` (`ApiExperiment.run()`),
+called by `loadRequirements()`. No fallback. `deluge/getStoreMaterialRequirements.dg` is kept
+in the repo as the reference implementation the JS port mirrors; it is not deployed.
+`getOpenPlanCount` and the parallel/sequential paging in the widget are gone too;
+`mergeRequirementPages` is kept unused (correct merge logic, would be needed if the read is
+ever split into concurrent pages again — pinned by `tools/alloc-paging.test.js`).
+
+The history below is why the (now-retired) function was shaped the way it was — it was fixed
+and confirmed working at 119 plans before being replaced by the JS path:
   1. Two previously-unbounded fetches — `Waste_Master[Status=="Available"]` (no material filter)
      and `Fabric_Piece[Piece_Status=="Available"]` (no lot filter) — scanned the WHOLE form on
      every call regardless of paging. Rebuilt to query per-material and per-lot respectively,
@@ -944,7 +967,15 @@ Fixed by:
   - `List(1,2,3,...)` — a literal-argument `List()` constructor — does **not** work
     (`"Not able to find 'List' function"`). Build with `.add()` in a loop instead.
 
-**`issueMaterials` → NOT fixed. Real bug found, fix not yet built.** `matPlanIdx` (which materials
+**`issueMaterials` → RETIRED. Deleted from Creator (Custom API + function).** The issue flow was
+split into `issueMaterialsHandover` (inserts `Material_Issue` + `Issue_Lines`) + `issueMaterialsApply`
+(moves stock), which the widget calls directly — no `USE_SPLIT_ISSUE` flag, no fallback.
+`deluge/issueMaterials.dg` is kept in the repo as the frozen reference the split was carved from
+and that four tests still read; it is not deployed. **The trim-fan-at-scale problem below was
+never solved in this function — it is inherited by `issueMaterialsApply`** and still open there;
+the analysis stands.
+
+Historical (the now-retired single function): `matPlanIdx` (which materials
 land on which of a supervisor's open plans) was rebuilt the same way as `getStoreMaterialRequirements`'s
 fixes — one query per material instead of one per plan×material — and that part is confirmed
 working (Execute against 111 real open plans). The remaining problem is structural, not a query

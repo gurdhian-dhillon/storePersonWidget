@@ -1,13 +1,18 @@
 /* =============================================================================
- * EXPERIMENT — build the store-issue-requirements payload with the Creator JS
- * Data API instead of the getStoreMaterialRequirements custom function.
+ * STORE MATERIAL REQUIREMENTS — the live read path.
  *
- * This is a faithful JS port of getStoreMaterialRequirements' DATA ASSEMBLY:
- * every supervisor block and every material entry comes out in the SAME shape,
- * with the SAME field names, so the client-side allocator (applyLotAllocation
- * in lot-allocator.js) and every renderer in main.js run UNCHANGED on top of
- * it. loadRequirements() calls ApiExperiment.run() and passes the result
- * straight to render().
+ * Builds the store-issue-requirements payload with the Creator JS Data API
+ * (getRecords) instead of a custom function. This REPLACES the retired
+ * getStoreMaterialRequirements Deluge function; there is no fallback.
+ *
+ * A faithful JS port of that function's DATA ASSEMBLY: every supervisor block
+ * and every material entry comes out in the SAME shape, with the SAME field
+ * names, so the client-side allocator (applyLotAllocation in lot-allocator.js)
+ * and every renderer in main.js run UNCHANGED on top of it. loadRequirements()
+ * calls ApiExperiment.run() and passes the result straight to render().
+ *
+ * (The name `ApiExperiment` / `api-experiment.js` is historical — this began as
+ * an A/B experiment against the Deluge function. It is the only path now.)
  *
  * FORMS READ (10 reports, via getRecords with cursor paging):
  *   Production_Planning_Report   open plans (Pending/Partially Received/In Progress)
@@ -34,9 +39,6 @@
  *     fall back to naming its plain-cloth base lot. printBase / printBaseLots
  *     come out empty. Plain (non-printed) fabric is unaffected.
  *   - No parallel paging — one cursor walk per report.
- *
- * REMOVE AFTER THE EXPERIMENT: delete this file and its <script> tag in
- * widget.html, and restore the CUSTOM-API PATH block in loadRequirements().
  * ========================================================================== */
 
 var ApiExperiment = (function () {
@@ -164,7 +166,7 @@ var ApiExperiment = (function () {
             };
             var out = assemble(raw);
             var t1 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-            out._experiment = {
+            out._stats = {
                 via: 'ZOHO.CREATOR.DATA.getRecords',
                 getRecordsCalls: res.reduce(function (n, r) { return n + r.calls; }, 0),
                 rowsFetched: {
@@ -176,7 +178,7 @@ var ApiExperiment = (function () {
                 printBasePorted: false,
                 paged: false
             };
-            console.log('[api-experiment] done', out._experiment);
+            console.log('[store-requirements] loaded via', out._stats);
             return out;
         });
     }
@@ -722,62 +724,6 @@ var ApiExperiment = (function () {
         }
     }
 
-    // ---- compare against the custom function ---------------------------
-    // DEV-ONLY A/B diagnostic, not wired to any screen. It is the last thing
-    // that calls getStoreMaterialRequirements - once that Custom API is deleted
-    // in Creator this stops working, which is fine; delete compare() then.
-    function compare() {
-        if (!have() || typeof ZOHO.CREATOR.DATA.invokeCustomApi !== 'function') {
-            console.warn('[api-experiment] compare needs getRecords AND invokeCustomApi');
-            return;
-        }
-        var pApi = run();
-        var tB = performance.now();
-        var pFn = ZOHO.CREATOR.DATA.invokeCustomApi({
-            api_name: 'getStoreMaterialRequirements',
-            http_method: 'POST',
-            payload: { skipCountTxt: '0', pagePlansTxt: '' }
-        }).then(function (resp) {
-            var parsed;
-            try { parsed = JSON.parse(resp.result); } catch (e) { parsed = null; }
-            return { plans: (parsed && parsed.plans) || [], _ms: Math.round(performance.now() - tB) };
-        });
-
-        return Promise.all([pApi, pFn]).then(function (r) {
-            var api = r[0], fn = r[1];
-            function totals(plans) {
-                var t = {};
-                (plans || []).forEach(function (b) {
-                    var req = 0, iss = 0, stock = 0;
-                    (b.materials || []).forEach(function (m) {
-                        req += num(m.required); iss += num(m.issued); stock += num(m.availableStock);
-                    });
-                    t[b.supervisorName || b.supervisorId] = {
-                        materials: (b.materials || []).length, required: r2(req), issued: r2(iss), stock: r2(stock)
-                    };
-                });
-                return t;
-            }
-            var tApi = totals(api.plans), tFn = totals(fn.plans);
-            console.log('%c[api-experiment] COMPARE', 'font-weight:bold');
-            console.log('  wall   — getRecords ' + api._experiment.wallMs + 'ms   custom fn ' + fn._ms + 'ms (unpaged)');
-            console.log('  calls  — getRecords ' + api._experiment.getRecordsCalls + '   custom fn 1');
-            console.log('  supers — getRecords ' + Object.keys(tApi).length + '   custom fn ' + Object.keys(tFn).length);
-            var merged = {};
-            Object.keys(tApi).concat(Object.keys(tFn)).forEach(function (k) {
-                merged[k] = {
-                    'api.mats': tApi[k] ? tApi[k].materials : '—', 'fn.mats': tFn[k] ? tFn[k].materials : '—',
-                    'api.req': tApi[k] ? tApi[k].required : '—', 'fn.req': tFn[k] ? tFn[k].required : '—',
-                    'api.iss': tApi[k] ? tApi[k].issued : '—', 'fn.iss': tFn[k] ? tFn[k].issued : '—',
-                    'api.stock': tApi[k] ? tApi[k].stock : '—', 'fn.stock': tFn[k] ? tFn[k].stock : '—'
-                };
-            });
-            console.table(merged);
-            console.log('  rows fetched:', api._experiment.rowsFetched);
-            return { getRecords: api, customFn: fn };
-        });
-    }
-
     // ---- raw-key inspector -------------------------------------------------
     // Dumps the first record of every report so the EXACT keys getRecords
     // returns can be compared against what assemble() reads. A report can
@@ -835,7 +781,7 @@ var ApiExperiment = (function () {
     }
 
     return {
-        run: run, compare: compare, assemble: assemble, keys: keys,
+        run: run, assemble: assemble, keys: keys,
         rollKeys: rollKeys,
         _getAll: getAll, _reports: RPT
     };

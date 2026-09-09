@@ -1,5 +1,18 @@
 string getSupervisorMaterials(string supervisorId, string skipLinesTxt)
 {
+	// ============================================================================
+	// RETIRED - DELETED FROM CREATOR (Custom API + function both removed).
+	//
+	// The supervisor's receive list is now built in the browser from flat
+	// getRecords reads - app/supervisor/js/receive-read.js (ReceiveRead.run()),
+	// called by app/supervisor/js/receive.js. There is NO fallback.
+	//
+	// This file is kept in the repo ONLY as the reference implementation that
+	// ReceiveRead ports (screen aggregation, printed-piece dedup, dispute netting,
+	// lot-note merge). tools/receive-print.test.js reads it as the frozen source.
+	// Do not re-deploy it.
+	// ============================================================================
+
 	// PAGED BY Issue_Line ROW. skipLinesTxt is how many of this supervisor's
 	// Issue_Lines to skip before processing; the call then processes up to
 	// ROW_BUDGET more and stops, reporting linesConsumed so the widget can call

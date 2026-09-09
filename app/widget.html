@@ -57,7 +57,9 @@
             <button type="button" class="tab-btn" data-tab="stockin">
                 Unallocated quantity
             </button>
-            <button type="button" class="tab-btn" data-tab="print">
+            <!-- Print Fabric tab hidden for now. The panel, its loader and
+                 print-data.js stay wired so re-showing is just un-hiding this. -->
+            <button type="button" class="tab-btn" data-tab="print" hidden>
                 Print Fabric
             </button>
         </nav>
@@ -89,10 +91,9 @@
 
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
     <script src="js/lot-allocator.js"></script>
-    <!-- EXPERIMENT — JS-Data-API stand-in for getStoreMaterialRequirements.
-         MUST load before main.js: loadRequirements() calls ApiExperiment.run().
-         Console: ApiExperiment.run() / ApiExperiment.compare().
-         Remove this file and this tag when the experiment is done. -->
+    <!-- Store material requirements — the live read path (JS Data API).
+         Replaces the retired getStoreMaterialRequirements function.
+         MUST load before main.js: loadRequirements() calls ApiExperiment.run(). -->
     <script src="js/api-experiment.js"></script>
     <!-- Print tab read side — JS Data API, replaces getPrintData.dg.
          MUST load before main.js: loadPrint() calls PrintData.load(). -->

@@ -52,9 +52,29 @@ string receiveFanOut(string supervisorId, string payloadJson)
 			fnCur = fnRawTxt.toMap();
 		}
 
-		FAN_BUDGET = 60;
+		// FAN_BUDGET is SMALL on purpose. Each material in the fan does TWO
+		// Material_Requirement scans (credit oldest-first, dispute newest-first),
+		// now looped over the receipt's own plans. For a common trim shared
+		// across a big Faire order one supervisor has one requirement row per
+		// Plan_Item; bounding to plansTouched (~a handful) makes each scan tiny.
+		// 60 was blowing the statement-execution limit before that bound; 8 is
+		// belt-and-braces and the widget's fanStep loop resumes on fnCur.mi.
+		FAN_BUDGET = 8;
 		VOUCHER_BUDGET = 60;
 		ITEM_BUDGET = 250;
+
+		// The receipt's plans, deduped, as a List of Longs - the fan scans
+		// Material_Requirement per plan instead of over everything the supervisor
+		// owns for the material.
+		touchedPlanIds = List();
+		for each  tpRaw in plansTouchedIn
+		{
+			tpTxt = ifnull(tpRaw,"").toString().trim();
+			if(tpTxt != "" && tpTxt.isNumber() == true && touchedPlanIds.contains(tpTxt.toLong()) == false)
+			{
+				touchedPlanIds.add(tpTxt.toLong());
+			}
+		}
 
 		ph = ifnull(fnCur.get("ph"),"fan").toString().trim();
 		if(ph == "")
@@ -183,6 +203,11 @@ string receiveFanOut(string supervisorId, string payloadJson)
 
 			mc = 0;
 			mProc = 0;
+			// Materials this call fanned - their line watermarks are stamped in
+			// ONE voucher-line pass AFTER the loop, not once per material (that
+			// re-walked every scope line per material - a second statement-limit
+			// multiplier).
+			fannedMats = List();
 			for each  pmRaw in perMatIn
 			{
 				if(mc >= mi && mProc < FAN_BUDGET)
@@ -219,7 +244,6 @@ string receiveFanOut(string supervisorId, string payloadJson)
 						reqNameById = Map();
 						reqUnitById = Map();
 						idsOldest = List();
-						rqRcvTotal = 0.0;
 
 						// "room" on a requirement row is Issued_Qty - Received_Qty
 						// - the same gap the store screen nets against open
@@ -231,68 +255,69 @@ string receiveFanOut(string supervisorId, string payloadJson)
 						// IS the record, exactly as the old receiveMaterials left
 						// it.
 						//
-						// BOUNDED TO OPEN PLANS, and that is not tidiness. The old
-						// receiveMaterials credited the ONE requirement its
-						// Issue_Line named. A material x lot line names none, so
-						// this fans across the supervisor's rows for that material
-						// - and an abandoned row on a finished plan that still
-						// reads owed would swallow the credit oldest-first, leaving
-						// the plan he ACTUALLY just received for uncredited and its
-						// item stuck at Awaiting_Material for ever. The issue path
-						// only ever feeds Pending / Partially Received / In
-						// Progress; a plan can reach Material Ready between issue
+						// BOUNDED TO THE RECEIPT'S PLANS, then to open plans - and
+						// that bound is what keeps this under the statement limit.
+						// A material x lot line names no requirement, so the fan has
+						// to spread arrived across the supervisor's rows for the
+						// material - but ONLY the plans this receipt was for
+						// (touchedPlanIds). Scanning every row he has ever owned for
+						// a shared trim was ~one row per Plan_Item and blew the limit
+						// at Faire volume.
+						//
+						// Order: plan-loop order (the receive screen's row order),
+						// oldest-first within a plan. The old code was globally
+						// oldest-first across plans; the drift only decides WHICH
+						// touched plan absorbs a shortfall when arrived is short, and
+						// a Stock_Dispute is raised on that plan either way.
+						//
+						// The issue path only ever feeds Pending / Partially Received
+						// / In Progress; a plan can reach Material Ready between issue
 						// and receipt, so that is accepted too.
-						oldestFirst = Material_Requirement[Assigned_To == supId && Material == matTxt.toLong()] sort by Added_Time;
-						for each  rq0 in oldestFirst
+						for each  cpid in touchedPlanIds
 						{
-							rIssS = ifnull(rq0.Issued_Qty,"0").toString().trim();
-							if(rIssS == "")
+							cpTxt = cpid.toString();
+							cCached = ifnull(planOpenCache.get(cpTxt),"").toString();
+							if(cCached == "")
 							{
-								rIssS = "0";
-							}
-							rRcvS = ifnull(rq0.Received_Qty,"0").toString().trim();
-							if(rRcvS == "")
-							{
-								rRcvS = "0";
-							}
-							rRoom = rIssS.toDecimal() - rRcvS.toDecimal();
-							rPlanTxt = ifnull(rq0.Plan,"").toString().trim();
-							rPlanOpen = false;
-							if(rPlanTxt != "" && rPlanTxt.isNumber() == true)
-							{
-								rCached = ifnull(planOpenCache.get(rPlanTxt),"").toString();
-								if(rCached == "")
+								cCached = "0";
+								for each  cPlanRec in Production_Planning[ID == cpid]
 								{
-									rCached = "0";
-									for each  rPlanRec in Production_Planning[ID == rPlanTxt.toLong()]
+									cPlanSt = ifnull(cPlanRec.Order_Status,"").toString().trim();
+									if(cPlanSt == "Pending" || cPlanSt == "Partially Received" || cPlanSt == "In Progress" || cPlanSt == "Material Ready")
 									{
-										rPlanSt = ifnull(rPlanRec.Order_Status,"").toString().trim();
-										if(rPlanSt == "Pending" || rPlanSt == "Partially Received" || rPlanSt == "In Progress" || rPlanSt == "Material Ready")
-										{
-											rCached = "1";
-										}
+										cCached = "1";
 									}
-									planOpenCache.put(rPlanTxt,rCached);
 								}
-								if(rCached == "1")
+								planOpenCache.put(cpTxt,cCached);
+							}
+							if(cCached == "1")
+							{
+								oldestFirst = Material_Requirement[Assigned_To == supId && Material == matTxt.toLong() && Plan == cpid] sort by Added_Time;
+								for each  rq0 in oldestFirst
 								{
-									rPlanOpen = true;
+									rIssS = ifnull(rq0.Issued_Qty,"0").toString().trim();
+									if(rIssS == "")
+									{
+										rIssS = "0";
+									}
+									rRcvS = ifnull(rq0.Received_Qty,"0").toString().trim();
+									if(rRcvS == "")
+									{
+										rRcvS = "0";
+									}
+									rRoom = rIssS.toDecimal() - rRcvS.toDecimal();
+									if(rRoom > 0)
+									{
+										ridTxt = rq0.ID + "";
+										roomById.put(ridTxt,rRoom);
+										rcvById.put(ridTxt,rRcvS.toDecimal());
+										planById.put(ridTxt,cpTxt);
+										itemById.put(ridTxt,ifnull(rq0.Plan_Item,"").toString().trim());
+										reqNameById.put(ridTxt,ifnull(rq0.Material_Name,"").toString());
+										reqUnitById.put(ridTxt,ifnull(rq0.Unit,"").toString());
+										idsOldest.add(ridTxt);
+									}
 								}
-							}
-							if(rPlanOpen == true)
-							{
-								rqRcvTotal = rqRcvTotal + rRcvS.toDecimal();
-							}
-							if(rRoom > 0 && rPlanOpen == true)
-							{
-								ridTxt = rq0.ID + "";
-								roomById.put(ridTxt,rRoom);
-								rcvById.put(ridTxt,rRcvS.toDecimal());
-								planById.put(ridTxt,rPlanTxt);
-								itemById.put(ridTxt,ifnull(rq0.Plan_Item,"").toString().trim());
-								reqNameById.put(ridTxt,ifnull(rq0.Material_Name,"").toString());
-								reqUnitById.put(ridTxt,ifnull(rq0.Unit,"").toString());
-								idsOldest.add(ridTxt);
 							}
 						}
 
@@ -324,16 +349,22 @@ string receiveFanOut(string supervisorId, string payloadJson)
 							}
 						}
 
-						// --- dispute the shortfall, newest-first ---
+						// --- dispute the shortfall ---
+						// Walks the SAME rows the credit scan collected (idsOldest,
+						// already bounded to touchedPlanIds), NOT a fresh unbounded
+						// Material_Requirement scan. The old code re-queried the
+						// whole material newest-first; every row it acted on had to
+						// be in roomById anyway (that null-guard is right below), so
+						// the re-query only added statement cost. Order across rows
+						// no longer matters here - the shortfall is grouped BY PLAN
+						// and one Stock_Dispute is raised per plan with a gap.
 						shortByPlan = Map();
 						planKeys = List();
 						planItemForPlan = Map();
-						newestFirst = Material_Requirement[Assigned_To == supId && Material == matTxt.toLong()] sort by Added_Time desc;
-						for each  rq2 in newestFirst
+						for each  rid2 in idsOldest
 						{
 							if(toDispute > 0)
 							{
-								rid2 = rq2.ID + "";
 								rmLeft2 = roomById.get(rid2);
 								if(rmLeft2 != null && rmLeft2 > 0)
 								{
@@ -473,51 +504,53 @@ string receiveFanOut(string supervisorId, string payloadJson)
 							}
 						}
 
-						//------------------------------------------------
-						// STAMP THE WATERMARKS. Everything this material had
-						// to fan has now been applied, so the lines record it:
-						// Fanned_Qty catches up to Received_Qty and
-						// Dispute_Raised_Qty to Disputed_Qty. A repeat of this
-						// receipt then computes 0 and does nothing.
-						//
-						// Written LAST, after the credits and the dispute, so a
-						// failure before this point leaves the lines unstamped
-						// and the next press redoes the work. Redoing is safe:
-						// the credit is capped by each requirement's own room,
-						// and the dispute upsert lands on the same open ticket.
-						//------------------------------------------------
-						for each  vStamp in vouchersScope
+						// Everything this material had to fan is applied - mark it
+						// for the single watermark-stamp pass after the loop.
+						if(fannedMats.contains(matTxt) == false)
 						{
-							vstTxt = ifnull(vStamp,"").toString().trim();
-							if(vstTxt != "" && vstTxt.isNumber() == true)
-							{
-								for each  vstRec in Material_Issue[ID == vstTxt.toLong()]
-								{
-									for each  vstLn in vstRec.Issue_Lines
-									{
-										if(ifnull(vstLn.Material,"").toString().trim() == matTxt)
-										{
-											vstRcvS = ifnull(vstLn.Received_Qty,"0").toString().trim();
-											if(vstRcvS == "")
-											{
-												vstRcvS = "0";
-											}
-											vstDspS = ifnull(vstLn.Disputed_Qty,"0").toString().trim();
-											if(vstDspS == "")
-											{
-												vstDspS = "0";
-											}
-											vstLn.Fanned_Qty = vstRcvS.toDecimal();
-											vstLn.Dispute_Raised_Qty = vstDspS.toDecimal();
-										}
-									}
-								}
-							}
+							fannedMats.add(matTxt);
 						}
 					}
 					mProc = mProc + 1;
 				}
 				mc = mc + 1;
+			}
+
+			// STAMP THE WATERMARKS for every material this call fanned, in ONE
+			// walk of the scope vouchers. Fanned_Qty catches up to Received_Qty,
+			// Dispute_Raised_Qty to Disputed_Qty, so a repeat of this receipt
+			// computes 0 and does nothing. LAST, so a failure before here leaves
+			// the lines unstamped and the next press redoes the work (safe: credit
+			// capped by each requirement's room, dispute upsert on the same open
+			// ticket).
+			for each  vStamp in vouchersScope
+			{
+				vstTxt = ifnull(vStamp,"").toString().trim();
+				if(vstTxt != "" && vstTxt.isNumber() == true)
+				{
+					for each  vstRec in Material_Issue[ID == vstTxt.toLong()]
+					{
+						for each  vstLn in vstRec.Issue_Lines
+						{
+							vstMat = ifnull(vstLn.Material,"").toString().trim();
+							if(vstMat != "" && fannedMats.contains(vstMat) == true)
+							{
+								vstRcvS = ifnull(vstLn.Received_Qty,"0").toString().trim();
+								if(vstRcvS == "")
+								{
+									vstRcvS = "0";
+								}
+								vstDspS = ifnull(vstLn.Disputed_Qty,"0").toString().trim();
+								if(vstDspS == "")
+								{
+									vstDspS = "0";
+								}
+								vstLn.Fanned_Qty = vstRcvS.toDecimal();
+								vstLn.Dispute_Raised_Qty = vstDspS.toDecimal();
+							}
+						}
+					}
+				}
 			}
 
 			newMi = mi + mProc;

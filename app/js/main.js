@@ -5523,36 +5523,17 @@ function issueForSupervisor(supIdx) {
 
 // ---- Load ----
 
-// getStoreMaterialRequirements is now PAGED, and paged by MATERIAL
-// REQUIREMENT ROW COUNT, not by plan count. A fixed plan-count page (tried
-// first, at 30, then 20, then 10) was proven wrong by Execute, not merely
-// suboptimal: statement cost tracks Material_Requirement rows, and rows per
-// plan are arbitrary, so a fixed number of PLANS is not a fixed amount of
-// WORK - two same-size pages differed by roughly 10x in real cost depending
-// on which plans landed where, and pages that had worked at one size failed
-// again at that same size once the order mix changed.
+// The store screen fetches the whole rack in one pass via ApiExperiment.run()
+// (Creator JS Data API + client-side allocator). ApiExperiment already returns
+// a single, fully-merged `plans` array, so nothing in the live path calls
+// mergeRequirementPages any more.
 //
-// So the function now walks plans one at a time (in small internal fetch
-// batches) and stops itself once accumulated requirement rows cross its own
-// budget - see getStoreMaterialRequirements.dg's header comment for the
-// full reasoning. Because pages are variable-length, this widget can no
-// longer compute "page N" on its own; the function returns
-// {"plans":[...],"plansConsumed":N} and the cursor for the next call is
-// simply skipCount + plansConsumed from the call just made.
-// plansConsumed === 0 is the "no more pages" signal.
-//
-// The store person still needs to see EVERYONE they're owed at once - there
-// is no supervisor picker on this screen and, per how this org actually
-// assigns orders, one supervisor can hold the whole queue, so filtering by
-// supervisor would not even bound the problem. So pages are fetched in the
-// background and MERGED before render() ever runs, and the screen looks
-// exactly as it did before paging existed - just assembled from several
-// cheap calls instead of one that no longer completes.
-//
-// Merging is by supervisorId, not concatenation: two pages can both carry a
-// block for the same supervisor (their plans just landed on different
-// pages), and concatenating would draw two cards for one person and silently
-// drop half his materials off whichever card the allocator runs on first.
+// It is kept because it is the correct merge: were the read ever split into
+// several concurrent pages again (a real possibility at large scale), two pages
+// can each carry a block for the same supervisor whose plans landed on
+// different pages. Merging by supervisorId — not concatenation — is what stops
+// that drawing two cards for one person and dropping half his materials off
+// whichever card the allocator runs first. `tools/alloc-paging.test.js` pins it.
 function mergeRequirementPages(target, page) {
     for (var i = 0; i < page.length; i++) {
         var block = page[i];
@@ -5632,95 +5613,29 @@ function mergeRequirementPages(target, page) {
     }
 }
 
-// PARALLEL PAGING. The old flow chained: each getStoreMaterialRequirements call
-// needed the previous call's plansConsumed to know its own skipCount, so a
-// supervisor holding a big backlog meant ~10 sequential round-trips.
-//
-// Now: one cheap getOpenPlanCount() up front, then fire ceil(count / PAGE_PLANS)
-// windows AT ONCE, each with a fixed skipCount it can compute without waiting on
-// anyone. getStoreMaterialRequirements gets a second arg (pagePlans) telling it
-// to process exactly that window and not stop early. Wall time drops from N
-// round-trips to ~2 (count, then all pages in flight together).
-//
-// mergeRequirementPages already reassembles overlapping supervisor blocks, so
-// the render is identical to before — just assembled from parallel responses.
-//
-// FALLBACK: if getOpenPlanCount fails, or returns 0/garbage, fall straight back
-// to the sequential chained walk (loadRequirementsSequential) — the proven path,
-// still there, unchanged.
-var REQ_PAGE_PLANS = 25;
-
 // ---- Load progress bar ----
 //
-// getStoreMaterialRequirements is paged; on a big backlog that is one
-// getOpenPlanCount call plus a handful of page calls. The bar tracks REAL
-// completion:
-//   parallel mode  — total is known (ceil(planCount / REQ_PAGE_PLANS) + 1 for
-//                    the count call); every finished call advances it.
-//   sequential mode — total is unknown, so it runs indeterminate with a live
-//                    "page N" counter.
+// ApiExperiment.run() fetches the whole rack in a handful of getRecords pages
+// and assembles it before returning. The widget cannot see that progress, so
+// the bar runs indeterminate with the sub-line explaining the wait.
 var LoadProgress = {
     el: null,
-    total: 0,
-    done: 0,
 
-    // total 0 => indeterminate.
-    start: function (contentEl, title, total) {
-        this.total = total || 0;
-        this.done = 0;
+    start: function (contentEl, title) {
         contentEl.innerHTML =
-            '<div class="load-progress' + (this.total ? '' : ' is-indeterminate') + '" id="load-progress">' +
+            '<div class="load-progress is-indeterminate" id="load-progress">' +
             '<div class="lp-head">' +
             '<span class="lp-title" id="lp-title"></span>' +
-            '<span class="lp-count" id="lp-count"></span>' +
             '</div>' +
             '<div class="lp-track"><div class="lp-fill" id="lp-fill"></div></div>' +
             '<div class="lp-sub" id="lp-sub">This can take a moment on a large order backlog.</div>' +
             '</div>';
         this.el = document.getElementById('load-progress');
-        this.setTitle(title || 'Loading material requirements…');
-        this._paint();
-    },
-
-    setTitle: function (t) {
         var n = document.getElementById('lp-title');
-        if (n) n.textContent = t;
+        if (n) n.textContent = title || 'Loading material requirements…';
     },
 
-    setSub: function (t) {
-        var n = document.getElementById('lp-sub');
-        if (n) n.textContent = t;
-    },
-
-    // Mark one unit of work complete (one API call returned).
-    tick: function () {
-        this.done++;
-        this._paint();
-    },
-
-    // Sequential mode: just bump a visible page counter, no bar fill.
-    setPage: function (n) {
-        var c = document.getElementById('lp-count');
-        if (c) c.textContent = 'Page ' + n;
-    },
-
-    _paint: function () {
-        var fill = document.getElementById('lp-fill');
-        var count = document.getElementById('lp-count');
-        if (!fill) return;
-        if (this.total > 0) {
-            var pct = Math.min(100, Math.round((this.done / this.total) * 100));
-            fill.style.width = pct + '%';
-            if (count) count.textContent = this.done + ' / ' + this.total;
-        }
-    },
-
-    // Snap to 100% briefly before render() swaps the content out.
     finish: function () {
-        if (this.el && this.total > 0) {
-            var fill = document.getElementById('lp-fill');
-            if (fill) fill.style.width = '100%';
-        }
         this.el = null;
     }
 };
@@ -5731,7 +5646,6 @@ function loadRequirements() {
     var refreshBtn = document.getElementById('refresh-btn');
     emptyState.classList.add('hidden');
     refreshBtn.disabled = true;
-    LoadProgress.start(content, 'Counting open orders…', 0);
 
     function done(merged) {
         console.log('merged requirements:', merged);
@@ -5751,120 +5665,16 @@ function loadRequirements() {
         content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h2>Failed to load requirements</h2><p>Check the browser console for details.</p></div>';
     }
 
-    // ============================ EXPERIMENT ==============================
-    // The custom-API path (getOpenPlanCount + parallel getStoreMaterialRequirements
-    // pages) is COMMENTED OUT below. Requirements are fetched with the Creator JS
-    // Data API instead, via ApiExperiment.run(). This is a temporary swap for
-    // measuring the JS-API approach — restore the block below to go back.
-    //
-    // KNOWN GAP: ApiExperiment does NOT run the fabric allocator, so fabric rows
-    // arrive without wastePicks / freshMeters / the outstanding-pieces split.
-    // The screen will render aggregate required/issued but fabric issue rows
-    // will be incomplete until the allocator is ported too.
-    LoadProgress.start(content, 'Loading requirements (JS Data API)…', 0);
+    // Requirements come from the Creator JS Data API (getRecords), assembled and
+    // allocated client-side by ApiExperiment.run(). There is no custom-function
+    // path any more — getStoreMaterialRequirements is retired.
+    LoadProgress.start(content, 'Loading material requirements…');
     if (typeof ApiExperiment === 'undefined' || !ApiExperiment.run) {
         return fail(new Error('ApiExperiment not loaded — check js/api-experiment.js'));
     }
     ApiExperiment.run().then(function (out) {
         done(out.plans || []);
     }).catch(fail);
-    return;
-    // ====================================================================
-
-    /* CUSTOM-API PATH — restore to revert the experiment.
-    ZOHO.CREATOR.DATA.invokeCustomApi({
-        api_name: 'getOpenPlanCount',
-        http_method: 'POST',
-        payload: {}
-    }).then(function (response) {
-        var count = 0;
-        try { count = (JSON.parse(response.result) || {}).count || 0; } catch (e) { count = 0; }
-
-        if (!count || count < 0) {
-            LoadProgress.setTitle('Loading material requirements…');
-            return loadRequirementsSequential(content, done, fail);
-        }
-
-        var pages = Math.ceil(count / REQ_PAGE_PLANS);
-        var merged = [];
-        var pending = pages;
-        var failed = false;
-
-        LoadProgress.start(content, 'Loading ' + count + ' order' + (count === 1 ? '' : 's') + '…', pages + 1);
-        LoadProgress.tick();
-        LoadProgress.setSub(pages === 1
-            ? 'One page to fetch.'
-            : pages + ' pages to fetch, in parallel.');
-
-        for (var p = 0; p < pages; p++) {
-            (function (skip) {
-                ZOHO.CREATOR.DATA.invokeCustomApi({
-                    api_name: 'getStoreMaterialRequirements',
-                    http_method: 'POST',
-                    payload: {
-                        skipCountTxt: String(skip),
-                        pagePlansTxt: String(REQ_PAGE_PLANS)
-                    }
-                }).then(function (resp) {
-                    if (failed) return;
-                    var parsed = JSON.parse(resp.result);
-                    mergeRequirementPages(merged, parsed.plans || []);
-                    LoadProgress.tick();
-                    pending--;
-                    if (pending === 0) done(merged);
-                }).catch(function (err) {
-                    if (failed) return;
-                    failed = true;
-                    console.warn('parallel page at skip ' + skip + ' failed, falling back to sequential', err);
-                    LoadProgress.start(content, 'Loading material requirements…', 0);
-                    loadRequirementsSequential(content, done, fail);
-                });
-            })(p * REQ_PAGE_PLANS);
-        }
-    }).catch(function (err) {
-        console.warn('getOpenPlanCount failed, falling back to sequential paging', err);
-        LoadProgress.start(content, 'Loading material requirements…', 0);
-        loadRequirementsSequential(content, done, fail);
-    });
-    */
-}
-
-// THE ORIGINAL CHAINED WALK, kept as the fallback path. Each call's cursor is
-// the previous call's skipCount + plansConsumed; plansConsumed === 0 ends it.
-// Slower (sequential) but proven.
-//
-// pagePlansTxt is sent as "" — Creator Custom API arguments are all MANDATORY
-// (no optional args), so every call must pass it; the empty string is what puts
-// getStoreMaterialRequirements into its legacy chained mode.
-function loadRequirementsSequential(content, done, fail) {
-    var merged = [];
-    var MAX_CALLS = 40; // safety cap - real stop is plansConsumed===0; this only guards a server bug looping forever
-
-    function fetchPage(skipCount, callsSoFar) {
-        if (callsSoFar >= MAX_CALLS) {
-            console.error('loadRequirements: hit MAX_CALLS safety cap, stopping - server may not be advancing plansConsumed correctly');
-            return;
-        }
-        LoadProgress.setPage(callsSoFar + 1);
-        return ZOHO.CREATOR.DATA.invokeCustomApi({
-            api_name: 'getStoreMaterialRequirements',
-            http_method: 'POST',
-            payload: {
-                skipCountTxt: String(skipCount),
-                pagePlansTxt: ''
-            }
-        }).then(function (response) {
-            var parsed = JSON.parse(response.result);
-            mergeRequirementPages(merged, parsed.plans || []);
-
-            var consumed = parsed.plansConsumed || 0;
-            if (consumed > 0) {
-                return fetchPage(skipCount + consumed, callsSoFar + 1);
-            }
-        });
-    }
-
-    fetchPage(0, 0).then(function () { done(merged); }).catch(fail);
 }
 
 // ---- Tabs ----

@@ -1,5 +1,25 @@
 string receiveMaterials(string supervisorId, string receiptsJson)
 {
+	// ============================================================================
+	// RETIRED - DELETED FROM CREATOR (Custom API + function both removed).
+	//
+	// The receive flow was split in two and the widget now calls those directly:
+	//   receiveHandover  - settles every voucher's material x lot Issue_Lines +
+	//                      waste + printed, drains stock, returns perMaterial
+	//   receiveFanOut    - fans to Material_Requirement, disputes, readiness,
+	//                      warehouse transfer, notify (phased, resumable)
+	// See app/supervisor/js/receive.js submitReceipt(). There is NO fallback and
+	// no USE_SPLIT_RECEIVE flag any more.
+	//
+	// This file is kept in the repo ONLY as the reference implementation the two
+	// split functions were carved from, and the frozen source a few tests read
+	// (raw-quantity, receive-print, waste-return). Do not re-deploy it.
+	//
+	// NOTE resolveDispute.dg comments reference "receiveMaterials.dg:979" as the
+	// model for the Issue_Lines wind-back - comments only, still a valid pointer
+	// into this frozen file.
+	// ============================================================================
+
 	// Supervisor confirms what he physically received.
 	//
 	// SWEEP APPLIER. The widget no longer sends per-line settlements. At

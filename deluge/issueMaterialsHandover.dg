@@ -235,10 +235,10 @@ string issueMaterialsHandover(string supervisorId, string handoverJson)
 				liRow.Cut_Size_Width=cwS.toDecimal();
 				liRow.Cut_Size_Length=clS.toDecimal();
 				// Nothing received or settled yet. Started at real 0 so
-				// receiveMaterials / postTransferOrders read a number, not the
-				// EMPTY a Creator numeric otherwise holds.
+				// receiveHandover / receiveFanOut / postTransferOrders read a
+				// number, not the EMPTY a Creator numeric otherwise holds.
+				// (Received_Pieces was here too - retired, field deleted, no reader.)
 				liRow.Received_Qty=0;
-				liRow.Received_Pieces=0;
 				liRow.Disputed_Qty=0;
 				liRow.Settled_Qty=0;
 				liRow.Fanned_Qty=0;

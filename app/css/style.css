@@ -1672,6 +1672,9 @@ th.col-num {
     overflow-x: auto;
 }
 
+.tab-btn[hidden] {
+    display: none !important;
+}
 .tab-btn {
     display: inline-flex;
     align-items: center;

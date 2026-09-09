@@ -40,20 +40,19 @@ Nothing here runs until pasted into Creator. `.dg` = paste + Save. Widget = zip 
 - Comments at lines ~5045-5060, 5088, 5099-5101 describe the legacy per-chunk-voucher model —
   rewrite to describe only the apply+handover model.
 
-### A2. `app/supervisor/js/receive.js` — receive path
+### A2. `app/supervisor/js/receive.js` — receive path — **DONE**
 
-- Delete `var USE_SPLIT_RECEIVE = true;` (line ~1002).
-- Delete `function sweepStep()` (lines ~1113-1138), `function finalizeStep()` (~1140-1161),
-  `function post()` (~952-995) — all legacy `receiveMaterials`-only.
-- `scheduleRetry` (line ~1094): drop the `if (USE_SPLIT_RECEIVE) { ... } else { ... }`, keep
-  only `resume = stage === 'sweep' ? handoverStep : fanStep;`.
-- Bottom of `submitReceipt` (line ~1226): `if (USE_SPLIT_RECEIVE) { handoverStep(); } else
-  { sweepStep(); }` → just `handoverStep();`.
-- Dead locals now: `sweepCursor`, `firstSweep`, `sweepN`, `finalizeN` (only `finalizeN` is
-  still read by `fanStep`? check — `fanStep` uses `finalizeN++`, keep that one). Remove
-  `sweepCursor`, `firstSweep`, `sweepN`.
-- Comments at lines ~793-800, 997-1001, 1181-1184 mention the legacy sweep/finalize — rewrite.
-- `isRateLimited` / the DELUGE-error handling in `splitInvoke` stays (still needed).
+- Deleted `var USE_SPLIT_RECEIVE = true;`.
+- Deleted `function sweepStep()`, `function finalizeStep()`, `function post()` — all legacy
+  `receiveMaterials`-only.
+- `scheduleRetry`: `if (USE_SPLIT_RECEIVE) {...} else {...}` → `var resume = stage === 'sweep'
+  ? handoverStep : fanStep;`.
+- End of `submitReceipt`: `if (USE_SPLIT_RECEIVE) {...} else {...}` → `handoverStep();`.
+- Removed dead locals `sweepCursor`, `firstSweep`, `sweepN`. `finalizeN` kept (`fanStep` uses it).
+- Comments rewritten (Submit header, RECEIVE PATH block, drainTransferOrders); console strings
+  `'receiveMaterials rate-limited'`/`'receiveMaterials aborted'` → `'receive …'`.
+- `isRateLimited` / the DELUGE-error handling in `splitInvoke` kept (still needed).
+- `node --check` clean; full test sweep green.
 
 ### A3. verify
 
@@ -68,19 +67,27 @@ Nothing here runs until pasted into Creator. `.dg` = paste + Save. Widget = zip 
 
 Once PART A ships and is confirmed working in production:
 
-### B1. `deluge/issueMaterials.dg` — DELETE
+### B1. `deluge/issueMaterials.dg` — **DONE (Creator side)**, file kept
 
-- No `thisapp.issueMaterials(` cross-call anywhere (verified).
-- Only caller was `main.js` `ISSUE_API` — removed in A1.
-- **Creator:** delete the Custom API `issueMaterials` and the function.
+- No `thisapp.issueMaterials(` cross-call anywhere (verified). No `USE_SPLIT_ISSUE`
+  flag any more, no `api_name: 'issueMaterials'` call — the widget calls
+  `issueMaterialsHandover` + `issueMaterialsApply` directly.
+- **Creator: DELETED** — Custom API `issueMaterials` and the function removed.
+- **Repo: the `.dg` file is KEPT**, with a "RETIRED — deleted from Creator" header.
+  Four tests (`print-cut`, `raw-quantity`, `receive-print`, `waste-return`) read it
+  as the frozen reference of the old single-function behaviour — still valid intent,
+  no test changes needed as long as the file stays.
 
-### B2. `deluge/receiveMaterials.dg` — DELETE
+### B2. `deluge/receiveMaterials.dg` — **DONE (Creator side)**, file kept
 
-- No `thisapp.receiveMaterials(` cross-call (verified).
-- Only caller was `receive.js` `post()` — removed in A2.
-- **Creator:** delete the Custom API `receiveMaterials` and the function.
-- NOTE `resolveDispute.dg` has *comments* referencing `receiveMaterials.dg:979` as the model
-  for the Issue_Lines wind-back — comments only, no call. Leave or update the comment.
+- No `thisapp.receiveMaterials(` cross-call (verified). `post()` removed in A2 — the widget
+  calls `receiveHandover` + `receiveFanOut` only.
+- **Creator: DELETED** — Custom API `receiveMaterials` and the function removed.
+- **Repo: the `.dg` file is KEPT**, with a "RETIRED — deleted from Creator" header.
+  `resolveDispute.dg` comments still point at `receiveMaterials.dg:979` for the Issue_Lines
+  wind-back model — a valid pointer into this frozen file.
+- Three tests (`raw-quantity`, `receive-print`, `waste-return`) read it as the frozen
+  reference — no test changes needed as long as the file stays.
 
 ### B3. `deluge/createProductionPlans.dg` — already parked unused (per CLAUDE.md), leave as-is
    unless you want it gone too — it's the pre-batch-workflow plan builder. Separate decision.
@@ -93,11 +100,11 @@ Once PART A ships and is confirmed working in production:
 
 | Field | Action |
 |---|---|
-| `Waste Piece` | delete in Creator. No code touches it. |
+| `Waste Piece` | delete in Creator. No code touches it. Every `Waste_Piece` hit is `Waste_Movement`/`Stock_Dispute`. |
 | `Piece Count` (subform) | delete in Creator. No code touches it. `Piece_Count` on Waste_Master/Movement is unrelated. |
 | `Plan` (subform) | delete in Creator. Never written to the subform. Parent `Material_Issue.Plan` stays. |
-| `Received Pieces` | 1 code edit then delete: remove `liRow.Received_Pieces=0;` from
-  `issueMaterialsHandover.dg:241`, redeploy that `.dg`, then delete the field. |
+| `Requirement` | delete in Creator. **No live reader** — `getSupervisorMaterials` is retired; the one `dl.Requirement` hit is `Damage_Lines`. |
+| `Received Pieces` | **`liRow.Received_Pieces=0;` REMOVED from `issueMaterialsHandover.dg`** (only a comment mentions it now). Re-paste that `.dg`, then delete the field in Creator. |
 
 ### C2. Legacy fields — delete AFTER Part B (they only matter for pre-migration vouchers)
 

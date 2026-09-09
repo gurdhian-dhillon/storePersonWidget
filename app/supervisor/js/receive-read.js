@@ -549,9 +549,10 @@ var ReceiveRead = (function () {
                 planId: planId,
                 planNo: pi.planNo,
                 salesOrder: pi.salesOrder,
-                _wastePieceId: wpId,   // resolved to materialId/material after the extra fetch
+                _wastePieceId: wpId,   // resolved to materialId/material/lot after the extra fetch
                 materialId: '',
                 material: '',
+                lot: '',               // set from Waste_Master.Lot in resolveWastePieceMaterials
                 width: num(wi.Piece_Width),
                 length: num(wi.Piece_Length),
                 pending: pend,
@@ -612,24 +613,38 @@ var ReceiveRead = (function () {
             plansAwaiting: Math.max(0, Object.keys(plansAssignedSet).length - Object.keys(planFedSet).length),
             errors: [],
             _wastePieceIds: wasteOut.map(function (w) { return w._wastePieceId; })
-                .filter(function (x, i, a) { return x && a.indexOf(x) === i; })
+                .filter(function (x, i, a) { return x && a.indexOf(x) === i; }),
+            // The Waste_Movement carries no lot; the second fetch reads
+            // Waste_Master.Lot per piece and resolves it through this map.
+            _lotNumById: lotNumById
         };
         return resolveWastePieceMaterials(out);
     }
 
-    // Second, tiny fetch: waste-piece id -> its Raw_Material (SKU) + name. Only
-    // the pieces actually on his still-owed Issued movements.
+    // Second, tiny fetch: waste-piece id -> its Raw_Material (SKU) + name + LOT.
+    // Only the pieces actually on his still-owed Issued movements. The
+    // Waste_Movement carries no lot, so the lot number comes from
+    // Waste_Master.Lot here.
     function resolveWastePieceMaterials(out) {
         var ids = out._wastePieceIds || [];
+        var lotNumById = out._lotNumById || {};
         delete out._wastePieceIds;
+        delete out._lotNumById;
         if (!ids.length || !have()) {
             return Promise.resolve(out);
         }
         var crit = ids.map(function (i) { return 'ID == ' + i; }).join(' || ');
         return getAll(RPT.wastePieces, crit).then(function (wps) {
             var skuByWp = {};
+            var lotByWp = {};
             (wps || []).forEach(function (w) {
                 skuByWp[String(w.ID)] = lookupId(w.SKU);
+                var lId = lookupId(w.Lot);
+                var lNum = lId ? lotNumById[lId] : '';
+                if (!lNum && w.Lot && typeof w.Lot === 'object') {
+                    lNum = flat(w.Lot.zc_display_value || w.Lot.Lot_Number || '');
+                }
+                lotByWp[String(w.ID)] = lNum || '';
             });
             var wantMats = {};
             Object.keys(skuByWp).forEach(function (k) { if (skuByWp[k]) wantMats[skuByWp[k]] = 1; });
@@ -649,6 +664,7 @@ var ReceiveRead = (function () {
                     var sku = skuByWp[w._wastePieceId] || '';
                     w.materialId = sku;
                     w.material = flat(nameById[sku] || '');
+                    w.lot = lotByWp[w._wastePieceId] || '';
                     delete w._wastePieceId;
                 });
                 return out;

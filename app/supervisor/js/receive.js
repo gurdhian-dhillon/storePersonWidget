@@ -415,7 +415,7 @@ function renderWasteRow(w, i) {
                     ' &middot; cut into ' + fmt(w.cutLength) + '&times;' + fmt(w.cutWidth) +
                     ' cm &middot; yields ' + w.yields + ' pcs</div>' +
             '</td>' +
-            '<td class="col-lot">-</td>' +
+            '<td class="col-lot">' + (w.lot ? escapeHtml(w.lot) : '-') + '</td>' +
             '<td class="col-num col-strong">' +
                 '<span class="qty-big">' + w.pending + '<span class="unit">pcs</span></span>' +
                 '<div class="qty-sub">' + fmt(w.length) + ' &times; ' + fmt(w.width) + ' cm</div>' +
@@ -794,10 +794,12 @@ function updateShortSummary() {
 //
 // The widget no longer distributes settlements per line. It names the vouchers
 // it is confirming and, only for a material he marked short, how much arrived.
-// receiveMaterials walks each voucher's Issue_Lines itself, in budgeted
-// resumable SWEEP slices, then a phased FINALIZE (voucher status -> readiness
-// sweep -> warehouse transfer -> dispute digest). Two loops here, one cursor
-// each, mirroring that.
+//
+// TWO SERVER CALLS: receiveHandover settles every voucher's material×lot
+// Issue_Lines + waste + printed and drains stock in one execution; then
+// receiveFanOut loops through a phased finalize (fan to Material_Requirement ->
+// voucher status -> readiness -> warehouse transfer -> dispute digest), each
+// pass resuming from finalizeCursor until finalizeDone.
 
 function submitReceipt() {
     var data = window.__data;
@@ -884,9 +886,6 @@ function submitReceipt() {
     var collectedErrors = [];
     var disputeIds = {};
 
-    var sweepCursor = {};
-    var firstSweep = true;
-    var sweepN = 0;
     var finalizeN = 0;
     var finalizeCursor = {};
     var stage = 'sweep';
@@ -949,57 +948,12 @@ function submitReceipt() {
             msg.indexOf('limit exceeded') >= 0;
     }
 
-    function post(receiptsJson, onOk) {
-        // Cursors go over as JSON STRINGS, not nested objects - the Deluge side
-        // reads them with .toString().toMap(), and a hand-built Deluge Map's
-        // toString() is not valid JSON, so never make the server round-trip one.
-        if (receiptsJson.sweepCursor !== undefined) receiptsJson.sweepCursor = JSON.stringify(receiptsJson.sweepCursor || {});
-        if (receiptsJson.finalizeCursor !== undefined) receiptsJson.finalizeCursor = JSON.stringify(receiptsJson.finalizeCursor || {});
-        ZOHO.CREATOR.DATA.invokeCustomApi({
-            api_name: 'receiveMaterials',
-            http_method: 'POST',
-            payload: { supervisorId: supId, receiptsJson: JSON.stringify(receiptsJson) }
-        }).then(function (response) {
-            var parsed;
-            try { parsed = JSON.parse(response.result); } catch (e) { parsed = null; }
-            if (parsed && parsed.errors && parsed.errors.length > 0) {
-                // ONLY A THROWN EXCEPTION CAN BE A THROTTLE, and only those are
-                // tested. errors[] on this path carries two very different
-                // things: "DELUGE: <message>" from the outer catch (a real
-                // failure, and the only shape a Zoho throttle arrives in), and
-                // per-row NOTICES the receipt is supposed to produce — "Waste
-                // piece 40x80: 2 of 5 not received - dispute raised", "Printed
-                // piece <id> not found". Those are permanent by construction:
-                // replaying the call cannot change them, and the dispute ones
-                // are the normal outcome of a short receipt, not a fault at all.
-                //
-                // Scanning them for throttle codes turned an ordinary partial
-                // receipt into a retry loop whenever a dimension, a quantity or
-                // a record id happened to contain 429 — five replays over ~2
-                // minutes, then an abort, with the fan-out never running.
-                if (parsed.errors.some(function (e) {
-                    var t = String(e || '');
-                    return t.indexOf('DELUGE:') === 0 && isRateLimited({ message: t });
-                })) {
-                    scheduleRetry({ message: parsed.errors.join(' ') });
-                    return;
-                }
-                collectedErrors = collectedErrors.concat(parsed.errors);
-            }
-            retryCount = 0;
-            onOk(parsed || {});
-        }).catch(function (err) {
-            if (isRateLimited(err)) { scheduleRetry(err); return; }
-            abortRun(err);
-        });
-    }
-
-    // ---- SPLIT RECEIVE PATH ----
+    // ---- RECEIVE PATH ----
     // receiveHandover (one call — settle the material×lot Issue_Lines + waste +
     // printed, drain stock, return perMaterial {arrived,short}) then loop
     // receiveFanOut (fan to Material_Requirement, dispute, readiness, transfer,
-    // notify). The legacy receiveMaterials sweep/finalize below is the fallback.
-    var USE_SPLIT_RECEIVE = true;
+    // notify). The single-function receiveMaterials this replaced is RETIRED
+    // (deleted from Creator) — there is no fallback.
     var perMaterial = [];
 
     function splitInvoke(apiName, payloadObj, onOk) {
@@ -1037,6 +991,8 @@ function submitReceipt() {
             retryCount = 0;
             onOk(parsed || {});
         }).catch(function (err) {
+            console.error('splitInvoke ' + apiName + ' failed', err,
+                '\npayload was:', payloadObj);
             if (isRateLimited(err)) { scheduleRetry(err); return; }
             abortRun(err);
         });
@@ -1086,78 +1042,23 @@ function submitReceipt() {
         if (retryCount >= RETRY_WAITS_MS.length) { abortRun(err); return; }
         var waitMs = RETRY_WAITS_MS[retryCount];
         retryCount++;
-        console.warn('receiveMaterials rate-limited; retry ' + retryCount + '/' +
+        console.warn('receive rate-limited; retry ' + retryCount + '/' +
             RETRY_WAITS_MS.length + ' in ' + waitMs + 'ms');
         btn.textContent = 'Rate limited — retrying…';
         showRcvProgress(stage === 'sweep' ? 'Receiving materials' : 'Finishing',
             'Store is busy — retrying in ' + Math.round(waitMs / 1000) + 's…');
-        var resume;
-        if (USE_SPLIT_RECEIVE) {
-            resume = stage === 'sweep' ? handoverStep : fanStep;
-        } else {
-            resume = stage === 'sweep' ? sweepStep : finalizeStep;
-        }
+        var resume = stage === 'sweep' ? handoverStep : fanStep;
         setTimeout(resume, waitMs);
     }
 
     function abortRun(err) {
-        console.error('receiveMaterials aborted', err);
+        console.error('receive aborted', err);
         closeRcvProgress();
         alert(stage === 'finalize'
             ? 'Receipt recorded. The status update did not finish — press Confirm again to complete it.'
             : 'Receipt saved so far. Press Confirm again to finish — it picks up where it stopped.');
         btn.disabled = false;
         btn.textContent = EDIT ? 'Confirm' : 'All received as listed';
-    }
-
-    function sweepStep() {
-        stage = 'sweep';
-        sweepN++;
-        btn.textContent = 'Saving…';
-        showRcvProgress('Receiving materials',
-            sweepN === 1 ? 'Confirming your handover…' : 'Batch ' + sweepN + '…');
-        var payload = {
-            vouchers: vouchers,
-            shortMaterials: shortMaterials,
-            waste: firstSweep ? wasteRows : [],
-            printedPieces: firstSweep ? printedRows : [],
-            sweepCursor: sweepCursor,
-            finalize: false
-        };
-        firstSweep = false;
-        post(payload, function (parsed) {
-            (parsed.disputeIds || []).forEach(function (d) { disputeIds[String(d)] = 1; });
-            if (parsed.sweepDone === true || !parsed.sweepCursor) {
-                finalizeCursor = {};
-                finalizeStep();
-            } else {
-                sweepCursor = parsed.sweepCursor;
-                setTimeout(sweepStep, 250);
-            }
-        });
-    }
-
-    function finalizeStep() {
-        stage = 'finalize';
-        finalizeN++;
-        btn.textContent = 'Finishing…';
-        var ph = (finalizeCursor && finalizeCursor.ph) || '';
-        showRcvProgress('Finishing', FINALIZE_PHASE_LABEL[ph] || 'Finishing up…');
-        var payload = {
-            vouchers: vouchers,
-            plansTouched: plansTouchedArr,
-            disputeIds: Object.keys(disputeIds),
-            finalize: true,
-            finalizeCursor: finalizeCursor
-        };
-        post(payload, function (parsed) {
-            if (parsed.finalizeDone === true) {
-                finishOk();
-            } else {
-                finalizeCursor = parsed.finalizeCursor || {};
-                setTimeout(finalizeStep, 250);
-            }
-        });
     }
 
     function finishOk() {
@@ -1178,10 +1079,10 @@ function submitReceipt() {
             console.warn('inventory drain failed, scheduled run will retry:', drainErr);
         });
 
-        // receiveMaterials already ran postTransferOrders('auto') once (finalize
-        // transfer phase), but that posts at most maxOrders per execution and a
-        // receipt can span many SIV vouchers. Keep draining until nothing is
-        // left waiting or no progress is made. Not awaited by the UI.
+        // receiveFanOut already ran postTransferOrders('auto') once (its transfer
+        // phase), but that posts at most maxOrders per execution and a receipt
+        // can span many SIV vouchers. Keep draining until nothing is left
+        // waiting or no progress is made. Not awaited by the UI.
         drainTransferOrders(0);
 
         EDIT = false;
@@ -1223,11 +1124,7 @@ function submitReceipt() {
         });
     }
 
-    if (USE_SPLIT_RECEIVE) {
-        handoverStep();
-    } else {
-        sweepStep();
-    }
+    handoverStep();
 }
 
 // ---- Load ----

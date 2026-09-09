@@ -337,6 +337,10 @@ test('waste: Issued movement minus Received children', async () => {
   assert.strictEqual(out.waste[0].rowId, 'W1');
   assert.strictEqual(out.waste[0].pending, 3);
   assert.strictEqual(out.waste[0].width, 300);
+  // The lot field always exists on a waste row (filled from Waste_Master.Lot by
+  // the follow-up fetch; '' in Node where that fetch is skipped). The bug this
+  // guards: the row shape had no `lot` at all and the screen hardcoded "-".
+  assert.strictEqual(out.waste[0].lot, '');
 });
 
 test('waste fully received -> not listed', async () => {
