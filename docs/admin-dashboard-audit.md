@@ -18,7 +18,7 @@ code and the Creator forms before acting — this is a point-in-time snapshot.
 
 | # | Item | State |
 |---|---|---|
-| 1 | `getSalesOrderProgress` statement limit | ✅ **rebuilt** on the JS Data API (`app/admin/anotherPage/js/pipeline-data.js`). The `.dg` is left in the repo unused. 50 tests. |
+| 1 | `getSalesOrderProgress` statement limit | ✅ **rebuilt** on the JS Data API (`app/admin/anotherPage/js/pipeline-data.js`). The `.dg` is left in the repo unused. 55 tests. |
 | 2 | `getRawMaterialsList` scans every lot | ✅ **bounded** to lots holding stock |
 | 3 | Wrong customer form (blank names) | ✅ **fixed** — `Customer_Master` / `Display_Name` |
 | 4 | Three orphan scripts | ✅ **deleted from the repo** — still to delete in Creator |
@@ -34,6 +34,84 @@ object wholesale and rescued only two of its four properties, so `pipelineError`
 and `progressError` were silently dropped every time the employee-report day
 changed — a failed pipeline lost its explanation and showed an empty state with
 nothing saying why.
+
+**2026-09-09 — pipeline search + "needs attention" now cover EVERY order, not
+the 25 on screen.** `PipelineData.page()` used to fetch all orders of a status,
+then **slice to 25 and enrich only that slice** — so `order.blocked` /
+`daysSinceMovement` (the join-derived risk inputs) existed for 25 orders, the
+risk chips honestly read "on this page", and item-name search only matched the
+loaded page. Now it enriches the **whole bucket** in one pass (still one
+`getRecords` per form, `fetchByIds` chunks the id list; no statement limit on the
+JS API — that is why it left Deluge), returns `{orders, total, notes}` with no
+`page`/`totalPages`, and **main.js** owns display paging as a client-side redraw
+(`goToPipelinePage`, no refetch), search (`matchesOrderQuery` over the full
+`DATA.progressOrders`), and the risk-chip filter — so the table, the counts and
+the pager cannot disagree about what is listed. Risk bar scope text: "on this
+page" → "across all N". `tools/admin-pipeline.test.js` +5 (55).
+
+**2026-09-09 — "due within 3 days" risk chip removed.** It fired on every
+healthy order in its last few days and trained the admin to ignore the bar.
+`risk()` now flags OVERDUE only (`level: 'late'`); the Due column still shows the
+date + a plain "in Nd" / "Nd late" note, just without the amber "due soon"
+styling. `worstRisk` rank map loses `due`.
+
+**2026-09-09 — item-level breakdown rebuilt around PRODUCTION FLOWS.** Two
+problems: (a) `enrich()` emitted a thin flat item list so every column rendered
+0; (b) more fundamentally, one product name can be at several stages **at once**
+— its order line through checking while a check-remake batch is at Stitching and
+a production-loss batch is at Cutting — and a single row with one stage pill
+cannot say that. And there was no "production loss" concept at all.
+
+`enrich()` now builds `o.items[]` as one **parent per product name**, each with
+`flows[]` — one entry per `Plan_Item` row, tagged `flowType`:
+- `original` — the ordered line
+- `check_remake` — pieces the checker rejected (`Remake_Reason == "Check_Reject"`)
+- `production_loss` — pieces a stage lost, auto-remade by `coverProductionLoss`
+  (`Remake_Reason == "Production_Loss"`); the order cannot complete without this
+  or a deliberate short-close
+- `alteration` — garments sent back to fix a stage
+
+Each flow carries its OWN `stage` / `stageStatus` (from a new
+`stageByPlan[pid].byItem[itemId]` map, highest `Sequence_No` wins),
+`awaitingMaterial`, and quantities. Parent headline numbers come from the
+`original` flow only (batches never double-count the order). `Qty_Accepted` /
+`Qty_Rejected` read off `Plan_Item`, `Qty_Alteration` off `Item_Check`.
+
+`renderItemDrawer` — kept deliberately lean after review ("too overwhelming"):
+- **No stage-filter chips** — the table always shows every line and its flows.
+- **Parent row = the ORDER LINE** (its own ordered/produced/accepted/rejected),
+  with the item **SKU** beside the name and the original flow's stage pill.
+- **Child rows = the BATCHES only** (remake / loss / alteration) — the order
+  line is already the parent, so it gets no child row. Each child shows its own
+  quantity + stage pill; a `production_loss` child is "Lost in production" with
+  an amber inset on the parent name cell.
+- Toggle is the **production-tab chevron** (right-pointing, rotates 90°), not a
+  `+`/`−` glyph. Rows open by default.
+- A **short-closed** order (`order.shortClosed` / `shortCloseReason`, already on
+  the enriched order) shows a banner; its loss flows read "Order short-closed —
+  not remade".
+- The **collapsed sales-order row** no longer carries remake / alteration / loss
+  pills — that detail lives in the breakdown; the row keeps only the risk flag,
+  due date, supervisor and progress.
+
+Production loss itself needs **no handling** in the dashboard — the app already
+guarantees it (`coverProductionLoss`, automatic, undeclinable; `Short_Closed`
+the only way past). The dashboard's job was to *show* it, which it now does.
+
+`tools/admin-pipeline.test.js` +flows assertions (72);
+`tools/admin-item-drawer.test.js` rewritten for flows (25).
+
+**2026-09-09 — pipeline widget restyled to the shared design system.**
+`app/admin/anotherPage/` loaded a **stale copy** of the Order Audit stylesheet
+as `css/base.css` — from before that sheet was fixed on 2026-09-08 — so it kept
+`font-family: 'Inter', system-ui, …`, `font-size: 14px` on `body` (which shrank
+every `rem` in `report.css`, all written against a 16px root with `/* 14px */`
+comments), and no `-webkit-font-smoothing`. `base.css` is **deleted**;
+`widget.html` now loads `../css/style.css` directly (the current Order Audit
+sheet), exactly as `report.css`'s own header comment always said it should — so
+the two admin screens genuinely cannot drift again. `report.css` gains a
+`.report-tabs` re-skin (rounded, tinted active tab) to match the supervisor /
+store tab strip.
 
 **`rm.Name` (#2's sub-point) was investigated and left alone:** it appears 13
 times across the repo, so it is an established field, not a typo here.

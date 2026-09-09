@@ -5,11 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Production & Stock Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <!-- The shared design system, not a copy of it. Tokens, header, tables,
-         pills, chevrons and empty states all come from the audit page's
-         stylesheet so the two admin screens cannot drift apart. Only what is
-         specific to this report lives in report.css. -->
-    <link rel="stylesheet" href="css/base.css">
+    <!-- The shared design system, not a copy of it. Tokens, Inter, the 16px
+         type scale, header, tables, pills, chevrons, item-cards and empty states
+         all come from the ORDER AUDIT widget's own stylesheet - loaded directly,
+         not copied - so the two admin screens genuinely cannot drift apart (a
+         copy called base.css did drift, and was deleted). Only what is specific
+         to this report lives in report.css. -->
+    <link rel="stylesheet" href="../css/style.css">
     <link rel="stylesheet" href="css/report.css">
 </head>
 <body>

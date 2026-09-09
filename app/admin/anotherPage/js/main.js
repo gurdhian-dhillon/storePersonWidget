@@ -23,9 +23,8 @@
 var DATA = null;
 var PIPELINE_STATUS = 'In Production';
 var IN_PRODUCTION_SUB_FILTER = 'All';
-var OPEN_ITEM_DRAWERS = {};
-var DRAWER_STAGE_FILTERS = {};
-var OPEN_ITEM_BATCH_DRAWERS = {};
+var OPEN_ITEM_DRAWERS = {};       // which sales-order rows have the breakdown open
+var OPEN_ITEM_BATCH_DRAWERS = {}; // which item rows have their flow children collapsed (=== false)
 var PIPELINE_PAGE = 1;
 var PIPELINE_TOTAL_PAGES = 1;
 var PIPELINE_PAGE_SIZE = 25;
@@ -41,7 +40,7 @@ var PROD_SEARCH_TERM = '';
 var PIPELINE_SORT = 'urgency';
 
 // The risk filter, when one of the risk chips is clicked: '', 'late', 'blocked',
-// 'stuck', 'due'. Narrows the current status bucket rather than replacing it,
+// 'stuck'. Narrows the current status bucket rather than replacing it,
 // so "In Production AND late" is one click from "In Production".
 var PIPELINE_RISK = '';
 var PENDING_SEARCH_TERM = '';
@@ -260,15 +259,10 @@ function getOrderMatchingItems(order, query) {
     addIfMatches(order.itemName);
     addIfMatches(order.firstItemName);
 
+    // Each item is a parent group; its flows all carry the same product name,
+    // so the parent name covers them.
     if (Array.isArray(order.items)) {
-        order.items.forEach(function (it) {
-            addIfMatches(it.itemName || it.name);
-            if (Array.isArray(it.batches)) {
-                it.batches.forEach(function (b) {
-                    addIfMatches(b.itemName);
-                });
-            }
-        });
+        order.items.forEach(function (it) { addIfMatches(it.itemName || it.name); });
     }
     return matched;
 }
@@ -302,18 +296,12 @@ function matchesOrderQuery(order, query, isPending) {
     var mainItem = String(order.itemName || order.firstItemName || '').toLowerCase();
     if (mainItem.indexOf(q) !== -1) return true;
 
-    // Check each item in order.items
+    // Check each item in order.items (parent groups; flows share the name)
     if (Array.isArray(order.items)) {
         for (var j = 0; j < order.items.length; j++) {
             var item = order.items[j];
             var itName = String(item.itemName || item.name || '').toLowerCase();
             if (itName && itName.indexOf(q) !== -1) return true;
-            if (Array.isArray(item.batches)) {
-                for (var k = 0; k < item.batches.length; k++) {
-                    var bName = String(item.batches[k].itemName || '').toLowerCase();
-                    if (bName && bName.indexOf(q) !== -1) return true;
-                }
-            }
         }
     }
 
@@ -452,7 +440,7 @@ function renderItemProgressBar(order) {
     if (prodComp > 0) badges.push('<span class="pill pill-qc">' + prodComp + ' QC Queue</span>');
     if (qcPass > 0) badges.push('<span class="pill pill-done">' + qcPass + ' Checking Passed</span>');
     if (finComp > 0) badges.push('<span class="pill pill-ok">' + finComp + ' Finishing Complete</span>');
-    if (alt > 0) badges.push('<span class="pill pill-running" style="background:#f3e8ff; color:#6b21a8; font-weight:600;">' + alt + ' Altered</span>');
+    if (alt > 0) badges.push('<span class="pill pill-alt">' + alt + ' Altered</span>');
     if (rej > 0) badges.push('<span class="pill pill-remake">' + rej + ' Rejected / Remake</span>');
 
     if (!badges.length) return '<span class="muted">No stage data</span>';
@@ -460,230 +448,161 @@ function renderItemProgressBar(order) {
     return '<div class="item-legend" style="gap:4px; flex-wrap:wrap;">' + badges.join('') + '</div>';
 }
 
+// ---- item-level breakdown, behind the "Inspect Items" toggle ----
+//
+// ONE PRODUCT NAME CAN BE AT SEVERAL STAGES AT ONCE. Its own pieces might be
+// through checking while a check-remake batch is back at Stitching and a
+// production-loss batch is at Cutting. So each `order.items[]` entry is a PARENT
+// (the order line) carrying `flows[]` — one per Plan_Item row:
+//
+//   original         the ordered line itself
+//   check_remake     pieces the checker rejected, being made again
+//   production_loss  pieces a stage lost, automatically being made again
+//                    (coverProductionLoss — the order cannot complete without
+//                    this or a deliberate short-close)
+//   alteration       garments sent back to fix a stage
+//
+// The parent row is a summary; each flow is a child row with its OWN stage.
+// The drawer does no arithmetic — every number comes off pipeline-data.js.
+
+var FLOW_META = {
+    original:        { label: 'Order line',         cls: '' },
+    check_remake:    { label: 'Remake (rejected)',  cls: 'flow-remake' },
+    production_loss: { label: 'Lost in production', cls: 'flow-loss' },
+    alteration:      { label: 'Alteration',         cls: 'flow-alt' }
+};
+
+var DRAWER_CHEVRON =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" ' +
+    'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>';
+
+// The stage pill for one flow — text + colour class. `shortClosed` overrides a
+// production-loss flow: the pieces are not coming, by decision.
+function flowStagePill(flow, shortClosed) {
+    if (flow.flowType === 'production_loss' && shortClosed) {
+        return { cls: 'pill-lost', text: 'Order short-closed — not remade' };
+    }
+    if (flow.finishingComplete === true) {
+        return { cls: 'pill-ok', text: 'Finishing complete — awaiting packing' };
+    }
+    if (flow.status === 'Awaiting_Check') {
+        return { cls: 'pill-qc', text: 'Produced — in QC queue' };
+    }
+    if (flow.stageStatus === 'Passed' || flow.status === 'Complete') {
+        return { cls: 'pill-done', text: 'Checking passed — waiting for finishing' };
+    }
+    if (flow.awaitingMaterial) {
+        return flow.flowType === 'original'
+            ? { cls: 'pill-await', text: 'Awaiting material' }
+            : { cls: 'pill-await', text: 'Awaiting material — store not asked yet' };
+    }
+    var s = String(flow.stage || '').trim();
+    var ss = String(flow.stageStatus || '').trim();
+    if (!s) return { cls: 'pill-running', text: 'In production' };
+    return { cls: 'pill-running', text: s + (ss ? ' — ' + ss.toLowerCase() : '') };
+}
+
 function renderItemDrawer(order, searchHighlightTerm) {
-    var items = Array.isArray(order.items) && order.items.length ? order.items : null;
+    var items = (Array.isArray(order.items) && order.items.length) ? order.items : null;
     var soId = String(order.id || order.salesOrder);
-    var activeSub = DRAWER_STAGE_FILTERS[soId] || 'All';
+    var q = (searchHighlightTerm || '').trim().toLowerCase();
+    var shortClosed = order.shortClosed === true || String(order.shortClosed) === 'true';
 
+    function nameHtml(nm) {
+        return (q && String(nm).toLowerCase().indexOf(q) !== -1)
+            ? highlightMatch(nm, searchHighlightTerm) : esc(nm);
+    }
+    function skuHtml(sku) {
+        return sku ? ' <span class="drawer-sku">' + esc(sku) + '</span>' : '';
+    }
+
+    var banner = shortClosed
+        ? '<div class="drawer-shortclose">This order is <b>short-closed</b>' +
+          (order.shortCloseReason ? ' &mdash; ' + esc(order.shortCloseReason) : '') +
+          '. Lost pieces below are not being remade.</div>'
+        : '';
+
+    // No items joined (a plan whose rows did not load) — one summary row.
     if (!items) {
-        var ord = Number(order.orderedQty) || 0;
-        var prod = Number(order.producedQty) || 0;
-        var st = String(order.currentStage || '').trim() || 'In Production';
-        var stStatus = String(order.currentStageStatus || '').trim();
-        var pill = '<span class="pill pill-running">' + esc(st + (stStatus ? ' (' + stStatus + ')' : '')) + '</span>';
-        if (stStatus === 'Passed' || stStatus === 'Completed') pill = '<span class="pill pill-done">' + esc(st + ' Passed') + '</span>';
-
-        var displayName = order.itemName || order.firstItemName || (order.salesOrder ? ('Item for ' + order.salesOrder) : 'Main Line Item');
-        var isSingleMatch = searchHighlightTerm && String(displayName).toLowerCase().indexOf(searchHighlightTerm.trim().toLowerCase()) !== -1;
-        var displayHtml = isSingleMatch ? highlightMatch(displayName, searchHighlightTerm) : esc(displayName);
-
-        return '<div class="item-drawer-wrap">' +
-            '<div class="item-drawer-title">Order Item Summary (1 item line)</div>' +
-            '<div class="item-drawer-scroll">' +
-            '<table class="item-drawer-table"><thead><tr>' +
-            '<th>Item Name</th><th class="r">Ordered</th><th class="r">Produced</th><th>Current Stage</th>' +
-            '</tr></thead><tbody>' +
-            '<tr><td><strong>' + displayHtml + '</strong></td>' +
-            '<td class="r">' + ord + '</td>' +
-            '<td class="r">' + prod + '</td>' +
-            '<td>' + pill + '</td></tr>' +
-            '</tbody></table></div></div>';
+        var name = order.itemName || order.firstItemName ||
+            (order.salesOrder ? ('Items for ' + order.salesOrder) : 'Line item');
+        var st = String(order.currentStage || '').trim() || 'in production';
+        return '<div class="item-drawer-wrap">' + banner +
+            '<div class="item-drawer-scroll"><table class="item-drawer-table"><thead><tr>' +
+            '<th>Item</th><th class="r">Ordered</th><th class="r">Produced</th><th>Current stage</th>' +
+            '</tr></thead><tbody><tr>' +
+            '<td><strong>' + nameHtml(name) + '</strong></td>' +
+            '<td class="r">' + n(order.orderedQty) + '</td>' +
+            '<td class="r">' + n(order.producedQty) + '</td>' +
+            '<td><span class="pill pill-running">' + esc(st) + '</span></td>' +
+            '</tr></tbody></table></div></div>';
     }
 
-    function getItemCategory(it) {
-        var st = String(it.status || '').trim();
-        var stgState = String(it.currentStageStatus || '').trim();
-        var ordSt = String(order.status || order.orderStatus || order.currentStage || '').trim();
+    var rows = items.map(function (it) {
+        var flows = it.flows || [];
+        var nm = it.itemName || it.name || 'Item';
+        var key = soId + '_' + nm;
+        var open = OPEN_ITEM_BATCH_DRAWERS[key] !== false; // open by default
+        var multi = flows.length > 1;
+        var rej = n(it.qtyRejected), alt = n(it.qtyAltered);
 
-        var isFinComplete = (
-            ordSt === 'Finishing Complete' || ordSt === 'Packed' || ordSt === 'Dispatched' ||
-            st === 'Finishing Complete' || st === 'Packed' || st === 'Dispatched' ||
-            it.isFinishingComplete === true || it.finishingStatus === 'Completed'
-        );
-        if (isFinComplete) return 'Finishing Complete';
+        var toggle = multi
+            ? '<button type="button" class="drawer-chevron' + (open ? ' is-open' : '') +
+              '" data-batch-key="' + esc(key) + '" aria-label="Toggle production flows">' +
+              DRAWER_CHEVRON + '</button>'
+            : '<span class="drawer-chevron-spacer"></span>';
 
-        var isQc = (st === 'Awaiting_Check' || it.remakeStatus === 'Awaiting_Check');
-        if (isQc) return 'Prod Complete';
-
-        var isPass = (stgState === 'Passed' || st === 'Complete');
-        if (isPass) return 'Checking Passed';
-
-        return 'In Progress';
-    }
-
-    // Count items per stage
-    var cAll = items.length;
-    var cInProg = 0, cProdComp = 0, cQcPass = 0, cFinComp = 0;
-
-    items.forEach(function (it) {
-        var cat = getItemCategory(it);
-        if (cat === 'Finishing Complete') cFinComp++;
-        else if (cat === 'Checking Passed') cQcPass++;
-        else if (cat === 'Prod Complete') cProdComp++;
-        else cInProg++;
-    });
-
-    var stageOptions = [
-        { id: 'All', label: 'All In Production (' + cAll + ')' },
-        { id: 'In Progress', label: 'In Progress (' + cInProg + ')' },
-        { id: 'Prod Complete', label: 'Prod Complete (QC Queue) (' + cProdComp + ')' },
-        { id: 'Checking Passed', label: 'Checking Passed (' + cQcPass + ')' },
-        { id: 'Finishing Complete', label: 'Finishing Complete (' + cFinComp + ')' }
-    ];
-
-    var toolbarHtml = '<div class="sub-stage-toolbar drawer-stage-toolbar" style="margin: 8px 0 12px; background: #ffffff;">' +
-        '<span class="sub-toolbar-title">PRODUCTION STAGES:</span>' +
-        '<div class="sub-chip-group">' +
-        stageOptions.map(function(s) {
-            var active = (activeSub === s.id);
-            return '<button type="button" class="sub-chip' + (active ? ' is-active' : '') + '" data-drawer-so="' + esc(soId) + '" data-drawer-sub="' + esc(s.id) + '">' +
-                esc(s.label) + '</button>';
-        }).join('') +
-        '</div></div>';
-
-    // Filter items based on activeSub inside this drawer
-    var filteredItems = items.filter(function (it) {
-        if (activeSub === 'All') return true;
-        return getItemCategory(it) === activeSub;
-    });
-
-    var showStageCol = (activeSub === 'All' || activeSub === 'In Progress' || activeSub === 'Finishing Complete' || activeSub === 'Checking Passed');
-    var colSpanVal = showStageCol ? 7 : 6;
-
-    var rows = filteredItems.map(function (it) {
-        var st = String(it.status || '').trim();
-        var stgName = String(it.currentStage || '').trim();
-        var stgState = String(it.currentStageStatus || '').trim();
-        var ordSt = String(order.status || order.orderStatus || order.currentStage || '').trim();
-        var isItemFinComplete = (ordSt === 'Finishing Complete' || ordSt === 'Packed' || ordSt === 'Dispatched' || st === 'Finishing Complete' || st === 'Packed' || st === 'Dispatched' || it.isFinishingComplete === true || it.finishingStatus === 'Completed');
-        var qAltered = Number(it.qtyAltered) || 0;
-        var isAlt = (it.isRemake || qAltered > 0 || !!it.hasRemake);
-
-        var stageLabel = stgName ? (stgName + (stgState ? ' ' + stgState : '')) : (st === 'Complete' ? 'Checking Passed' : (st === 'Awaiting_Check' ? 'Prod Complete (QC Queue)' : 'In Production'));
-
-        var pillCls = 'pill-running';
-        if (st === 'Awaiting_Check' || it.remakeStatus === 'Awaiting_Check') {
-            pillCls = 'pill-qc';
-            stageLabel = 'Prod Complete (QC Queue)';
-        } else if (isItemFinComplete) {
-            pillCls = 'pill-ok';
-            stageLabel = (st === 'Finishing Complete' || stgName === 'Finishing Complete' || stgName === 'Finishing Complete (Awaiting Packing)') ? 'Finishing Complete (Awaiting Packing)' : (stgName ? stgName + ' (Awaiting Packing)' : 'Finishing Complete (Awaiting Packing)');
-        } else if (activeSub === 'Checking Passed' || getItemCategory(it) === 'Checking Passed') {
-            pillCls = 'pill-done';
-            stageLabel = 'Checking Passed (Wait for Finishing)';
-        } else if (stgState === 'Passed' || stgState === 'Completed' || st === 'Complete') {
-            pillCls = 'pill-done';
-        } else if (isAlt) {
-            pillCls = 'pill-remake';
-            stageLabel = (it.remakeStage || stgName || 'Production') + ' (Remake Running)';
+        // Parent = the order line's own numbers. Stage pill = the original
+        // flow's, or (single-flow) that one flow.
+        var headFlow = null;
+        for (var i = 0; i < flows.length; i++) {
+            if (flows[i].flowType === 'original') { headFlow = flows[i]; break; }
         }
+        if (!headFlow) headFlow = flows[0] || {};
+        var hp = flowStagePill(headFlow, shortClosed);
 
-        var pill = '<span class="pill ' + pillCls + '">' + esc(stageLabel) + '</span>';
-        var nameStr = it.itemName || it.name || it.item || ('Item #' + it.id);
-        var itemKey = soId + '_' + nameStr;
-        var hasBatches = Number(it.qtyRejected) > 0 || qAltered > 0 || (Array.isArray(it.batches) && it.batches.length > 1);
-        var isBatchOpen = !!OPEN_ITEM_BATCH_DRAWERS[itemKey];
-        var totalRej = Number(it.qtyRejected) || 0;
-        var totalAlt = Number(it.qtyAltered) || 0;
-        var totalRmk = Number(it.qtyRemake) || 0;
-
-        var rmkStageInfo = it.remakeStatus === 'Awaiting_Check'
-            ? 'Waiting in QC Queue'
-            : (it.remakeStage
-                ? (it.remakeStage + (it.remakeStageStatus === 'Completed' ? ' (Completed)' : ' (Running)'))
-                : 'Remake Production');
-        var altStageInfo = it.altStatus === 'Awaiting_Check'
-            ? 'Waiting in QC Queue'
-            : (it.altStage
-                ? (it.altStage + (it.altStageStatus === 'Completed' ? ' (Completed)' : ' (Running)'))
-                : 'Alteration Production');
-
-        if (Array.isArray(it.batches)) {
-            it.batches.forEach(function (b) {
-                var bReason = String(b.remakeReason || '').trim();
-                if (bReason === 'Alteration') {
-                    var bAltQty = Number(b.qtyOrdered) || Number(b.qtyAltered) || 0;
-                    if (bAltQty > totalAlt) totalAlt = bAltQty;
-                    if (b.currentStage) {
-                        var bAltSuffix = b.status === 'Awaiting_Check'
-                            ? ' (QC Queue)'
-                            : (b.currentStageStatus === 'Completed' ? ' (Completed)' : ' (Running)');
-                        altStageInfo = b.currentStage + bAltSuffix;
-                    }
-                } else if (b.isRemake) {
-                    var bRmkQty = Number(b.qtyOrdered) || Number(b.qtyRemake) || 0;
-                    if (bRmkQty > totalRmk) totalRmk = bRmkQty;
-                    if (Number(b.qtyRejected) > totalRej) totalRej = Number(b.qtyRejected);
-                    if (b.currentStage) {
-                        var bSuffix = b.status === 'Awaiting_Check'
-                            ? ' (QC Queue)'
-                            : (b.currentStageStatus === 'Completed' ? ' (Completed)' : ' (Running)');
-                        rmkStageInfo = b.currentStage + bSuffix;
-                    }
-                } else {
-                    if (Number(b.qtyRejected) > totalRej) totalRej = Number(b.qtyRejected);
-                }
-            });
-        }
-
-        var cardDetails = '';
-        var rejCount = Math.max(totalRej, totalRmk);
-        if (rejCount > 0) {
-            cardDetails += '<div class="mobile-batch-line" style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">' +
-                '<span class="m-batch-lbl" style="font-size:11.5px; font-weight:600; color:#64748b;">Rejected / Remake:</span>' +
-                '<span class="pill pill-remake" style="font-size:11.5px; font-weight:700;">' + rejCount + ' Pcs</span>' +
-                '<span class="m-batch-sub" style="font-size:10.5px; color:#94a3b8;">(' + esc(rmkStageInfo) + ')</span>' +
-                '</div>';
-        }
-        if (totalAlt > 0) {
-            cardDetails += '<div class="mobile-batch-line" style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">' +
-                '<span class="m-batch-lbl" style="font-size:11.5px; font-weight:600; color:#64748b;">Altered:</span>' +
-                '<span class="pill pill-running" style="font-size:11.5px; font-weight:700;">' + totalAlt + ' Pcs</span>' +
-                '<span class="m-batch-sub" style="font-size:10.5px; color:#94a3b8;">(' + esc(altStageInfo) + ')</span>' +
-                '</div>';
-        }
-
-        var batchBtn = hasBatches
-            ? '<button type="button" class="sub-chip btn-toggle-batch' + (isBatchOpen ? ' is-active' : '') + '" data-batch-key="' + esc(itemKey) + '" style="font-size:11px; padding:2px 8px; cursor:pointer;">' +
-              (isBatchOpen ? '▼ Hide Details' : '▶ Rejection / Alteration Details') + '</button>'
-            : '';
-
-        var tdStage = showStageCol ? ('<td>' + pill + '</td>') : '';
-        var isItemMatch = searchHighlightTerm && String(nameStr).toLowerCase().indexOf(searchHighlightTerm.trim().toLowerCase()) !== -1;
-        var nameDisplay = isItemMatch ? highlightMatch(nameStr, searchHighlightTerm) : esc(nameStr);
-
-        var rowHtml = '<tr>' +
-            '<td><strong>' + nameDisplay + '</strong>' + (batchBtn ? ' ' + batchBtn : '') + '</td>' +
+        var out = '<tr class="drawer-parent-row' + (it.hasLoss ? ' has-loss' : '') + '">' +
+            '<td class="drawer-item-cell">' + toggle +
+                '<span class="drawer-item-name"><strong>' + nameHtml(nm) + '</strong>' +
+                skuHtml(it.sku) + '</span></td>' +
             '<td class="r">' + n(it.qtyOrdered) + '</td>' +
             '<td class="r">' + n(it.qtyProduced) + '</td>' +
             '<td class="r">' + n(it.qtyAccepted) + '</td>' +
-            '<td class="r">' + (it.qtyRejected > 0 ? '<span class="lost-some">' + n(it.qtyRejected) + '</span>' : '0') + '</td>' +
-            '<td class="r">' + (qAltered > 0 ? '<span class="lost-some">' + qAltered + '</span>' : '0') + '</td>' +
-            tdStage +
+            '<td class="r">' + (rej > 0 ? '<span class="lost-some">' + rej + '</span>' : '0') + '</td>' +
+            '<td class="r">' + (alt > 0 ? '<span class="lost-some">' + alt + '</span>' : '0') + '</td>' +
+            '<td><span class="pill ' + hp.cls + '">' + esc(hp.text) + '</span></td>' +
             '</tr>';
 
-        if (hasBatches) {
-            var desktopBatchDetails = cardDetails || '<span style="font-size:12px; color:#64748b;">No rejected or altered pieces recorded.</span>';
-            rowHtml += '<tr class="item-batch-drawer-row" data-batch-key="' + esc(itemKey) + '" style="display:' + (isBatchOpen ? 'table-row' : 'none') + ';"><td colspan="' + colSpanVal + '" style="background:#f8fafc; padding:10px 14px; border-left:3px solid #3b82f6;">' +
-                '<div style="font-size:11px; font-weight:700; color:#475569; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">REJECTION &amp; ALTERATION SUMMARY FOR ' + esc(nameStr) + '</div>' +
-                '<div style="display:flex; align-items:center; gap:24px; flex-wrap:wrap;">' + desktopBatchDetails + '</div></td></tr>';
+        // Child flow rows for the batches — the order line is already the
+        // parent, so only remake / loss / alteration get a child row.
+        if (multi) {
+            flows.forEach(function (f) {
+                if (f.flowType === 'original') return;
+                var m = FLOW_META[f.flowType] || FLOW_META.original;
+                var p = flowStagePill(f, shortClosed);
+                var qOrdered = f.flowType === 'alteration'
+                    ? (n(f.qtyAltered) || n(f.qtyOrdered)) : n(f.qtyOrdered);
+                out += '<tr class="drawer-flow-row ' + m.cls +
+                    '" data-flow-parent="' + esc(key) + '"' + (open ? '' : ' hidden') + '>' +
+                    '<td class="flow-name"><span class="flow-tag">' + esc(m.label) + '</span></td>' +
+                    '<td class="r">' + qOrdered + '</td>' +
+                    '<td class="r">' + n(f.qtyProduced) + '</td>' +
+                    '<td class="r">&mdash;</td><td class="r">&mdash;</td><td class="r">&mdash;</td>' +
+                    '<td><span class="pill ' + p.cls + '">' + esc(p.text) + '</span></td>' +
+                    '</tr>';
+            });
         }
-
-        return rowHtml;
+        return out;
     }).join('');
 
-    if (!rows) {
-        rows = '<tr><td colspan="' + colSpanVal + '" class="muted" style="text-align:center; padding:16px;">No items match the selected stage filter (' + esc(activeSub) + ').</td></tr>';
-    }
-
-    var thStage = showStageCol ? '<th>Current Stage</th>' : '';
-
     return '<div class="item-drawer-wrap">' +
-        '<div class="item-drawer-title">Item-Level Tracking Breakdown (' + items.length + ' item types)</div>' +
-        toolbarHtml +
-        '<div class="item-drawer-scroll">' +
-        '<table class="item-drawer-table"><thead><tr>' +
-        '<th>Item Name</th><th class="r">Ordered</th><th class="r">Produced</th><th class="r">Accepted</th><th class="r">Rejected</th><th class="r">Altered</th>' + thStage +
+        '<div class="item-drawer-title">Item-level breakdown &middot; ' + items.length +
+        ' line' + (items.length === 1 ? '' : 's') + '</div>' +
+        banner +
+        '<div class="item-drawer-scroll"><table class="item-drawer-table"><thead><tr>' +
+        '<th>Item</th><th class="r">Ordered</th><th class="r">Produced</th>' +
+        '<th class="r">Accepted</th><th class="r">Rejected</th><th class="r">Altered</th>' +
+        '<th>Current stage</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
         '</div>';
 }
@@ -702,49 +621,25 @@ function bindDrawerControls(containerEl) {
     var root = containerEl || document.getElementById('pipeline-section');
     if (!root) return;
 
-    // Bind stage filter chips inside expanded drawers for in-place filtering (zero page flicker)
-    Array.prototype.forEach.call(root.querySelectorAll('.drawer-stage-toolbar .sub-chip'), function (chip) {
-        if (chip._bound) return;
-        chip._bound = true;
-        chip.addEventListener('click', function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            var soId = chip.getAttribute('data-drawer-so');
-            var sub = chip.getAttribute('data-drawer-sub');
-            DRAWER_STAGE_FILTERS[soId] = sub;
-            updateOrderDrawerInPlace(soId);
-        });
-    });
-
-    // Bind batch toggle buttons inside drawers for in-place row toggling
-    Array.prototype.forEach.call(root.querySelectorAll('.btn-toggle-batch'), function (btn) {
+    // Parent row expand / collapse — shows or hides its child flow rows in
+    // place, no re-render. Rows are open by default (=== false means
+    // deliberately collapsed). Chevron rotates 90deg when open, same as the
+    // production tab.
+    Array.prototype.forEach.call(root.querySelectorAll('.drawer-chevron'), function (btn) {
         if (btn._bound) return;
         btn._bound = true;
         btn.addEventListener('click', function (e) {
             e.preventDefault();
             e.stopPropagation();
-            var bKey = btn.getAttribute('data-batch-key');
-            var isOpen = !OPEN_ITEM_BATCH_DRAWERS[bKey];
-            OPEN_ITEM_BATCH_DRAWERS[bKey] = isOpen;
+            var key = btn.getAttribute('data-batch-key');
+            var isOpen = OPEN_ITEM_BATCH_DRAWERS[key] === false; // currently collapsed -> open
+            OPEN_ITEM_BATCH_DRAWERS[key] = isOpen ? true : false;
 
-            btn.classList.toggle('is-active', isOpen);
-            btn.innerHTML = isOpen ? '▼ Hide Details' : '▶ Rejection / Alteration Details';
+            btn.classList.toggle('is-open', isOpen);
 
-            var itemRow = btn.closest('tr');
-            if (itemRow) {
-                var drawerRow = itemRow.nextElementSibling;
-                if (drawerRow && drawerRow.classList.contains('item-batch-drawer-row')) {
-                    drawerRow.style.display = isOpen ? 'table-row' : 'none';
-                }
-            }
-
-            var mobileCard = btn.closest('.mobile-item-card');
-            if (mobileCard) {
-                var mPanel = mobileCard.querySelector('.mobile-batch-panel');
-                if (mPanel) {
-                    mPanel.style.display = isOpen ? 'flex' : 'none';
-                }
-            }
+            Array.prototype.forEach.call(root.querySelectorAll('.drawer-flow-row'), function (r) {
+                if (r.getAttribute('data-flow-parent') === key) r.hidden = !isOpen;
+            });
         });
     });
 }
@@ -816,13 +711,15 @@ function fmtDue(v) {
 // actually arrives with. Each chip narrows the current bucket rather than
 // replacing it, so "In Production and late" is one click away.
 //
-// Counted over the loaded page, and it says so: claiming a factory-wide figure
-// from a page of 25 would be a number that changes as you paginate, which is
-// worse than no number.
+// Counted over the WHOLE bucket now — every order of the status is loaded and
+// enriched up front, so these are factory-wide figures and clicking a chip
+// filters every order, not the 25 on screen. `orders` here is the full
+// pre-search set (rawOrders); the chips must not recount against a view they
+// themselves narrowed.
 function renderRiskBar(orders) {
     if (typeof PipelineData === 'undefined' || !orders || !orders.length) return '';
 
-    var tally = { late: 0, blocked: 0, stuck: 0, due: 0 };
+    var tally = { late: 0, blocked: 0, stuck: 0 };
     orders.forEach(function (o) {
         var seen = {};
         PipelineData.risk(o).forEach(function (r) {
@@ -835,15 +732,14 @@ function renderRiskBar(orders) {
     var defs = [
         { key: 'late', label: 'overdue', why: 'past the expected delivery date and not yet packed' },
         { key: 'blocked', label: 'awaiting material', why: 'items the store has not issued cloth for' },
-        { key: 'stuck', label: 'no movement 14d+', why: 'no stage has started or finished in a fortnight' },
-        { key: 'due', label: 'due within 3 days', why: 'delivery is today or in the next three days' }
+        { key: 'stuck', label: 'no movement 14d+', why: 'no stage has started or finished in a fortnight' }
     ];
 
     var any = defs.some(function (d) { return tally[d.key] > 0; });
 
     var h = '<div class="risk-bar">';
     if (!any) {
-        h += '<span class="risk-clear">✓ Nothing on this page is overdue, blocked or stalled.</span>';
+        h += '<span class="risk-clear">✓ Nothing here is overdue, blocked or stalled.</span>';
     } else {
         h += '<span class="risk-bar-label">Needs attention</span>';
         defs.forEach(function (d) {
@@ -856,7 +752,7 @@ function renderRiskBar(orders) {
         if (PIPELINE_RISK) {
             h += '<button type="button" class="risk-chip risk-clear-btn" data-risk="">Show all</button>';
         }
-        h += '<span class="risk-scope">on this page</span>';
+        h += '<span class="risk-scope">across all ' + orders.length + '</span>';
     }
     h += '</div>';
     return h;
@@ -1168,11 +1064,21 @@ function renderInProgressOrdersBody() {
         return h + '<p class="progress-empty">Nothing in this bucket matches that filter.</p>';
     }
 
+    // PAGE THE FILTERED SET FOR DISPLAY ONLY. Search and the risk chips have
+    // already narrowed `orders` over every loaded order; the table shows one
+    // page of that, the pager below walks the rest. Clamp the page in case a
+    // filter shrank the list under the current page number.
+    var filteredTotal = orders ? orders.length : 0;
+    PIPELINE_TOTAL_PAGES = Math.max(1, Math.ceil(filteredTotal / (PIPELINE_PAGE_SIZE || 25)));
+    if (PIPELINE_PAGE > PIPELINE_TOTAL_PAGES) PIPELINE_PAGE = PIPELINE_TOTAL_PAGES;
+    var pageFrom = (PIPELINE_PAGE - 1) * (PIPELINE_PAGE_SIZE || 25);
+    var pageOrders = (orders || []).slice(pageFrom, pageFrom + (PIPELINE_PAGE_SIZE || 25));
+
     h += '<div class="table-wrapper"><table class="progress-table"><thead><tr>';
 
     if (PIPELINE_STATUS === 'Dispatched') {
         h += '<th>Sales order</th><th>Customer</th><th>Plan</th><th>Order date</th><th class="r">Dispatched / ordered</th><th>Next step</th></tr></thead><tbody>';
-        orders.forEach(function (order) {
+        pageOrders.forEach(function (order) {
             var soDisplay = isSearching ? highlightMatch(order.salesOrder || '—', PROD_SEARCH_TERM) : esc(order.salesOrder || '—');
             var matchedItems = isSearching ? getOrderMatchingItems(order, PROD_SEARCH_TERM) : [];
             var displayItemName = (isSearching && matchedItems.length) ? matchedItems.join(', ') : (order.itemName || order.firstItemName || '');
@@ -1201,7 +1107,7 @@ function renderInProgressOrdersBody() {
         });
     } else if (PIPELINE_STATUS === 'Packed') {
         h += '<th>Sales order</th><th>Customer</th><th>Plan</th><th>Order date</th><th class="r">Packed / ordered</th><th>Next step</th></tr></thead><tbody>';
-        orders.forEach(function (order) {
+        pageOrders.forEach(function (order) {
             var soDisplay = isSearching ? highlightMatch(order.salesOrder || '—', PROD_SEARCH_TERM) : esc(order.salesOrder || '—');
             var matchedItems = isSearching ? getOrderMatchingItems(order, PROD_SEARCH_TERM) : [];
             var displayItemName = (isSearching && matchedItems.length) ? matchedItems.join(', ') : (order.itemName || order.firstItemName || '');
@@ -1232,14 +1138,13 @@ function renderInProgressOrdersBody() {
         h += '<th>Sales order</th><th>Due</th><th>Supervisor</th><th>Progress</th>' +
             '<th class="r">Produced / ordered</th><th>Items</th></tr></thead><tbody>';
 
-        orders.forEach(function (order) {
+        pageOrders.forEach(function (order) {
             var soId = String(order.id || order.salesOrder);
             var isOpen = !!OPEN_ITEM_DRAWERS[soId];
-            var rem = Number(order.remakeItems) || 0;
-            var remTxt = rem > 0
-                ? ' <span class="pill pill-remake" title="Rework: replaces a rejected or damaged piece">' +
-                  rem + ' remake' + (rem === 1 ? '' : 's') + '</span>'
-                : '';
+            // No remake / alteration / loss pills on the collapsed row — that
+            // detail lives in the item breakdown. The row carries the order
+            // number, its risk flag, due date, supervisor and progress; that is
+            // enough to decide whether to open it.
 
             var itemProgHtml = '<button type="button" class="sub-chip btn-open-progress-modal" data-so-id="' + esc(soId) + '">' +
                 '<span>📊 View Progress</span></button>';
@@ -1270,16 +1175,15 @@ function renderInProgressOrdersBody() {
 
             // DUE DATE, which this screen has never shown despite the field
             // existing on Sales_Order since the plan builder started copying it
-            // to Plan_End_Date. Without it there is no late and no due-soon,
-            // which is most of what an order-status board is for.
+            // to Plan_End_Date. Overdue is the one state highlighted — "due
+            // soon" is not a flag, so the days-remaining note is plain.
             var dueHtml = '<span class="is-muted">—</span>';
             if (order.dueDate) {
                 var dd = order.daysToDue;
                 var dcls = '', dnote = '';
                 if (dd !== null && order.status !== 'Packed' && order.status !== 'Dispatched') {
                     if (dd < 0) { dcls = 'due-late'; dnote = Math.abs(dd) + 'd late'; }
-                    else if (dd === 0) { dcls = 'due-today'; dnote = 'today'; }
-                    else if (dd <= 3) { dcls = 'due-soon'; dnote = 'in ' + dd + 'd'; }
+                    else if (dd === 0) { dnote = 'today'; }
                     else { dnote = 'in ' + dd + 'd'; }
                 }
                 dueHtml = '<span class="due-cell ' + dcls + '">' + esc(fmtDue(order.dueDate)) +
@@ -1303,7 +1207,7 @@ function renderInProgressOrdersBody() {
             h += '<tr class="so-card-row' + (rk ? ' has-risk risk-row-' + rk.level : '') + '">' +
                 '<td class="td-so-header">' +
                     '<div class="so-title-line">' +
-                        '<div class="so-num-wrap"><strong>' + soDisplay + '</strong>' + remTxt + riskTxt + '</div>' +
+                        '<div class="so-num-wrap"><strong>' + soDisplay + '</strong>' + riskTxt + '</div>' +
                         qtyBadgeMobile +
                     '</div>' +
                     itemSub +
@@ -1334,10 +1238,10 @@ function renderInProgressOrdersBody() {
     }
 
     var paginationHtml = '';
-    if (PIPELINE_TOTAL_PAGES > 1 || PIPELINE_TOTAL_ORDERS > 0) {
-        var startIdx = ((PIPELINE_PAGE - 1) * PIPELINE_PAGE_SIZE) + 1;
-        var endIdx = Math.min(PIPELINE_PAGE * PIPELINE_PAGE_SIZE, PIPELINE_TOTAL_ORDERS || (orders ? orders.length : 0));
-        if (!orders || orders.length === 0) { startIdx = 0; endIdx = 0; }
+    if (PIPELINE_TOTAL_PAGES > 1) {
+        var pageSz = PIPELINE_PAGE_SIZE || 25;
+        var startIdx = pageOrders.length ? ((PIPELINE_PAGE - 1) * pageSz) + 1 : 0;
+        var endIdx = pageOrders.length ? (startIdx + pageOrders.length - 1) : 0;
 
         var prevDisabled = PIPELINE_PAGE <= 1 ? ' disabled' : '';
         var nextDisabled = PIPELINE_PAGE >= PIPELINE_TOTAL_PAGES ? ' disabled' : '';
@@ -1358,10 +1262,13 @@ function renderInProgressOrdersBody() {
             pageButtons += '<button type="button" class="pipeline-page-btn' + (isActive ? ' is-active' : '') + '" data-page="' + pageNum + '">' + pageNum + '</button>';
         }
 
-        var totalCountDisplay = PIPELINE_TOTAL_ORDERS || (orders ? orders.length : 0);
+        // The filtered count — search and the risk chips have already narrowed
+        // this. Says "12 of 107" behind a search, "107 orders" with none.
+        var totalCountDisplay = filteredTotal;
+        var scopeSuffix = (isSearching || PIPELINE_RISK) ? (' of ' + totalBeforeSearch) : '';
 
         paginationHtml = '<div class="pipeline-pagination">' +
-            '<div class="pagination-info desktop-only">Showing <strong>' + startIdx + '–' + endIdx + '</strong> of <strong>' + totalCountDisplay + '</strong> orders</div>' +
+            '<div class="pagination-info desktop-only">Showing <strong>' + startIdx + '–' + endIdx + '</strong> of <strong>' + totalCountDisplay + '</strong>' + scopeSuffix + ' orders</div>' +
             '<div class="pagination-controls desktop-only">' +
             '<button type="button" class="btn-pipeline-prev ghost-btn" data-page="' + (PIPELINE_PAGE - 1) + '"' + prevDisabled + '>◀ Prev</button>' +
             pageButtons +
@@ -1371,7 +1278,7 @@ function renderInProgressOrdersBody() {
             '<button type="button" class="btn-pipeline-prev mobile-pager-btn" data-page="' + (PIPELINE_PAGE - 1) + '"' + prevDisabled + '>◀ Prev</button>' +
             '<div class="mobile-pager-center">' +
             '<div class="pager-main-badge">Page <strong>' + PIPELINE_PAGE + '</strong> of <strong>' + PIPELINE_TOTAL_PAGES + '</strong></div>' +
-            '<div class="pager-sub-badge">' + startIdx + '–' + endIdx + ' of ' + totalCountDisplay + ' orders</div>' +
+            '<div class="pager-sub-badge">' + startIdx + '–' + endIdx + ' of ' + totalCountDisplay + scopeSuffix + ' orders</div>' +
             '</div>' +
             '<button type="button" class="btn-pipeline-next mobile-pager-btn" data-page="' + (PIPELINE_PAGE + 1) + '"' + nextDisabled + '>Next ▶</button>' +
             '</div>' +
@@ -1568,8 +1475,9 @@ function renderPendingOrders() {
 function bindTableEvents(rootEl) {
     if (!rootEl) return;
 
-    // The risk chips. Filtering happens entirely in memory over the page that
-    // is already loaded, so this never refetches — it is a redraw.
+    // The risk chips. Filtering happens entirely in memory over the whole
+    // enriched bucket, so this never refetches — it is a redraw. Back to page 1
+    // because the filter changed how many rows there are.
     Array.prototype.forEach.call(rootEl.querySelectorAll('[data-risk]'), function (btn) {
         btn.addEventListener('click', function (e) {
             e.preventDefault();
@@ -1578,6 +1486,7 @@ function bindTableEvents(rootEl) {
             // Clicking the chip that is already on turns it off, so the filter
             // is its own way back and does not need a separate control.
             PIPELINE_RISK = (PIPELINE_RISK === want) ? '' : want;
+            PIPELINE_PAGE = 1;
             renderPipeline();
         });
     });
@@ -1615,14 +1524,15 @@ function bindTableEvents(rootEl) {
         });
     });
 
-    // Bind pagination buttons
+    // Bind pagination buttons — a client-side redraw, no refetch. The whole
+    // bucket is in memory, so changing page just re-slices it.
     Array.prototype.forEach.call(rootEl.querySelectorAll('.pipeline-page-btn, .btn-pipeline-prev, .btn-pipeline-next'), function (btn) {
         btn.addEventListener('click', function (e) {
             e.preventDefault();
             if (btn.disabled || btn.classList.contains('is-active')) return;
             var targetPage = Number(btn.getAttribute('data-page'));
             if (targetPage && targetPage >= 1 && targetPage <= PIPELINE_TOTAL_PAGES && targetPage !== PIPELINE_PAGE) {
-                loadSalesOrderProgress(PIPELINE_STATUS === 'In Production' ? 'In Progress' : PIPELINE_STATUS, targetPage);
+                goToPipelinePage(targetPage);
             }
         });
     });
@@ -1689,6 +1599,8 @@ function updateInProgressSearch(immediate) {
     if (newQuery !== LAST_PROD_SEARCH_TERM.trim().toLowerCase()) {
         OPEN_ITEM_DRAWERS = {};
         LAST_PROD_SEARCH_TERM = PROD_SEARCH_TERM || '';
+        // A changed query is a different result set — start at its first page.
+        PIPELINE_PAGE = 1;
     }
 
     if (PROD_SEARCH_DEBOUNCE_TIMER) {
@@ -2080,9 +1992,13 @@ function loadPipelineFromOrderAudit(originalError) {
 //
 // Every state variable below is unchanged, and renderPipeline() is untouched —
 // the payload is shaped to the contract the renderers already read.
+// `page` is accepted for old call sites but ignored: the whole bucket is
+// loaded and enriched in one go, and paging is a client-side redraw
+// (goToPipelinePage) with no refetch. This is what lets the search box and the
+// "needs attention" chips work over EVERY order rather than the 25 on screen.
 function loadSalesOrderProgress(statusFilter, page) {
     var targetStatus = statusFilter || PIPELINE_STATUS || 'In Progress';
-    PIPELINE_PAGE = Number(page) || 1;
+    PIPELINE_PAGE = 1;
     DATA = DATA || {};
     DATA.progressOrders = null;
     renderPipeline();
@@ -2094,13 +2010,7 @@ function loadSalesOrderProgress(statusFilter, page) {
         return;
     }
 
-    PipelineData.page({
-        status: targetStatus,
-        page: PIPELINE_PAGE,
-        pageSize: PIPELINE_PAGE_SIZE || 25,
-        search: PROD_SEARCH_TERM || '',
-        sort: PIPELINE_SORT || 'urgency'
-    }).then(function (data) {
+    PipelineData.page({ status: targetStatus }).then(function (data) {
         DATA = DATA || {};
         DATA.progressOrders = data.orders || [];
         // A report link name that did not resolve is reported without emptying
@@ -2109,9 +2019,10 @@ function loadSalesOrderProgress(statusFilter, page) {
         DATA.progressError = (data.notes && data.notes.length)
             ? 'Some detail could not be read: ' + data.notes.join('; ')
             : '';
-        PIPELINE_PAGE = Math.max(1, Math.floor(Number(data.page) || PIPELINE_PAGE || 1));
+        // Totals are derived from the full set in renderInProgressOrdersBody
+        // now (after status sub-filter, search and risk chip), so they always
+        // match the list. This is just the pre-filter count.
         PIPELINE_TOTAL_ORDERS = Math.max(0, Math.floor(Number(data.total) || 0));
-        PIPELINE_TOTAL_PAGES = Math.max(1, Math.floor(Number(data.totalPages) || 1));
         renderPipeline();
     }).catch(function (err) {
         console.error('PipelineData.page failed:', err);
@@ -2120,6 +2031,16 @@ function loadSalesOrderProgress(statusFilter, page) {
         DATA.progressError = (err && (err.message || err.toString())) || 'Request failed';
         renderPipeline();
     });
+}
+
+// Client-side page change — no refetch, the whole bucket is already in memory.
+function goToPipelinePage(targetPage) {
+    var n = Math.max(1, Math.floor(Number(targetPage) || 1));
+    if (n === PIPELINE_PAGE) return;
+    PIPELINE_PAGE = n;
+    renderPipeline();
+    var sec = document.getElementById('pipeline-section');
+    if (sec && sec.scrollIntoView) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // ---- the stage breakdown behind the chevron ----

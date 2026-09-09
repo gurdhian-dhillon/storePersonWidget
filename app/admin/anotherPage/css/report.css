@@ -1,7 +1,41 @@
-/* Employee report — the layer on top of ../css/style.css.
-   Everything shared (tokens, header, .table-wrapper, .pill, .chevron,
-   .ans-toggle, .empty-state, .work-row) comes from there. Only what this
-   screen adds is below. */
+/* Production & Stock Dashboard — the layer on top of ../css/style.css.
+   Everything shared (tokens, Inter + the 16px type scale, header, tabs,
+   .table-wrapper, .pill, .chevron, .ans-toggle, .empty-state, .work-row) comes
+   from there, so this screen reads as the same product as the Order Audit,
+   store and supervisor widgets. Only what this screen adds is below. */
+
+/* Tab strip, matched to the supervisor / store widgets: a rounded, tinted
+   active tab rather than the Order Audit's flat underline. The shared
+   .tab-strip / .tab-btn give the layout; this re-skins them for .report-tabs. */
+.tab-strip.report-tabs {
+    align-items: center;
+    gap: 0.35rem;
+    border-bottom-width: 2px;
+    margin-bottom: 1.25rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.tab-strip.report-tabs::-webkit-scrollbar { display: none; }
+
+.tab-strip.report-tabs .tab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 40px;
+    padding: 0.55rem 1rem;
+    border-bottom-width: 2.5px;
+    border-radius: 6px 6px 0 0;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+.tab-strip.report-tabs .tab-btn:hover {
+    color: var(--text-main);
+    background: rgba(241, 245, 249, 0.7);
+}
+.tab-strip.report-tabs .tab-btn.is-active {
+    background: rgba(37, 99, 235, 0.05);
+    font-weight: 600;
+}
 
 .day-controls {
     display: flex;
@@ -586,34 +620,7 @@
     transform: rotate(90deg);
 }
 
-/* ---- Sub-stage Toolbar & Chips ---- */
-.sub-stage-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin: 14px 0 8px;
-    padding: 10px 14px;
-    background: #f8fafc;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    flex-wrap: wrap;
-}
-
-.sub-toolbar-title {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-}
-
-.sub-chip-group {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-}
-
+/* ---- View Progress button ---- */
 .sub-chip {
     padding: 4px 10px;
     font: inherit;
@@ -633,10 +640,10 @@
 }
 
 .sub-chip.is-active {
-    background: #1e40af;
+    background: var(--primary);
     color: #ffffff;
-    border-color: #1e40af;
-    box-shadow: 0 1px 3px rgba(30, 64, 175, 0.25);
+    border-color: var(--primary);
+    box-shadow: 0 1px 3px rgba(37, 99, 235, 0.25);
 }
 
 /* ---- Multi-Segment Item Progress Bar ---- */
@@ -753,6 +760,82 @@
     z-index: 2;
     box-shadow: 0 1px 2px rgba(0,0,0,0.05);
 }
+
+/* ---- item breakdown: order line + its production flows ---- */
+
+/* The accordion chevron, same shape/behaviour as the production tab: points
+   right, rotates 90deg when the flows are shown. */
+.drawer-chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    margin-right: 6px;
+    padding: 0;
+    color: var(--primary);
+    background: none;
+    border: 0;
+    border-radius: 4px;
+    cursor: pointer;
+    vertical-align: middle;
+    flex: 0 0 auto;
+    transition: transform 0.15s ease, background 0.15s ease;
+}
+.drawer-chevron svg { width: 14px; height: 14px; display: block; }
+.drawer-chevron:hover { background: rgba(37, 99, 235, 0.1); }
+.drawer-chevron.is-open { transform: rotate(90deg); }
+.drawer-chevron-spacer { display: inline-block; width: 26px; }
+
+.drawer-item-cell { display: flex; align-items: baseline; }
+.drawer-item-name { min-width: 0; }
+.drawer-sku {
+    margin-left: 6px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+/* Order-line row. Amber inset on the name cell if any pieces were lost. */
+.drawer-parent-row > td { font-weight: 500; }
+.drawer-parent-row.has-loss > td:first-child { box-shadow: inset 3px 0 0 var(--status-warning); }
+
+/* Child flow rows — batches only (the order line IS the parent). */
+.drawer-flow-row > td {
+    background: #fbfcfe !important;
+    padding: 5px 10px 5px 34px !important;
+    font-size: 12px !important;
+    color: var(--text-muted) !important;
+}
+.drawer-flow-row > td:first-child { border-left: 3px solid var(--border) !important; }
+.drawer-flow-row.flow-remake > td:first-child { border-left-color: #fb7185 !important; }
+.drawer-flow-row.flow-loss   > td:first-child { border-left-color: var(--status-warning) !important; }
+.drawer-flow-row.flow-alt    > td:first-child { border-left-color: #c084fc !important; }
+
+.flow-tag {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+.drawer-flow-row.flow-remake .flow-tag { color: #be123c; }
+.drawer-flow-row.flow-loss   .flow-tag { color: #92400e; }
+.drawer-flow-row.flow-alt    .flow-tag { color: #6b21a8; }
+
+/* The short-close banner at the top of the breakdown. */
+.drawer-shortclose {
+    margin: 8px 0;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #92400e;
+    background: var(--status-warning-bg);
+    border: 1px solid #fcd34d;
+    border-radius: var(--radius);
+}
+
+.pill-alt   { background: #f3e8ff; color: #6b21a8; font-weight: 600; }
+.pill-lost  { background: var(--status-warning-bg); color: #92400e; font-weight: 600; }
+.pill-await { background: #f1f5f9; color: #475569; font-weight: 600; }
 
 .item-search-bar {
     display: flex;
@@ -1957,40 +2040,6 @@
         margin-bottom: 4px !important;
         text-transform: uppercase !important;
         letter-spacing: 0.3px !important;
-    }
-
-    /* Production stage filters: silky touch scroll with zero ugly gray browser scrollbar */
-    .drawer-stage-toolbar {
-        flex-direction: column !important;
-        align-items: flex-start !important;
-        gap: 4px !important;
-        margin: 4px 0 8px 0 !important;
-    }
-
-    .drawer-stage-toolbar .sub-chip-group {
-        display: flex !important;
-        flex-wrap: nowrap !important;
-        overflow-x: auto !important;
-        -webkit-overflow-scrolling: touch !important;
-        width: 100% !important;
-        padding-bottom: 2px !important;
-        gap: 5px !important;
-        scrollbar-width: none !important;
-        -ms-overflow-style: none !important;
-    }
-
-    .drawer-stage-toolbar .sub-chip-group::-webkit-scrollbar {
-        display: none !important;
-        width: 0 !important;
-        height: 0 !important;
-    }
-
-    .drawer-stage-toolbar .sub-chip {
-        flex: 0 0 auto !important;
-        white-space: nowrap !important;
-        font-size: 11px !important;
-        padding: 3px 8px !important;
-        border-radius: 5px !important;
     }
 
     /* Table Columns for Item-Level Breakdown on Mobile */

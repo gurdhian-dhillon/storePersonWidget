@@ -122,12 +122,29 @@ function baseTables() {
         { ID: 'I2', Plan: { ID: '101' }, Item_Name: 'Linen Hamlet Throw L', Line_No: 2,
           Qty_Ordered: 10, Qty_Produced: 0, Item_Status: 'Awaiting_Material', Is_Remake: false },
         { ID: 'I3', Plan: { ID: '102' }, Item_Name: 'Linen Sylph Throw', Line_No: 1,
-          Qty_Ordered: 15, Qty_Produced: 15, Item_Status: 'Complete', Is_Remake: false },
+          Qty_Ordered: 15, Qty_Produced: 15, Qty_Accepted: 15, Qty_Rejected: 0,
+          Item_Status: 'Complete', Is_Remake: false },
         { ID: 'I4', Plan: { ID: '103' }, Item_Name: 'Fern Napkin', Line_No: 1,
           Qty_Ordered: 50, Qty_Produced: 0, Item_Status: 'Awaiting_Material', Is_Remake: false },
         { ID: 'I5', Plan: { ID: '103' }, Item_Name: 'Fern Napkin (remake)', Line_No: 2,
           Qty_Ordered: 5, Qty_Produced: 0, Item_Status: 'Awaiting_Material',
-          Is_Remake: true, Remake_Reason: 'Check_Reject' }
+          Is_Remake: true, Remake_Reason: 'Check_Reject' },
+        // Plan 104 / SO-0001 — one product name at FOUR concurrent flows:
+        // the order line (through checking), a check-remake batch (Stitching),
+        // a production-loss batch (Cutting), and an alteration batch (Cutting).
+        // The drawer must show each flow's own stage, not one merged pill.
+        { ID: 'I6', Plan: { ID: '104' }, Item_Name: 'Fern Duvet Cover', Line_No: 1,
+          Qty_Ordered: 12, Qty_Produced: 10, Qty_Accepted: 8, Qty_Rejected: 3,
+          Item_Status: 'Complete', Is_Remake: false },
+        { ID: 'I7', Plan: { ID: '104' }, Item_Name: 'Fern Duvet Cover', Line_No: 2,
+          Qty_Ordered: 3, Qty_Produced: 0, Qty_Accepted: 0, Qty_Rejected: 0,
+          Item_Status: 'In_Production', Is_Remake: true, Remake_Reason: 'Check_Reject' },
+        { ID: 'I8', Plan: { ID: '104' }, Item_Name: 'Fern Duvet Cover', Line_No: 3,
+          Qty_Ordered: 1, Qty_Produced: 0, Qty_Accepted: 0, Qty_Rejected: 0,
+          Item_Status: 'In_Production', Is_Remake: true, Remake_Reason: 'Alteration' },
+        { ID: 'I9', Plan: { ID: '104' }, Item_Name: 'Fern Duvet Cover', Line_No: 4,
+          Qty_Ordered: 2, Qty_Produced: 0, Qty_Accepted: 0, Qty_Rejected: 0,
+          Item_Status: 'Awaiting_Material', Is_Remake: true, Remake_Reason: 'Production_Loss' }
     ];
     t[STAGES] = [
         { ID: 'S1', Plan: { ID: '101' }, Plan_Item: { ID: 'I1' }, Phase_Name: 'Cutting',
@@ -136,11 +153,25 @@ function baseTables() {
           Sequence_No: 2, Stage_Status: 'In_Progress', Qty_In: 10, Qty_Out: 4, Log_Date: iso(-1) },
         // Plan 102 last moved 30 days ago -> STUCK.
         { ID: 'S3', Plan: { ID: '102' }, Plan_Item: { ID: 'I3' }, Phase_Name: 'Cutting',
-          Sequence_No: 1, Stage_Status: 'Done', Qty_In: 15, Qty_Out: 15, Log_Date: iso(-30) }
+          Sequence_No: 1, Stage_Status: 'Done', Qty_In: 15, Qty_Out: 15, Log_Date: iso(-30) },
+        // Plan 104: root done through Checking; the Check_Reject batch is
+        // mid-Stitching; the Alteration batch is at Cutting.
+        { ID: 'S4', Plan: { ID: '104' }, Plan_Item: { ID: 'I6' }, Phase_Name: 'Stitching',
+          Sequence_No: 2, Stage_Status: 'Done', Qty_In: 12, Qty_Out: 12, Log_Date: iso(-5) },
+        { ID: 'S5', Plan: { ID: '104' }, Plan_Item: { ID: 'I7' }, Phase_Name: 'Cutting',
+          Sequence_No: 1, Stage_Status: 'Done', Qty_In: 3, Qty_Out: 3, Log_Date: iso(-2) },
+        { ID: 'S6', Plan: { ID: '104' }, Plan_Item: { ID: 'I7' }, Phase_Name: 'Stitching',
+          Sequence_No: 2, Stage_Status: 'In_Progress', Qty_In: 3, Qty_Out: 1, Log_Date: iso(-1) },
+        { ID: 'S7', Plan: { ID: '104' }, Plan_Item: { ID: 'I8' }, Phase_Name: 'Cutting',
+          Sequence_No: 1, Stage_Status: 'In_Progress', Qty_In: 1, Qty_Out: 0, Log_Date: iso(-1) }
+        // I9 (production loss) has no Stage_Log yet — Awaiting_Material, store
+        // not asked. Its flow should read "awaiting material".
     ];
     t[CHECKS] = [
         { ID: 'CK1', Plan: { ID: '102' }, Plan_Item: { ID: 'I3' }, Round: 1,
-          Qty_Inspected: 15, Qty_Approved: 15, Qty_Rejected: 0, Qty_Alteration: 0 }
+          Qty_Inspected: 15, Qty_Approved: 15, Qty_Rejected: 0, Qty_Alteration: 0 },
+        { ID: 'CK2', Plan: { ID: '104' }, Plan_Item: { ID: 'I6' }, Round: 1,
+          Qty_Inspected: 12, Qty_Approved: 8, Qty_Rejected: 3, Qty_Alteration: 1 }
     ];
     t[FINISH] = [
         { ID: 'F1', Item_Check: { ID: 'CK1' }, Finishing_Status: 'Done' }
@@ -192,6 +223,16 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (res) {
     check('total calls stay in single figures for a page of orders',
         ASKED.length <= 9, ASKED.length + ' calls');
 
+    // page() no longer pages. It returns the WHOLE bucket enriched so the
+    // search box and the "needs attention" chips (which run client-side over
+    // the returned array) cover every order, not the 25 on screen. main.js
+    // slices for display. `total` is just the count.
+    check('the return has no page / totalPages / pageSize keys',
+        res.totalPages === undefined && res.page === undefined,
+        JSON.stringify(Object.keys(res)));
+    check('total equals the number of orders returned',
+        res.total === res.orders.length);
+
     // --- the joined figures ---
     const so3000 = byId['SO-3000'];
     check('plan number joined', so3000.planNo === 'PLAN-00107');
@@ -215,6 +256,71 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (res) {
     check('remake items counted', byId['SO-1099'].remakeItems === 1);
 
     // ===================================================================
+    console.log('\nITEM BREAKDOWN — one name, its concurrent production flows:');
+    // ===================================================================
+    // The bug: the drawer merged an order line and its remake / loss /
+    // alteration batches into ONE row with ONE stage pill — impossible, since
+    // a name can be at several stages at once. Now `o.items[]` is a PARENT per
+    // name with a `flows[]` array, each flow at its own stage.
+    const so0001 = byId['SO-0001'];
+    check('SO-0001 has its plan-104 item', Array.isArray(so0001.items) && so0001.items.length === 1,
+        JSON.stringify((so0001.items || []).map(function (i) { return i.name; })));
+
+    const fdc = so0001.items[0] || {};
+    check('the parent is the product name', fdc.name === 'Fern Duvet Cover');
+    check('parent headline qtys come from the ORDER LINE (I6), not summed',
+        fdc.qtyOrdered === 12 && fdc.qtyProduced === 10 && fdc.qtyAccepted === 8 && fdc.qtyRejected === 3,
+        JSON.stringify({ o: fdc.qtyOrdered, p: fdc.qtyProduced, a: fdc.qtyAccepted, r: fdc.qtyRejected }));
+    check('qtyAltered is the alteration flow quantity (1)', fdc.qtyAltered === 1);
+    check('hasRemake / hasLoss / hasAlteration all set',
+        fdc.hasRemake === true && fdc.hasLoss === true && fdc.hasAlteration === true,
+        JSON.stringify({ r: fdc.hasRemake, l: fdc.hasLoss, a: fdc.hasAlteration }));
+
+    check('flows[] has all FOUR Plan_Item rows', Array.isArray(fdc.flows) && fdc.flows.length === 4,
+        JSON.stringify((fdc.flows || []).map(function (f) { return f.id + ':' + f.flowType; })));
+
+    const byType = {};
+    (fdc.flows || []).forEach(function (f) { byType[f.flowType] = f; });
+    check('flows are ordered original -> remake -> loss -> alteration',
+        fdc.flows.map(function (f) { return f.flowType; }).join(',') ===
+        'original,check_remake,production_loss,alteration',
+        fdc.flows.map(function (f) { return f.flowType; }).join(','));
+
+    // I6 finished Stitching and is Item_Status Complete -> its flow carries the
+    // last real stage (Stitching/Done) and status Complete; the drawer's pill
+    // maps that to "checking passed".
+    check('the ORIGINAL flow keeps its own last stage + status',
+        byType.original.stage === 'Stitching' && byType.original.status === 'Complete',
+        JSON.stringify({ s: byType.original.stage, st: byType.original.status }));
+    check('the CHECK-REMAKE flow is at its own stage (Stitching, running)',
+        byType.check_remake.stage === 'Stitching' && byType.check_remake.stageStatus === 'Running',
+        JSON.stringify(byType.check_remake));
+    check('the ALTERATION flow is at Cutting',
+        byType.alteration.stage === 'Cutting', JSON.stringify(byType.alteration));
+    check('the PRODUCTION-LOSS flow has no stage yet and is awaiting material',
+        byType.production_loss.stage === '' && byType.production_loss.awaitingMaterial === true,
+        JSON.stringify(byType.production_loss));
+
+    // Order-level totals must NOT double-count the batches.
+    check('order orderedQty is the order line only (12), not 12+3+1+2',
+        so0001.orderedQty === 12, 'got ' + so0001.orderedQty);
+    check('order producedQty is the order line only (10)', so0001.producedQty === 10,
+        'got ' + so0001.producedQty);
+    check('order rejectedQty counts the checked line (3)', so0001.rejectedQty === 3,
+        'got ' + so0001.rejectedQty);
+    check('order remakeItems counts all three batches (3)', so0001.remakeItems === 3,
+        'got ' + so0001.remakeItems);
+    check('order lossFlows counts the production-loss batch (1)', so0001.lossFlows === 1,
+        'got ' + so0001.lossFlows);
+
+    // A plain line with no batches is a parent with one flow.
+    const sylph = (byId['SO-2000'].items || [])[0] || {};
+    check('a plain line is a parent with a single flow',
+        Array.isArray(sylph.flows) && sylph.flows.length === 1 &&
+        sylph.flows[0].flowType === 'original',
+        JSON.stringify(sylph));
+
+    // ===================================================================
     console.log('\nRISK — and, just as important, what must NOT be flagged:');
     // ===================================================================
     function levels(o) { return P.risk(o).map(function (r) { return r.level; }); }
@@ -224,9 +330,10 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (res) {
     check('and the label says how many days',
         P.risk(so2000).some(function (r) { return r.level === 'late' && /5 days? overdue/.test(r.label); }),
         JSON.stringify(P.risk(so2000).map(function (r) { return r.label; })));
-    check('an order due in 2 days is flagged due, not late',
-        levels(byId['SO-1099']).indexOf('due') > -1 &&
-        levels(byId['SO-1099']).indexOf('late') === -1);
+    check('an order due in 2 days is NOT flagged — "due soon" was removed',
+        levels(byId['SO-1099']).indexOf('due') === -1 &&
+        levels(byId['SO-1099']).indexOf('late') === -1,
+        JSON.stringify(levels(byId['SO-1099'])));
     check('an order due in 20 days is NOT flagged for time',
         levels(so3000).indexOf('due') === -1 && levels(so3000).indexOf('late') === -1,
         JSON.stringify(levels(so3000)));
@@ -246,10 +353,10 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (res) {
         check('a dispatched order raises no risk at all', P.risk(disp).length === 0,
             JSON.stringify(P.risk(disp).map(function (r) { return r.level; })));
 
-        // worstRisk ranks late above due, so the row shows the worse word.
-        check('worstRisk prefers late over due',
+        // worstRisk ranks late above blocked/stuck, so the row shows the worst.
+        check('worstRisk prefers late over the rest',
             P.worstRisk(so2000).level === 'late');
-        check('a clean order has no worst risk', P.worstRisk(so3000) !== null);
+        check('an order with a risk has a worst risk', P.worstRisk(so3000) !== null);
 
         // ===================================================================
         console.log('\nSORTING — urgency by default:');
@@ -299,8 +406,38 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (res) {
                         return P2.risk(o).every(function (x) { return x.level !== 'stuck'; });
                     }));
 
-                console.log('\n' + pass + ' passed, ' + fail + ' failed');
-                process.exit(fail ? 1 : 0);
+                // ===============================================================
+                console.log('\nWHOLE BUCKET — a status set bigger than a display page:');
+                // ===============================================================
+                // 40 In-Production orders, no plans (so the join is a no-op) —
+                // every one must come back so the search + risk chips see them.
+                const big = baseTables();
+                big[ORDERS] = [];
+                for (var bi = 1; bi <= 40; bi++) {
+                    big[ORDERS].push({
+                        ID: 'B' + bi, Sales_Order: 'SO-9' + String(bi).padStart(3, '0'),
+                        Order_Status: 'In Progress',
+                        Expected_Delivery_Date: iso(bi % 7 === 0 ? -3 : 20),
+                        Customer: { ID: 'C1', display_value: 'Faire' }
+                    });
+                }
+                big[PLANS] = [];
+                const P3 = load(big);
+                return P3.page({ status: 'In Production' }).then(function (r3) {
+                    check('all 40 orders returned, not a page of 25',
+                        r3.orders.length === 40, 'got ' + r3.orders.length);
+                    check('total matches', r3.total === 40);
+                    // Every 7th has a due date 3 days ago -> overdue. The risk
+                    // count must span the whole 40, not a slice.
+                    var lateCount = r3.orders.filter(function (o) {
+                        return P3.risk(o).some(function (x) { return x.level === 'late'; });
+                    }).length;
+                    check('the overdue count spans the whole bucket (5 of 40)',
+                        lateCount === 5, 'got ' + lateCount);
+
+                    console.log('\n' + pass + ' passed, ' + fail + ' failed');
+                    process.exit(fail ? 1 : 0);
+                });
             });
         });
     });

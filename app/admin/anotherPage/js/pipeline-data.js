@@ -294,21 +294,33 @@ var PipelineData = (function () {
     }
 
     /* ----------------------------------------------------------------------
-     * page(opts) -> { orders, total, totalPages, page, notes }
+     * page(opts) -> { orders, total, notes }   (name is historical — it does
+     * not page; it returns the whole enriched bucket, main.js pages for display)
      *
-     * opts: { status, page, pageSize, search, sort }
-     *
-     * `status` is one of the tile buckets ('Pending', 'In Production',
-     * 'Packed', 'Dispatched') or a single Order_Status, or '' for everything
-     * currently live.
+     * opts: { status }  — one of the tile buckets ('Pending', 'In Production',
+     * 'Packed', 'Dispatched'), a single Order_Status, or '' for everything
+     * currently live. page/pageSize/search/sort are accepted and ignored.
      * -------------------------------------------------------------------- */
+    //
+    // ENRICHES THE WHOLE BUCKET, NOT ONE PAGE. Every order of the requested
+    // status set is fetched, joined and returned. The caller pages the result
+    // for DISPLAY, but "needs attention" (overdue / awaiting material / stuck)
+    // and the risk-chip filter run over the full array on the client — so they
+    // count every order, not just the 25 on screen. That was the whole bug:
+    // the risk bar honestly said "on this page" because that was all it had.
+    //
+    // `search` and `sort` are no longer applied here — main.js owns both, over
+    // the full enriched set, so the table / counts / pager cannot disagree
+    // about what is listed. `page`/`pageSize` are ignored (kept in the signature
+    // so an old caller does not break).
+    //
+    // Cost: the joins were bounded by 25 orders' plans; now by every
+    // in-production order's plans (~one plan each). Still one getRecords per
+    // form for the whole set (fetchByIds chunks the id list at 60), and there
+    // is NO statement limit on the JS Data API — the reason this left Deluge.
     function page(opts) {
         opts = opts || {};
         var wanted = str(opts.status).trim();
-        var pageNo = Math.max(1, num(opts.page) || 1);
-        var pageSize = num(opts.pageSize) || 25;
-        var search = str(opts.search).trim().toLowerCase();
-        var sort = str(opts.sort) || 'urgency';
         var notes = [];
 
         var statuses;
@@ -347,33 +359,16 @@ var PipelineData = (function () {
                 };
             });
 
-            // Free-text filter before paging, so the count matches the list.
-            if (search) {
-                orders = orders.filter(function (o) {
-                    return (o.salesOrder + ' ' + o.customerName + ' ' + o.status)
-                        .toLowerCase().indexOf(search) > -1;
-                });
-            }
-
             var total = orders.length;
-            orders = sortOrders(orders, sort);
-
-            var from = (pageNo - 1) * pageSize;
-            var slice = orders.slice(from, from + pageSize);
-            var totalPages = Math.max(1, Math.ceil(total / pageSize));
-
-            if (!slice.length) {
-                return { orders: [], total: total, totalPages: totalPages,
-                         page: pageNo, notes: notes };
+            if (!orders.length) {
+                return { orders: [], total: 0, notes: notes };
             }
 
-            // ---- the joins, one fetch per form for the WHOLE page ----
-            return enrich(slice, notes).then(function () {
-                // Sorting again: urgency depends on stage movement, which is
-                // only known after the joins. Cheap — it is one page of rows.
-                var out = sortOrders(slice, sort);
-                return { orders: out, total: total, totalPages: totalPages,
-                         page: pageNo, notes: notes };
+            // ---- the joins, one fetch per form for the WHOLE bucket ----
+            return enrich(orders, notes).then(function () {
+                // Urgency depends on stage movement, only known after the joins.
+                var out = sortOrders(orders, 'urgency');
+                return { orders: out, total: total, notes: notes };
             });
         });
     }
@@ -479,7 +474,11 @@ var PipelineData = (function () {
                         }
                     });
 
-                    // --- stage logs, newest activity per plan ---
+                    // --- stage logs, newest activity per plan AND per item ---
+                    // Deluge sorted Stage_Log by Sequence_No DESC and kept the
+                    // FIRST in-progress / done phase seen per item — i.e. the
+                    // furthest-along one. Here rows arrive unordered, so the
+                    // highest Sequence_No wins.
                     var stageByPlan = {};
                     (stageRes.rows || []).forEach(function (lg) {
                         var pid = idOf(lg.Plan);
@@ -500,6 +499,15 @@ var PipelineData = (function () {
                         if (st === 'In_Progress') b.open.push(row);
                         else if (st === 'Done') b.done.push(row);
 
+                        // Per-item furthest-along phase, open and done tracked
+                        // separately (an item can have a done Cutting and an open
+                        // Stitching at once — the open one wins for "current").
+                        if (row.itemId) {
+                            var bi = b.byItem[row.itemId] || (b.byItem[row.itemId] = { open: null, done: null });
+                            if (st === 'In_Progress' && (!bi.open || row.seq > bi.open.seq)) bi.open = row;
+                            else if (st === 'Done' && (!bi.done || row.seq > bi.done.seq)) bi.done = row;
+                        }
+
                         // The most recent evidence that ANYTHING moved on this
                         // plan — what "stuck for N days" is measured from.
                         var d = parseDate(row.on);
@@ -515,49 +523,139 @@ var PipelineData = (function () {
                     });
 
                     // --- fold into the orders ---
+                    //
+                    // ONE PRODUCT NAME CAN BE AT SEVERAL STAGES AT ONCE. The
+                    // order line's own pieces might be through checking while its
+                    // check-remake batch is back at Stitching and its production-
+                    // loss batch is at Cutting. A single row with one stage pill
+                    // cannot say that. So `o.items[]` is one PARENT per name, and
+                    // each parent carries `flows[]` — one entry per Plan_Item
+                    // (original / check_remake / production_loss / alteration),
+                    // each with its OWN stage. The drawer renders the parent as a
+                    // summary and the flows as child rows.
+                    var FLOW_TYPE = function (isRemake, reason) {
+                        if (!isRemake) return 'original';
+                        if (reason === 'Alteration') return 'alteration';
+                        if (reason === 'Production_Loss') return 'production_loss';
+                        return 'check_remake'; // Check_Reject, and any older value
+                    };
+                    var FLOW_ORDER = { original: 0, check_remake: 1, production_loss: 2, alteration: 3 };
+
                     orders.forEach(function (o) {
                         if (!o.planId) return;
                         var items = itemsByPlan[o.planId] || [];
-                        var sb = stageByPlan[o.planId] || { open: [], done: [], last: null };
+                        var sb = stageByPlan[o.planId] || { open: [], done: [], last: null, byItem: {} };
+                        var ordSt = o.status;
+                        var ordFinDone = (ordSt === 'Finishing Complete' || ordSt === 'Packed' || ordSt === 'Dispatched');
 
                         o.itemCount = items.length;
-                        items.forEach(function (it) {
-                            var iid = str(it.ID);
-                            var ordered = num(it.Qty_Ordered);
-                            var produced = num(it.Qty_Produced);
-                            var status = str(it.Item_Status).trim();
-                            var isRemake = it.Is_Remake === true || str(it.Is_Remake) === 'true';
 
-                            o.orderedQty += ordered;
-                            o.producedQty += produced;
-                            o.rejectedQty += num(it.Qty_Rejected);
+                        // One flow per Plan_Item row, with its own stage.
+                        var flows = items.map(function (it) {
+                            var iid = str(it.ID);
+                            var isRemake = it.Is_Remake === true || str(it.Is_Remake) === 'true';
+                            var reason = str(it.Remake_Reason).trim();
+                            var flowType = FLOW_TYPE(isRemake, reason);
+                            var status = str(it.Item_Status).trim();
+                            var name = str(it.Item_Name) || ('Item #' + iid);
+                            var qOrd = num(it.Qty_Ordered);
+                            var qProd = num(it.Qty_Produced);
+                            var qAcc = num(it.Qty_Accepted);
+                            var qRej = num(it.Qty_Rejected);
+                            var qAlt = altByItem[iid] || 0;
+
+                            // Order-level totals: original lines only — a batch
+                            // remakes pieces the original line already counts.
+                            if (flowType === 'original') {
+                                o.orderedQty += qOrd;
+                                o.producedQty += qProd;
+                                if (qRej > 0 && checkedItems[iid]) o.rejectedQty += qRej;
+                            }
                             if (isRemake) o.remakeItems++;
+                            if (flowType === 'production_loss') o.lossFlows = (o.lossFlows || 0) + 1;
                             if (status === 'Complete') o.completedItems++;
-                            // AWAITING MATERIAL IS THE BLOCKER THAT MATTERS.
-                            // An item here cannot be worked on at all — the
-                            // store owes it cloth — and it is invisible on a
-                            // produced/ordered ratio.
                             if (status === 'Awaiting_Material') o.blocked++;
 
-                            o.items.push({
-                                id: iid,
-                                name: str(it.Item_Name),
-                                sku: labelOf(it.Item_Sku),
-                                ordered: ordered,
-                                produced: produced,
+                            var finDone = ordFinDone || !!finishedItems[iid];
+
+                            // This flow's furthest-along stage, from the per-item
+                            // stage map (open wins over done), then derived.
+                            var bi = sb.byItem[iid] || { open: null, done: null };
+                            var stage = '', stageStatus = '';
+                            if (bi.open) { stage = bi.open.phase; stageStatus = 'Running'; }
+                            else if (bi.done) { stage = bi.done.phase; stageStatus = 'Done'; }
+
+                            if (stage === '') {
+                                if (finDone) { stage = 'Finishing'; stageStatus = 'Done'; }
+                                else if (status === 'Complete') { stage = 'Checking'; stageStatus = 'Passed'; }
+                                else if (status === 'Awaiting_Check') { stage = 'Checking'; stageStatus = 'Queued'; }
+                                else if (status === 'Awaiting_Material') { stage = ''; stageStatus = 'Awaiting material'; }
+                            }
+
+                            return {
+                                id: iid, name: name, sku: labelOf(it.Item_Sku),
+                                flowType: flowType,
+                                lineNo: num(it.Line_No),
                                 status: status,
-                                isRemake: isRemake,
-                                remakeReason: str(it.Remake_Reason),
+                                qtyOrdered: qOrd, qtyProduced: qProd,
+                                qtyAccepted: qAcc, qtyRejected: qRej, qtyAltered: qAlt,
+                                stage: stage, stageStatus: stageStatus,
+                                finishingComplete: finDone,
                                 checked: !!checkedItems[iid],
-                                finished: !!finishedItems[iid],
-                                alteration: altByItem[iid] || 0,
-                                lineNo: num(it.Line_No)
-                            });
+                                // A batch with no material raised yet still sits
+                                // at Awaiting_Material — the store has not been
+                                // asked. Worth flagging on a production-loss row.
+                                awaitingMaterial: status === 'Awaiting_Material'
+                            };
                         });
 
-                        // Current stage: the open one furthest along, else the
-                        // last one completed. Sorted by Sequence_No the same way
-                        // the Deluge did.
+                        // Group flows by product name -> one parent per name.
+                        var groupMap = {}, groupOrder = [];
+                        flows.forEach(function (f) {
+                            var g = groupMap[f.name];
+                            if (!g) {
+                                g = { name: f.name, itemName: f.name, sku: f.sku, lineNo: f.lineNo,
+                                      qtyOrdered: 0, qtyProduced: 0, qtyAccepted: 0,
+                                      qtyRejected: 0, qtyAltered: 0,
+                                      hasRemake: false, hasLoss: false, hasAlteration: false,
+                                      flows: [] };
+                                groupMap[f.name] = g;
+                                groupOrder.push(f.name);
+                            }
+                            // The parent's headline numbers come from the
+                            // ORIGINAL line; the batches add their own quantities.
+                            if (f.flowType === 'original') {
+                                g.qtyOrdered = f.qtyOrdered;
+                                g.qtyProduced = f.qtyProduced;
+                                g.qtyAccepted = f.qtyAccepted;
+                                g.qtyRejected = f.qtyRejected;
+                                if (f.sku) g.sku = f.sku;
+                                if (g.lineNo === 0 || f.lineNo < g.lineNo) g.lineNo = f.lineNo;
+                            } else if (f.flowType === 'alteration') {
+                                g.hasAlteration = true;
+                                g.qtyAltered += f.qtyOrdered;
+                            } else if (f.flowType === 'production_loss') {
+                                g.hasLoss = true;
+                            } else {
+                                g.hasRemake = true;
+                            }
+                            g.flows.push(f);
+                        });
+
+                        o.items = groupOrder.map(function (nm) {
+                            var g = groupMap[nm];
+                            g.flows.sort(function (a, b) {
+                                var d = (FLOW_ORDER[a.flowType] || 0) - (FLOW_ORDER[b.flowType] || 0);
+                                return d !== 0 ? d : a.lineNo - b.lineNo;
+                            });
+                            return g;
+                        }).sort(function (a, b) { return a.lineNo - b.lineNo; });
+
+                        // Item count = ORDER LINES (parent groups), which is how
+                        // the admin counts them — not raw Plan_Item rows.
+                        o.itemCount = o.items.length;
+
+                        // Order-level current stage: furthest-along open, else done.
                         var open = sb.open.slice().sort(function (a, b) { return b.seq - a.seq; });
                         var done = sb.done.slice().sort(function (a, b) { return b.seq - a.seq; });
                         if (open.length) {
@@ -568,19 +666,14 @@ var PipelineData = (function () {
                             o.currentStageStatus = 'Done';
                         }
                         if (done.length) o.lastCompletedStage = done[0].phase;
-
                         o.stages = open.concat(done);
 
-                        // HOW LONG SINCE ANYTHING HAPPENED. A stuck order looks
-                        // identical to a healthy one on a produced/ordered
-                        // ratio; this is the only figure that separates them.
+                        // HOW LONG SINCE ANYTHING HAPPENED — the stuck signal.
                         if (sb.last) {
                             o.lastMovement = sb.last;
                             o.daysSinceMovement = Math.round(
                                 (midnight(new Date()).getTime() - midnight(sb.last).getTime()) / 86400000);
                         }
-
-                        o.items.sort(function (a, b) { return a.lineNo - b.lineNo; });
                     });
 
                     return null;
@@ -606,16 +699,12 @@ var PipelineData = (function () {
             return out;
         }
 
-        if (d !== null) {
-            if (d < 0) {
-                out.push({ level: 'late', label: Math.abs(d) + ' day' + (Math.abs(d) === 1 ? '' : 's') + ' overdue',
-                           why: 'past its expected delivery date and not yet packed' });
-            } else if (d === 0) {
-                out.push({ level: 'due', label: 'due today', why: 'expected delivery is today' });
-            } else if (d <= 3) {
-                out.push({ level: 'due', label: 'due in ' + d + ' day' + (d === 1 ? '' : 's'),
-                           why: 'expected delivery is within three days' });
-            }
+        // Only OVERDUE is flagged, not "due soon". A due-soon chip fires on
+        // every healthy order in its last few days and trains the admin to
+        // ignore the bar — overdue is the state that actually needs a decision.
+        if (d !== null && d < 0) {
+            out.push({ level: 'late', label: Math.abs(d) + ' day' + (Math.abs(d) === 1 ? '' : 's') + ' overdue',
+                       why: 'past its expected delivery date and not yet packed' });
         }
 
         if (order.blocked > 0) {
@@ -646,7 +735,7 @@ var PipelineData = (function () {
     function worstRisk(order) {
         var rs = risk(order);
         if (!rs.length) return null;
-        var rank = { late: 0, blocked: 1, stuck: 2, due: 3, short: 4 };
+        var rank = { late: 0, blocked: 1, stuck: 2, short: 3 };
         var best = rs[0];
         rs.forEach(function (r) {
             if (rank[r.level] < rank[best.level]) best = r;
