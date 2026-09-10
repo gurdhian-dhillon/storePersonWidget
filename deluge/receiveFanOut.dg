@@ -38,6 +38,12 @@ string receiveFanOut(string supervisorId, string payloadJson)
 	dispRows = List();
 	finalizeCursorJson = "{\"ph\":\"done\"}";
 	finalizeDone = true;
+	// Declared above the try so the catch can always read it - Deluge has no
+	// block scope, but a variable never assigned on the executed path still
+	// throws "Variable not defined", which would mask the real error. The phase
+	// currently running; the catch advances the cursor past it. Reassigned
+	// inside the try once the payload's own cursor is parsed.
+	ph = "";
 	try
 	{
 		supId = supervisorId.trim().toLong();
@@ -886,7 +892,61 @@ string receiveFanOut(string supervisorId, string payloadJson)
 	}
 	catch (e)
 	{
-		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"disputeIds\":[],\"finalizeCursor\":{\"ph\":\"done\"},\"finalizeDone\":true}";
+		// A caught exception mid-finalize must NOT report the receipt as fully
+		// finished. The old catch returned disputeIds:[], ph:"done", done:true -
+		// the widget then called finishOk() and every phase after the throw
+		// (vouchers status, readiness sweep, transfer, notify) silently never
+		// ran, and any Stock_Dispute already raised in this call never reached
+		// the notify digest.
+		//
+		// Instead: keep the disputeIds this call did raise (newDispIdsJson is
+		// built as they are inserted), and ADVANCE the cursor to the NEXT phase
+		// rather than repeating the current one. Advancing, not repeating,
+		// because fanStep in receive.js has no retry counter for the finalize
+		// loop - re-entering a phase that throws deterministically (a bad
+		// record) would spin for ever. The one phase actually skipped is
+		// reported in errors[], the widget shows it in "Recorded, with
+		// discrepancies", and pressing Confirm again re-runs the whole finalize
+		// from {} (receiveHandover is idempotent) which retries the skipped
+		// phase cleanly - the same recovery abortRun already tells him to use.
+		//
+		// ph is assigned at the top of the try, before any phase work, so on a
+		// throw during crediting / disputing / the sweep it holds a real value.
+		// A throw BEFORE ph is set is a parse/structural failure - re-running
+		// from any phase fails the same way, so that case still ends at "done".
+		catchPh = ifnull(ph,"").toString().trim();
+		nextPh = "done";
+		if(catchPh == "fan")
+		{
+			nextPh = "vouchers";
+		}
+		else if(catchPh == "vouchers")
+		{
+			nextPh = "items";
+		}
+		else if(catchPh == "items")
+		{
+			nextPh = "transfer";
+		}
+		else if(catchPh == "transfer")
+		{
+			nextPh = "notify";
+		}
+		catchCursor = "{\"ph\":\"" + nextPh + "\"}";
+		if(nextPh == "items")
+		{
+			catchCursor = "{\"ph\":\"items\",\"pi\":0,\"ii\":0}";
+		}
+		else if(nextPh == "vouchers")
+		{
+			catchCursor = "{\"ph\":\"vouchers\",\"vi\":0}";
+		}
+		catchDone = "false";
+		if(nextPh == "done")
+		{
+			catchDone = "true";
+		}
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"disputeIds\":[" + newDispIdsJson + "],\"finalizeCursor\":" + catchCursor + ",\"finalizeDone\":" + catchDone + "}";
 	}
 
 	//------------------------------------------------------------------------
