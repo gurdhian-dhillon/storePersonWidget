@@ -761,25 +761,25 @@
         background: transparent;
     }
 
-    .packing-app .pack-tbl {
+    .packing-app .pack-scroll > .pack-tbl {
         display: block;
         width: 100%;
         border: none;
         background: transparent;
     }
 
-    .packing-app .pack-tbl thead {
+    .packing-app .pack-scroll > .pack-tbl thead {
         display: none;
     }
 
-    .packing-app .pack-tbl tbody {
+    .packing-app .pack-scroll > .pack-tbl tbody {
         display: flex;
         flex-direction: column;
         gap: 0.75rem;
         width: 100%;
     }
 
-    .packing-app .pack-tbl tbody tr {
+    .packing-app .pack-scroll > .pack-tbl tbody tr {
         display: block;
         padding: 1rem;
         background: var(--surface);
@@ -790,11 +790,11 @@
         position: relative;
     }
 
-    .packing-app .pack-tbl tbody tr:hover {
+    .packing-app .pack-scroll > .pack-tbl tbody tr:hover {
         background: var(--surface);
     }
 
-    .packing-app .pack-tbl td {
+    .packing-app .pack-scroll > .pack-tbl td {
         display: block;
         width: 100% !important;
         padding: 0.25rem 0 !important;
@@ -804,7 +804,7 @@
     }
 
     /* Cell 1: Item Name & SKU */
-    .packing-app .pack-tbl td:first-child {
+    .packing-app .pack-scroll > .pack-tbl td:first-child {
         font-size: 1rem;
         margin-bottom: 0.5rem;
         padding-bottom: 0.5rem !important;
@@ -824,10 +824,10 @@
     }
 
     /* Grid layout for Weight, Total Qty, Boxed, and Left */
-    .packing-app .pack-tbl td:nth-child(2),
-    .packing-app .pack-tbl td:nth-child(3),
-    .packing-app .pack-tbl td:nth-child(4),
-    .packing-app .pack-tbl td:nth-child(5) {
+    .packing-app .pack-scroll > .pack-tbl td:nth-child(2),
+    .packing-app .pack-scroll > .pack-tbl td:nth-child(3),
+    .packing-app .pack-scroll > .pack-tbl td:nth-child(4),
+    .packing-app .pack-scroll > .pack-tbl td:nth-child(5) {
         display: inline-flex;
         align-items: center;
         width: 50% !important;
@@ -837,38 +837,38 @@
     }
 
     /* Clear float after the inline cells */
-    .packing-app .pack-tbl tbody tr::after {
+    .packing-app .pack-scroll > .pack-tbl tbody tr::after {
         content: "";
         display: table;
         clear: both;
     }
 
-    .packing-app .pack-tbl td:nth-child(2)::before {
+    .packing-app .pack-scroll > .pack-tbl td:nth-child(2)::before {
         content: "Weight:\00a0";
         font-weight: 600;
         color: var(--text-muted);
     }
 
-    .packing-app .pack-tbl td:nth-child(3)::before {
+    .packing-app .pack-scroll > .pack-tbl td:nth-child(3)::before {
         content: "Total:\00a0";
         font-weight: 600;
         color: var(--text-muted);
     }
 
-    .packing-app .pack-tbl td:nth-child(4)::before {
+    .packing-app .pack-scroll > .pack-tbl td:nth-child(4)::before {
         content: "Boxed:\00a0";
         font-weight: 600;
         color: var(--text-muted);
     }
 
-    .packing-app .pack-tbl td:nth-child(5)::before {
+    .packing-app .pack-scroll > .pack-tbl td:nth-child(5)::before {
         content: "Left:\00a0";
         font-weight: 600;
         color: var(--text-muted);
     }
 
     /* Cell 6: Action Button (+ box) */
-    .packing-app .pack-tbl td:last-child {
+    .packing-app .pack-scroll > .pack-tbl td:last-child {
         display: block;
         width: 100% !important;
         padding-top: 0.75rem !important;
@@ -877,7 +877,8 @@
         text-align: right !important;
     }
 
-    .packing-app .mini-btn {
+    .packing-app .pack-scroll .mini-btn,
+    .packing-app .pack-sec-head .mini-btn {
         width: 100%;
         text-align: center;
         padding: 0.55rem;
@@ -900,7 +901,7 @@
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        gap: 0.35rem 0.3rem;
+        gap: 0.35rem 0.25rem;
         width: 100%;
         padding-bottom: 0.45rem;
         border-bottom: 1px dashed #e2e8f0;
@@ -922,13 +923,18 @@
     }
 
     .packing-app .dim-input {
-        flex: 1 1 0;
-        min-width: 3rem;
+        flex: 1 1 2.5rem;
+        min-width: 2.2rem;
         width: auto !important;
         font-size: 0.875rem !important;
         font-weight: 600;
         text-align: center !important;
         padding: 0.4rem 0.2rem !important;
+    }
+
+    .packing-app .dim-row input:nth-of-type(4) {
+        flex: 0 0 4.25rem !important;
+        max-width: 5rem;
     }
 
     .packing-app .dim-x {
@@ -952,97 +958,248 @@
         font-size: 0.72rem;
     }
 
-    /* Transform Box Items table into clean block list for mobile */
+    /* Box Card contents & photo column vertical stacking for mobile */
+    .packing-app .box-card {
+        padding: 0.85rem 0.75rem;
+        gap: 0.85rem;
+    }
+
+    .packing-app .box-right-col {
+        display: flex;
+        flex-direction: column;
+        gap: 1.1rem;
+        width: 100%;
+        min-width: 0;
+    }
+
+    .packing-app .box-contents {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .packing-app .box-photo-col {
+        width: 100%;
+        min-width: 0;
+        padding-top: 0.85rem;
+        border-top: 1px dashed var(--border);
+    }
+
+    .packing-app .box-sub-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        padding-bottom: 0.5rem;
+        width: 100%;
+    }
+
+    .packing-app .box-sub-head > span {
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #64748b;
+        white-space: nowrap;
+    }
+
+    .packing-app .box-sub-head .mini-btn {
+        width: auto !important;
+        padding: 0.35rem 0.75rem !important;
+        font-size: 0.8rem !important;
+        font-weight: 600;
+        white-space: nowrap;
+        border-radius: 6px;
+        background: #f1f5f9;
+        color: var(--primary);
+        border: 1px solid #cbd5e1;
+        cursor: pointer;
+    }
+
+    .packing-app .box-sub-head .mini-btn:hover {
+        background: #e2e8f0;
+    }
+
+    .packing-app .photo-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        align-items: center;
+        width: 100%;
+    }
+
+    .packing-app .photo-thumb {
+        width: 50px;
+        height: 50px;
+        border-radius: 8px;
+    }
+
+    .packing-app .photo-add {
+        width: 50px;
+        height: 50px;
+        border-radius: 8px;
+    }
+
+    /* Transform Box Items table into clean, modern card list for mobile */
     .packing-app .box-items-tbl {
         display: block;
         width: 100%;
         border: none;
+        background: transparent;
+        margin: 0;
     }
 
     .packing-app .box-items-tbl thead {
         display: none;
     }
 
-    .packing-app .box-items-tbl tbody,
-    .packing-app .box-items-tbl tr {
-        display: block;
+    .packing-app .box-items-tbl tbody {
+        display: flex;
+        flex-direction: column;
+        gap: 0.65rem;
         width: 100%;
     }
 
-    .packing-app .box-items-tbl tr {
-        padding: 0.6rem 0;
-        border-bottom: 1px dashed var(--border);
-        position: relative;
+    .packing-app .box-items-tbl tbody tr {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-rows: auto auto;
+        grid-template-areas:
+            "item act"
+            "qty  qty";
+        gap: 0.55rem 0.5rem;
+        align-items: center;
+        padding: 0.75rem 0.85rem;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: var(--radius);
+        box-shadow: none;
+        width: 100%;
+        box-sizing: border-box;
     }
 
-    .packing-app .box-items-tbl tr:last-child {
-        border-bottom: none;
+    .packing-app .box-items-tbl tbody tr:hover {
+        background: #f8fafc;
+    }
+
+    .packing-app .box-items-tbl tbody tr::after {
+        display: none !important;
+        content: none !important;
     }
 
     .packing-app .box-items-tbl td {
-        display: block;
-        width: 100% !important;
-        padding: 0.25rem 0 !important;
-        text-align: left !important;
+        display: block !important;
+        width: auto !important;
+        padding: 0 !important;
+        border: none !important;
+        float: none !important;
+        background: transparent !important;
     }
 
     .packing-app .box-items-tbl td::before {
         content: none !important;
     }
 
-    .packing-app .box-items-tbl td:first-child {
-        margin-bottom: 0.35rem;
-        border: none !important;
+    /* Row 1, Left: Item select */
+    .packing-app .box-items-tbl td.col-item {
+        grid-area: item;
+        min-width: 0;
+        width: 100% !important;
     }
 
     .packing-app .box-items-tbl .cell-select {
         width: 100%;
+        height: 38px;
+        font-size: 0.875rem;
+        font-weight: 500;
+        color: var(--text-main);
+        background-color: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        padding: 0 1.75rem 0 0.65rem;
         text-overflow: ellipsis;
         white-space: nowrap;
         overflow: hidden;
+        outline: none;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
 
-    .packing-app .box-items-tbl td:nth-child(2) {
-        display: inline-flex !important;
+    .packing-app .box-items-tbl .cell-select:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+    }
+
+    /* Row 1, Right: Remove button */
+    .packing-app .box-items-tbl td.col-act {
+        grid-area: act;
+        display: flex !important;
         align-items: center;
-        width: 65% !important;
-        border: none !important;
-        float: left;
-    }
-
-    .packing-app .box-items-tbl td:nth-child(2)::before {
-        content: "Pieces:\00a0" !important;
-        font-weight: 600;
-        color: var(--text-muted);
-        margin-right: 0.5rem;
-    }
-
-    .packing-app .box-items-tbl td:nth-child(2) .cell-input {
-        width: 4rem;
-        text-align: center;
-        font-weight: 600;
-    }
-
-    .packing-app .box-items-tbl td:last-child {
-        display: inline-flex !important;
-        width: 35% !important;
         justify-content: flex-end;
+    }
+
+    .packing-app .box-items-tbl td.col-act:empty {
+        display: none !important;
+    }
+
+    .packing-app .box-items-tbl .x-btn {
+        width: 34px;
+        height: 34px;
+        min-width: 34px;
+        display: flex;
         align-items: center;
-        border: none !important;
-        float: right;
-        margin-top: 0;
-        padding-top: 0 !important;
+        justify-content: center;
+        border-radius: 6px;
+        color: #94a3b8;
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        font-size: 0.95rem;
+        cursor: pointer;
+        transition: all 0.15s ease;
     }
 
-    .packing-app .box-items-tbl td:last-child::before {
-        content: none !important;
+    .packing-app .box-items-tbl .x-btn:hover,
+    .packing-app .box-items-tbl .x-btn:active {
+        color: var(--status-danger);
+        background: #fee2e2;
+        border-color: #fecaca;
     }
 
-    /* Clear float on box items row */
-    .packing-app .box-items-tbl tr::after {
-        content: "";
-        display: table;
-        clear: both;
+    /* Row 2: Pieces in box count and number input */
+    .packing-app .box-items-tbl td.col-num {
+        grid-area: qty;
+        display: flex !important;
+        align-items: center;
+        justify-content: space-between;
+        padding-top: 0.45rem !important;
+        border-top: 1px dashed #e2e8f0 !important;
+        width: 100% !important;
+    }
+
+    .packing-app .box-items-tbl td.col-num::before {
+        content: "Pieces in box" !important;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: #475569;
+        letter-spacing: 0.01em;
+    }
+
+    .packing-app .box-items-tbl td.col-num .cell-input {
+        width: 5.5rem;
+        height: 34px;
+        text-align: center;
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: var(--text-main);
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        outline: none;
+        padding: 0.2rem 0.5rem;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .packing-app .box-items-tbl td.col-num .cell-input:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
     }
 
     /* Box Card Section Header and Add box button stacking */
