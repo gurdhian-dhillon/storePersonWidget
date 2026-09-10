@@ -2395,6 +2395,20 @@ function getBaseGroupName(rm) {
     }
 }
 
+// ---- Rolls on a lot ----
+// A lot's shelf cloth is a set of physical rolls, not one continuous length
+// (docs/lot-rolls-model.md). getRawMaterialsList.dg feeds lot.rolls[] as
+// {rollId,label,length,status,origin}. A lot seeded before the rolls model has
+// none — the caller shows the lot figure alone.
+function rollsSummaryText(rolls, unit) {
+    if (!rolls || !rolls.length) return '';
+    return rolls.map(function (r) {
+        var len = fmt(Number(r.length) || 0) + (unit ? ' ' + unit : '');
+        var tag = (r.status && r.status !== 'Available') ? ' (' + r.status + ')' : '';
+        return (r.label || '—') + ' ' + len + tag;
+    }).join('  ·  ');
+}
+
 function loadMaterials() {
     var panel = document.getElementById('materials-panel');
     if (!panel) return;
@@ -2530,6 +2544,13 @@ function renderMaterials() {
                         return escapeHtml(l.lotNumber) + ' - qty=' + fmt(lotQty) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + statusText;
                     }).join(', ');
                     nameCell += '<div style="font-weight:normal; font-size:11px; color:var(--text-muted); margin-top:4px; padding-left:18px;">Lots: ' + lotsTextList + '</div>';
+                    var rollsText = rm.lots.map(function (l) {
+                        var s = rollsSummaryText(l.rolls, rm.unit);
+                        return s ? escapeHtml(l.lotNumber) + ': ' + escapeHtml(s) : '';
+                    }).filter(Boolean).join('   |   ');
+                    if (rollsText) {
+                        nameCell += '<div style="font-weight:normal; font-size:11px; color:var(--text-muted); margin-top:3px; padding-left:18px; font-variant-numeric:tabular-nums; line-height:1.5;">Rolls&nbsp;&nbsp;' + rollsText + '</div>';
+                    }
                 }
                 nameCell += '</td>';
 
@@ -2573,11 +2594,17 @@ function renderMaterials() {
                                 ? '<span class="status-pill status-danger" style="padding:2px 6px; font-size:10px; font-weight:700; border-radius:4px; background:#fee2e2; color:#991b1b;">Blocked</span>'
                                 : '<span class="status-pill status-sufficient" style="padding:2px 6px; font-size:10px; font-weight:700; border-radius:4px; background:#d1fae5; color:#065f46;">Active</span>';
 
+                            var rollCell = rollsSummaryText(l.rolls, rm.unit);
+                            rollCell = rollCell
+                                ? '<span style="font-size:11px; color:var(--text-main); line-height:1.5; font-variant-numeric:tabular-nums; display:inline-block;">' + escapeHtml(rollCell) + '</span>'
+                                : '<span class="muted">—</span>';
+
                             return '<tr>' +
                                 '<td style="font-weight:600; padding:6px 12px;">' + escapeHtml(l.lotNumber) + '</td>' +
                                 '<td class="r" style="font-variant-numeric:tabular-nums; text-align:right; padding:6px 12px;">' + fmt(w) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + '</td>' +
                                 '<td class="r" style="font-variant-numeric:tabular-nums; text-align:right; padding:6px 12px;">' + fmt(u) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + '</td>' +
                                 '<td class="r" style="font-variant-numeric:tabular-nums; font-weight:600; text-align:right; padding:6px 12px;">' + fmt(tot) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + '</td>' +
+                                '<td style="padding:6px 12px;">' + rollCell + '</td>' +
                                 '<td style="padding:6px 12px;">' + statusPill + '</td>' +
                                 '</tr>';
                         }).join('');
@@ -2588,23 +2615,25 @@ function renderMaterials() {
                             '<td class="r" style="font-variant-numeric:tabular-nums; text-align:right; padding:8px 12px;">' + fmt(totalUnwash) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + '</td>' +
                             '<td class="r" style="font-variant-numeric:tabular-nums; text-align:right; padding:8px 12px;">' + fmt(totalCombined) + (rm.unit ? ' ' + escapeHtml(rm.unit) : '') + '</td>' +
                             '<td style="padding:8px 12px;"></td>' +
+                            '<td style="padding:8px 12px;"></td>' +
                             '</tr>';
                     } else {
-                        lotRows = '<tr><td colspan="5" style="text-align:center; padding:12px; color:var(--text-muted);">No lots found for this material.</td></tr>';
+                        lotRows = '<tr><td colspan="6" style="text-align:center; padding:12px; color:var(--text-muted);">No lots found for this material.</td></tr>';
                     }
 
                     detailRowHtml = '<tr class="lots-detail-row" style="background:#f8fafc;">' +
                         '<td></td>' +
                         '<td colspan="12" style="padding:10px 16px 16px 16px; border-bottom:1px solid var(--border);">' +
                         '<div style="font-weight:700; font-size:12px; color:var(--text-main); margin-bottom:8px;">Lot breakdown details</div>' +
-                        '<div class="table-wrapper" style="box-shadow:none; border:1px solid #e2e8f0; border-radius:6px; background:#ffffff; max-width:800px; overflow:hidden; margin-top:0;">' +
+                        '<div class="table-wrapper" style="box-shadow:none; border:1px solid #e2e8f0; border-radius:6px; background:#ffffff; max-width:920px; overflow:hidden; margin-top:0;">' +
                         '<table class="rep-table" style="margin-bottom:0; width:100%;">' +
                         '<thead><tr>' +
                         '<th style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px;">Lot Number</th>' +
-                        '<th class="r" style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; text-align:right; width:22%;">Wash Qty</th>' +
-                        '<th class="r" style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; text-align:right; width:22%;">Unwash Qty</th>' +
-                        '<th class="r" style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; text-align:right; width:22%;">Total Qty</th>' +
-                        '<th style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; width:15%;">Status</th>' +
+                        '<th class="r" style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; text-align:right; width:16%;">Wash Qty</th>' +
+                        '<th class="r" style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; text-align:right; width:16%;">Unwash Qty</th>' +
+                        '<th class="r" style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; text-align:right; width:16%;">Total Qty</th>' +
+                        '<th style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; width:26%;">Rolls (label · length)</th>' +
+                        '<th style="background:#f1f5f9; font-weight:600; padding:6px 12px; font-size:11px; width:12%;">Status</th>' +
                         '</tr></thead>' +
                         '<tbody>' + lotRows + '</tbody>' +
                         '</table>' +

@@ -64,7 +64,44 @@ string getRawMaterialsList()
 					ltSt = "Active";
 				}
 
-				oneLot = "{\"lotId\":\"" + lt.ID + "\",\"lotNumber\":\"" + ltNum + "\",\"label\":\"" + ltLab + "\",\"status\":\"" + ltSt + "\",\"unwash\":" + luS.toDecimal() + ",\"wash\":" + lwS.toDecimal() + ",\"inTransit\":" + liS.toDecimal() + ",\"disputed\":" + ldS.toDecimal() + ",\"inWash\":" + lhS.toDecimal() + "}";
+				ltWidthS = ifnull(lt.Width1,"0").toString().trim();
+				if(ltWidthS == "")
+				{
+					ltWidthS = "0";
+				}
+
+				// PHYSICAL ROLLS of the lot - the Lot_Rolls subform. A lot's shelf
+				// cloth is a set of rolls, not one continuous length; the store
+				// person walks to the rack holding a roll label. Field names match
+				// api-experiment.js's live-verified read: Roll_Label, Roll_Length
+				// (string), Roll_Status, Origin.
+				rollsJson = "";
+				for each  rl in lt.Lot_Rolls
+				{
+					rlLenS = ifnull(rl.Roll_Length,"0").toString().trim();
+					if(rlLenS == "")
+					{
+						rlLenS = "0";
+					}
+					rlLab = ifnull(rl.Roll_Label,"").toString().trim().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+					rlSt = ifnull(rl.Roll_Status,"").toString().trim();
+					if(rlSt == "")
+					{
+						rlSt = "Available";
+					}
+					rlOrg = ifnull(rl.Origin,"").toString().trim();
+					if(rlOrg == "")
+					{
+						rlOrg = "Purchased";
+					}
+					if(rollsJson != "")
+					{
+						rollsJson = rollsJson + ",";
+					}
+					rollsJson = rollsJson + "{\"rollId\":\"" + rl.ID + "\",\"label\":\"" + rlLab + "\",\"length\":" + rlLenS.toDecimal() + ",\"status\":\"" + rlSt + "\",\"origin\":\"" + rlOrg + "\"}";
+				}
+
+				oneLot = "{\"lotId\":\"" + lt.ID + "\",\"lotNumber\":\"" + ltNum + "\",\"label\":\"" + ltLab + "\",\"status\":\"" + ltSt + "\",\"widthCm\":" + ltWidthS.toDecimal() + ",\"unwash\":" + luS.toDecimal() + ",\"wash\":" + lwS.toDecimal() + ",\"inTransit\":" + liS.toDecimal() + ",\"disputed\":" + ldS.toDecimal() + ",\"inWash\":" + lhS.toDecimal() + ",\"rolls\":[" + rollsJson + "]}";
 
 				prevJson = ifnull(lotJsonByMat.get(ltMat),"").toString();
 				if(prevJson != "")

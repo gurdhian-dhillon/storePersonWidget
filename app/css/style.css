@@ -1116,6 +1116,35 @@ th.col-num {
     color: var(--text-muted);
 }
 
+/* ---- Rolls on the Raw materials tab ----
+   A lot's shelf cloth is a set of physical rolls; the store person walks to the
+   rack holding a roll label, so every lot names its rolls. See
+   docs/lot-rolls-model.md. */
+
+/* The "Rolls  L2-R1 750 m · L2-R2 8 m" line under the material name in the
+   collapsed row. Sits just below the "Lots:" line, one notch smaller, monospace
+   figures so lengths line up at a glance. */
+.mat-rolls-summary {
+    font-weight: 400;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 3px;
+    padding-left: 18px;
+    line-height: 1.5;
+}
+.mat-rolls-summary,
+.lot-roll-inline {
+    font-variant-numeric: tabular-nums;
+}
+
+/* The Rolls cell inside the expanded lot-breakdown table. */
+.lot-roll-inline {
+    font-size: 11px;
+    color: var(--text-main);
+    line-height: 1.5;
+    display: inline-block;
+}
+
 .pager {
     gap: 0.3rem;
 }
