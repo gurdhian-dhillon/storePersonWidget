@@ -1165,11 +1165,13 @@ function bucketFor(key) {
 // Material_Requirement - so they must agree, and a mismatch means a cut size or
 // fabric width changed after the plan was made.
 //
-// NOW NEEDED is deliberately not compared to either. It is the live allocation,
-// a different calculation that re-decides how much offcuts cover and is SUPPOSED
-// to differ. Putting it in a column next to STORED under a shared tick would
-// invite exactly the subtraction CLAUDE.md calls the most common way to
-// conclude the maths is broken when it is not.
+// A "Now needed" column used to sit here, showing the live allocator's metres
+// for this material+cut. It was removed: that figure is pooled per order across
+// every plan item sharing the material+cut (not per item, despite the row being
+// per item), and on a lot with fragmented rolls it can cost more whole rows than
+// either item's own PLANNED figure implies - a real number, but not one this
+// per-item row can present without misleading. See git history if this needs
+// to come back with a proper cross-item breakdown.
 function matAnswerRow(mat, item, idx) {
     var unit = mat.isFabric ? 'Mtr' : (mat.unit || '');
     var planned, cls, mark, note;
@@ -1220,7 +1222,6 @@ function matAnswerRow(mat, item, idx) {
 
     var offcuts = '—';
     var lot = '<span class="muted">—</span>';
-    var nowNeeded = '—';
 
     if (mat.isFabric) {
         if (!bucket) {
@@ -1234,7 +1235,6 @@ function matAnswerRow(mat, item, idx) {
             offcuts = liveA.o.wastePieces > 0
                 ? '<b>' + liveA.o.wastePieces + '</b> pcs'
                 : '<span class="muted">none</span>';
-            nowNeeded = num(liveA.o.metres, 3);
 
             if (liveA.o.why === 'skipped') {
                 lot = '<span class="no">none fits</span>';
@@ -1248,14 +1248,6 @@ function matAnswerRow(mat, item, idx) {
                 if (liveA.o.override) lot += ' <span class="no">overridden</span>';
             }
         }
-    } else {
-        // NOTHING OUTSTANDING IS A DASH, NOT A ZERO — and it has to be the same
-        // dash a fabric line uses. A fully-issued fabric row printed "—" here
-        // while a fully-issued trim printed "0.000", two spellings of one state
-        // sitting in the same column, on the summary row where the eye lands.
-        // A dash is the right one: 0 is a measurement, absence is not.
-        var rem = (parseFloat(mat.storedRequiredQty) || 0) - (parseFloat(mat.issuedQty) || 0);
-        nowNeeded = rem > 0.0005 ? num(rem, 3) : '—';
     }
 
     // LOT and FROM OFFCUTS CANNOT APPLY TO A TRIM. Thread has no shade to match
@@ -1279,7 +1271,6 @@ function matAnswerRow(mat, item, idx) {
         '<td class="r ' + cls + '" title="' + esc(note) + '">' + mark + '</td>' +
         '<td class="lot-cell">' + (mat.isFabric ? lot : naCell) + '</td>' +
         '<td class="r offcut-cell">' + (mat.isFabric ? offcuts : naCell) + '</td>' +
-        '<td class="r strong">' + nowNeeded + '</td>' +
         '<td class="r">' + num(mat.issuedQty, 3) + '</td>' +
         '<td class="r">' + num(mat.receivedQty, 3) + '</td>' +
         '<td class="r"><button type="button" class="ans-toggle" title="Show the working" ' +
@@ -1293,7 +1284,7 @@ function matAnswerRow(mat, item, idx) {
             '</span></button></td>' +
         '</tr>' +
         '<tr class="work-row" id="work-' + esc(mat.reqId) + '" hidden>' +
-        '<td colspan="11">' + (mat.isFabric ? renderFabricLine(mat, item) : renderNonFabric(mat, item)) + '</td>' +
+        '<td colspan="10">' + (mat.isFabric ? renderFabricLine(mat, item) : renderNonFabric(mat, item)) + '</td>' +
         '</tr>';
 }
 
@@ -1305,10 +1296,7 @@ function renderItemMaterials(item) {
     // THE GLOSSARY MOVED ONTO THE COLUMNS. Each `title` is the sentence that
     // used to sit in the paragraph below the table, attached to the heading that
     // raises the question — so it is read when it is asked rather than once,
-    // above, before it has occurred to anybody. The one on "Now needed" is the
-    // load-bearing one: subtracting it from Planned and calling the difference a
-    // discrepancy is the most common way to conclude this app's maths is broken
-    // when it is not.
+    // above, before it has occurred to anybody.
     var h = '<div class="table-wrapper"><table class="ans-table"><thead><tr>' +
         '<th>Material</th><th class="r">Unit</th>' +
         '<th class="r" title="The requirement fixed when the plan was made. Derived here from the cut size and fabric width.">Planned</th>' +
@@ -1322,7 +1310,6 @@ function renderItemMaterials(item) {
         // is doing that job and nowhere else.
         '<th title="The roll this order is committed to. One order is cut from one lot so its pieces match in colour; the reason it was chosen is in the working.">Lot</th>' +
         '<th class="r" title="What the store is about to be offered off that same lot, read live from the store screen. Advisory — a higher-priority supervisor can claim the same remnant first.">From offcuts</th>' +
-        '<th class="r" title="The LIVE allocation, recalculated whenever offcut stock moves. It is a different calculation from Planned and is meant to be lower — the difference is not a discrepancy.">Now needed</th>' +
         '<th class="r">Issued</th><th class="r">Received</th><th></th>' +
         '</tr></thead><tbody>';
     item.materials.forEach(function (mat, i) { h += matAnswerRow(mat, item, i); });
@@ -1331,13 +1318,8 @@ function renderItemMaterials(item) {
     // THE COLUMN GLOSSARY THAT USED TO SIT HERE IS GONE. It was a five-sentence
     // paragraph explaining Planned / Stored / Now needed / Lot / From offcuts,
     // and it printed once PER ITEM — so a ten-item order carried ten identical
-    // copies of it and a Faire order carried a hundred and ten.
-    //
-    // What it was really protecting against is one specific false alarm:
-    // subtracting "Now needed" from "Planned" and reporting the difference as a
-    // discrepancy. That warning now lives on the column that causes it, as a
-    // title attribute, where it is read at the moment of the question instead of
-    // a paragraph below it.
+    // copies of it and a Faire order carried a hundred and ten. Each remaining
+    // column's explanation now lives on its own `title` attribute instead.
     return h;
 }
 

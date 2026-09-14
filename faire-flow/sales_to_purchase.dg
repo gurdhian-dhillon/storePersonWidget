@@ -1,0 +1,251 @@
+// ===== CONFIG =====
+venderID = "8845025000000133030";
+// STEP 1 : Get Sales Order
+salesOrderID = salesorder.get("salesorder_id");
+organizationID = organization.get("organization_id");
+response = invokeurl
+[
+	url :"https://www.zohoapis.com/books/v3/salesorders/" + salesOrderID + "?organization_id=" + organizationID
+	type :GET
+	connection:"booksconnection"
+];
+if(response.get("code") != 0)
+{
+	info response;
+	return;
+}
+salesOrderData = response.get("salesorder");
+status = salesOrderData.get("status");
+// STEP 2 : Vendor GST check
+vendorResponse = invokeurl
+[
+	url :"https://www.zohoapis.com/books/v3/contacts/" + venderID + "?organization_id=" + organizationID
+	type :GET
+	connection:"booksconnection"
+];
+vendorGstTreatment = "";
+if(vendorResponse.get("code") == 0)
+{
+	vendorGstTreatment = vendorResponse.get("contact").get("gst_treatment");
+}
+isVendorUnregistered = false;
+if(vendorGstTreatment == null || vendorGstTreatment == "" || vendorGstTreatment == "business_none" || vendorGstTreatment == "consumer")
+{
+	isVendorUnregistered = true;
+}
+// STEP 3 : Build PO line items - no rate sent, PO uses item's own default rate
+purchaseLineItems = List();
+lineItems = salesOrderData.get("line_items");
+for each  item in lineItems
+{
+	itemId = item.get("item_id");
+	if(itemId != null && itemId != "")
+	{
+		line = Map();
+		line.put("item_id",itemId);
+		itemName = item.get("name");
+		if(itemName == null || itemName == "")
+		{
+			itemName = item.get("description");
+		}
+		line.put("name",itemName);
+		line.put("description",item.get("description"));
+		line.put("quantity",item.get("quantity"));
+		line.put("unit",item.get("unit"));
+		itemTaxId = item.get("tax_id");
+		if(isVendorUnregistered == false && itemTaxId != null && itemTaxId != "")
+		{
+			line.put("tax_id",itemTaxId);
+		}
+		purchaseLineItems.add(line);
+	}
+}
+// STEP 4 : Build PO payload
+purchaseOrder = Map();
+purchaseOrder.put("vendor_id",venderID);
+purchaseOrder.put("date",salesOrderData.get("date"));
+soShipmentDate = ifnull(salesOrderData.get("shipment_date"),"").toString().trim();
+purchaseOrder.put("reference_number",salesOrderData.get("salesorder_number"));
+purchaseOrder.put("line_items",purchaseLineItems);
+purchaseOrder.put("currency_id",salesOrderData.get("currency_id"));
+purchaseOrder.put("exchange_rate",salesOrderData.get("exchange_rate"));
+purchaseOrder.put("trigger","workflow");
+// Region and order source are read from the incoming SO's own custom fields so a
+// Faire SO stays "Faire" all the way to Texus/GAD. Fall back to US/Shopify for a SO
+// that carries neither (older Shopify-connector orders), which preserves prior behaviour.
+soCustomFields = salesOrderData.get("custom_fields");
+customerPersonName = "";
+soRegion = "";
+soOrderSource = "";
+if(soCustomFields != null)
+{
+	for each  cf in soCustomFields
+	{
+		if(cf.get("api_name") == "cf_customer_name")
+		{
+			customerPersonName = ifnull(cf.get("value"),"");
+		}
+		if(cf.get("api_name") == "cf_region")
+		{
+			soRegion = ifnull(cf.get("value"),"");
+		}
+		if(cf.get("api_name") == "cf_order_source")
+		{
+			soOrderSource = ifnull(cf.get("value"),"");
+		}
+	}
+}
+if(soRegion == "")
+{
+	soRegion = "US";
+}
+if(soOrderSource == "")
+{
+	soOrderSource = "Shopify";
+}
+poCustomFields = List();
+regionField = Map();
+regionField.put("api_name","cf_region");
+regionField.put("value",soRegion);
+poCustomFields.add(regionField);
+sourceField = Map();
+sourceField.put("api_name","cf_order_source");
+sourceField.put("value",soOrderSource);
+poCustomFields.add(sourceField);
+personNameField = Map();
+personNameField.put("api_name","cf_customer_person_name");
+personNameField.put("value",customerPersonName);
+poCustomFields.add(personNameField);
+if(soShipmentDate != "")
+{
+	shipmentDateField = Map();
+	shipmentDateField.put("api_name","cf_expected_shipment_date");
+	shipmentDateField.put("value",soShipmentDate);
+	poCustomFields.add(shipmentDateField);
+}
+// FIX: Build customer shipping address string from the SO's shipping_address
+shippingAddr = salesOrderData.get("shipping_address");
+customerShippingAddress = "";
+if(shippingAddr != null)
+{
+	addrParts = List();
+	attention = ifnull(shippingAddr.get("attention"),"");
+	if(attention != "")
+	{
+		addrParts.add(attention);
+	}
+	streetLine1 = ifnull(shippingAddr.get("address"),"");
+	if(streetLine1 != "")
+	{
+		addrParts.add(streetLine1);
+	}
+	streetLine2 = ifnull(shippingAddr.get("street2"),"");
+	if(streetLine2 != "")
+	{
+		addrParts.add(streetLine2);
+	}
+	addrCity = ifnull(shippingAddr.get("city"),"");
+	addrState = ifnull(shippingAddr.get("state"),"");
+	addrZip = ifnull(shippingAddr.get("zip"),"");
+	cityStateZip = addrCity;
+	if(addrState != "")
+	{
+		if(cityStateZip != "")
+		{
+			cityStateZip = cityStateZip + ", " + addrState;
+		}
+		else
+		{
+			cityStateZip = addrState;
+		}
+	}
+	if(addrZip != "")
+	{
+		cityStateZip = cityStateZip + " " + addrZip;
+	}
+	if(cityStateZip != "")
+	{
+		addrParts.add(cityStateZip);
+	}
+	addrCountry = ifnull(shippingAddr.get("country"),"");
+	if(addrCountry != "")
+	{
+		addrParts.add(addrCountry);
+	}
+	customerShippingAddress = addrParts.toString(", ");
+}
+shippingAddressField = Map();
+shippingAddressField.put("api_name","cf_customer_person_address");
+shippingAddressField.put("value",customerShippingAddress);
+poCustomFields.add(shippingAddressField);
+purchaseOrder.put("custom_fields",poCustomFields);
+// STEP 5 : Duplicate check
+salesOrderNumber = salesOrderData.get("salesorder_number");
+dupCheck = invokeurl
+[
+	url :"https://www.zohoapis.com/books/v3/purchaseorders?organization_id=" + organizationID + "&reference_number=" + salesOrderNumber + "&vendor_id=" + venderID
+	type :GET
+	connection:"booksconnection"
+];
+existingPOs = dupCheck.get("purchaseorders");
+isDuplicate = false;
+if(existingPOs != null && existingPOs.size() > 0)
+{
+	for each  po in existingPOs
+	{
+		if(po.get("reference_number") == salesOrderNumber)
+		{
+			isDuplicate = true;
+			break;
+		}
+	}
+}
+if(isDuplicate == true)
+{
+	info "PO already exists - skipping.";
+	return;
+}
+// STEP 6 : Create PO and mark it issued
+if(status == "open" && purchaseLineItems.size() > 0)
+{
+	createResponse = invokeurl
+	[
+		url :"https://www.zohoapis.com/books/v3/purchaseorders?organization_id=" + organizationID
+		type :POST
+		parameters:purchaseOrder.toString()
+		connection:"booksconnection"
+	];
+	if(createResponse.get("code") == 0)
+	{
+		purchaseOrderId = createResponse.get("purchaseorder").get("purchaseorder_id");
+		statusResponse = invokeurl
+		[
+			url :"https://www.zohoapis.com/books/v3/purchaseorders/" + purchaseOrderId + "/status/issued?organization_id=" + organizationID
+			type :POST
+			connection:"booksconnection"
+		];
+		if(statusResponse.get("code") == 0)
+		{
+			info "Purchase order created & issued: " + purchaseOrderId;
+			po_to_so(createResponse.get("purchaseorder"),organization,user);
+			info "Texus Inc sync triggered.";
+		}
+		else
+		{
+			info "PO created but failed to mark issued: " + statusResponse.get("message");
+		}
+	}
+	else
+	{
+		info "PO creation FAILED: " + createResponse.get("message");
+	}
+}
+else if(purchaseLineItems.size() == 0)
+{
+	info "No purchasable items found in this sales order — PO not created.";
+}
+else
+{
+	info "Sales order status is not open, skipping PO creation. Status: " + status;
+}
+

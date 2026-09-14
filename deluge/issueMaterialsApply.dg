@@ -34,8 +34,11 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 	//       { "mrqId":"777", "planId":"50", "planItemId":"888",
 	//         "giveQty":5.50, "giveRaw":10, "giveWaste":4, "issuedLot":"901" } ],
 	//     "lotMoves":[
-	//       { "lotId":"901", "qty":11.00, "isPieces":false,
-	//         "pieces":[ {"pieceId":"abc","count":3,"cutLengthCm":300} ] } ],
+	//       { "lotId":"901", "qty":11.00,
+	//         "rolls":[ {"rollId":"1234","label":"L2-R1","metres":9.0} ] } ],
+	//       -- "isPieces"/"pieces" (the old Fabric_Piece "cut at issue" fields)
+	//          are no longer read. Printed fabric is ordinary short Lot_Rolls
+	//          now (docs/printing-v2-plan.md); the allocator never sends them.
 	//     "wastePicks":[
 	//       { "wasteId":"456", "pieces":3, "planId":"50", "planItemId":"888",
 	//         "yieldPer":2, "pieceWidth":300, "pieceLength":400 } ],
@@ -478,7 +481,6 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 						lqStr = "0";
 					}
 					moveQty = lqStr.toDecimal();
-					isPieces = ifnull(lm.get("isPieces"),"false").toString().trim() == "true";
 					lotRecs = Raw_Material_Lot[ID == lotId.toLong()];
 					if(lotId == "" || lotRecs.count() == 0)
 					{
@@ -634,90 +636,16 @@ string issueMaterialsApply(string supervisorId, string issuesJson, string applyK
 								}
 							}
 						}
-						if(isPieces == true && anyNewAlloc == true)
-						{
-							// Same retry guard as 3a/3b above - a printed-piece
-							// split is a stock move too, and re-running it on a
-							// retry would split the remainder a second time.
-							pcList = ifnull(lm.get("pieces"),"[]").toString().toJSONList();
-							for each  pcRaw in pcList
-							{
-								pcM = pcRaw.toMap();
-								pcId = ifnull(pcM.get("pieceId"),"").toString().trim();
-								pcCntS = ifnull(pcM.get("count"),"0").toString().trim();
-								if(pcCntS == "")
-								{
-									pcCntS = "0";
-								}
-								pcTake = pcCntS.toDecimal().toLong();
-								pcCutS = ifnull(pcM.get("cutLengthCm"),"0").toString().trim();
-								if(pcCutS == "")
-								{
-									pcCutS = "0";
-								}
-								pcCutLen = pcCutS.toDecimal();
-								pcRecs = Fabric_Piece[ID == pcId.toLong()];
-								if(pcId == "" || pcRecs.count() == 0)
-								{
-									if(errJson != "")
-									{
-										errJson = errJson + ",";
-									}
-									errJson = errJson + "\"" + matName + ": fabric piece " + pcId + " not found\"";
-								}
-								else if(pcTake > 0)
-								{
-									for each  fpMv in pcRecs
-									{
-										fpMvS = ifnull(fpMv.Piece_Count,"0").toString().trim();
-										if(fpMvS == "")
-										{
-											fpMvS = "0";
-										}
-										fpOrigLenS = ifnull(fpMv.Piece_Length_Cm,"0").toString().trim();
-										if(fpOrigLenS == "")
-										{
-											fpOrigLenS = "0";
-										}
-										if(pcCutLen <= 0)
-										{
-											pcCutLen = fpOrigLenS.toDecimal();
-										}
-										fpMvLeft = fpMvS.toDecimal().toLong() - pcTake;
-										isClamped = false;
-										if(fpMvLeft < 0)
-										{
-											if(errJson != "")
-											{
-												errJson = errJson + ",";
-											}
-											errJson = errJson + "\"" + matName + ": piece " + pcId + " only has " + fpMvS.toDecimal().toLong() + ", asked " + pcTake + " - clamped\"";
-											info "issueMaterialsApply: piece " + pcId + " would go negative - clamped";
-											fpMvLeft = 0;
-											isClamped = true;
-										}
-										fpMv.Piece_Count=fpMvLeft;
-										fpMvRemainder = fpOrigLenS.toDecimal() - pcCutLen;
-										if(fpMvRemainder > 0 && isClamped == false)
-										{
-											insert into Fabric_Piece
-											[
-												Added_User=zoho.loginuser
-												Material=fpMv.Material
-												Lot=fpMv.Lot
-												Piece_Length_Cm=fpMvRemainder
-												Piece_Width_Cm=fpMv.Piece_Width_Cm
-												Piece_Count=pcTake
-												State=fpMv.State
-												Piece_Status="Available"
-												Carton_Number=fpMv.Carton_Number
-												Print_Job=fpMv.Print_Job
-											]
-										}
-									}
-								}
-							}
-						}
+						// FABRIC_PIECE "cut pieces at issue" WRITER REMOVED HERE.
+						// Printed fabric is ordinary short Lot_Rolls now
+						// (docs/printing-v2-plan.md) - the allocator has hard-coded
+						// every lotLines[].pieces = [] since the rolls migration, so
+						// this branch (isPieces == true, a populated lm.get("pieces"))
+						// could never fire from any live caller; tools/print-cut.test.js
+						// pinned that asymmetry until this cleanup landed. The 3a/3b
+						// blocks above (Wash_Quantity/In_Transit_Qty, the named-roll
+						// decrement) are the live path for every lot move, printed or
+						// not, and are unchanged.
 					}
 				}
 				//--------------------------------------------------------------

@@ -60,12 +60,6 @@ function lot(o) {
     Status: 'Active', Wash_Quantity: 0, Unwash_Quantity: 0, In_Wash_Qty: 0, Form: ''
   }, o);
 }
-function fabricPiece(o) {
-  return Object.assign({
-    ID: 'FP1', Lot: lk('L1'), Piece_Length_Cm: 0, Piece_Width_Cm: 0,
-    Piece_Count: 0, State: 'Wash', Carton_Number: ''
-  }, o);
-}
 function wasteM(o) {
   return Object.assign({
     ID: 'W1', SKU: lk('M1'), Piece_Width: 0, Piece_Length: 0, Piece_Count: 0,
@@ -82,7 +76,7 @@ function exc(o) {
 function assemble(raw) {
   return ApiExperiment.assemble(Object.assign({
     plans: [], reqs: [], emps: [], planItems: [], rawMats: [], lots: [],
-    pieces: [], waste: [], exceptions: []
+    waste: [], exceptions: []
   }, raw));
 }
 function matOf(out, supId, matId) {
@@ -259,28 +253,32 @@ test('lots: blocked flagged & kept, empty dropped, calc* sums every lot', () => 
 });
 
 // =========================================================================
-// 7. PIECES-FORM LOT — wash = sum of washed pieces' metres, pieces attached
-//    two Wash pieces 300cm x 5, one Unwash 300cm x 2
-//    wash = (300/100)*5 = 15   (Unwash excluded)
+// 7. FABRIC_PIECE RETIRED (docs/printing-v2-plan.md) — a lot's Form field is
+//    no longer a live distinction. A lot typed "Pieces" in Creator (legacy
+//    data) must still read as an ordinary roll lot: wash/unwash come off the
+//    lot's own quantity columns, never a Fabric_Piece lookup that no longer
+//    exists, and `assemble()` must not throw on a raw payload with no
+//    `pieces` key at all (assemble()'s own default fills it, same as the
+//    other seven arrays) - that was the exact shape that broke the store
+//    screen when Fabric_Piece_Report was deleted in Creator: fetching it
+//    failed the whole Promise.all, and `run()` never reached `assemble()`.
 // =========================================================================
-test('pieces-form lot: wash from washed pieces only, piece list carried', () => {
+test('FP-RETIRED: a "Pieces"-typed lot reads as an ordinary roll lot, no pieces fetch needed', () => {
   const out = assemble({
     plans: [plan({ ID: '1' })],
     reqs: [req({ Is_Fabric: true, Material: lk('F1'), Material_Name: 'Print', Unit: 'Mtr', Required_Qty: 5 })],
     emps: [emp('E1', 'Ravi')],
     rawMats: [rawMat({ ID: 'F1', Name: 'Print', Fabric_Width_Inches: '44' })],
-    lots: [lot({ ID: 'LP', Material: lk('F1'), Lot_Number: 'P', Form: 'Pieces' })],
-    pieces: [
-      fabricPiece({ ID: 'p1', Lot: lk('LP'), Piece_Length_Cm: 300, Piece_Width_Cm: 110, Piece_Count: 5, State: 'Wash' }),
-      fabricPiece({ ID: 'p2', Lot: lk('LP'), Piece_Length_Cm: 300, Piece_Width_Cm: 110, Piece_Count: 2, State: 'Unwash' })
-    ]
+    // Legacy data: Form still says "Pieces" on the record, Wash_Quantity set
+    // the ordinary way. No `pieces` key in raw at all.
+    lots: [lot({ ID: 'LP', Material: lk('F1'), Lot_Number: 'P', Form: 'Pieces', Wash_Quantity: 15 })]
   });
   const m = matOf(out, 'E1', 'F1');
   const lp = m.lots.find((l) => l.lotId === 'LP');
-  assert.strictEqual(lp.form, 'Pieces');
-  assert.strictEqual(lp.wash, 15, '(300/100)*5, unwash excluded');
-  assert.strictEqual(lp.pieces.length, 2, 'both pieces carried for the allocator');
-  assert.strictEqual(m.availableStock, 15, 'material rollup uses the pieces sum');
+  assert.strictEqual(lp.form, 'Roll', 'Form is no longer read - every lot reports as Roll');
+  assert.strictEqual(lp.wash, 15, 'wash comes off Wash_Quantity, not a pieces sum');
+  assert.deepStrictEqual(lp.pieces, [], 'pieces is always empty now');
+  assert.strictEqual(m.availableStock, 15);
 });
 
 // =========================================================================

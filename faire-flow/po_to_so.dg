@@ -1,0 +1,546 @@
+
+YOUR_REFRESH_TOKEN = "1000.f4d03afa83fcafdf723bf74817044c5f.589bb46412fb0fd07b73c492526fbb28";
+YOUR_CLIENT_ID = "1000.48SYGORXWF96C73E6H2J9VKJ9AJ0RY";
+YOUR_CLIENT_SECRET = "c3670f57a213b4642de3040d3070cda16b015686f8";
+// STEP 1 : Generate Access Token
+paramMap = Map();
+paramMap.put("refresh_token",YOUR_REFRESH_TOKEN);
+paramMap.put("client_id",YOUR_CLIENT_ID);
+paramMap.put("client_secret",YOUR_CLIENT_SECRET);
+paramMap.put("grant_type","refresh_token");
+tokenResponse = invokeurl
+[
+	url :"https://accounts.zoho.in/oauth/v2/token"
+	type :POST
+	parameters:paramMap
+];
+accessToken = tokenResponse.get("access_token");
+// STEP 2 : Authorization Header
+headers = Map();
+headers.put("Authorization","Zoho-oauthtoken " + accessToken);
+// ============================================
+// NEW BLOCK (Edit A) : capture region & order source from the incoming purchaseorder
+// ============================================
+srcRegion = "";
+srcOrderSource = "";
+// FIX: also capture the customer person name and shipping address that were set on the US PO
+srcCustomerName = "";
+srcCustomerAddress = "";
+srcExpectedShipDate = "";
+poCustomFieldsSrc = purchaseorder.get("custom_fields");
+if(poCustomFieldsSrc != null)
+{
+	for each  cf in poCustomFieldsSrc
+	{
+		if(cf.get("api_name") == "cf_region" && cf.get("value") != null)
+		{
+			srcRegion = cf.get("value");
+		}
+		if(cf.get("api_name") == "cf_order_source" && cf.get("value") != null)
+		{
+			srcOrderSource = cf.get("value");
+		}
+		if(cf.get("api_name") == "cf_customer_person_name" && cf.get("value") != null)
+		{
+			srcCustomerName = cf.get("value");
+		}
+		if(cf.get("api_name") == "cf_customer_person_address" && cf.get("value") != null)
+		{
+			srcCustomerAddress = cf.get("value");
+		}
+		if(cf.get("api_name") == "cf_expected_shipment_date" && cf.get("value") != null)
+		{
+			srcExpectedShipDate = cf.get("value");
+		}
+	}
+}
+srcExpectedShipDate = ifnull(srcExpectedShipDate,"").toString().trim();
+info "DEBUG source region: " + srcRegion + " | source order source: " + srcOrderSource;
+info "DEBUG source customer name: " + srcCustomerName + " | source customer address: " + srcCustomerAddress;
+info "DEBUG source expected ship date: " + srcExpectedShipDate;
+// ============================================
+// END NEW BLOCK (Edit A)
+// ============================================
+TEXAS_ORGANIZATION_ID = "60045783868";
+CUSTOMER_ID = "2830509000004369001";
+// STEP 3 : Fetch Texus Inc tax list
+targetTaxResponse = invokeurl
+[
+	url :"https://www.zohoapis.in/books/v3/settings/taxes?organization_id=" + TEXAS_ORGANIZATION_ID
+	type :GET
+	headers:headers
+];
+targetTaxes = targetTaxResponse.get("taxes");
+// STEP 4 : Duplicate check - SO in Texus Inc
+poReferenceNumber = purchaseorder.get("reference_number");
+duplicateCheckResponse = invokeurl
+[
+	url :"https://www.zohoapis.in/books/v3/salesorders?organization_id=" + TEXAS_ORGANIZATION_ID + "&reference_number=" + poReferenceNumber
+	type :GET
+	headers:headers
+];
+existingSalesOrders = duplicateCheckResponse.get("salesorders");
+isDuplicate = false;
+if(existingSalesOrders != null && existingSalesOrders.size() > 0)
+{
+	for each  existingSO in existingSalesOrders
+	{
+		if(existingSO.get("reference_number") == poReferenceNumber)
+		{
+			isDuplicate = true;
+			info "Duplicate SO found in Texus Inc: " + existingSO.get("salesorder_number");
+			break;
+		}
+	}
+}
+if(isDuplicate == true)
+{
+	info "SO already exists in Texus Inc - skipping.";
+	return;
+}
+// STEP 5 : Build SO line items by SKU lookup in Texus Inc
+lineItems = List();
+for each  row1 in purchaseorder.get("line_items")
+{
+	sku = row1.get("sku");
+	poQuantity = row1.get("quantity");
+	poRate = row1.get("rate");
+	poTaxPercentage = row1.get("tax_percentage");
+	info "DEBUG row1: " + row1;
+	itemSearchResponse = invokeurl
+	[
+		url :"https://www.zohoapis.in/books/v3/items?organization_id=" + TEXAS_ORGANIZATION_ID + "&sku=" + sku
+		type :GET
+		headers:headers
+	];
+	matchedItems = itemSearchResponse.get("items");
+	if(matchedItems.size() > 0)
+	{
+		matchedItem = matchedItems.get(0);
+		lineItem = Map();
+		lineItem.put("item_id",matchedItem.get("item_id"));
+		lineItem.put("quantity",poQuantity);
+		lineItem.put("rate",poRate);
+		if(poTaxPercentage != null && targetTaxes != null)
+		{
+			for each  taxRow in targetTaxes
+			{
+				if(taxRow.get("tax_percentage") == poTaxPercentage)
+				{
+					lineItem.put("tax_id",taxRow.get("tax_id"));
+					break;
+				}
+			}
+		}
+		info "DEBUG matched tax_id for SKU " + sku + ": " + lineItem.get("tax_id");
+		lineItems.add(lineItem);
+	}
+	else
+	{
+		info "No matching item found for SKU: " + sku;
+	}
+}
+// STEP 6 : Create SO in Texus Inc
+salesOrder = Map();
+salesOrder.put("customer_id",CUSTOMER_ID);
+salesOrder.put("date",zoho.currentdate.toString("yyyy-MM-dd"));
+if(srcExpectedShipDate != "")
+{
+	salesOrder.put("shipment_date",srcExpectedShipDate);
+}
+salesOrder.put("reference_number",poReferenceNumber);
+soSrcOrderSource = srcOrderSource;
+if(soSrcOrderSource == "")
+{
+	soSrcOrderSource = "Shopify";
+}
+soSrcRegion = srcRegion;
+if(soSrcRegion == "")
+{
+	soSrcRegion = "US";
+}
+soCustomFields = List();
+orderSourceField = Map();
+orderSourceField.put("api_name","cf_order_source");
+orderSourceField.put("value",soSrcOrderSource);
+soCustomFields.add(orderSourceField);
+regionField = Map();
+regionField.put("api_name","cf_region");
+regionField.put("value",soSrcRegion);
+soCustomFields.add(regionField);
+// FIX: carry customer person name and shipping address over to the Texus Inc SO
+customerNameFieldSO = Map();
+customerNameFieldSO.put("api_name","cf_customer_person_name");
+customerNameFieldSO.put("value",srcCustomerName);
+soCustomFields.add(customerNameFieldSO);
+customerAddressFieldSO = Map();
+customerAddressFieldSO.put("api_name","cf_customer_shipping_address");
+customerAddressFieldSO.put("value",srcCustomerAddress);
+soCustomFields.add(customerAddressFieldSO);
+salesOrder.put("custom_fields",soCustomFields);
+salesOrder.put("line_items",lineItems);
+info "DEBUG full salesOrder payload: " + salesOrder;
+param = Map();
+param.put("JSONString",salesOrder.toString());
+soResponse = invokeurl
+[
+	url :"https://www.zohoapis.in/books/v3/salesorders?organization_id=" + TEXAS_ORGANIZATION_ID
+	type :POST
+	parameters:param
+	headers:headers
+];
+info "SO creation response: " + soResponse;
+if(soResponse.get("code") == 0)
+{
+	salesorderId = soResponse.get("salesorder").get("salesorder_id");
+	// STEP 7 : Confirm the SO
+	confirmResponse = invokeurl
+	[
+		url :"https://www.zohoapis.in/books/v3/salesorders/" + salesorderId + "/status/confirmed?organization_id=" + TEXAS_ORGANIZATION_ID
+		type :POST
+		headers:headers
+	];
+	if(confirmResponse.get("code") == 0)
+	{
+		info "SO confirmed in Texus Inc: " + salesorderId;
+		// STEP 8 : Fetch confirmed SO data to convert to PO
+		texusVendorID = "2830509000003542001";
+		soDataResponse = invokeurl
+		[
+			url :"https://www.zohoapis.in/books/v3/salesorders/" + salesorderId + "?organization_id=" + TEXAS_ORGANIZATION_ID
+			type :GET
+			headers:headers
+		];
+		texusSoData = soDataResponse.get("salesorder");
+		// STEP 9 : Vendor GST check in Texus Inc
+		texusVendorResponse = invokeurl
+		[
+			url :"https://www.zohoapis.in/books/v3/contacts/" + texusVendorID + "?organization_id=" + TEXAS_ORGANIZATION_ID
+			type :GET
+			headers:headers
+		];
+		texusVendorGst = "";
+		if(texusVendorResponse.get("code") == 0)
+		{
+			texusVendorGst = texusVendorResponse.get("contact").get("gst_treatment");
+		}
+		isTexusVendorUnregistered = texusVendorGst == "business_none" || texusVendorGst == "consumer" || texusVendorGst == "" || texusVendorGst == null;
+		// STEP 10 : Build PO line items from confirmed SO
+		texusPOLineItems = List();
+		for each  soItem in texusSoData.get("line_items")
+		{
+			soItemId = soItem.get("item_id");
+			if(soItemId != null && soItemId != "")
+			{
+				poLine = Map();
+				poLine.put("item_id",soItemId);
+				soItemName = soItem.get("name");
+				if(soItemName == null || soItemName == "")
+				{
+					soItemName = soItem.get("description");
+				}
+				poLine.put("name",soItemName);
+				poLine.put("sku",soItem.get("sku"));
+				poLine.put("description",soItem.get("description"));
+				poLine.put("quantity",soItem.get("quantity"));
+				poLine.put("unit",soItem.get("unit"));
+				poLine.put("hsn_or_sac",soItem.get("hsn_or_sac"));
+				poLine.put("item_order",soItem.get("item_order"));
+				soItemDiscount = soItem.get("discount");
+				if(soItemDiscount != null && soItemDiscount != "" && soItemDiscount != 0)
+				{
+					poLine.put("discount",soItemDiscount + "%");
+				}
+				if(isTexusVendorUnregistered == false)
+				{
+					soItemTaxId = soItem.get("tax_id");
+					if(soItemTaxId != null && soItemTaxId != "")
+					{
+						poLine.put("tax_id",soItemTaxId);
+					}
+				}
+				texusPOLineItems.add(poLine);
+			}
+		}
+		// STEP 11 : Duplicate PO check in Texus Inc
+		texusPoRefNumber = texusSoData.get("salesorder_number");
+		texusDupCheck = invokeurl
+		[
+			url :"https://www.zohoapis.in/books/v3/purchaseorders?organization_id=" + TEXAS_ORGANIZATION_ID + "&reference_number=" + texusPoRefNumber + "&vendor_id=" + texusVendorID
+			type :GET
+			headers:headers
+		];
+		texusExistingPOs = texusDupCheck.get("purchaseorders");
+		texusIsDuplicate = false;
+		if(texusExistingPOs != null && texusExistingPOs.size() > 0)
+		{
+			for each  existingPO in texusExistingPOs
+			{
+				if(existingPO.get("reference_number") == texusPoRefNumber)
+				{
+					texusIsDuplicate = true;
+					break;
+				}
+			}
+		}
+		if(texusIsDuplicate == true)
+		{
+			info "PO already exists in Texus Inc - skipping.";
+			return;
+		}
+		// STEP 12 : Build and create PO in Texus Inc
+		texusPO = Map();
+		texusPO.put("vendor_id",texusVendorID);
+		texusPO.put("date",texusSoData.get("date"));
+		texusPO.put("reference_number",texusPoRefNumber);
+		texusPO.put("line_items",texusPOLineItems);
+		texusPO.put("trigger","workflow");
+		texusPO.put("currency_id",texusSoData.get("currency_id"));
+		// 			texusPO.put("exchange_rate",texusSoData.get("exchange_rate"));
+		// 			texusPO.put("is_reverse_charge_applied",false);
+		// ============================================
+		// MODIFIED BLOCK (Edit B) : custom fields carry REAL captured values
+		// ============================================
+		texusPoCustomFields = List();
+		texusOrderSourceField = Map();
+		texusOrderSourceField.put("api_name","cf_order_source");
+		texusOrderSourceField.put("value",srcOrderSource);
+		texusPoCustomFields.add(texusOrderSourceField);
+		texusRegionField = Map();
+		texusRegionField.put("api_name","cf_region");
+		texusRegionField.put("value",srcRegion);
+		texusPoCustomFields.add(texusRegionField);
+		// ============================================
+		// END MODIFIED BLOCK (Edit B)
+		// ============================================
+		texusPoCustNameField = Map();
+		texusPoCustNameField.put("api_name","cf_customer_person_name");
+		texusPoCustNameField.put("value",srcCustomerName);
+		texusPoCustomFields.add(texusPoCustNameField);
+		texusPoCustAddrField = Map();
+		texusPoCustAddrField.put("api_name","cf_customer_shipping_address");
+		texusPoCustAddrField.put("value",srcCustomerAddress);
+		texusPoCustomFields.add(texusPoCustAddrField);
+		if(srcExpectedShipDate != "")
+		{
+			texusPoShipDateField = Map();
+			texusPoShipDateField.put("api_name","cf_expected_shipment_date");
+			texusPoShipDateField.put("value",srcExpectedShipDate);
+			texusPoCustomFields.add(texusPoShipDateField);
+		}
+		texusPO.put("custom_fields",texusPoCustomFields);
+		texusPoParam = Map();
+		texusPoParam.put("JSONString",texusPO.toString());
+		texusPoResponse = invokeurl
+		[
+			url :"https://www.zohoapis.in/books/v3/purchaseorders?organization_id=" + TEXAS_ORGANIZATION_ID
+			type :POST
+			parameters:texusPoParam
+			headers:headers
+		];
+		info "Texus Inc PO creation response: " + texusPoResponse;
+		if(texusPoResponse.get("code") == 0)
+		{
+			texusPurchaseOrderId = texusPoResponse.get("purchaseorder").get("purchaseorder_id");
+			texusStatusResponse = invokeurl
+			[
+				url :"https://www.zohoapis.in/books/v3/purchaseorders/" + texusPurchaseOrderId + "/status/issued?organization_id=" + TEXAS_ORGANIZATION_ID
+				type :POST
+				headers:headers
+			];
+			if(texusStatusResponse.get("code") == 0)
+			{
+				info "PO created & issued in Texus Inc: " + texusPurchaseOrderId;
+				// ============================================
+				// NEW BLOCK (Edit C) : direct, self-contained Inventory push
+				// No workflow rule needed - runs immediately, in the same execution.
+				// ============================================
+				isEligibleRegion = srcRegion == "US";
+				isEligibleSource = srcOrderSource == "Shopify" || srcOrderSource == "Faire";
+				if(isEligibleRegion == true && isEligibleSource == true)
+				{
+					try
+					{
+						texusPoFullResponse = invokeurl
+						[
+							url :"https://www.zohoapis.in/books/v3/purchaseorders/" + texusPurchaseOrderId + "?organization_id=" + TEXAS_ORGANIZATION_ID
+							type :GET
+							headers:headers
+						];
+						if(texusPoFullResponse.get("code") == 0)
+						{
+							texusFullPO = texusPoFullResponse.get("purchaseorder");
+							inv_REFRESH_TOKEN = "1000.d2e19889015d5d7254e2241d0cf36537.6971088c4f09be46a9966e154ac94905";
+							inv_CLIENT_ID = "1000.TQXGKY8NIM4D9T6HPQLCRYLL4KZRZV";
+							inv_CLIENT_SECRET = "ba2586623a2429ebbadb183e9ac7471072931f0e35";
+							inv_paramMap = Map();
+							inv_paramMap.put("refresh_token",inv_REFRESH_TOKEN);
+							inv_paramMap.put("client_id",inv_CLIENT_ID);
+							inv_paramMap.put("client_secret",inv_CLIENT_SECRET);
+							inv_paramMap.put("grant_type","refresh_token");
+							inv_tokenResponse = invokeurl
+							[
+								url :"https://accounts.zoho.in/oauth/v2/token"
+								type :POST
+								parameters:inv_paramMap
+							];
+							inv_accessToken = inv_tokenResponse.get("access_token");
+							inv_headers = Map();
+							inv_headers.put("Authorization","Zoho-oauthtoken " + inv_accessToken);
+							GAD_ORGANIZATION_ID = "60076905558";
+							inv_CUSTOMER_ID = "3955559000000038020";
+							inv_TAX_EXEMPTION_ID = "3955559000000325595";
+							inv_poReferenceNumber = texusFullPO.get("reference_number");
+							inv_duplicateCheckResponse = invokeurl
+							[
+								url :"https://www.zohoapis.in/inventory/v1/salesorders?organization_id=" + GAD_ORGANIZATION_ID + "&reference_number=" + inv_poReferenceNumber
+								type :GET
+								headers:inv_headers
+							];
+							inv_existingSalesOrders = inv_duplicateCheckResponse.get("salesorders");
+							inv_isDuplicate = false;
+							if(inv_existingSalesOrders != null && inv_existingSalesOrders.size() > 0)
+							{
+								for each  inv_existingSO in inv_existingSalesOrders
+								{
+									if(inv_existingSO.get("reference_number") == inv_poReferenceNumber)
+									{
+										inv_isDuplicate = true;
+										info "Exact duplicate found in GAD Inventory - existing SO number: " + inv_existingSO.get("salesorder_number");
+										break;
+									}
+								}
+							}
+							if(inv_isDuplicate == true)
+							{
+								info "Sales Order already exists in GAD Inventory for reference_number: " + inv_poReferenceNumber + " - skipping.";
+							}
+							else
+							{
+								inv_lineItems = List();
+								for each  inv_row1 in texusFullPO.get("line_items")
+								{
+									inv_sku = inv_row1.get("sku");
+									inv_itemSearchResponse = invokeurl
+									[
+										url :"https://www.zohoapis.in/inventory/v1/items?organization_id=" + GAD_ORGANIZATION_ID + "&sku=" + inv_sku
+										type :GET
+										headers:inv_headers
+									];
+									inv_matchedItems = inv_itemSearchResponse.get("items");
+									if(inv_matchedItems.size() > 0)
+									{
+										inv_matchedItem = inv_matchedItems.get(0);
+										inv_lineItem = Map();
+										inv_lineItem.put("item_id",inv_matchedItem.get("item_id"));
+										inv_lineItem.put("quantity",inv_row1.get("quantity"));
+										inv_lineItem.put("rate",inv_row1.get("rate"));
+										inv_lineItem.put("tax_exemption_id",inv_TAX_EXEMPTION_ID);
+										inv_lineItems.add(inv_lineItem);
+									}
+									else
+									{
+										info "No matching item found in GAD Inventory for SKU: " + inv_sku;
+									}
+								}
+								inv_salesOrder = Map();
+								inv_salesOrder.put("customer_id",inv_CUSTOMER_ID);
+								inv_salesOrder.put("date",zoho.currentdate.toString("yyyy-MM-dd"));
+								if(srcExpectedShipDate != "")
+								{
+									inv_salesOrder.put("shipment_date",srcExpectedShipDate);
+								}
+								inv_salesOrder.put("reference_number",inv_poReferenceNumber);
+								inv_salesOrder.put("tax_exemption_id",inv_TAX_EXEMPTION_ID);
+								inv_soCustomFields = List();
+								inv_orderSourceField = Map();
+								inv_orderSourceField.put("api_name","cf_order_source");
+								inv_orderSourceField.put("value",srcOrderSource);
+								inv_soCustomFields.add(inv_orderSourceField);
+								inv_regionField = Map();
+								inv_regionField.put("api_name","cf_region");
+								inv_regionField.put("value",srcRegion);
+								inv_soCustomFields.add(inv_regionField);
+								inv_custNameField = Map();
+								inv_custNameField.put("api_name","cf_customer_person_name");
+								inv_custNameField.put("value",srcCustomerName);
+								inv_soCustomFields.add(inv_custNameField);
+								inv_custAddrField = Map();
+								inv_custAddrField.put("api_name","cf_customer_shipping_address");
+								inv_custAddrField.put("value",srcCustomerAddress);
+								inv_soCustomFields.add(inv_custAddrField);
+								inv_salesOrder.put("custom_fields",inv_soCustomFields);
+								inv_salesOrder.put("line_items",inv_lineItems);
+								info "DEBUG GAD Inventory SO payload: " + inv_salesOrder;
+								inv_param = Map();
+								inv_param.put("JSONString",inv_salesOrder.toString());
+								inv_response = invokeurl
+								[
+									url :"https://www.zohoapis.in/inventory/v1/salesorders?organization_id=" + GAD_ORGANIZATION_ID
+									type :POST
+									parameters:inv_param
+									headers:inv_headers
+								];
+								info "GAD Inventory SO creation response: " + inv_response;
+								if(inv_response.get("code") == 0)
+								{
+									inv_salesorderId = inv_response.get("salesorder").get("salesorder_id");
+									inv_confirmResponse = invokeurl
+									[
+										url :"https://www.zohoapis.in/inventory/v1/salesorders/" + inv_salesorderId + "/status/confirmed?organization_id=" + GAD_ORGANIZATION_ID
+										type :POST
+										headers:inv_headers
+									];
+									if(inv_confirmResponse.get("code") == 0)
+									{
+										info "Sales Order confirmed in GAD Inventory: " + inv_salesorderId;
+									}
+									else
+									{
+										info "Failed to confirm Sales Order in GAD Inventory: " + inv_confirmResponse.get("message");
+									}
+								}
+								else
+								{
+									info "GAD Inventory Sales Order creation FAILED: " + inv_response.get("message");
+								}
+							}
+						}
+						else
+						{
+							info "Could not re-fetch Texus PO before Inventory push: " + texusPoFullResponse.get("message");
+						}
+					}
+					catch (e)
+					{
+						info "ERROR while auto-triggering PO->Inventory logic: " + e;
+					}
+				}
+				else
+				{
+					info "Skipping Inventory automation - region: " + srcRegion + ", order source: " + srcOrderSource;
+				}
+				// ============================================
+				// END NEW BLOCK (Edit C)
+				// ============================================
+			}
+			else
+			{
+				info "PO created but failed to mark issued: " + texusStatusResponse.get("message");
+			}
+		}
+		else
+		{
+			info "Texus Inc PO creation FAILED: " + texusPoResponse.get("message");
+		}
+	}
+	else
+	{
+		info "Failed to confirm SO in Texus Inc: " + confirmResponse.get("message");
+	}
+}
+else
+{
+	info "SO creation in Texus Inc FAILED: " + soResponse.get("message");
+}
+

@@ -1,0 +1,248 @@
+YOUR_REFRESH_TOKEN = "1000.d2e19889015d5d7254e2241d0cf36537.6971088c4f09be46a9966e154ac94905";
+YOUR_CLIENT_ID = "1000.TQXGKY8NIM4D9T6HPQLCRYLL4KZRZV";
+YOUR_CLIENT_SECRET = "ba2586623a2429ebbadb183e9ac7471072931f0e35";
+// STEP 1 : Generate Access Token
+paramMap = Map();
+paramMap.put("refresh_token",YOUR_REFRESH_TOKEN);
+paramMap.put("client_id",YOUR_CLIENT_ID);
+paramMap.put("client_secret",YOUR_CLIENT_SECRET);
+paramMap.put("grant_type","refresh_token");
+tokenResponse = invokeurl
+[
+	url :"https://accounts.zoho.in/oauth/v2/token"
+	type :POST
+	parameters:paramMap
+];
+accessToken = tokenResponse.get("access_token");
+// STEP 2 : Authorization Header
+headers = Map();
+headers.put("Authorization","Zoho-oauthtoken " + accessToken);
+// STEP 3 : GAD Inventory Organization ID
+GAD_ORGANIZATION_ID = "60076905558";
+// STEP 4 : Customer ID
+// TODO: this still needs to come from a vendor -> customer mapping,
+// since the PO's vendor_id ("GAD") is not a customer record.
+// For now this stays fixed until that mapping exists.
+CUSTOMER_ID = "3955559000000038020";
+// STEP 4b : Check customer's tax settings in target org
+customerResponse = invokeurl
+[
+	url :"https://www.zohoapis.in/inventory/v1/contacts/" + CUSTOMER_ID + "?organization_id=" + GAD_ORGANIZATION_ID
+	type :GET
+	headers:headers
+];
+info "DEBUG FULL customerResponse: " + customerResponse;
+// STEP 4b2 : Determine interstate vs intrastate
+// TODO: confirm ORG_STATE_CODE matches your GAD Inventory org's registered state
+ORG_STATE_CODE = "RJ";
+customerPlaceOfContact = customerResponse.get("contact").get("place_of_contact");
+isInterstate = customerPlaceOfContact != ORG_STATE_CODE;
+info "DEBUG isInterstate: " + isInterstate + " (customer place_of_contact: " + customerPlaceOfContact + ")";
+// STEP 4c : Fetch target org's tax list
+targetTaxResponse = invokeurl
+[
+	url :"https://www.zohoapis.in/inventory/v1/settings/taxes?organization_id=" + GAD_ORGANIZATION_ID
+	type :GET
+	headers:headers
+];
+info "DEBUG FULL targetTaxResponse: " + targetTaxResponse;
+targetTaxes = targetTaxResponse.get("taxes");
+// STEP 4d : DUPLICATE CHECK - skip if a Sales Order already exists for this PO reference
+poReferenceNumber = purchaseorder.get("reference_number");
+duplicateCheckResponse = invokeurl
+[
+	url :"https://www.zohoapis.in/inventory/v1/salesorders?organization_id=" + GAD_ORGANIZATION_ID + "&reference_number=" + poReferenceNumber
+	type :GET
+	headers:headers
+];
+existingSalesOrders = duplicateCheckResponse.get("salesorders");
+isDuplicate = false;
+if(existingSalesOrders != null && existingSalesOrders.size() > 0)
+{
+	// Zoho's reference_number filter can return partial/fuzzy matches, so confirm an EXACT match
+	// before treating it as a duplicate.
+	for each  existingSO in existingSalesOrders
+	{
+		existingRefNumber = existingSO.get("reference_number");
+		if(existingRefNumber == poReferenceNumber)
+		{
+			isDuplicate = true;
+			info "Exact duplicate found - existing SO number: " + existingSO.get("salesorder_number") + " with reference_number: " + existingRefNumber;
+			break;
+		}
+	}
+}
+if(isDuplicate == true)
+{
+	info "Sales Order already exists for reference_number: " + poReferenceNumber + " - skipping creation.";
+	return;
+}
+// STEP 5 : Build line items dynamically from the actual PO data
+lineItems = List();
+for each  row1 in purchaseorder.get("line_items")
+{
+	sku = row1.get("sku");
+	poQuantity = row1.get("quantity");
+	poRate = row1.get("rate");
+	poTaxPercentage = row1.get("tax_percentage");
+	poTaxName = row1.get("tax_name");
+	info "DEBUG row1: " + row1;
+	info "DEBUG poTaxPercentage: " + poTaxPercentage;
+	// Look up the matching Inventory item in the TARGET org by SKU
+	// (item_id from the PO's org will not exist in GAD_ORGANIZATION_ID)
+	itemSearchResponse = invokeurl
+	[
+		url :"https://www.zohoapis.in/inventory/v1/items?organization_id=" + GAD_ORGANIZATION_ID + "&sku=" + sku
+		type :GET
+		headers:headers
+	];
+	matchedItems = itemSearchResponse.get("items");
+	if(matchedItems.size() > 0)
+	{
+		matchedItem = matchedItems.get(0);
+		info "DEBUG matchedItem is_taxable: " + matchedItem.get("is_taxable");
+		lineItem = Map();
+		lineItem.put("item_id",matchedItem.get("item_id"));
+		lineItem.put("quantity",poQuantity);
+		lineItem.put("rate",poRate);
+		// Map the source PO's tax (by percentage + interstate/intrastate) to the target org's tax_id.
+		// tax_id itself is org-specific and cannot be copied directly across orgs.
+		if(poTaxPercentage != null && targetTaxes != null)
+		{
+			requiredSpec = "intra";
+			if(isInterstate)
+			{
+				requiredSpec = "inter";
+			}
+			for each  taxRow in targetTaxes
+			{
+				if(taxRow.get("tax_percentage") == poTaxPercentage && taxRow.get("tax_specification") == requiredSpec)
+				{
+					lineItem.put("tax_id",taxRow.get("tax_id"));
+					break;
+				}
+			}
+		}
+		info "DEBUG matched tax_id for SKU " + sku + ": " + lineItem.get("tax_id");
+		lineItems.add(lineItem);
+	}
+	else
+	{
+		info "No matching item found for SKU: " + sku;
+	}
+}
+// STEP 6 : Create Sales Order Payload
+salesOrder = Map();
+salesOrder.put("customer_id",CUSTOMER_ID);
+salesOrder.put("date",zoho.currentdate.toString("yyyy-MM-dd"));
+salesOrder.put("reference_number",purchaseorder.get("reference_number"));
+// Read order_source, region, expected_shipment_date, customer person name and shipping
+// address from the PO's own custom fields (texus_sales_to_purchase wrote them onto the
+// Texus PO). Fall back to Shopify/IN only when a field is genuinely absent, same rule
+// texus_sales_to_purchase itself applies when reading off the Texus SO.
+poCustomFieldsList = purchaseorder.get("custom_fields");
+poOrderSource = "";
+poRegion = "";
+customerPersonNameFromPO = "";
+customerShippingAddressFromPO = "";
+poShipmentDate = "";
+if(poCustomFieldsList != null)
+{
+	for each  cf in poCustomFieldsList
+	{
+		cfApiName = cf.get("api_name");
+		if(cfApiName == "cf_order_source")
+		{
+			poOrderSource = ifnull(cf.get("value"),"");
+		}
+		else if(cfApiName == "cf_region")
+		{
+			poRegion = ifnull(cf.get("value"),"");
+		}
+		else if(cfApiName == "cf_customer_person_name")
+		{
+			customerPersonNameFromPO = ifnull(cf.get("value"),"");
+		}
+		else if(cfApiName == "cf_customer_shipping_address")
+		{
+			customerShippingAddressFromPO = ifnull(cf.get("value"),"");
+		}
+		else if(cfApiName == "cf_expected_shipment_date")
+		{
+			poShipmentDate = ifnull(cf.get("value"),"").toString().trim();
+		}
+	}
+}
+if(poOrderSource == "")
+{
+	poOrderSource = "Shopify";
+}
+if(poRegion == "")
+{
+	poRegion = "IN";
+}
+soCustomFields = List();
+orderSourceField = Map();
+orderSourceField.put("api_name","cf_order_source");
+orderSourceField.put("value",poOrderSource);
+soCustomFields.add(orderSourceField);
+regionField = Map();
+regionField.put("api_name","cf_region");
+regionField.put("value",poRegion);
+soCustomFields.add(regionField);
+personNameFieldSO = Map();
+personNameFieldSO.put("api_name","cf_customer_person_name");
+personNameFieldSO.put("value",customerPersonNameFromPO);
+soCustomFields.add(personNameFieldSO);
+shippingAddressFieldSO = Map();
+shippingAddressFieldSO.put("api_name","cf_customer_shipping_address");
+shippingAddressFieldSO.put("value",customerShippingAddressFromPO);
+soCustomFields.add(shippingAddressFieldSO);
+info "Customer Person Name carried to Inventory SO: " + customerPersonNameFromPO;
+info "Customer Shipping Address carried to Inventory SO: " + customerShippingAddressFromPO;
+salesOrder.put("custom_fields",soCustomFields);
+// Expected shipment date: GAD Inventory SO has a standard shipment_date field, same as
+// the LL/Texus Sales Orders - use it instead of a custom field here, mirroring how
+// texus_sales_to_purchase reads shipment_date off the Texus SO.
+if(poShipmentDate != "")
+{
+	salesOrder.put("shipment_date",poShipmentDate);
+	info "Expected Shipment Date carried to Inventory SO: " + poShipmentDate;
+}
+salesOrder.put("line_items",lineItems);
+info "DEBUG full salesOrder payload: " + salesOrder;
+// STEP 7 : Create Sales Order
+param = Map();
+param.put("JSONString",salesOrder.toString());
+response = invokeurl
+[
+	url :"https://www.zohoapis.in/inventory/v1/salesorders?organization_id=" + GAD_ORGANIZATION_ID
+	type :POST
+	parameters:param
+	headers:headers
+];
+info response;
+// STEP 8 : Confirm the Sales Order (creation always defaults to draft otherwise)
+if(response.get("code") == 0)
+{
+	salesorderId = response.get("salesorder").get("salesorder_id");
+	confirmResponse = invokeurl
+	[
+		url :"https://www.zohoapis.in/inventory/v1/salesorders/" + salesorderId + "/status/confirmed?organization_id=" + GAD_ORGANIZATION_ID
+		type :POST
+		headers:headers
+	];
+	info confirmResponse;
+	if(confirmResponse.get("code") == 0)
+	{
+		info "Sales Order confirmed in GAD Inventory: " + salesorderId;
+	}
+	else
+	{
+		info "Failed to confirm Sales Order: " + confirmResponse.get("message");
+	}
+}
+else
+{
+	info "Sales Order creation FAILED: " + response.get("message");
+}

@@ -1,0 +1,24 @@
+void faire_probe()
+{
+faire_api_key = "8cmw5qcv535sdvu85mfg5390ravzapf5wcdcb6ndsex6l2ir2w8bt9ylfed3ipzbv1p258xhznm4hnfv5s5bm5yl3ve2utj78hru";
+faire_response = invokeurl
+[
+	url :"https://www.faire.com/external-api/v2/orders?limit=10"
+	type :GET
+	headers:{"X-FAIRE-ACCESS-TOKEN":faire_api_key}
+];
+info "===== RAW RESPONSE =====";
+info faire_response.toString();
+orders = faire_response.get("orders");
+if(orders != null && orders.size() > 0)
+{
+	info "===== FIRST ORDER =====";
+	info orders.get(0).toString();
+	itms = orders.get(0).get("items");
+	if(itms != null && itms.size() > 0)
+	{
+		info "===== FIRST ITEM =====";
+		info itms.get(0).toString();
+	}
+}
+}

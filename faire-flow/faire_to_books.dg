@@ -1,0 +1,171 @@
+void faire_to_books( Map salesorder, Map organization, Map user )
+{
+// ===== Faire -> Zoho Books Sales Order Sync =====
+// Zoho Books > Settings > Automation > Custom Functions
+// Uses the existing "faire_books" connection (Settings > Connections)
+// scope: ZohoBooks.fullaccess.all - used for all Zoho Books invokeurl calls below.
+faire_api_key = "8cmw5qcv535sdvu85mfg5390ravzapf5wcdcb6ndsex6l2ir2w8bt9ylfed3ipzbv1p258xhznm4hnfv5s5bm5yl3ve2utj78hru";
+// move to a connection/encrypted var, do not hardcode
+organization_id = "920163292";
+// Zoho Books > Settings > Organization Profile
+// ---- Fetch Faire orders (unchanged from your working logic) ----
+response = invokeurl
+[
+	url :"https://www.faire.com/external-api/v2/orders?limit=50"
+	type :GET
+	headers:{"X-FAIRE-ACCESS-TOKEN":faire_api_key}
+];
+orders = response.get("orders");
+info "Fetched " + orders.size() + " orders from Faire";
+for each  order in orders
+{
+	faire_order_id = order.get("id");
+	if(faire_order_id == null)
+	{
+		info "Skipping order: missing Faire Order ID.";
+	}
+	else
+	{
+		// ---- Step 1: Duplicate check using reference_number = Faire Order ID ----
+		search_url = "https://www.zohoapis.com/books/v3/salesorders?organization_id=" + organization_id + "&reference_number=" + faire_order_id;
+		search_response = invokeurl
+		[
+			url :search_url
+			type :GET
+			connection:"faire_books"
+		];
+		existing_orders = search_response.get("salesorders");
+		order_exists = false;
+		existing_so_id = "";
+		if(existing_orders != null && existing_orders.size() > 0)
+		{
+			order_exists = true;
+			existing_so_id = existing_orders.get(0).get("salesorder_id");
+		}
+		if(order_exists == true)
+		{
+			info "Order already exists in Zoho Books. Skipping.";
+			info "Existing Zoho Books Sales Order ID: " + existing_so_id;
+		}
+		else
+		{
+			// ---- Step 2: Find or create customer ----
+			retailer_map = order.get("address");
+			retailer_name = retailer_map.get("name");
+			customer_id = null;
+			cust_search_url = "https://www.zohoapis.com/books/v3/contacts?organization_id=" + organization_id + "&contact_name=" + retailer_name;
+			cust_search_response = invokeurl
+			[
+				url :cust_search_url
+				type :GET
+				connection:"faire_books"
+			];
+			contacts = cust_search_response.get("contacts");
+			if(contacts != null && contacts.size() > 0)
+			{
+				customer_id = contacts.get(0).get("contact_id");
+			}
+			else
+			{
+				cust_payload = Map();
+				cust_payload.put("contact_name",retailer_name);
+				cust_create_url = "https://www.zohoapis.com/books/v3/contacts?organization_id=" + organization_id;
+				cust_create_response = invokeurl
+				[
+					url :cust_create_url
+					type :POST
+					parameters:cust_payload.toString()
+					connection:"faire_books"
+				];
+				new_contact = cust_create_response.get("contact");
+				if(new_contact != null)
+				{
+					customer_id = new_contact.get("contact_id");
+				}
+				else
+				{
+					info "ERROR: Failed to create customer for Faire Order " + faire_order_id + ". Response: " + cust_create_response;
+				}
+			}
+			// ---- Step 3: Find/map items and build line_items ----
+			items = order.get("items");
+			line_items = List();
+			for each  faire_item in items
+			{
+				item_sku = faire_item.get("sku");
+				item_qty = faire_item.get("quantity");
+				item_rate = faire_item.get("price_cents");
+				// adjust conversion if Faire returns cents
+				item_search_url = "https://www.zohoapis.com/books/v3/items?organization_id=" + organization_id + "&sku=" + item_sku;
+				item_search_response = invokeurl
+				[
+					url :item_search_url
+					type :GET
+					connection:"faire_books"
+				];
+				zoho_items = item_search_response.get("items");
+				if(zoho_items != null && zoho_items.size() > 0)
+				{
+					zoho_item_id = zoho_items.get(0).get("item_id");
+					line_item_map = Map();
+					line_item_map.put("item_id",zoho_item_id);
+					line_item_map.put("quantity",item_qty);
+					line_item_map.put("rate",item_rate);
+					line_items.add(line_item_map);
+				}
+				else
+				{
+					info "No matching Zoho Books item for SKU: " + item_sku + " (Faire Order " + faire_order_id + "). Line item skipped.";
+				}
+			}
+			// ---- Step 4: Validate before creating ----
+			if(faire_order_id == null || customer_id == null || line_items.size() == 0)
+			{
+				info "VALIDATION FAILED for Faire Order " + faire_order_id + " - customer_id: " + customer_id + ", line_items count: " + line_items.size() + ". Sales Order NOT created.";
+			}
+			else
+			{
+				// ---- Step 5: Create Sales Order ----
+				so_payload = Map();
+				so_payload.put("customer_id",customer_id);
+				so_payload.put("line_items",line_items);
+				so_payload.put("reference_number",faire_order_id);
+				// Alternative: store in a dedicated custom field instead of reference_number.
+				// If you create a Sales Order custom field with API name "cf_faire_order_id",
+				// use this block instead (and search with &cf_faire_order_id=<id> above):
+				//
+				// custom_fields = List();
+				// cf = Map();
+				// cf.put("label", "Faire Order ID");
+				// cf.put("value", faire_order_id);
+				// custom_fields.add(cf);
+				// so_payload.put("custom_fields", custom_fields);
+				create_url = "https://www.zohoapis.com/books/v3/salesorders?organization_id=" + organization_id;
+				create_response = invokeurl
+				[
+					url :create_url
+					type :POST
+					parameters:so_payload.toString()
+					connection:"faire_books"
+				];
+				info "Zoho Books create response for Faire Order " + faire_order_id + ": " + create_response;
+				created_so = create_response.get("salesorder");
+				if(created_so != null)
+				{
+					salesorder_id = created_so.get("salesorder_id");
+					info "SUCCESS: Faire Order " + faire_order_id + " synced to Zoho Books Sales Order " + salesorder_id;
+				}
+				else
+				{
+					info "ERROR: Failed to create Sales Order for Faire Order " + faire_order_id + ". Full response: " + create_response;
+				}
+			}
+		}
+	}
+}
+page_token = response.get("page_token");
+if(page_token != null)
+{
+	info "More orders exist. Next page_token: " + page_token;
+}
+}

@@ -14,14 +14,14 @@
  * (The name `ApiExperiment` / `api-experiment.js` is historical — this began as
  * an A/B experiment against the Deluge function. It is the only path now.)
  *
- * FORMS READ (10 reports, via getRecords with cursor paging):
+ * FORMS READ (9 reports, via getRecords with cursor paging):
  *   Production_Planning_Report   open plans (Pending/Partially Received/In Progress)
  *   Material_Requirement_Report  the demand rows
  *   Employee_Report              supervisor names
  *   Plan_Item_Report             item name + remake flag
  *   All_items_Report             Raw_Material: SKU, display name, qty, width, print base
- *   All_Material_Lots            Raw_Material_Lot: wash / unwash / in-wash / form / status
- *   Fabric_Piece_Report          printed-cloth pieces (for Pieces-form lots)
+ *   All_Material_Lots            Raw_Material_Lot: wash / unwash / in-wash / form / status,
+ *                                 with Lot_Rolls — printed cloth is ordinary short rolls now
  *   Waste_Master_Report          available offcuts
  *   Material_Exception_Report    open shortage / wash tickets
  *
@@ -29,7 +29,7 @@
  *   - aggregation key supId|matId|source, sum required/issued/pieces
  *   - per-cut summary (cutsJson), per-line list (lines[])
  *   - per-material stock rollup from lots (wash/unwash/in-wash), fabric width
- *   - lot list with blocked / empty-lot / in-wash handling, Pieces vs Roll form
+ *   - lot list with blocked / empty-lot / in-wash handling
  *   - wasteStock[] per material with its lot number + carton
  *   - openExceptions[] with covered plan ids, poNumber, lot
  *   - poCoveredQty netting
@@ -39,6 +39,14 @@
  *     fall back to naming its plain-cloth base lot. printBase / printBaseLots
  *     come out empty. Plain (non-printed) fabric is unaffected.
  *   - No parallel paging — one cursor walk per report.
+ *
+ * FABRIC_PIECE_REPORT REMOVED (docs/printing-v2-plan.md). Printed cloth is
+ * Lot_Rolls (Origin="Printed") now, not Fabric_Piece rows, and Raw_Material_Lot
+ * no longer carries a live Pieces/Roll Form distinction - every lot's stock
+ * comes from its Lot_Rolls the same way. Fetching Fabric_Piece_Report broke
+ * the WHOLE screen the day the report was deleted in Creator (Promise.all
+ * fails the entire fetch on one 404), even though nothing had sent a printed
+ * lot down the pieces path since the rolls migration.
  * ========================================================================== */
 
 var ApiExperiment = (function () {
@@ -54,7 +62,6 @@ var ApiExperiment = (function () {
         planItems: 'Plan_Item_Report',
         rawMat: 'All_items_Report',
         lots: 'All_Material_Lots',
-        pieces: 'Fabric_Piece_Report',
         waste: 'Waste_Master_Report',
         exceptions: 'Material_Exception_Report'
     };
@@ -155,14 +162,13 @@ var ApiExperiment = (function () {
             getAll(RPT.planItems, null),
             getAll(RPT.rawMat, null),
             getAll(RPT.lots, null),
-            getAll(RPT.pieces, 'Piece_Status == "Available"'),
             getAll(RPT.waste, 'Status == "Available"'),
             getAll(RPT.exceptions, 'Status == "Open"')
         ]).then(function (res) {
             var raw = {
                 plans: res[0].rows, reqs: res[1].rows, emps: res[2].rows,
                 planItems: res[3].rows, rawMats: res[4].rows, lots: res[5].rows,
-                pieces: res[6].rows, waste: res[7].rows, exceptions: res[8].rows
+                waste: res[6].rows, exceptions: res[7].rows
             };
             var out = assemble(raw);
             var t1 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -172,7 +178,7 @@ var ApiExperiment = (function () {
                 rowsFetched: {
                     plans: raw.plans.length, requirements: raw.reqs.length, employees: raw.emps.length,
                     planItems: raw.planItems.length, rawMaterials: raw.rawMats.length, lots: raw.lots.length,
-                    pieces: raw.pieces.length, waste: raw.waste.length, exceptions: raw.exceptions.length
+                    waste: raw.waste.length, exceptions: raw.exceptions.length
                 },
                 wallMs: Math.round(t1 - t0),
                 printBasePorted: false,
@@ -184,16 +190,16 @@ var ApiExperiment = (function () {
     }
 
     // The PURE assembly — the JS port of getStoreMaterialRequirements' data
-    // build. Takes the nine fetched row-arrays, returns { plans: [...] } in the
+    // build. Takes the eight fetched row-arrays, returns { plans: [...] } in the
     // exact shape the custom function returns. No SDK, no promises, so it is
     // fully unit-testable (see tools/api-experiment-parity.test.js).
     //
-    //   raw = { plans, reqs, emps, planItems, rawMats, lots, pieces, waste,
+    //   raw = { plans, reqs, emps, planItems, rawMats, lots, waste,
     //           exceptions }   — arrays of getRecords-shaped records
     function assemble(raw) {
         var plans = raw.plans || [], reqs = raw.reqs || [], emps = raw.emps || [],
             planItems = raw.planItems || [], rawMats = raw.rawMats || [], lots = raw.lots || [],
-            pieces = raw.pieces || [], waste = raw.waste || [], exceptions = raw.exceptions || [];
+            waste = raw.waste || [], exceptions = raw.exceptions || [];
 
         {
             // ---------- id-keyed maps ----------------------------------
@@ -245,22 +251,6 @@ var ApiExperiment = (function () {
                     // than leaving the store person to guess.
                     unallocatedQty: num(rm.Unallocated_Qty)
                 };
-            });
-
-            // Fabric_Piece grouped by lot id (available only, fetched with that
-            // criteria). Piece_Length_Cm / Piece_Width_Cm / Piece_Count / State.
-            var piecesByLot = {};
-            pieces.forEach(function (fp) {
-                var lotId = lookupId(fp.Lot);
-                if (!lotId) return;
-                (piecesByLot[lotId] = piecesByLot[lotId] || []).push({
-                    pieceId: String(fp.ID),
-                    lengthCm: num(fp.Piece_Length_Cm),
-                    widthCm: num(fp.Piece_Width_Cm),
-                    count: num(fp.Piece_Count),
-                    state: str(fp.State).trim() || 'Wash',
-                    carton: str(fp.Carton_Number).trim()
-                });
             });
 
             // Raw_Material_Lot grouped by material id. Also a lot-id -> lot-number
@@ -449,8 +439,8 @@ var ApiExperiment = (function () {
             });
 
             // ---------- per-material lot rollup ----------------------
-            // For every material in play: build lots[] (blocked/empty filtered,
-            // Pieces vs Roll), sum calcWash / calcUnwash / calcInWash.
+            // For every material in play: build lots[] (blocked/empty filtered),
+            // sum calcWash / calcUnwash / calcInWash.
             var lotJsonByMat = {};   // matId -> lots[] (objects, not JSON)
             var calcWashByMat = {};
             var calcUnwashByMat = {};
@@ -468,24 +458,13 @@ var ApiExperiment = (function () {
                     var lrWash = num(l.Wash_Quantity);
                     var lrUnwash = num(l.Unwash_Quantity);
                     var lrInWash = num(l.In_Wash_Qty);
-                    var form = str(l.Form).trim();
-                    if (form !== 'Pieces') form = 'Roll';
-
-                    var lrPieces = [];
-                    if (form === 'Pieces') {
-                        var fps = piecesByLot[String(l.ID)] || [];
-                        var pieceMtr = 0;
-                        fps.forEach(function (fp) {
-                            if (fp.count > 0 && fp.lengthCm > 0) {
-                                lrPieces.push({
-                                    pieceId: fp.pieceId, lengthCm: fp.lengthCm, widthCm: fp.widthCm,
-                                    count: fp.count, state: fp.state, carton: fp.carton
-                                });
-                                if (fp.state === 'Wash') pieceMtr += (fp.lengthCm / 100) * fp.count;
-                            }
-                        });
-                        lrWash = pieceMtr; // Pieces lot's issuable stock is its washed pieces
-                    }
+                    // FORM IS NO LONGER A LIVE DISTINCTION (docs/printing-v2-plan.md
+                    // deletes Raw_Material_Lot.Form; every lot's stock comes from
+                    // its Lot_Rolls, printed or not). Always 'Roll' - kept as a
+                    // field so lot-allocator.js's `l.form === 'Pieces' ? ... : ...`
+                    // fallback (there so nothing downstream reading `.form` gets
+                    // undefined) stays exactly as true as it always was.
+                    var form = 'Roll';
 
                     var lrRolls = readRolls(l);
 
@@ -500,7 +479,11 @@ var ApiExperiment = (function () {
                             unwash: lrUnwash,
                             inWash: lrInWash,
                             form: form,
-                            pieces: lrPieces,
+                            // Always empty - Fabric_Piece is retired. Kept as a key
+                            // (not dropped) so lot-allocator.js's `(l.pieces ||
+                            // []).forEach(...)` reads the same "nothing here" shape
+                            // it always did rather than an absent field.
+                            pieces: [],
                             // Physical rolls, shelf only. Σ length should equal
                             // wash+unwash+inWash for a healthy lot (verifyLotSync
                             // checks this server-side).

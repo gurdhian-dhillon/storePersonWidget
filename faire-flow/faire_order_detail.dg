@@ -1,0 +1,154 @@
+void faire_order_detail()
+{
+faire_api_key = "8cmw5qcv535sdvu85mfg5390ravzapf5wcdcb6ndsex6l2ir2w8bt9ylfed3ipzbv1p258xhznm4hnfv5s5bm5yl3ve2utj78hru";
+organization_id = "920163292";
+utc_now = zoho.currenttime.subHour(5).subMinutes(30);
+cutoff_date = utc_now.subDay(1);
+info "utc_now (naive UTC): " + utc_now + " | cutoff_date: " + cutoff_date;
+page_token = "";
+has_more_pages = true;
+page_markers = List();
+page_markers.add(1);
+page_markers.add(2);
+page_markers.add(3);
+page_markers.add(4);
+page_markers.add(5);
+page_markers.add(6);
+page_markers.add(7);
+page_markers.add(8);
+page_markers.add(9);
+page_markers.add(10);
+page_markers.add(11);
+page_markers.add(12);
+page_markers.add(13);
+page_markers.add(14);
+page_markers.add(15);
+page_markers.add(16);
+page_markers.add(17);
+page_markers.add(18);
+page_markers.add(19);
+page_markers.add(20);
+page_markers.add(21);
+page_markers.add(22);
+page_markers.add(23);
+page_markers.add(24);
+page_markers.add(25);
+page_markers.add(26);
+page_markers.add(27);
+page_markers.add(28);
+page_markers.add(29);
+page_markers.add(30);
+recent_count = 0;
+for each  page_num in page_markers
+{
+	if(has_more_pages == true)
+	{
+		fetch_url = "https://www.faire.com/external-api/v2/orders?limit=50";
+		if(page_token != "")
+		{
+			fetch_url = fetch_url + "&cursor=" + page_token;
+		}
+		faire_response = invokeurl
+		[
+			url :fetch_url
+			type :GET
+			headers:{"X-FAIRE-ACCESS-TOKEN":faire_api_key}
+		];
+		orders = faire_response.get("orders");
+		if(orders == null)
+		{
+			orders = List();
+		}
+		for each  order in orders
+		{
+			faire_order_id = order.get("id");
+			created_at = order.get("created_at");
+			order_date = null;
+			if(created_at != null)
+			{
+				try
+				{
+					order_date = created_at.toString().toDate("yyyy-MM-dd'T'HH:mm:ss");
+				}
+				catch (e)
+				{
+					order_date = null;
+				}
+			}
+			is_recent = false;
+			if(order_date != null && order_date >= cutoff_date)
+			{
+				is_recent = true;
+			}
+			if(is_recent == true)
+			{
+				recent_count = recent_count + 1;
+				info "==================================================";
+				info "RECENT ORDER " + recent_count + " : " + faire_order_id;
+				info "  display_id : " + order.get("display_id");
+				info "  state      : " + order.get("state");
+				info "  created_at : " + created_at;
+				info "  source     : " + order.get("source");
+				info "  retailer_id: " + order.get("retailer_id");
+				addr = order.get("address");
+				if(addr != null)
+				{
+					info "  ADDRESS: " + addr.toString();
+				}
+				faire_items = order.get("items");
+				if(faire_items != null)
+				{
+					info "  ITEM COUNT : " + faire_items.size();
+					line_no = 0;
+					for each  fitem in faire_items
+					{
+						line_no = line_no + 1;
+						fsku = ifnull(fitem.get("sku"),"").toString().trim();
+						info "  --- line " + line_no + " ---";
+						info "    sku          : '" + fsku + "'";
+						info "    quantity     : " + fitem.get("quantity");
+						info "    price_cents  : " + fitem.get("price_cents");
+						info "    product_name : " + fitem.get("product_name");
+						info "    variant_name : " + fitem.get("variant_name");
+						info "    product_id   : " + fitem.get("product_id");
+						info "    variant_id   : " + fitem.get("variant_id");
+						info "    item_state   : " + fitem.get("state");
+						if(fsku != "")
+						{
+							item_search = invokeurl
+							[
+								url :"https://www.zohoapis.com/books/v3/items?organization_id=" + organization_id + "&sku=" + fsku
+								type :GET
+								connection:"faire_books"
+							];
+							books_items = item_search.get("items");
+							if(books_items != null && books_items.size() > 0)
+							{
+								bi = books_items.get(0);
+								info "    BOOKS MATCH  : item_id=" + bi.get("item_id") + " | name=" + bi.get("name") + " | sku=" + bi.get("sku") + " | rate=" + bi.get("rate") + " | status=" + bi.get("status");
+							}
+							else
+							{
+								info "    BOOKS MATCH  : *** NO ITEM IN LL BOOKS WITH SKU '" + fsku + "' ***";
+							}
+						}
+						else
+						{
+							info "    BOOKS MATCH  : (no sku on faire line - cannot look up)";
+						}
+					}
+				}
+				info "  RAW ORDER JSON:";
+				info order.toString();
+			}
+		}
+		page_token = ifnull(faire_response.get("cursor"),"").toString();
+		if(page_token == "")
+		{
+			has_more_pages = false;
+		}
+	}
+}
+info "==================================================";
+info "DONE - recent orders (within 24h) found: " + recent_count;
+}

@@ -2516,7 +2516,7 @@ function renderMaterials() {
             var rows = list.map(function (rm) {
                 // Stock styling
                 var stockClass = rm.stock > 0 ? 'yes' : 'no';
-                var stockLabel = rm.stock > 0 ? fmt(rm.stock) : 'Out';
+                var stockLabel = rm.stock > 0 ? fmt(rm.stock) : '0';
                 var unitLabel = rm.stock > 0 ? ' <span class="unit" style="color:var(--text-muted); font-size:11px;">' + escapeHtml(rm.unit) + '</span>' : '';
                 
                 var washLabel = rm.isFabric ? (rm.washQty > 0 ? (fmt(rm.washQty) + ' <span class="unit" style="color:var(--text-muted); font-size:11px;">' + escapeHtml(rm.unit) + '</span>') : '0') : '<span class="muted">—</span>';

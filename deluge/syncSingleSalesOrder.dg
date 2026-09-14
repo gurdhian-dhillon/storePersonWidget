@@ -2,6 +2,15 @@ map syncSingleSalesOrder(string salesOrderId)
 {
 	notifyTo = "gurdhian.helios@gmail.com";
 	orgId = "60076905558";
+	// Same pushNotification shape sendProductionPlanSummary/createProductionPlans
+	// use - a Creator user email (push target, distinct from the mail address)
+	// and a report link name the push deep-links a record into. Sales_Order_Report
+	// is confirmed to exist (docs/issue-receive-model-migration.md); the other
+	// callers all link Production_Planning records because a plan already exists
+	// by the time they fire - this one runs before planning, so it links the
+	// Sales_Order record itself.
+	pushNotifyTo = "livelinenstore@gmail.com";
+	pushReportLink = "Sales_Order_Report";
 	if(salesOrderId == null || salesOrderId.toString().trim() == "")
 	{
 		return {"status":"error","message":"salesOrderId is missing"};
@@ -135,14 +144,29 @@ map syncSingleSalesOrder(string salesOrderId)
 		newRow.Rate=liRow.get("rate");
 		newRow.Amount=liRow.get("item_total");
 		newRow.Quantity=liRow.get("quantity");
+		// COLOR AND SIZE COME FROM Item_Master, NEVER FROM INVENTORY'S LINE ITEM.
+		// They are identity attributes of the product - one SKU has one color and
+		// one size, it does not vary by order - unlike Rate/Amount/Quantity just
+		// above, which are transactional facts read from Inventory's line item on
+		// purpose (what THIS order was actually charged). Set only when the SKU
+		// resolves; a SKU not in Item_Master already falls into noItemTxt below
+		// and there is nothing else to read them from.
 		imId = null;
 		if(liSku != "")
 		{
-			imHits = Item_Master[SKU == liSku].ID.getAll();
-			if(imHits.size() > 0)
+			// FIRST MATCH ONLY, same as the .get(0) this replaced - a SKU is meant
+			// to be unique in Item_Master and nothing here relies on the guard
+			// firing, but the original took the first row and this keeps that
+			// exact behaviour rather than silently switching to "last wins".
+			for each  imRec in Item_Master[SKU == liSku]
 			{
-				imId = imHits.get(0);
-				newRow.SKU=imId;
+				if(imId == null)
+				{
+					imId = imRec.ID;
+					newRow.SKU=imId;
+					newRow.Color=ifnull(imRec.Color,"").toString();
+					newRow.Size=ifnull(imRec.Size,"").toString();
+				}
 			}
 		}
 		if(imId == null)
@@ -204,23 +228,57 @@ map syncSingleSalesOrder(string salesOrderId)
 	}
 
 	//----------------------------------------------------------------------
-	// EXPECTED DELIVERY DATE = ORDER DATE + 3 DAYS, SHOPIFY ONLY.
+	// EXPECTED DELIVERY DATE.
 	//
-	// Inventory's "date" is an ISO string (yyyy-MM-dd). Deluge parses
-	// "dd-MMM-yyyy" the same way whatever the org's locale is set to, while an
-	// ISO or a dd/MM string is read differently in the US than here - so it is
-	// reformatted through its parts first, the same pattern syncPurchaseInflow
-	// uses on the bill date. Set AFTER the insert: a Date field cannot take a
-	// null in the insert block, and this is skipped entirely for non-Shopify.
+	// Shopify: order date + 3 days - Shopify never tells us a ship-by date, so
+	// this is our own estimate.
+	// Every other source (Faire, Custom, PR): Inventory's OWN "shipment_date"
+	// field, set AS-IS, no offset. faire-flow/create_so_in_gad_inventory.dg:209
+	// already writes it onto the GAD Inventory SO as a standard field (carried
+	// from Faire's expected_ship_date / ship_after through LL -> Texus -> GAD),
+	// so by the time it reaches here it is Inventory's own answer to "when does
+	// this ship", not a value we compute - unlike Shopify, which never sends
+	// one at all. Present -> set it. Absent -> stays empty, and that is not an
+	// issue (the field simply carries nothing for this order), unlike a
+	// Shopify date, which is always expected and IS flagged when unparseable.
+	//
+	// Both dates arrive from Inventory as ISO strings (yyyy-MM-dd). Deluge
+	// parses "dd-MMM-yyyy" the same way whatever the org's locale is set to,
+	// while an ISO or a dd/MM string is read differently in the US than here -
+	// so both are reformatted through their parts first, the same pattern
+	// syncPurchaseInflow uses on the bill date. Set AFTER the insert: a Date
+	// field cannot take a null in the insert block.
 	//
 	// A date Inventory sent in a shape we cannot read leaves the field blank
 	// rather than failing the sync - the order still plans, just without the
-	// expected date, and the note below flags it.
+	// expected date, and the note below flags it (Shopify only).
 	//----------------------------------------------------------------------
 	delivNote = "";
 	if(srcNorm == "Shopify")
 	{
 		invDateTxt = ifnull(salesorder.get("date"),"").toString().trim();
+		offsetDays = 3;
+		emptySrcNote = "";
+	}
+	else
+	{
+		invDateTxt = ifnull(salesorder.get("shipment_date"),"").toString().trim();
+		offsetDays = 0;
+		emptySrcNote = "no shipment_date on the Inventory order - left blank";
+	}
+	if(invDateTxt == "")
+	{
+		if(srcNorm == "Shopify")
+		{
+			delivNote = "no order date on the Inventory order - left blank";
+		}
+		else
+		{
+			delivNote = emptySrcNote;
+		}
+	}
+	else
+	{
 		if(invDateTxt.length() > 10)
 		{
 			invDateTxt = invDateTxt.substring(0,10);
@@ -248,12 +306,19 @@ map syncSingleSalesOrder(string salesOrderId)
 				{
 					dmyTxt = isoParts.get(2).toString() + "-" + monNames.get(monIdx) + "-" + isoParts.get(0).toString();
 					baseDate = dmyTxt.toDate();
-					delivDate = baseDate.addDay(3);
+					delivDate = baseDate.addDay(offsetDays);
 					for each  soUpd in Sales_Order[ID == insertResult]
 					{
 						soUpd.Expected_Delivery_Date = delivDate;
 					}
-					delivNote = "set to " + delivDate.toString("dd-MMM-yyyy") + " (order date + 3)";
+					if(srcNorm == "Shopify")
+					{
+						delivNote = "set to " + delivDate.toString("dd-MMM-yyyy") + " (order date + 3)";
+					}
+					else
+					{
+						delivNote = "set to " + delivDate.toString("dd-MMM-yyyy") + " (from Inventory's shipment_date)";
+					}
 				}
 			}
 		}
@@ -261,10 +326,6 @@ map syncSingleSalesOrder(string salesOrderId)
 		{
 			delivNote = "FAILED to parse '" + invDateTxt.replaceAll("\"","'") + "' - " + eDate.toString().replaceAll("\"","'");
 		}
-	}
-	else
-	{
-		delivNote = "not Shopify - left blank";
 	}
 
 	issueCount = 0;
@@ -337,5 +398,24 @@ map syncSingleSalesOrder(string salesOrderId)
 			mailNote = "FAILED - " + eMail.toString();
 		}
 	}
-	return {"status":"success","salesOrderId":soIdTxt,"recordId":insertResult.toString(),"salesOrderNumber":soNumber,"orderSource":srcNorm,"orderStatus":"Pending","lineItems":lineCount,"issues":issueCount,"noBom":noBomTxt,"multiBom":multiBomTxt,"notInItemMaster":noItemTxt,"customerUnmatched":custMissTxt,"customerPersonName":custPersonName,"expectedDeliveryDate":delivNote,"mail":mailNote};
+	// PUSH IS AN ALERT ONLY - MAIL IS THE SOURCE OF TRUTH, same rule and same
+	// isolation sendProductionPlanSummary uses: its own try/catch, separate from
+	// the mail's, so a push failure (or the admin simply not having a device
+	// registered) can never fail this sync or block the mail that already went
+	// out above. Fires on the same condition as the mail - one issue or more.
+	pushNote = "not needed";
+	if(issueCount > 0)
+	{
+		try
+		{
+			pushMsg = issueCount + " thing(s) to fix on SO " + soNumber + " before it can be planned.";
+			zoho.pushNotification(pushNotifyTo,"Sales order needs attention",pushMsg,pushReportLink,insertResult.toLong());
+			pushNote = "accepted, to " + pushNotifyTo;
+		}
+		catch (ePush)
+		{
+			pushNote = "FAILED - " + ePush.toString();
+		}
+	}
+	return {"status":"success","salesOrderId":soIdTxt,"recordId":insertResult.toString(),"salesOrderNumber":soNumber,"orderSource":srcNorm,"orderStatus":"Pending","lineItems":lineCount,"issues":issueCount,"noBom":noBomTxt,"multiBom":multiBomTxt,"notInItemMaster":noItemTxt,"customerUnmatched":custMissTxt,"customerPersonName":custPersonName,"expectedDeliveryDate":delivNote,"mail":mailNote,"push":pushNote};
 }

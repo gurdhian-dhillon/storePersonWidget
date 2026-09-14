@@ -1,0 +1,413 @@
+
+// ===== ONE-OFF TEST HELPER =====
+// Fetches ONE specific Faire order by id and creates it in LL USA Books, using the
+// exact same SO-building logic as custom_faire_orders (SKU aggregation, catalog
+// lookup, address, shipment_date) - but with NO date cutoff and NO state exclusion,
+// so a real historical test order can be replayed on demand regardless of age.
+// Change the id below to retest a different order.
+organization_id = "920163292";
+api_calls_made = 0;
+sku_not_found = 0;
+faire_order_id = "bo_cvvnqus9pd";
+// STEP 1 : Fetch the single order directly by id
+order_response = invokeurl
+[
+	url :"https://www.faire.com/external-api/v2/orders/" + faire_order_id
+	type :GET
+	connection:"faire_connection"
+];
+api_calls_made = api_calls_made + 1;
+// The single-order endpoint returns the order directly - no "order" wrapper
+// (unlike the list endpoint, which wraps results in "orders": [...]).
+order = order_response;
+if(order == null || order.get("id") == null)
+{
+	info "FAIL - could not fetch Faire order " + faire_order_id + ". Response: " + order_response;
+	return;
+}
+info "Fetched Faire order " + faire_order_id + " | state: " + order.get("state");
+// STEP 2 : Duplicate check - skip creation but still report what would happen
+dup_check = invokeurl
+[
+	url :"https://www.zohoapis.com/books/v3/salesorders?organization_id=" + organization_id + "&reference_number=" + faire_order_id
+	type :GET
+	connection:"faire_books"
+];
+api_calls_made = api_calls_made + 1;
+dup_orders = dup_check.get("salesorders");
+if(dup_orders != null && dup_orders.size() > 0)
+{
+	info "ALREADY EXISTS - a Sales Order with reference_number " + faire_order_id + " is already in LL Books (delete it first to replay this test). Existing: " + dup_orders.get(0).get("salesorder_number");
+	return;
+}
+// STEP 3 : Dates
+created_at = order.get("created_at");
+order_date = null;
+if(created_at != null)
+{
+	try
+	{
+		order_date = created_at.toString().toDate("yyyy-MM-dd'T'HH:mm:ss");
+	}
+	catch (e)
+	{
+		info "WARN - could not parse created_at '" + created_at + "': " + e;
+		order_date = null;
+	}
+}
+order_date_str = "";
+if(order_date != null)
+{
+	order_date_str = order_date.addHour(5).addMinutes(30).toString("yyyy-MM-dd");
+}
+else if(created_at != null && created_at.toString().length() >= 10)
+{
+	order_date_str = created_at.toString().subString(0,10);
+}
+ship_by = order.get("expected_ship_date");
+if(ship_by == null)
+{
+	ship_by = order.get("ship_after");
+}
+shipment_date_str = "";
+if(ship_by != null && ship_by.toString().length() >= 10)
+{
+	shipment_date_str = ship_by.toString().subString(0,10);
+}
+// STEP 4 : Address
+addr = order.get("address");
+retailer_name = "Unknown Faire Retailer";
+if(addr != null && addr.get("name") != null)
+{
+	retailer_name = addr.get("name");
+}
+retailer_email = "";
+if(order.get("retailer_email") != null)
+{
+	retailer_email = order.get("retailer_email");
+}
+so_address = Map();
+if(addr != null)
+{
+	attn = ifnull(addr.get("name"),"").toString().trim();
+	if(attn.length() > 80)
+	{
+		attn = attn.subString(0,80);
+	}
+	addr1 = ifnull(addr.get("address1"),"").toString().trim();
+	addr2 = ifnull(addr.get("address2"),"").toString().trim();
+	full = addr1;
+	if(addr1 == "" && addr2 != "")
+	{
+		full = addr2;
+	}
+	else if(addr1 != "" && addr2 != "")
+	{
+		full = addr1 + ", " + addr2;
+	}
+	line1 = full;
+	line2 = "";
+	if(full.length() > 80)
+	{
+		line1 = full.subString(0,80);
+		line2 = full.subString(80,full.length());
+		if(line2.length() > 80)
+		{
+			line2 = line2.subString(0,80);
+		}
+	}
+	city = ifnull(addr.get("city"),"").toString().trim();
+	if(city.length() > 60)
+	{
+		city = city.subString(0,60);
+	}
+	state = ifnull(addr.get("state"),"").toString().trim();
+	if(state.length() > 60)
+	{
+		state = state.subString(0,60);
+	}
+	zip = ("" + ifnull(addr.get("postal_code"),"")).trim();
+	if(zip.length() > 20)
+	{
+		zip = zip.subString(0,20);
+	}
+	country = ifnull(addr.get("country"),"").toString().trim();
+	if(country.length() > 60)
+	{
+		country = country.subString(0,60);
+	}
+	phone = ifnull(addr.get("phone_number"),"").toString().trim();
+	if(attn != "")
+	{
+		so_address.put("attention",attn);
+	}
+	if(line1 != "")
+	{
+		so_address.put("address",line1);
+	}
+	if(line2 != "")
+	{
+		so_address.put("street2",line2);
+	}
+	if(city != "")
+	{
+		so_address.put("city",city);
+	}
+	if(state != "")
+	{
+		so_address.put("state",state);
+	}
+	if(zip != "")
+	{
+		so_address.put("zip",zip);
+	}
+	if(country != "")
+	{
+		so_address.put("country",country);
+	}
+	if(phone != "")
+	{
+		so_address.put("phone",phone);
+	}
+}
+// STEP 5 : Contact
+contact_id = "";
+search_resp = invokeurl
+[
+	url :"https://www.zohoapis.com/books/v3/contacts?organization_id=" + organization_id + "&contact_name=" + retailer_name
+	type :GET
+	connection:"faire_books"
+];
+api_calls_made = api_calls_made + 1;
+existing_contacts = search_resp.get("contacts");
+if(existing_contacts != null && existing_contacts.size() > 0)
+{
+	for each  c in existing_contacts
+	{
+		c_email = ifnull(c.get("email"),"").toString().trim().toLowerCase();
+		if(retailer_email == "" || c_email == retailer_email.toString().trim().toLowerCase())
+		{
+			contact_id = c.get("contact_id").toString();
+			break;
+		}
+	}
+}
+if(contact_id == "")
+{
+	cp = Map();
+	cp.put("contact_name",retailer_name);
+	cp.put("email",retailer_email);
+	cc_resp = invokeurl
+	[
+		url :"https://www.zohoapis.com/books/v3/contacts?organization_id=" + organization_id
+		type :POST
+		parameters:cp.toString()
+		headers:{"content-type":"application/json"}
+		connection:"faire_books"
+	];
+	api_calls_made = api_calls_made + 1;
+	new_contact = cc_resp.get("contact");
+	if(new_contact != null)
+	{
+		contact_id = new_contact.get("contact_id");
+	}
+	else
+	{
+		info "WARN - contact create failed for " + faire_order_id + " (retailer_name: '" + retailer_name + "'). Zoho response: " + cc_resp;
+	}
+}
+if(contact_id == null || contact_id == "")
+{
+	info "FAIL - no contact for " + faire_order_id;
+	return;
+}
+// STEP 6 : Line items - aggregate by SKU, look up catalog item_id (same as custom_faire_orders)
+faire_items = order.get("items");
+sku_qty = Map();
+sku_price = Map();
+sku_name = Map();
+sku_order = List();
+if(faire_items != null)
+{
+	for each  fitem in faire_items
+	{
+		raw_sku = ifnull(fitem.get("sku"),"").toString().trim();
+		fqty = 1;
+		if(fitem.get("quantity") != null)
+		{
+			fqty = fitem.get("quantity");
+		}
+		frate = 0;
+		if(fitem.get("price_cents") != null)
+		{
+			frate = fitem.get("price_cents") / 100;
+		}
+		fname = "Unnamed Faire Item";
+		if(fitem.get("product_name") != null && fitem.get("product_name") != "")
+		{
+			fname = fitem.get("product_name");
+		}
+		else if(fitem.get("variant_name") != null && fitem.get("variant_name") != "")
+		{
+			fname = fitem.get("variant_name");
+		}
+		group_key = raw_sku;
+		if(group_key == "")
+		{
+			group_key = "NOSKU::" + fname;
+		}
+		if(sku_qty.get(group_key) == null)
+		{
+			sku_qty.put(group_key,fqty);
+			sku_price.put(group_key,frate);
+			sku_name.put(group_key,fname);
+			sku_order.add(group_key);
+		}
+		else
+		{
+			sku_qty.put(group_key,sku_qty.get(group_key) + fqty);
+		}
+	}
+}
+line_items = List();
+for each  group_key in sku_order
+{
+	gqty = sku_qty.get(group_key);
+	grate = sku_price.get(group_key);
+	gname = sku_name.get(group_key);
+	real_sku = "";
+	if(group_key.startsWith("NOSKU::") == false)
+	{
+		real_sku = group_key;
+	}
+	matched_item_id = "";
+	if(real_sku != "")
+	{
+		item_search = invokeurl
+		[
+			url :"https://www.zohoapis.com/books/v3/items?organization_id=" + organization_id + "&sku=" + real_sku
+			type :GET
+			connection:"faire_books"
+		];
+		api_calls_made = api_calls_made + 1;
+		found_items = item_search.get("items");
+		if(found_items != null && found_items.size() > 0)
+		{
+			matched_item_id = found_items.get(0).get("item_id").toString();
+		}
+	}
+	li = Map();
+	if(matched_item_id != "")
+	{
+		li.put("item_id",matched_item_id);
+		li.put("quantity",gqty);
+		li.put("rate",grate);
+	}
+	else
+	{
+		if(real_sku != "")
+		{
+			info "SKU NOT IN LL CATALOG: '" + real_sku + "' (order " + faire_order_id + ", '" + gname + "') - writing freeform line, this line will NOT propagate to Texus/GAD.";
+			sku_not_found = sku_not_found + 1;
+		}
+		li.put("name",gname);
+		li.put("quantity",gqty);
+		li.put("rate",grate);
+	}
+	line_items.add(li);
+}
+if(line_items.size() == 0)
+{
+	info "FAIL - no line items for " + faire_order_id;
+	return;
+}
+// STEP 7 : Build and create the SO
+custom_fields = List();
+rcf = Map();
+rcf.put("api_name","cf_region");
+rcf.put("value","US");
+custom_fields.add(rcf);
+scf = Map();
+scf.put("api_name","cf_order_source");
+scf.put("value","Faire");
+custom_fields.add(scf);
+so_payload = Map();
+so_payload.put("customer_id",contact_id);
+so_payload.put("reference_number",faire_order_id);
+so_payload.put("line_items",line_items);
+so_payload.put("custom_fields",custom_fields);
+if(order_date_str != "")
+{
+	so_payload.put("date",order_date_str);
+}
+if(shipment_date_str != "")
+{
+	so_payload.put("shipment_date",shipment_date_str);
+}
+info "About to create SO for " + faire_order_id + " | date: " + order_date_str + " | shipment_date: " + shipment_date_str + " | customer_id: " + contact_id + " | line_items: " + line_items.size();
+create_resp = invokeurl
+[
+	url :"https://www.zohoapis.com/books/v3/salesorders?organization_id=" + organization_id
+	type :POST
+	parameters:so_payload.toString()
+	headers:{"content-type":"application/json","X-ZOHO-Execute-CustomFunction":"true"}
+	connection:"faire_books"
+];
+api_calls_made = api_calls_made + 1;
+new_so = create_resp.get("salesorder");
+if(new_so == null && create_resp.get("code") == 120124)
+{
+	info "WARN - custom field dropdown rejected for " + faire_order_id + ". Retrying without custom_fields. Fix the dropdown value in Zoho Books settings.";
+	so_payload.remove("custom_fields");
+	create_resp = invokeurl
+	[
+		url :"https://www.zohoapis.com/books/v3/salesorders?organization_id=" + organization_id
+		type :POST
+		parameters:so_payload.toString()
+		headers:{"content-type":"application/json","X-ZOHO-Execute-CustomFunction":"true"}
+		connection:"faire_books"
+	];
+	api_calls_made = api_calls_made + 1;
+	new_so = create_resp.get("salesorder");
+}
+if(new_so == null)
+{
+	info "FAIL - " + faire_order_id + ". Response: " + create_resp;
+	return;
+}
+so_id = new_so.get("salesorder_id");
+info "CREATED - SO " + so_id + " for " + faire_order_id + " | shipment_date: " + shipment_date_str;
+if(so_address.size() > 0)
+{
+	billing_update = invokeurl
+	[
+		url :"https://www.zohoapis.com/books/v3/salesorders/" + so_id + "/address/billing?organization_id=" + organization_id
+		type :PUT
+		parameters:so_address.toString()
+		headers:{"content-type":"application/json"}
+		connection:"faire_books"
+	];
+	api_calls_made = api_calls_made + 1;
+	info "billing address update -> " + billing_update;
+	shipping_update = invokeurl
+	[
+		url :"https://www.zohoapis.com/books/v3/salesorders/" + so_id + "/address/shipping?organization_id=" + organization_id
+		type :PUT
+		parameters:so_address.toString()
+		headers:{"content-type":"application/json"}
+		connection:"faire_books"
+	];
+	api_calls_made = api_calls_made + 1;
+	info "shipping address update -> " + shipping_update;
+}
+confirm_resp = invokeurl
+[
+	url :"https://www.zohoapis.com/books/v3/salesorders/" + so_id + "/status/confirmed?organization_id=" + organization_id
+	type :POST
+	headers:{"X-ZOHO-Execute-CustomFunction":"true"}
+	connection:"faire_books"
+];
+api_calls_made = api_calls_made + 1;
+info "CONFIRMED - SO " + so_id;
+info "DONE - Faire order " + faire_order_id + " -> LL Books SO " + so_id + " | SKUs not in catalog: " + sku_not_found + " | API calls used: " + api_calls_made;
+

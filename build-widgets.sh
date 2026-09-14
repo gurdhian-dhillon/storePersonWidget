@@ -36,13 +36,20 @@ adminsales|admin/anotherPage|AdminSalesAndStock
 # outside the zip, so the file is copied in beside it and the reference is
 # rewritten. Each line: source-relative-to-app | destination-relative-to-app/ |
 # sed expression applied to the copied widget.html.
+#
+# Keep this in step with the widget.html files. A `(src|href)="../..."` in a
+# widget.html that has NO entry here fails the build at the guard below (good -
+# it would 404 in Creator). An entry here whose sed matches nothing is the
+# quieter failure: finishing and packing were made self-contained (their own
+# css/base.css + css/style.css, no `../`) but their stale entries stayed - the
+# finishing one shipped a dead copy of the shared stylesheet, the packing one
+# OVERWROTE packing's real local css/base.css with the shared file. Both removed.
+# Only admin (../js/) and adminsales (../css/) still genuinely reach up.
 extras_for() {
     case "$1" in
-        finishing|packing)
-            echo 'css/style.css|css/base.css|s#href="\.\./css/style\.css"#href="css/base.css"#g'
-            ;;
         admin)
             echo 'js/lot-allocator.js|js/lot-allocator.js|s#src="\.\./js/lot-allocator\.js"#src="js/lot-allocator.js"#g'
+            echo 'js/api-experiment.js|js/api-experiment.js|s#src="\.\./js/api-experiment\.js"#src="js/api-experiment.js"#g'
             ;;
         adminsales)
             echo 'admin/css/style.css|css/base.css|s#href="\.\./css/style\.css"#href="css/base.css"#g'
@@ -70,6 +77,21 @@ for arg in "$@"; do
 done
 
 [ -d "$DEST_ROOT" ] || { echo "destination root not found: $DEST_ROOT" >&2; exit 1; }
+
+# A mistyped widget name builds nothing and (without this) exits 0 - looks like
+# success but ships nothing. Validate every selected key against the table.
+if [ -n "$SELECTED" ]; then
+    for want in $SELECTED; do
+        _found=0
+        while IFS='|' read -r k r f; do
+            if [ "$k" = "$want" ]; then _found=1; fi
+        done <<< "$WIDGETS"
+        if [ "$_found" -eq 0 ]; then
+            echo "unknown widget: $want" >&2
+            exit 1
+        fi
+    done
+fi
 
 copy_dir() {   # copy_dir <src> <dest>  - files only, one level deep
     local src="$1" dest="$2" f n=0
