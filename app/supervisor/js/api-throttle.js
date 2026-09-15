@@ -69,11 +69,18 @@ function installApiThrottle(target, options) {
     var maxInflight = options.maxInflight || 4;
     var maxRetries = options.maxRetries === undefined ? 4 : options.maxRetries;
     var retryWaitMs = options.retryWaitMs || 6000;
+    // A hung SDK promise would otherwise never decrement inflight and wedge
+    // the queue at maxInflight forever — see data-throttle.js's copy of this,
+    // which is where this fix originated. Frees the slot and rejects that one
+    // call (and everything coalesced onto it); cannot cancel the request itself.
+    var callTimeoutMs = options.callTimeoutMs || 25000;
     var safeList = options.coalesceSafe || COALESCE_SAFE;
     var now = options.now || function () { return Date.now(); };
     var later = options.setTimeout || function (fn, ms) { return setTimeout(fn, ms); };
+    var clearLater = options.clearTimeout || function (id) { clearTimeout(id); };
     var onDrop = options.onDrop || function () {};
     var onRetry = options.onRetry || function () {};
+    var onTimeout = options.onTimeout || function () {};
 
     if (!target || typeof target.invokeCustomApi !== 'function') return null;
     // Installing twice would put the queue behind itself for no reason.
@@ -107,15 +114,20 @@ function installApiThrottle(target, options) {
     // Creator surfaces the limit as a rejection carrying code 2955. The HTTP
     // status and the message are checked too - the same condition arrives as a
     // bare 429 on some paths, and a wrapper that knew only one shape would
-    // silently stop retrying if the other turned up.
+    // silently stop retrying if the other turned up. Also checks the
+    // stringified error body and "maximum number of api calls" (the
+    // simultaneous-calls wording, as opposed to the per-minute wording) so
+    // this stays identical to data-throttle.js's copy rather than drifting.
     function isRateLimited(err) {
         if (!err) return false;
         var code = err.code !== undefined ? String(err.code) : '';
         if (code === '2955') return true;
         var status = err.status || err.statusCode || (err.response && err.response.status);
         if (String(status) === '429') return true;
-        var txt = (err.description || err.message || '') + '';
-        return txt.toLowerCase().indexOf('limit for a minute') !== -1;
+        var txt = '';
+        try { txt = JSON.stringify(err); } catch (e) { txt = String(err); }
+        txt += ' ' + (err.description || err.message || '') + (err.responseText || '');
+        return /2955|limit for a minute|maximum number of api calls/i.test(txt);
     }
 
     function settleJob(job, ok, value) {
@@ -144,12 +156,28 @@ function installApiThrottle(target, options) {
 
     function dispatch(job) {
         inflight++;
+        var settled = false;
+        var timeoutId = later(function () {
+            if (settled) return;
+            settled = true;
+            inflight--;
+            onTimeout(job.opts && job.opts.api_name);
+            settleJob(job, false, new Error((job.opts && job.opts.api_name || 'invokeCustomApi') +
+                ': timed out after ' + callTimeoutMs + 'ms — slot freed, call abandoned'));
+            pump();
+        }, callTimeoutMs);
 
         real.call(target, job.opts).then(function (res) {
+            if (settled) return;
+            settled = true;
+            clearLater(timeoutId);
             inflight--;
             settleJob(job, true, res);
             pump();
         }, function (err) {
+            if (settled) return;
+            settled = true;
+            clearLater(timeoutId);
             inflight--;
             if (isRateLimited(err) && job.tries < maxRetries) {
                 job.tries++;
@@ -210,6 +238,9 @@ function installApiThrottle(target, options) {
             },
             onRetry: function (name, tryNo, waitMs) {
                 console.warn('API: Creator rate-limited ' + name + ' (attempt ' + tryNo + ') - retrying in ' + Math.round(waitMs / 1000) + 's');
+            },
+            onTimeout: function (name) {
+                console.error('API: ' + name + ' timed out - slot freed');
             }
         })) {
             return;

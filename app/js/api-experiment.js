@@ -124,6 +124,55 @@ var ApiExperiment = (function () {
         });
     }
 
+    // ---- fetch several reports, each scoped to a batch of plan ids --------
+    // `Material_Requirement` and `Plan_Item` have no Order_Status of their
+    // own — openness lives on the PLAN (Production_Planning), reached only
+    // through a lookup (mr.Plan) — so neither can be scoped by a criteria
+    // string on its own field the way `plans`/`waste`/`exceptions` are.
+    //
+    // A form growing to 1000+ rows per 100 orders means "fetch everything,
+    // filter in JS" (the old `getAll(RPT.reqs, null)`) does not stay flat: a
+    // month of real production leaves thousands of CLOSED plans' rows sitting
+    // in the form forever (nothing deletes them), and every one of those is
+    // downloaded and thrown away on every store-screen load. The fix is to
+    // fetch by id: `Plan == id1 || Plan == id2 || ...` built from the ALREADY
+    // fetched, already-filtered `plans` report — the store's read stays
+    // bounded by how much is currently open, not by total history.
+    //
+    // CHUNKED, not one giant OR string. How many "Plan == id" clauses
+    // getRecords' criteria parser tolerates in one call has not been
+    // verified against this org (no Creator instance to test against — see
+    // CLAUDE.md's "never claim a Deluge/Creator change is verified"), so this
+    // caps each request at PLAN_CHUNK ids and fetches the chunks in
+    // parallel — a criteria-length ceiling then fails one bounded chunk
+    // instead of the entire scoped fetch, and is far more likely to simply
+    // not be hit at all. A supervisor holding 111 open plans (the real
+    // scaling test in this repo) becomes 5 chunked calls of ≤25 ids each,
+    // run through the same getRecords throttle as everything else.
+    var PLAN_CHUNK = 25;
+
+    function getAllByPlanIds(reportName, planIds) {
+        if (!planIds.length) return Promise.resolve({ rows: [], calls: 0 });
+
+        var chunks = [];
+        for (var i = 0; i < planIds.length; i += PLAN_CHUNK) {
+            chunks.push(planIds.slice(i, i + PLAN_CHUNK));
+        }
+
+        return Promise.all(chunks.map(function (chunk) {
+            var criteria = chunk.map(function (id) { return 'Plan == ' + id; }).join(' || ');
+            return getAll(reportName, criteria);
+        })).then(function (results) {
+            var rows = [];
+            var calls = 0;
+            results.forEach(function (r) {
+                rows = rows.concat(r.rows);
+                calls += r.calls;
+            });
+            return { rows: rows, calls: calls };
+        });
+    }
+
     // ---- value coercion --------------------------------------------------
     function num(v) { var n = Number(v); return isNaN(n) ? 0 : n; }
     function str(v) { return v == null ? '' : String(v); }

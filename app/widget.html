@@ -90,6 +90,11 @@
     </div>
 
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <!-- BEFORE EVERY getRecords-based script. Wraps ZOHO.CREATOR.DATA.getRecords
+         with a concurrency cap + 2955 retry — api-experiment.js alone opens with
+         8 simultaneous getRecords cursor walks, which trips Creator's "too many
+         API calls initiated at once" limit under load. -->
+    <script src="js/data-throttle.js"></script>
     <script src="js/lot-allocator.js"></script>
     <!-- Store material requirements — the live read path (JS Data API).
          Replaces the retired getStoreMaterialRequirements function.

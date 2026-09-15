@@ -59,6 +59,13 @@
     </div>
 
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <!-- Wraps ZOHO.CREATOR.DATA.getRecords with the same concurrency cap + 2955
+         retry as every other getRecords-using widget — see app/js/data-throttle.js.
+         This screen's own getRecords calls are one-at-a-time (a photo fetch per
+         box, on demand), so the burst this exists to fix doesn't happen here —
+         wired in anyway so coverage is uniform and nobody has to wonder why
+         packing was the one screen left out. -->
+    <script src="../js/data-throttle.js"></script>
     <script src="js/main.js"></script>
     <script>
         document.addEventListener('DOMContentLoaded', function () {

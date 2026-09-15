@@ -118,6 +118,10 @@
          stay under Creator's per-minute limit, and a script that loaded first
          would keep the unwrapped function for the life of the page. -->
     <script src="js/api-throttle.js"></script>
+    <!-- Same reasoning, the getRecords counterpart — see app/js/data-throttle.js.
+         receive-read.js and handover-detail.js both open with several
+         simultaneous getRecords cursor walks. -->
+    <script src="../js/data-throttle.js"></script>
 
     <!-- Shell first: it owns the tabs, the shared picker and Refresh. The two
          tab scripts then attach their own listeners to those shared controls. -->

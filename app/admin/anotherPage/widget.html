@@ -76,6 +76,8 @@
     </div>
 
     <script src="https://static.zohocdn.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+    <!-- BEFORE EVERY getRecords-based script — see app/js/data-throttle.js. -->
+    <script src="../../js/data-throttle.js"></script>
     <!-- The sales order pipeline, over the JS Data API. Replaces the
          getSalesOrderProgress Custom API, whose per-plan Stage_Log / Item_Check
          / Plan_Item walks could hit Creator's uncatchable statement limit on a
