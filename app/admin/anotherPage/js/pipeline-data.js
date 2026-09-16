@@ -259,41 +259,6 @@ var PipelineData = (function () {
     }
 
     /* ----------------------------------------------------------------------
-     * counts() — the four dashboard tiles, plus every status behind them.
-     *
-     * One fetch of every order's status field. Counting client-side rather
-     * than seven `.count()` queries means the tiles and the list can never
-     * disagree about what status an order is in.
-     * -------------------------------------------------------------------- */
-    function counts() {
-        return fetch('orders', null).then(function (res) {
-            var byStatus = {};
-            FLOW.forEach(function (s) { byStatus[s] = 0; });
-            var total = 0;
-
-            (res.rows || []).forEach(function (so) {
-                var st = str(so.Order_Status).trim();
-                total++;
-                if (byStatus[st] === undefined) byStatus[st] = 0;
-                byStatus[st]++;
-            });
-
-            var inProd = 0;
-            IN_PRODUCTION.forEach(function (s) { inProd += byStatus[s] || 0; });
-
-            return {
-                total: total,
-                byStatus: byStatus,
-                pending: byStatus['Pending'] || 0,
-                inProduction: inProd,
-                packed: byStatus['Packed'] || 0,
-                dispatched: byStatus['Dispatched'] || 0,
-                error: res.error || null
-            };
-        });
-    }
-
-    /* ----------------------------------------------------------------------
      * page(opts) -> { orders, total, notes }   (name is historical — it does
      * not page; it returns the whole enriched bucket, main.js pages for display)
      *
@@ -744,7 +709,6 @@ var PipelineData = (function () {
     }
 
     return {
-        counts: counts,
         page: page,
         risk: risk,
         worstRisk: worstRisk,

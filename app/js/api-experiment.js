@@ -14,7 +14,7 @@
  * (The name `ApiExperiment` / `api-experiment.js` is historical — this began as
  * an A/B experiment against the Deluge function. It is the only path now.)
  *
- * FORMS READ (9 reports, via getRecords with cursor paging):
+ * FORMS READ (8 reports, via getRecords with cursor paging):
  *   Production_Planning_Report   open plans (Pending/Partially Received/In Progress)
  *   Material_Requirement_Report  the demand rows
  *   Employee_Report              supervisor names
@@ -143,12 +143,19 @@ var ApiExperiment = (function () {
     // getRecords' criteria parser tolerates in one call has not been
     // verified against this org (no Creator instance to test against — see
     // CLAUDE.md's "never claim a Deluge/Creator change is verified"), so this
-    // caps each request at PLAN_CHUNK ids and fetches the chunks in
-    // parallel — a criteria-length ceiling then fails one bounded chunk
-    // instead of the entire scoped fetch, and is far more likely to simply
-    // not be hit at all. A supervisor holding 111 open plans (the real
-    // scaling test in this repo) becomes 5 chunked calls of ≤25 ids each,
-    // run through the same getRecords throttle as everything else.
+    // caps each request at PLAN_CHUNK ids. That lowers the odds of hitting a
+    // length ceiling at all, but does NOT isolate one bad chunk from the
+    // rest: chunks are merged with a bare Promise.all below, so a genuine
+    // criteria error in any one chunk rejects the WHOLE scoped fetch — same
+    // blast radius an unchunked call would have had. (A 9280 "no rows for
+    // these ids" IS isolated per chunk — getAll already resolves that to an
+    // empty array — it's only a hard parser error that isn't.) Deliberately
+    // not wrapped in a per-chunk .catch: silently dropping a chunk of
+    // requirement rows on error would hide real material demand from the
+    // store screen, which is worse than the fetch failing loudly. A
+    // supervisor holding 111 open plans (the real scaling test in this
+    // repo) becomes 5 chunked calls of ≤25 ids each, run through the same
+    // getRecords throttle as everything else.
     var PLAN_CHUNK = 25;
 
     function getAllByPlanIds(reportName, planIds) {
@@ -197,6 +204,14 @@ var ApiExperiment = (function () {
     }
 
     // =====================================================================
+    // TWO PHASES, not one 8-way burst. Material_Requirement and Plan_Item
+    // have no Order_Status of their own — openness lives on the PLAN,
+    // reached only through a lookup — so scoping them server-side needs the
+    // open plan ids in hand FIRST. Phase 1 fetches just the (small) open-plan
+    // list; phase 2 uses those ids to scope reqs/planItems while the other
+    // five reports (already filtered or bounded master data) run alongside.
+    // See getAllByPlanIds above for why this stays bounded by current WIP
+    // rather than by the whole form's history.
     function run() {
         if (!have()) return Promise.reject(new Error('ZOHO.CREATOR.DATA.getRecords not available'));
 
@@ -204,37 +219,55 @@ var ApiExperiment = (function () {
 
         var planCriteria = OPEN_STATUSES.map(function (s) { return 'Order_Status == "' + s + '"'; }).join(' || ');
 
-        return Promise.all([
-            getAll(RPT.plans, planCriteria),
-            getAll(RPT.reqs, null),
-            getAll(RPT.emps, null),
-            getAll(RPT.planItems, null),
-            getAll(RPT.rawMat, null),
-            getAll(RPT.lots, null),
-            getAll(RPT.waste, 'Status == "Available"'),
-            getAll(RPT.exceptions, 'Status == "Open"')
-        ]).then(function (res) {
-            var raw = {
-                plans: res[0].rows, reqs: res[1].rows, emps: res[2].rows,
-                planItems: res[3].rows, rawMats: res[4].rows, lots: res[5].rows,
-                waste: res[6].rows, exceptions: res[7].rows
-            };
-            var out = assemble(raw);
-            var t1 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-            out._stats = {
-                via: 'ZOHO.CREATOR.DATA.getRecords',
-                getRecordsCalls: res.reduce(function (n, r) { return n + r.calls; }, 0),
-                rowsFetched: {
-                    plans: raw.plans.length, requirements: raw.reqs.length, employees: raw.emps.length,
-                    planItems: raw.planItems.length, rawMaterials: raw.rawMats.length, lots: raw.lots.length,
-                    waste: raw.waste.length, exceptions: raw.exceptions.length
-                },
-                wallMs: Math.round(t1 - t0),
-                printBasePorted: false,
-                paged: false
-            };
-            console.log('[store-requirements] loaded via', out._stats);
-            return out;
+        return getAll(RPT.plans, planCriteria).then(function (plansResult) {
+            // Re-derive planIds with the SAME filter assemble() applies,
+            // not the raw phase-1 rows — fetch-set == keep-set by
+            // construction. planCriteria and this filter should already
+            // agree; deriving independently just means a drift between them
+            // costs one wasted id in an OR-clause, never a missed plan.
+            var planIds = plansResult.rows
+                .filter(function (p) { return OPEN_STATUSES.indexOf(str(p.Order_Status).trim()) !== -1; })
+                .map(function (p) { return String(p.ID); });
+
+            return Promise.all([
+                getAllByPlanIds(RPT.reqs, planIds),
+                getAllByPlanIds(RPT.planItems, planIds),
+                getAll(RPT.emps, null),
+                getAll(RPT.rawMat, null),
+                getAll(RPT.lots, null),
+                getAll(RPT.waste, 'Status == "Available"'),
+                getAll(RPT.exceptions, 'Status == "Open"')
+            ]).then(function (res) {
+                var raw = {
+                    plans: plansResult.rows, reqs: res[0].rows, emps: res[2].rows,
+                    planItems: res[1].rows, rawMats: res[3].rows, lots: res[4].rows,
+                    waste: res[5].rows, exceptions: res[6].rows
+                };
+                var out = assemble(raw);
+                var t1 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+                var totalCalls = plansResult.calls + res.reduce(function (n, r) { return n + r.calls; }, 0);
+                out._stats = {
+                    via: 'ZOHO.CREATOR.DATA.getRecords',
+                    getRecordsCalls: totalCalls,
+                    rowsFetched: {
+                        plans: raw.plans.length, requirements: raw.reqs.length, employees: raw.emps.length,
+                        planItems: raw.planItems.length, rawMaterials: raw.rawMats.length, lots: raw.lots.length,
+                        waste: raw.waste.length, exceptions: raw.exceptions.length
+                    },
+                    wallMs: Math.round(t1 - t0),
+                    printBasePorted: false,
+                    paged: false,
+                    // Reads scoped to open plans only, not the whole
+                    // Material_Requirement / Plan_Item form — see the
+                    // getAllByPlanIds comment for why this matters as those
+                    // forms grow past the size where "fetch everything,
+                    // filter client-side" stays cheap.
+                    phased: true,
+                    openPlanCount: planIds.length
+                };
+                console.log('[store-requirements] loaded via', out._stats);
+                return out;
+            });
         });
     }
 
@@ -815,7 +848,7 @@ var ApiExperiment = (function () {
     return {
         run: run, assemble: assemble, keys: keys,
         rollKeys: rollKeys,
-        _getAll: getAll, _reports: RPT
+        _getAll: getAll, _getAllByPlanIds: getAllByPlanIds, _reports: RPT
     };
 })();
 

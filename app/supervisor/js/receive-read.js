@@ -107,7 +107,48 @@ var ReceiveRead = (function () {
         return str(v).replace(/"/g, "'").replace(/\r/g, '').replace(/\n/g, ' | ').replace(/\t/g, ' ');
     }
 
+    // ---- fetch a report scoped to a batch of ids, chunked --------------
+    // Same technique as api-experiment.js's getAllByPlanIds: Creator's
+    // criteria parser has a practical length limit on a long OR-string
+    // (pipeline-data.js's fetchByIds already chunks at 60 with in-tree
+    // proof that width is safe), so a long id list is split and the chunks
+    // fetched in parallel, merged client-side. `extra`, if given, is ANDed
+    // onto every chunk's criteria (e.g. 'Assigned_To == ' + supId), so the
+    // per-supervisor scope survives the id-scoping rather than being lost.
+    var ID_CHUNK = 60;
+    function getAllByIds(reportName, field, ids, extra) {
+        if (!ids.length) return Promise.resolve([]);
+        var chunks = [];
+        for (var i = 0; i < ids.length; i += ID_CHUNK) chunks.push(ids.slice(i, i + ID_CHUNK));
+        return Promise.all(chunks.map(function (chunk) {
+            var idCrit = '(' + chunk.map(function (id) { return field + ' == ' + id; }).join(' || ') + ')';
+            var criteria = extra ? (extra + ' && ' + idCrit) : idCrit;
+            return getAll(reportName, criteria);
+        })).then(function (results) {
+            var rows = [];
+            results.forEach(function (r) { rows = rows.concat(r); });
+            return rows;
+        });
+    }
+
     // =====================================================================
+    // TWO PHASES for Material_Requirement, same shape and same reason as
+    // api-experiment.js's store-screen fix: Material_Requirement has no
+    // Order_Status of its own, and `Assigned_To == supId` alone is NOT
+    // bounded — it returns every requirement row this supervisor has EVER
+    // been assigned, all-time, including plans that finished months ago
+    // (assemble() already discards those: `if (!pi || !pi.open) return;`
+    // below). A supervisor who has worked a year of production would have
+    // this grow the same way the store screen's unfiltered form-wide fetch
+    // did, just partitioned by headcount instead of company-wide.
+    //
+    // Fixed by fetching this supervisor's OPEN plans first (Assigned_To +
+    // Order_Status together — Production_Planning supports both in one
+    // criteria string; the retired getSupervisorMaterials.dg already used
+    // exactly this query), then scoping Material_Requirement to
+    // `Assigned_To == supId && (Plan == id1 || ...)`, chunked via
+    // getAllByIds. issues/disputes/wasteMv are unaffected — already scoped
+    // to this supervisor and not the thing that was unbounded.
     function run(supervisorId) {
         if (!have()) return Promise.reject(new Error('ZOHO.CREATOR.DATA.getRecords not available'));
         var supId = str(supervisorId).trim();
@@ -123,40 +164,52 @@ var ReceiveRead = (function () {
             });
         }
 
+        var openPlanCriteria = '(' + OPEN_PLAN_STATUSES.map(function (s) {
+            return 'Order_Status == "' + s + '"';
+        }).join(' || ') + ')';
+
         return Promise.all([
             getAll(RPT.emps, null),
             getAll(RPT.issues, 'Issued_To == ' + supId),
-            getAll(RPT.reqs, 'Assigned_To == ' + supId),
+            getAll(RPT.plans, 'Assigned_To == ' + supId + ' && ' + openPlanCriteria),
             getAll(RPT.disputes, 'Supervisor == ' + supId + ' && Status == "Open"'),
             getAll(RPT.wasteMv, 'Moved_By == ' + supId),
             getAll(RPT.rawMat, null),
             getAll(RPT.lots, null)
         ]).then(function (res) {
             var raw = {
-                emps: res[0], issues: res[1], reqs: res[2],
+                emps: res[0], issues: res[1], openPlans: res[2],
                 disputes: res[3], wasteMv: res[4], rawMats: res[5], lots: res[6]
             };
-            // Plans + sales orders: only the ones actually referenced.
-            var planIds = {};
-            raw.reqs.forEach(function (rq) {
-                var p = lookupId(rq.Plan); if (p) planIds[p] = 1;
-            });
+
+            var openPlanIds = raw.openPlans.map(function (p) { return String(p.ID); });
+            var reqFetch = getAllByIds(RPT.reqs, 'Plan', openPlanIds, 'Assigned_To == ' + supId);
+
+            // wasteMv can reference a plan that has since closed — assemble()
+            // already tolerates a waste row whose plan isn't in planInfo (it
+            // falls back to blank planNo/salesOrder), so those ids are
+            // resolved too, unioned with the open set, rather than dropped.
+            var wasteMvPlanIds = {};
             raw.wasteMv.forEach(function (wm) {
-                var p = lookupId(wm.Plan); if (p) planIds[p] = 1;
+                var p = lookupId(wm.Plan); if (p) wasteMvPlanIds[p] = 1;
             });
-            var wantPlans = Object.keys(planIds);
-            var planFetch = wantPlans.length
-                ? getAll(RPT.plans, wantPlans.map(function (p) { return 'ID == ' + p; }).join(' || '))
+            openPlanIds.forEach(function (id) { delete wasteMvPlanIds[id]; });
+            var extraPlanIds = Object.keys(wasteMvPlanIds);
+            var extraPlanFetch = extraPlanIds.length
+                ? getAllByIds(RPT.plans, 'ID', extraPlanIds)
                 : Promise.resolve([]);
-            return planFetch.then(function (plans) {
-                raw.plans = plans;
+
+            return Promise.all([reqFetch, extraPlanFetch]).then(function (r2res) {
+                raw.reqs = r2res[0];
+                raw.plans = raw.openPlans.concat(r2res[1]);
+
                 var soIds = {};
-                plans.forEach(function (p) {
+                raw.plans.forEach(function (p) {
                     var so = lookupId(p.Sales_Order); if (so) soIds[so] = 1;
                 });
                 var wantSO = Object.keys(soIds);
                 var soFetch = wantSO.length
-                    ? getAll(RPT.salesOrders, wantSO.map(function (s) { return 'ID == ' + s; }).join(' || '))
+                    ? getAllByIds(RPT.salesOrders, 'ID', wantSO)
                     : Promise.resolve([]);
                 return soFetch.then(function (sos) {
                     raw.salesOrders = sos;
@@ -672,7 +725,7 @@ var ReceiveRead = (function () {
         });
     }
 
-    return { run: run, assemble: assemble, _reports: RPT };
+    return { run: run, assemble: assemble, _reports: RPT, _getAllByIds: getAllByIds };
 })();
 
 if (typeof window !== 'undefined') window.ReceiveRead = ReceiveRead;

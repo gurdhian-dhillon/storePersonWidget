@@ -373,71 +373,70 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (res) {
         check('date sort is newest first', byDate[0].salesOrder === 'SO-3000');
 
         // ===================================================================
-        console.log('\nCOUNTS — the tiles:');
+        // COUNTS ("the tiles") used to be tested here against
+        // PipelineData.counts() — deleted along with the function itself.
+        // counts() had zero live callers: the dashboard tiles are served by
+        // the getOrderPipelineCounts Custom API (app/admin/anotherPage/js/
+        // main.js), with an order-audit fallback, never by this JS Data-API
+        // path. counts()'s own fetch — the whole Sales_Order form, no
+        // criteria — was the same unbounded-growth shape the store screen's
+        // Material_Requirement fetch had, but fixing dead code just teaches
+        // the next reader it's live. Deleted, not optimized.
         // ===================================================================
-        return P.counts().then(function (c) {
-            check('total counted', c.total === 5, 'got ' + c.total);
-            check('In Production folds the four live statuses', c.inProduction === 4,
-                'got ' + c.inProduction);
-            check('dispatched counted separately', c.dispatched === 1);
-            check('packed is zero here', c.packed === 0);
-            check('per-status breakdown available',
-                c.byStatus['In Progress'] === 4, JSON.stringify(c.byStatus));
+
+        // ===================================================================
+        console.log('\nDEGRADATION — a missing report must not empty the board:');
+        // ===================================================================
+        // Same rule as the consumption tab: the pipeline is more useful with
+        // some joins missing than replaced by an error page.
+        const partial = baseTables();
+        delete partial[STAGES];   // stub rejects -> 9280 -> treated as empty
+        delete partial[FINISH];
+        const P2 = load(partial);
+        return P2.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (r2) {
+            check('orders still returned without stage data', r2.orders.length === 4);
+            check('quantities still joined',
+                r2.orders.some(function (o) { return o.orderedQty > 0; }));
+            check('a 9280 is not reported as an error', (r2.notes || []).length === 0,
+                JSON.stringify(r2.notes));
+            check('stage-derived fields are simply empty, not wrong',
+                r2.orders.every(function (o) { return o.currentStage === ''; }));
+            check('and nothing is falsely called stuck without stage data',
+                r2.orders.every(function (o) {
+                    return P2.risk(o).every(function (x) { return x.level !== 'stuck'; });
+                }));
 
             // ===============================================================
-            console.log('\nDEGRADATION — a missing report must not empty the board:');
+            console.log('\nWHOLE BUCKET — a status set bigger than a display page:');
             // ===============================================================
-            // Same rule as the consumption tab: the pipeline is more useful with
-            // some joins missing than replaced by an error page.
-            const partial = baseTables();
-            delete partial[STAGES];   // stub rejects -> 9280 -> treated as empty
-            delete partial[FINISH];
-            const P2 = load(partial);
-            return P2.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (r2) {
-                check('orders still returned without stage data', r2.orders.length === 4);
-                check('quantities still joined',
-                    r2.orders.some(function (o) { return o.orderedQty > 0; }));
-                check('a 9280 is not reported as an error', (r2.notes || []).length === 0,
-                    JSON.stringify(r2.notes));
-                check('stage-derived fields are simply empty, not wrong',
-                    r2.orders.every(function (o) { return o.currentStage === ''; }));
-                check('and nothing is falsely called stuck without stage data',
-                    r2.orders.every(function (o) {
-                        return P2.risk(o).every(function (x) { return x.level !== 'stuck'; });
-                    }));
-
-                // ===============================================================
-                console.log('\nWHOLE BUCKET — a status set bigger than a display page:');
-                // ===============================================================
-                // 40 In-Production orders, no plans (so the join is a no-op) —
-                // every one must come back so the search + risk chips see them.
-                const big = baseTables();
-                big[ORDERS] = [];
-                for (var bi = 1; bi <= 40; bi++) {
-                    big[ORDERS].push({
-                        ID: 'B' + bi, Sales_Order: 'SO-9' + String(bi).padStart(3, '0'),
-                        Order_Status: 'In Progress',
-                        Expected_Delivery_Date: iso(bi % 7 === 0 ? -3 : 20),
-                        Customer: { ID: 'C1', display_value: 'Faire' }
-                    });
-                }
-                big[PLANS] = [];
-                const P3 = load(big);
-                return P3.page({ status: 'In Production' }).then(function (r3) {
-                    check('all 40 orders returned, not a page of 25',
-                        r3.orders.length === 40, 'got ' + r3.orders.length);
-                    check('total matches', r3.total === 40);
-                    // Every 7th has a due date 3 days ago -> overdue. The risk
-                    // count must span the whole 40, not a slice.
-                    var lateCount = r3.orders.filter(function (o) {
-                        return P3.risk(o).some(function (x) { return x.level === 'late'; });
-                    }).length;
-                    check('the overdue count spans the whole bucket (5 of 40)',
-                        lateCount === 5, 'got ' + lateCount);
-
-                    console.log('\n' + pass + ' passed, ' + fail + ' failed');
-                    process.exit(fail ? 1 : 0);
+            // 40 In-Production orders, no plans (so the join is a no-op) —
+            // every one must come back so the search + risk chips see them.
+            const big = baseTables();
+            big[ORDERS] = [];
+            for (var bi = 1; bi <= 40; bi++) {
+                big[ORDERS].push({
+                    ID: 'B' + bi, Sales_Order: 'SO-9' + String(bi).padStart(3, '0'),
+                    Order_Status: 'In Progress',
+                    Expected_Delivery_Date: iso(bi % 7 === 0 ? -3 : 20),
+                    Customer: { ID: 'C1', display_value: 'Faire' }
                 });
+            }
+            big[PLANS] = [];
+            const P3 = load(big);
+            return P3.page({ status: 'In Production' }).then(function (r3) {
+                check('all 40 orders returned, not a page of 25',
+                    r3.orders.length === 40, 'got ' + r3.orders.length);
+                check('total matches', r3.total === 40);
+                // Every 7th has a due date 3 days ago -> overdue. The risk
+                // count must span the whole 40, not a slice.
+                var lateCount = r3.orders.filter(function (o) {
+                    return P3.risk(o).some(function (x) { return x.level === 'late'; });
+                }).length;
+                check('the overdue count spans the whole bucket (5 of 40)',
+                    lateCount === 5, 'got ' + lateCount);
+
+                console.log('\n' + pass + ' passed, ' + fail + ' failed');
+                process.exit(fail ? 1 : 0);
             });
         });
     });

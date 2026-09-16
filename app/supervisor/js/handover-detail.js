@@ -262,10 +262,27 @@ var HandoverDetail = (function () {
             var supId = lookupId(mi.Issued_To);
             var lines = Array.isArray(mi.Issue_Lines) ? mi.Issue_Lines : [];
 
-            // Requirement rows: everything assigned to this supervisor, then
-            // matched down to this SIV's (material, lot) pairs in assemble().
-            var reqFetch = supId
-                ? getAll(RPT.reqs, 'Assigned_To == ' + supId)
+            // Requirement rows: scoped to this supervisor AND to only the
+            // materials this ONE SIV actually issued, then matched down to
+            // the exact (material, lot) pairs below. Used to fetch
+            // `Assigned_To == supId` alone — every requirement row this
+            // supervisor has EVER been assigned, all-time, no plan-status or
+            // material bound (same shape the store screen's unfiltered
+            // Material_Requirement fetch had, just partitioned by
+            // supervisor). A voucher only ever has a handful of distinct
+            // materials on it (the file's own header: ~200 lines worst
+            // case), so narrowing to those materials shrinks this from
+            // "supervisor's whole history" to "supervisor's history for the
+            // few materials on this voucher" — the OR-list stays small
+            // without needing chunking.
+            var matIds = {};
+            lines.forEach(function (ln) {
+                var m = lookupId(ln.Material); if (m) matIds[m] = 1;
+            });
+            var wantMats = Object.keys(matIds);
+            var reqFetch = (supId && wantMats.length)
+                ? getAll(RPT.reqs, 'Assigned_To == ' + supId + ' && (' +
+                    wantMats.map(function (m) { return 'Material == ' + m; }).join(' || ') + ')')
                 : Promise.resolve([]);
 
             return reqFetch.then(function (reqs) {
