@@ -36,7 +36,8 @@ var HandoverDetail = (function () {
         itemMaster: 'Item_Master_Report',
         rawMat: 'All_items_Report',
         lots: 'All_Material_Lots',
-        emps: 'Employee_Report'
+        emps: 'Employee_Report',
+        wasteMv: 'Waste_Movement_Report'
     };
 
     function have() {
@@ -336,8 +337,33 @@ var HandoverDetail = (function () {
                         var skuFetch = wantSku.length
                             ? getAll(RPT.itemMaster, wantSku.map(function (s) { return 'ID == ' + s; }).join(' || '))
                             : Promise.resolve([]);
-                        return skuFetch.then(function (masters) {
-                            raw.itemMasters = masters || [];
+
+                        // WHICH physical offcut piece fed each item - Waste_Movement
+                        // rows written by issueMaterialsApply (Movement_Type ==
+                        // "Issued") already carry Piece_Width/Piece_Length/
+                        // Carton_Number, everything he needs to find it on the rack,
+                        // with no second lookup through Waste_Master (they are
+                        // stamped straight onto the movement at apply time). Scoped
+                        // by Plan_Item, the same join getProductionWidgetData already
+                        // uses for the identical form - bounded to this handover's
+                        // items, not a form walk. Not scoped by Voucher: that field
+                        // is only stamped by the legacy path, blank on movements
+                        // issueMaterialsApply writes (see getStoreIssueHistory's own
+                        // comment on it), so it can't be trusted here.
+                        var itemIds = {};
+                        raw.planItems.forEach(function (pi) {
+                            if (pi.ID) itemIds[String(pi.ID)] = 1;
+                        });
+                        var wantItems = Object.keys(itemIds);
+                        var wasteMvFetch = wantItems.length
+                            ? getAll(RPT.wasteMv, '(' +
+                                wantItems.map(function (id) { return 'Plan_Item == ' + id; }).join(' || ') +
+                                ') && Movement_Type == "Issued"')
+                            : Promise.resolve([]);
+
+                        return Promise.all([skuFetch, wasteMvFetch]).then(function (r3res) {
+                            raw.itemMasters = r3res[0] || [];
+                            raw.wasteMoves = r3res[1] || [];
                             return assemble(vId, raw);
                         });
                     });
@@ -354,7 +380,35 @@ var HandoverDetail = (function () {
         var lines = Array.isArray(mi.Issue_Lines) ? mi.Issue_Lines : [];
         var reqs = raw.reqs || [], plans = raw.plans || [], salesOrders = raw.salesOrders || [],
             planItems = raw.planItems || [], itemMasters = raw.itemMasters || [],
-            rawMats = raw.rawMats || [], lots = raw.lots || [], emps = raw.emps || [];
+            rawMats = raw.rawMats || [], lots = raw.lots || [], emps = raw.emps || [],
+            wasteMoves = raw.wasteMoves || [];
+
+        // Offcut identity per item - Plan_Item -> [{ width, length, pieces,
+        // carton }], one entry per distinct piece size/carton a Waste_Movement
+        // recorded. Several rows can share an item (two different remnants
+        // covered one requirement), so this is a list, summed by (width,
+        // length, carton) in case the apply loop ever wrote more than one
+        // movement for the identical piece.
+        var wastePiecesByItem = {};
+        wasteMoves.forEach(function (wm) {
+            var itemId = lookupId(wm.Plan_Item);
+            if (!itemId) return;
+            var w = num(wm.Piece_Width), l = num(wm.Piece_Length);
+            var pcs = num(wm.Piece_Count);
+            var carton = str(wm.Carton_Number).trim();
+            if (pcs <= 0) return;
+            var list = wastePiecesByItem[itemId] || (wastePiecesByItem[itemId] = []);
+            var key = w + '|' + l + '|' + carton;
+            var found = null;
+            for (var i = 0; i < list.length; i++) {
+                if (list[i]._key === key) { found = list[i]; break; }
+            }
+            if (found) {
+                found.pieces += pcs;
+            } else {
+                list.push({ _key: key, width: w, length: l, pieces: pcs, carton: carton });
+            }
+        });
 
         // ---- id maps ----
         var empNameById = {};
@@ -484,7 +538,20 @@ var HandoverDetail = (function () {
                 var lotObj = c.lots[li];
                 lotObj.qtyIssued = r2(lotObj.qtyIssued + num(ln.Qty));
                 lotObj.qtyReceived = r2(lotObj.qtyReceived + num(ln.Received_Qty));
-                parseRollLabel(ln.Roll_Label).forEach(function (r) {
+                var rParts = parseRollLabel(ln.Roll_Label);
+                // ONE roll on this line carries no "Xm" suffix in Roll_Label
+                // (main.js only writes one when a line spans several rolls —
+                // see its own comment) but the length is not actually missing:
+                // the whole line's Qty came off that one roll, same reasoning
+                // receive-read.js's identical single-roll branch already uses
+                // for the Receive tab. Do NOT get this from Roll_Label's text —
+                // getExpectedWaste.dg parses that string server-side and keys
+                // roll identity on "no comma = the label IS the roll"; adding
+                // a suffix there would change what it dedupes on.
+                if (rParts.length === 1 && !rParts[0].mtr) {
+                    rParts[0].mtr = num(ln.Qty);
+                }
+                rParts.forEach(function (r) {
                     var ri = lotObj._rollIdx[r.label];
                     if (ri == null) {
                         ri = lotObj.rolls.length;
@@ -502,6 +569,16 @@ var HandoverDetail = (function () {
             delete c._lotIdx;
             return c;
         });
+
+        // c.piecesFromRaw / c.piecesFromWaste above are read off Issue_Lines,
+        // which never carries them — Pieces_From_Raw / Pieces_From_Waste are
+        // written only onto Material_Requirement (issueMaterialsApply.dg:266-267).
+        // So the cloth-in-this-handover table always showed "from offcut" as 0,
+        // structurally, not just in this one case. The real split is filled in
+        // further down, off the SAME matAgg pass the cut list below builds -
+        // one computation, one caveat (Pieces_From_* is cumulative across every
+        // handover of a material+lot, not scoped to this SIV — see the cut-list
+        // comment right below), not two places that could drift apart.
 
         // ---- cut list: matId -> { planId -> { items } } ----
         //
@@ -591,6 +668,9 @@ var HandoverDetail = (function () {
                     cutWidth: num(rq.Cut_Size_Width),
                     cutLength: num(rq.Cut_Size_Length),
                     lotRolls: [],
+                    wastePieces: (wastePiecesByItem[itemId] || []).map(function (wp) {
+                        return { width: wp.width, length: wp.length, pieces: wp.pieces, carton: wp.carton };
+                    }),
                     _seen: {}
                 };
                 pl.byItem[itemId] = it;
@@ -658,6 +738,24 @@ var HandoverDetail = (function () {
             };
         }).sort(function (a, b) {
             return String(a.material).localeCompare(String(b.material));
+        });
+
+        // Backfill the cloth table's piece split from the same matAgg totals
+        // the cut list uses — see the comment above `cloth`'s assembly for why
+        // Issue_Lines can't supply this itself.
+        cloth.forEach(function (c) {
+            var m = matAgg[c.materialId];
+            if (!m) return;
+            var raw3 = 0, waste3 = 0;
+            m.planOrder.forEach(function (pid) {
+                m.byPlan[pid].itemOrder.forEach(function (iid) {
+                    var it = m.byPlan[pid].byItem[iid];
+                    raw3 += it.piecesFromRaw;
+                    waste3 += it.piecesFromWaste;
+                });
+            });
+            c.piecesFromRaw = raw3;
+            c.piecesFromWaste = waste3;
         });
 
         return { header: header, cloth: cloth, cutList: cutListOut, errors: [] };
@@ -824,15 +922,25 @@ if (typeof module !== 'undefined' && module.exports) module.exports = HandoverDe
             var lotCell = '—';
             if (c.isFabric && c.lots.length) {
                 lotCell = '<div class="hd-lots">' + c.lots.map(function (l) {
-                    var names = (l.rolls || []).filter(function (r) { return r.roll; })
-                        .map(function (r) { return esc(r.roll); });
-                    var rollTxt = names.length
-                        ? '<span class="hd-roll-list">' + names.join(', ') + '</span>'
+                    // Each roll's OWN length, not just its name. One lot commonly
+                    // spans several physical rolls issued together (a lot can run
+                    // short mid-roll); without the length here he cannot tell which
+                    // roll to unspool for which piece, or that R2 only has 3.15 Mtr
+                    // left on it versus R1's 18. mtr is 0 when Roll_Label carried no
+                    // parseable suffix (parseRollLabel's own fallback) - shown as
+                    // the bare roll name rather than a misleading "0 Mtr".
+                    var tags = (l.rolls || []).filter(function (r) { return r.roll; })
+                        .map(function (r) {
+                            return '<span class="hd-roll-list">' + esc(r.roll) +
+                                (r.mtr > 0 ? ' &middot; ' + f2(r.mtr) + ' Mtr' : '') + '</span>';
+                        });
+                    var rollTxt = tags.length
+                        ? tags.join('')
                         : '<span class="hd-roll-none">roll not recorded</span>';
                     return '<div class="hd-lot-line">' +
                         '<b class="hd-lot-name">' + esc(l.lot) + '</b>' +
                         '<span class="hd-lot-arrow">&rarr;</span>' +
-                        rollTxt +
+                        '<span class="hd-roll-group">' + rollTxt + '</span>' +
                     '</div>';
                 }).join('') + '</div>';
             } else if (c.isFabric) {
@@ -924,8 +1032,30 @@ if (typeof module !== 'undefined' && module.exports) module.exports = HandoverDe
                             return '<span class="bd-roll-tag">' +
                                 esc(lr.lot) + (lr.roll ? ' &middot; ' + esc(lr.roll) : '') + '</span>';
                         }).join('') || '—';
+                        // WHICH offcut, not just how many. A bare count told him
+                        // nothing to find on the rack, so he had to open Production
+                        // to see the piece — exactly the trip this tab exists to
+                        // remove (see the file header). Waste_Movement gives the
+                        // real dimensions + carton; only fall back to a bare count
+                        // when a movement genuinely could not be matched (a
+                        // pre-migration handover, or the join missed it) so the
+                        // count on it.piecesFromWaste is never silently dropped.
+                        var pieceBadge = '';
+                        if (it.piecesFromWaste) {
+                            var wpTags = (it.wastePieces || []).map(function (wp) {
+                                var dims = (wp.length || wp.width)
+                                    ? f2(wp.length) + '&times;' + f2(wp.width) + 'cm' : '';
+                                var label = [dims, wp.carton ? 'Carton ' + esc(wp.carton) : '']
+                                    .filter(function (s) { return s; }).join(' &middot; ');
+                                return label
+                                    ? '<span class="bd-waste-tag">' + wp.pieces + ' pc' + (wp.pieces === 1 ? '' : 's') +
+                                      ' &middot; ' + label + '</span>' : '';
+                            }).filter(function (s) { return s; }).join('');
+                            pieceBadge = wpTags ||
+                                ('<span class="hd-sub">(' + it.piecesFromWaste + ' from offcut)</span>');
+                        }
                         return '<tr>' + nameCell +
-                            '<td class="hd-i-num"><b>' + it.pieces + '</b> pc' + (it.pieces === 1 ? '' : 's') + '</td>' +
+                            '<td class="hd-i-num hd-i-pieces"><b>' + it.pieces + '</b> pc' + (it.pieces === 1 ? '' : 's') + pieceBadge + '</td>' +
                             '<td class="hd-i-num"><b>' + f2(it.issuedQty) + '</b> ' + esc(m.unit) + '</td>' +
                             '<td class="hd-i-cut">' + cut + '</td>' +
                             '<td class="hd-i-roll">' + lotRoll + '</td>' +
@@ -937,7 +1067,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = HandoverDe
                 }).join('');
 
                 var head = isFab
-                    ? '<tr><th class="hd-i-name">Item</th><th class="hd-i-num">Pieces</th>' +
+                    ? '<tr><th class="hd-i-name">Item</th><th class="hd-i-num hd-i-pieces">Pieces</th>' +
                       '<th class="hd-i-num">Cloth</th>' +
                       '<th class="hd-i-cut">Cut size (L &times; W)</th>' +
                       '<th class="hd-i-roll">Lot &amp; roll</th><th class="hd-i-status">Status</th></tr>'

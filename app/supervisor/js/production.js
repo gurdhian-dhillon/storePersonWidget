@@ -22,6 +22,14 @@ function isCuttingPhase(name) {
 // entry per Issued_Lot, each roll string possibly carrying a per-roll metre
 // suffix ("R2 4m") when the row drew from several rolls. Rendered "L2 -> R1, R2"
 // per lot, stacked. Same convention as the Handovers tab. Empty -> "-".
+//
+// LENGTH IS KEPT WHEN THE SERVER SENT ONE, not stripped to the bare label. A
+// row that drew from several rolls (Roll_Label "R1 8m, R2 12m") already
+// carries the metres the same way the Handovers tab's tags do — this used to
+// throw that number away even when it had it. A single-roll row still shows
+// as a bare label ("R1") with no length: getProductionWidgetData does not
+// currently backfill that from the row's own Issued_Qty the way
+// handover-detail.js's parallel fix does — a server change, not done here.
 function lotRollCellHtml(mat) {
 	const lots = (mat && mat.lotRolls) || [];
 	if (!Array.isArray(lots) || lots.length === 0) {
@@ -31,14 +39,17 @@ function lotRollCellHtml(mat) {
 		.map((lr) => {
 			const names = (lr.rolls || [])
 				.map((r) => {
-					// Strip a trailing " <number>m" suffix to just the label.
+					// Split a trailing " <number>m" suffix off into its own tag
+					// rather than discarding it.
 					const s = String(r).trim();
 					const sNoM = s.slice(-1) === "m" ? s.slice(0, -1) : s;
 					const sp = sNoM.lastIndexOf(" ");
 					if (sp > 0 && !isNaN(Number(sNoM.slice(sp + 1).trim()))) {
-						return escapeHtml(sNoM.slice(0, sp).trim());
+						const label = escapeHtml(sNoM.slice(0, sp).trim());
+						const mtr = sNoM.slice(sp + 1).trim();
+						return `<span class="prod-roll-tag">${label} &middot; ${escapeHtml(mtr)} Mtr</span>`;
 					}
-					return escapeHtml(s);
+					return s ? `<span class="prod-roll-tag">${escapeHtml(s)}</span>` : '';
 				})
 				.filter(Boolean);
 			// No roll recorded for this lot -> just show the lot, no arrow.
@@ -50,7 +61,7 @@ function lotRollCellHtml(mat) {
 			return `<div class="prod-lot-line"><b class="prod-lot-name">${escapeHtml(
 				lr.lot,
 			)}</b><span class="prod-lot-arrow">&rarr;</span><span class="prod-roll-list">${names.join(
-				", ",
+				"",
 			)}</span></div>`;
 		})
 		.join("");

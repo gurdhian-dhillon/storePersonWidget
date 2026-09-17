@@ -2070,7 +2070,24 @@ th.col-num {
 .prod-lot-line + .prod-lot-line { margin-top: 0.15rem; }
 .prod-lot-name { color: #1d4ed8; font-weight: 700; }
 .prod-lot-arrow { color: var(--text-muted); }
-.prod-roll-list { color: var(--text-main); }
+
+/* Each roll can now carry its own length ("R1 · 8 Mtr"), not just a bare
+   name, so several rolls under one lot wrap onto their own tags rather than
+   running together in a comma list — same pattern as the Handovers tab's
+   .hd-roll-group / .hd-roll-list. */
+.prod-roll-list {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    align-items: baseline;
+}
+.prod-roll-tag {
+    color: var(--text-main);
+    background: #f1f5f9;
+    border-radius: 0.35rem;
+    padding: 0.02rem 0.4rem;
+    white-space: nowrap;
+}
 
 /* ---- Supervisor shell ---- */
 
@@ -3054,6 +3071,26 @@ th.col-num {
     text-transform: none;
     vertical-align: middle;
     white-space: nowrap;
+}
+
+/* Which PHYSICAL offcut fed this item — dimensions + carton, not just a count.
+   A count alone ("1 from offcut") tells him nothing to find on the rack; this
+   is the piece Waste_Movement recorded at issue time. Green like every other
+   offcut marker in this app (.remake-tag's own comment explains why). One tag
+   per distinct piece size/carton — an item can draw from more than one. */
+.bd-waste-tag {
+    display: block;
+    margin-top: 0.2rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 1rem;
+    background: #ecfdf5;
+    color: #16a34a;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    white-space: nowrap;
+    width: fit-content;
 }
 
 /* The one chip in the per-order split that is a reissue. Tinted rather than
@@ -4681,7 +4718,23 @@ th.col-num {
 }
 .hd-lot-name { color: #1d4ed8; font-weight: 700; }
 .hd-lot-arrow { color: var(--text-muted); }
-.hd-roll-list { color: var(--text-main); }
+
+/* Each roll now carries its own length ("R2 · 3.15 Mtr"), not just a bare
+   name, so several rolls under one lot no longer fit "R1, R2, R3" on one
+   line - wrap and comma-separate visually with a tag chip per roll instead. */
+.hd-roll-group {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    align-items: baseline;
+}
+.hd-roll-list {
+    color: var(--text-main);
+    background: #f1f5f9;
+    border-radius: 0.35rem;
+    padding: 0.02rem 0.4rem;
+    white-space: nowrap;
+}
 .hd-roll-none {
     font-size: 0.8rem;
     color: var(--text-muted);
@@ -4768,6 +4821,16 @@ th.col-num {
 .hd-i-name .mat-name { font-weight: 500; color: var(--text-main); }
 .hd-i-num  { width: 6rem;  text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .hd-i-num b { color: var(--text-main); }
+/* The pieces cell can carry one .bd-waste-tag per distinct offcut piece under
+   the count (it.piecesFromWaste > 0) — dimensions + carton, wide enough that
+   nowrap on the base rule above would run it into Cloth/Cut size otherwise.
+   Widened past the plain-number columns and left-aligned once a tag is
+   present, since a tag reads as a label, not a number. .hd-sub is the
+   fallback for the rare handover with no matched Waste_Movement (see the
+   render comment) and stays right-aligned like the count above it. */
+.hd-i-pieces { width: 11rem; white-space: normal; }
+.hd-i-pieces .hd-sub { display: block; white-space: nowrap; }
+.bd-waste-tag { text-align: left; }
 .hd-i-cut  { width: 9.5rem; white-space: nowrap; }
 .hd-i-roll { width: 8.5rem; }
 .hd-i-status { width: 8rem; }
