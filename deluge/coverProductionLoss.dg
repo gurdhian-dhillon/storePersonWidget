@@ -371,7 +371,7 @@ string coverProductionLoss(string planItemId)
 	{
 		// Creator reports every runtime failure to a widget as code 9430, so the
 		// real message has to travel inside the payload.
-		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
 	}
 
 	return res;

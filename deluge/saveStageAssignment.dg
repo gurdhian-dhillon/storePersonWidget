@@ -509,7 +509,7 @@ string saveStageAssignment(string payloadJson)
 	{
 		// Creator collapses every runtime failure to a widget into a generic
 		// "code 9430", so the real message is carried back in the payload.
-		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
 	}
 
 	return res;

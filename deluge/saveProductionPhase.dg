@@ -469,7 +469,7 @@ string saveProductionPhase(string payloadJson)
 					}
 					catch (eLoss)
 					{
-						lossWarn = "The " + (lossIn - lossOut) + " missing pieces could NOT be queued for remaking: " + eLoss.toString().replaceAll("\"","'") + " - tell the office before this order is packed.";
+						lossWarn = "The " + (lossIn - lossOut) + " missing pieces could NOT be queued for remaking: " + eLoss.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + " - tell the office before this order is packed.";
 						info "coverProductionLoss FAILED for item " + itemId + ": " + eLoss.toString();
 					}
 				}
@@ -725,7 +725,7 @@ string saveProductionPhase(string payloadJson)
 	}
 	catch (e)
 	{
-		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
 	}
 
 	return res;

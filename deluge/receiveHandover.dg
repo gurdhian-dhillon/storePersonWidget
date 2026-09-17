@@ -619,7 +619,7 @@ string receiveHandover(string supervisorId, string payloadJson)
 							wNoteTxt = "";
 							if(wRemark != "")
 							{
-								wNoteTxt = " - " + wRemark.replaceAll("\"","'");
+								wNoteTxt = " - " + wRemark.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
 							}
 							wDispMat = null;
 							for each  wmRec2 in Waste_Master[ID == wi.Waste_Piece]

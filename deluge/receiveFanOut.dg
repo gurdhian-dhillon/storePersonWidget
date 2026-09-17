@@ -327,6 +327,45 @@ string receiveFanOut(string supervisorId, string payloadJson)
 							}
 						}
 
+						// FALLBACK - the plan-scoped scan found nothing to credit.
+						// touchedPlanIds comes off the widget's m.orders, which is
+						// filtered three ways the handover line is not (plan open,
+						// owedQ > 0, dispute-netted), while the figure he confirms is
+						// summed over every one of his handovers with no plan filter.
+						// So the confirm scope and the fan scope can genuinely
+						// disagree. Bounded by supervisor + material exactly as the
+						// retired receiveMaterials was, so this stays a scan of one
+						// material's rows, not a form walk.
+						if(idsOldest.size() == 0)
+						{
+							fbRows = Material_Requirement[Assigned_To == supId && Material == matTxt.toLong()] sort by Added_Time;
+							for each  rqF in fbRows
+							{
+								fIssS = ifnull(rqF.Issued_Qty,"0").toString().trim();
+								if(fIssS == "")
+								{
+									fIssS = "0";
+								}
+								fRcvS = ifnull(rqF.Received_Qty,"0").toString().trim();
+								if(fRcvS == "")
+								{
+									fRcvS = "0";
+								}
+								fRoom = fIssS.toDecimal() - fRcvS.toDecimal();
+								if(fRoom > 0)
+								{
+									fidTxt = rqF.ID + "";
+									roomById.put(fidTxt,fRoom);
+									rcvById.put(fidTxt,fRcvS.toDecimal());
+									planById.put(fidTxt,ifnull(rqF.Plan,"").toString().trim());
+									itemById.put(fidTxt,ifnull(rqF.Plan_Item,"").toString().trim());
+									reqNameById.put(fidTxt,ifnull(rqF.Material_Name,"").toString());
+									reqUnitById.put(fidTxt,ifnull(rqF.Unit,"").toString());
+									idsOldest.add(fidTxt);
+								}
+							}
+						}
+
 						// --- what is left to apply, off the line watermarks ---
 						toCredit = ifnull(toCreditByMat.get(matTxt),0.0);
 						toDispute = ifnull(toDisputeByMat.get(matTxt),0.0);
@@ -512,6 +551,23 @@ string receiveFanOut(string supervisorId, string payloadJson)
 
 						// Everything this material had to fan is applied - mark it
 						// for the single watermark-stamp pass after the loop.
+						//
+						// STAMPED UNCONDITIONALLY, AND THAT IS DELIBERATE. Gating this
+						// on toCredit/toDispute reaching 0 was tried and removed: it
+						// buys nothing and costs correctness. Nothing re-visits a
+						// material once mProc advances the resume cursor past it
+						// (newMi = mi + mProc), and the next receipt fans only its own
+						// vouchers - so an ungated leftover is lost either way, just
+						// with the watermark left unstamped. The only case the gate
+						// changed was a re-fan of the SAME scope (a retried call, a
+						// double press), where the two halves differ: the credit walk
+						// writes Received_Qty so room caps re-application, but the
+						// dispute upsert below ADDS pGap to the open ticket and would
+						// inflate it a second time.
+						//
+						// The real fix for an unspent leftover is the fallback scan
+						// above, which gives the credit somewhere to land instead of
+						// leaving it stranded.
 						if(fannedMats.contains(matTxt) == false)
 						{
 							fannedMats.add(matTxt);

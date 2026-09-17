@@ -695,7 +695,7 @@ string raiseReissueRequest(string payloadJson)
 	}
 	catch (e)
 	{
-		res = "{\"success\":false,\"error\":\"" + e.toString().replaceAll("\"","'") + "\"}";
+		res = "{\"success\":false,\"error\":\"" + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
 		logLines.add(res);
 		info logLines;
 	}

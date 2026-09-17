@@ -537,7 +537,7 @@ string closeAlterationBatch(string payloadJson)
 	}
 	catch (e)
 	{
-		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
 	}
 
 	// THE NOTE HAS NOWHERE ELSE TO GO. Plan_Item carries no remarks field, and

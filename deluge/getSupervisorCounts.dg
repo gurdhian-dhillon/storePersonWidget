@@ -202,7 +202,7 @@ string getSupervisorCounts(string supervisorId)
 	}
 	catch (e)
 	{
-		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"pendingReceive\":0,\"openDisputes\":0,\"wasteWaiting\":0,\"activePlans\":0,\"reissueWaiting\":0}";
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"],\"pendingReceive\":0,\"openDisputes\":0,\"wasteWaiting\":0,\"activePlans\":0,\"reissueWaiting\":0}";
 	}
 
 	return "{\"errors\":[],\"pendingReceive\":" + pendingReceive + ",\"openDisputes\":" + openDisputes + ",\"wasteWaiting\":" + wasteWaiting + ",\"activePlans\":" + activePlans + ",\"reissueWaiting\":" + reissueWaiting + "}";

@@ -635,7 +635,7 @@ string getReissueDrafts(string supervisorId)
 	}
 	catch (e)
 	{
-		res = "{\"errors\":[\"" + e.toString().replaceAll("\"","'") + "\"],\"items\":[]}";
+		res = "{\"errors\":[\"" + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"],\"items\":[]}";
 	}
 
 	return res;

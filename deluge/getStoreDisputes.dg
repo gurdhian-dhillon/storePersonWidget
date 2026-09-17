@@ -81,7 +81,7 @@ string getStoreDisputes()
 			if(lnRes == "Supervisor_Denied")
 			{
 				supDenied = "true";
-				denyNote = ifnull(ln.Note,"").toString().replaceAll("\"","'");
+				denyNote = ifnull(ln.Note,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
 			}
 			if(lnRes == "Store_Denied")
 			{
@@ -170,7 +170,7 @@ string getStoreDisputes()
 			// quotes - a bare newline inside a hand-built JSON string is just as
 			// fatal as a bare quote, and this one is free text from a phone.
 			raisedNote = ifnull(d.Raised_Note,"").toString().replaceAll("\"","'");
-			raisedNote = raisedNote.replaceAll("\n"," ").replaceAll("\r"," ");
+			raisedNote = raisedNote.replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
 		}
 		catch (eNote)
 		{
@@ -231,14 +231,14 @@ string getStoreDisputes()
 			{
 				errJson = errJson + ",";
 			}
-			errJson = errJson + "\"Dispute " + d.ID + " could not be read: " + eRow.toString().replaceAll("\"","'") + "\"";
+			errJson = errJson + "\"Dispute " + d.ID + " could not be read: " + eRow.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"";
 			info "dispute row skipped: " + d.ID + " - " + eRow.toString();
 		}
 	}
 	}
 	catch (e)
 	{
-		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"],\"disputes\":[]}";
+		return "{\"errors\":[\"DELUGE: " + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"],\"disputes\":[]}";
 	}
 
 	// Built by hand - List.toString() does not reliably wrap in [].
