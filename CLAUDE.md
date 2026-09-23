@@ -296,6 +296,13 @@ receipt settles it. A shortfall goes to `Disputed_Qty` and raises a `Stock_Dispu
 > Transfer orders are the one thing in this app that moves stock in a system this repo cannot read
 > back.
 
+> **PRINTING MOVES INVENTORY AT SEND, NOT RECEIPT — the one exception to the rule above.**
+> `postPrintAdjustments` posts one quantity adjustment per print job per leg, at the store
+> location `…032097`, one account both sides: **−metres sent** on the plain SKU at send
+> (`PJ-00001-OUT`), **+metres returned** on the printed SKU at receipt (`-IN`), **+metres sent**
+> back at cancel (`-RET`). The IN/RET leg never posts while the OUT is still owed. Details and
+> the leg-state machine: `docs/printing-v2-plan.md` §12.
+
 **The same rule runs backwards for offcuts.** A declared remnant is not stock: while
 `Waste_Master.Status` is `Pending_Receipt`, `Piece_Count` holds what the supervisor *declared*,
 not what is on the rack. `receiveWastePieces` is where the two get compared — what the store

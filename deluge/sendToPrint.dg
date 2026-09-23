@@ -106,6 +106,7 @@ string sendToPrint(string payloadJson)
 		srcSku = "";
 		srcIsFab = false;
 		srcWidth = "";
+		srcInvItem = "";
 
 		if(errTxt == "")
 		{
@@ -137,6 +138,7 @@ string sendToPrint(string payloadJson)
 					}
 
 					srcWidth = ifnull(smChk.Fabric_Width_Inches,"").toString().trim();
+					srcInvItem = ifnull(smChk.Inventory_Item_ID,"").toString().trim();
 				}
 			}
 		}
@@ -161,6 +163,7 @@ string sendToPrint(string payloadJson)
 		tgtIsFab = false;
 		tgtType = "";
 		tgtWidth = "";
+		tgtInvItem = "";
 
 		if(errTxt == "")
 		{
@@ -188,6 +191,7 @@ string sendToPrint(string payloadJson)
 
 					tgtType = ifnull(tmChk.Type_field,"").toString().trim().toLowerCase();
 					tgtWidth = ifnull(tmChk.Fabric_Width_Inches,"").toString().trim();
+					tgtInvItem = ifnull(tmChk.Inventory_Item_ID,"").toString().trim();
 				}
 			}
 		}
@@ -227,6 +231,22 @@ string sendToPrint(string payloadJson)
 		if(errTxt == "" && diffW > 0.01)
 		{
 			errTxt = "Width mismatch - source is " + srcWidth + " in, target " + tgtWidth + " in. A printed piece must be full width of both.";
+		}
+
+		//--------------------------------------------------------------------
+		// BOTH SKUs MUST EXIST IN ZOHO INVENTORY. Sending posts -metres on the
+		// source there (postPrintAdjustments) and receiving posts +metres on
+		// the target. Refused HERE, before anything moves, rather than letting
+		// the job go out and leaving Inventory to drift - the same reason
+		// postTransferOrders refuses a whole voucher with an unmapped line.
+		//--------------------------------------------------------------------
+		if(errTxt == "" && srcInvItem == "")
+		{
+			errTxt = srcSku + " has no Zoho Inventory item mapped - map it before sending cloth to print";
+		}
+		if(errTxt == "" && tgtInvItem == "")
+		{
+			errTxt = tgtSku + " has no Zoho Inventory item mapped - map it before sending cloth to print";
 		}
 
 		//--------------------------------------------------------------------
@@ -768,11 +788,72 @@ string sendToPrint(string payloadJson)
 		// number from the moment the job exists.
 		//--------------------------------------------------------------------
 		jobId = 0;
+		jobNo = "";
 
+		//--------------------------------------------------------------------
+		// THE JOB NUMBER, PJ-00001 upward. It is the reference on the Zoho
+		// Inventory adjustments (PJ-00001-OUT / -IN / -RET), so the document
+		// there and the job here share one identifier. Built the way
+		// issueMaterialsHandover builds the SIV: SORTED ON ID, never on Job_No
+		// (a text sort reads PJ-99999 above PJ-100000), largest parsed number
+		// wins, blanks skipped.
+		//--------------------------------------------------------------------
+		if(errTxt == "")
+		{
+			lastJobs = Print_Job[ID != 0] sort by ID desc range from 1 to 10;
+			lastJNum = 0;
+			for each  lj in lastJobs
+			{
+				ljTxt = ifnull(lj.Job_No,"").toString().trim();
+				if(ljTxt != "")
+				{
+					jParts = ljTxt.toList("-");
+					if(jParts.size() > 1)
+					{
+						jNumTxt = jParts.get(jParts.size() - 1).trim();
+						if(jNumTxt.isNumber() == true)
+						{
+							jSeen = jNumTxt.toLong();
+							if(jSeen > lastJNum)
+							{
+								lastJNum = jSeen;
+							}
+						}
+					}
+				}
+			}
+			nextJNum = lastJNum + 1;
+			if(nextJNum < 10)
+			{
+				jPad = "0000" + nextJNum;
+			}
+			else if(nextJNum < 100)
+			{
+				jPad = "000" + nextJNum;
+			}
+			else if(nextJNum < 1000)
+			{
+				jPad = "00" + nextJNum;
+			}
+			else if(nextJNum < 10000)
+			{
+				jPad = "0" + nextJNum;
+			}
+			else
+			{
+				jPad = "" + nextJNum;
+			}
+			jobNo = "PJ-" + jPad;
+		}
+
+		// Inv_Out_Status starts Pending - the OUT adjustment is owed from the
+		// moment the cloth leaves. No comments inside the insert block below.
 		if(errTxt == "")
 		{
 			newJobId = insert into Print_Job
 			[
+				Job_No=jobNo
+				Inv_Out_Status="Pending"
 				Source_State=srcState
 				Metres_Sent=metresSent
 				Metres_Returned=0
@@ -845,6 +926,37 @@ string sendToPrint(string payloadJson)
 			errTxt = "The print job could not be created";
 		}
 
+		//--------------------------------------------------------------------
+		// ZOHO INVENTORY: -Metres_Sent on the source SKU, now. Its own
+		// try/catch and never an error for this call - the cloth has left and
+		// the job exists; an unreachable Inventory must not make the send look
+		// failed. A leg that did not post stays Pending on the job with the
+		// reason in Inv_Last_Error, and postPrintAdjustments("") retries it.
+		// Read back off the record rather than parsed out of the reply, so
+		// what the screen is told is what is stored.
+		//--------------------------------------------------------------------
+		invStatus = "Pending";
+		invError = "";
+		if(errTxt == "")
+		{
+			try
+			{
+				invRes = thisapp.postPrintAdjustments(jobId.toString(),"false");
+			}
+			catch (eInv)
+			{
+				invError = "Inventory post did not run: " + eInv.toString();
+			}
+			for each  pjInv in Print_Job[ID == jobId]
+			{
+				invStatus = ifnull(pjInv.Inv_Out_Status,"").toString().trim();
+				if(invError == "")
+				{
+					invError = ifnull(pjInv.Inv_Last_Error,"").toString().trim();
+				}
+			}
+		}
+
 		if(errTxt == "")
 		{
 			// Ids forced to string - 18-digit ids break JSON.parse on the widget.
@@ -860,7 +972,7 @@ string sendToPrint(string payloadJson)
 				pj2 = pj2 + 1;
 			}
 
-			res = "{\"success\":true,\"jobId\":\"" + jobId + "\",\"metresSent\":" + metresSent + ",\"rollPlan\":[" + planJson + "],\"lotWash\":" + lotWashOut + ",\"lotUnwash\":" + lotUnwashOut + ",\"lotInPrint\":" + lotInPrintOut + ",\"materialInPrint\":" + matInPrintOut + "}";
+			res = "{\"success\":true,\"jobId\":\"" + jobId + "\",\"jobNo\":\"" + jobNo + "\",\"inventory\":\"" + invStatus + "\",\"inventoryError\":\"" + invError.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\",\"metresSent\":" + metresSent + ",\"rollPlan\":[" + planJson + "],\"lotWash\":" + lotWashOut + ",\"lotUnwash\":" + lotUnwashOut + ",\"lotInPrint\":" + lotInPrintOut + ",\"materialInPrint\":" + matInPrintOut + "}";
 		}
 	}
 	catch (e)

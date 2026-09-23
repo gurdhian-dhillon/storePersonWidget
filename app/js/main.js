@@ -8591,12 +8591,22 @@ function printJobsHtml() {
         var open = String(printJobOpenId) === String(j.jobId);
         var pieces = (j.sendLines || []).reduce(function (a, l) { return a + (Number(l.count) || 0); }, 0);
 
+        // The OUT adjustment (-metres on the source SKU in Zoho Inventory) has
+        // not landed. Said on the card, because a pill that only appears in an
+        // alert at send time is gone the moment he closes it.
+        var invPill = (j.invOutStatus !== 'Posted')
+            ? '<span class="status-pill status-danger" title="' +
+                  escapeHtml(j.invError || 'Retried by postPrintAdjustments') + '">' +
+                  'Inventory not updated</span>'
+            : '';
+
         return '' +
             '<div class="item-card' + (open ? ' open' : '') + '" id="print-job-card-' + j.jobId + '">' +
                 '<div class="item-header" onclick="togglePrintJob(\'' + j.jobId + '\')">' +
                     '<div class="item-header-info">' +
                         '<h2>' + escapeHtml(j.printedName || j.printedSku || '—') + '</h2>' +
                         '<div class="item-meta-line">' +
+                            (j.jobNo ? '<span>' + escapeHtml(j.jobNo) + '</span>' : '') +
                             '<span>' + escapeHtml(j.printerName || 'printer not named') + '</span>' +
                             '<span>' + pieces + (pieces === 1 ? ' piece' : ' pieces') +
                                 ' &middot; ' + fmt(j.metresSent) + ' Mtr</span>' +
@@ -8606,6 +8616,7 @@ function printJobsHtml() {
                         '</div>' +
                     '</div>' +
                     '<div class="item-header-right">' +
+                        invPill +
                         '<span class="status-pill status-warning">Sent ' + escapeHtml(j.sentOn || '') + '</span>' +
                         '<span class="chevron" aria-hidden="true">' +
                             '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
@@ -9194,6 +9205,19 @@ function removeSendLine(matId, idx) {
     rerenderSendLines(matId);
 }
 
+// The Creator side of a send / receive / cancel is done whenever success is
+// true; the Zoho Inventory adjustment is posted after it and can fail on its
+// own (unmapped SKU, Inventory unreachable). It is retried later by
+// postPrintAdjustments, but he must be told now — silence reads as "posted".
+// Not_Needed is a legitimate outcome (a cancel whose OUT never landed).
+function printInventoryWarning(parsed, what) {
+    var st = String((parsed && parsed.inventory) || '');
+    if (st === 'Posted' || st === 'Not_Needed') return;
+    alert(what + ' in Creator, but Zoho Inventory was NOT updated yet.\n\n' +
+          ((parsed && parsed.inventoryError) || 'No reason given.') +
+          '\n\nIt stays pending on the job and will be retried.');
+}
+
 function submitSendToPrint(matId) {
     var m = printSourceById(matId);
     if (!m) return;
@@ -9271,6 +9295,8 @@ function submitSendToPrint(matId) {
             btn.textContent = 'Send to print';
             return;
         }
+
+        printInventoryWarning(parsed, 'Sent' + (parsed.jobNo ? ' as ' + parsed.jobNo : ''));
 
         printSendLines[matId] = [{ len: '', count: '' }];
         delete printSendPlan[matId];
@@ -9372,6 +9398,7 @@ function submitReceivePrint(jobId) {
             alert(parsed.piecesLost + ' of ' + parsed.piecesSent + ' pieces did not come back — ' +
                   fmt(parsed.loss) + ' Mtr. Recorded on the job.');
         }
+        printInventoryWarning(parsed, 'Received');
 
         delete printRecvPieces[jobId];
         printJobOpenId = null;
@@ -9413,6 +9440,7 @@ function submitCancelJob(jobId) {
             if (btn) { btn.disabled = false; btn.textContent = 'Came back unprinted'; }
             return;
         }
+        printInventoryWarning(parsed, 'Cancelled');
         delete printRecvPieces[jobId];
         printJobOpenId = null;
         loadPrint();

@@ -14,7 +14,7 @@
  *                            rolls: [ { rollId, label, length, status, origin } ] } ] } ],
  *     target:  [ same shape ],        // Type_field ~ "printed fabric"
  *     printers:[ { id, name } ],
- *     jobs:    [ { jobId, sourceMaterialId, sourceName, sourceSku,
+ *     jobs:    [ { jobId, jobNo, invOutStatus, invError, sourceMaterialId, sourceName, sourceSku,
  *                  sourceLotId, sourceLotNumber,
  *                  printedMaterialId, printedName, printedSku,
  *                  printerName, sourceState, metresSent, sentOn, jobStatus,
@@ -245,6 +245,7 @@ var PrintData = (function () {
 
             jobList.push({
                 jobId: String(pj.ID),
+                jobNo: str(pj.Job_No).trim(),
                 sourceMaterialId: srcMatId,
                 sourceName: matNameById[srcMatId] || lookupText(pj.Source_Material, 'Material_Display_Name'),
                 sourceSku: matSkuById[srcMatId] || '',
@@ -258,6 +259,10 @@ var PrintData = (function () {
                 metresSent: qty(pj.Metres_Sent),
                 sentOn: pj.Sent_On ? String(pj.Sent_On) : '',
                 jobStatus: str(pj.Job_Status).trim(),
+                // Zoho Inventory OUT adjustment (-metres on the source SKU).
+                // Blank = sent before the integration existed.
+                invOutStatus: str(pj.Inv_Out_Status).trim(),
+                invError: str(pj.Inv_Last_Error).trim(),
                 sendLines: sendLines
             });
         });

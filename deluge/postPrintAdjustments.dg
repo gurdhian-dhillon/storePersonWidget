@@ -1,0 +1,431 @@
+string postPrintAdjustments(string jobIdTxt, string dryRun)
+{
+	// Tells Zoho Inventory about a print job, as QUANTITY ADJUSTMENTS - one per
+	// job per leg, each with the job number as its reference so the Inventory
+	// document and the Print_Job are the same thing and reconciling them is not a
+	// lookup:
+	//
+	//   OUT  at send     source (plain) SKU   -Metres_Sent       PJ-00001-OUT
+	//   IN   at receipt  printed SKU          +Metres_Returned   PJ-00001-IN
+	//   RET  at cancel   source (plain) SKU   +Metres_Sent       PJ-00001-RET
+	//
+	// IN and RET are the same leg (Inv_In_*): a job is either received or
+	// cancelled, never both. The loss at the printer is never posted on its own -
+	// the OUT took every metre that left, the IN adds back only what returned,
+	// and the difference is the loss. Both hit ONE account, so the conversion
+	// nets and what remains is the value the printer lost - the same shape as
+	// consumption vs finished goods (docs/inventory-build-plan.md, "The
+	// accounting shape").
+	//
+	// THE LOCATION IS THE STORE'S - the one postTransferOrders moves cloth OUT
+	// of. Printing happens before issue, so the cloth leaves and returns there.
+	//
+	//   jobIdTxt  one job id - called inline by sendToPrint / receiveFromPrint /
+	//             cancelPrintJob right after their Creator writes
+	//             ""  => SWEEP: every job with a leg still Pending or Posting,
+	//             oldest first, capped. Run it by hand or from a schedule to
+	//             retry whatever failed inline.
+	//   dryRun    "true" builds every body and posts nothing
+	//
+	// LEG STATUS (Inv_Out_Status / Inv_In_Status):
+	//   Pending     owed to Inventory, not yet accepted
+	//   Posting     written BEFORE the call. A run that dies mid-call (the
+	//               statement limit is NOT catchable) leaves it here, and the
+	//               next run asks Inventory whether that reference landed
+	//               before posting again - exactly the Inventory_Post_Queue
+	//               recovery. Without it a crash after the POST double-posts.
+	//   Posted      accepted; Inv_*_Doc_ID holds the adjustment id
+	//   Not_Needed  nothing to post (a job cancelled before its OUT ever
+	//               reached Inventory - Inventory never lost the cloth, so it
+	//               must not be given it back)
+	//
+	// A BLANK Inv_Out_Status means a job sent before this existed. Its plain
+	// cloth left Creator but never left Inventory, so it is treated as Pending
+	// when that job is named - the OUT is exactly the correction it needs. The
+	// sweep does not pick blanks up: a job already received or cancelled
+	// before this existed is left for a human, not replayed.
+	//
+	// THE IN LEG WAITS FOR THE OUT. Posting +printed while -plain has failed
+	// would let Inventory hold both at once; posting RET before OUT would
+	// credit plain cloth Inventory never took off.
+	//
+	// NEVER THROWS TO ITS CALLER. A failed post leaves the leg Pending with the
+	// reason in Inv_Last_Error; the Creator side of the job is already done and
+	// must not look failed because Inventory was unreachable.
+
+	res = "";
+	errTxt = "";
+	jobsJson = "";
+
+	try
+	{
+		orgId = "60076905558";
+		adjUrl = "https://www.zohoapis.in/inventory/v1/inventoryadjustments";
+		accId = "3955559000000032057";
+		locStore = "3955559000000032097";
+		reasonTxt = "Production Cycle";
+		sweepCap = 20;
+
+		writeAllowed = true;
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase();
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			writeAllowed = false;
+		}
+
+		oneJob = ifnull(jobIdTxt,"").toString().trim();
+		jobIds = List();
+		if(oneJob != "")
+		{
+			if(oneJob.isNumber() == false)
+			{
+				errTxt = "Job id is not a number";
+			}
+			else
+			{
+				jobIds.add(oneJob);
+			}
+		}
+		else
+		{
+			sweepRecs = Print_Job[Inv_Out_Status == "Pending" || Inv_Out_Status == "Posting" || Inv_In_Status == "Pending" || Inv_In_Status == "Posting"] sort by ID asc range from 1 to sweepCap;
+			for each  sw in sweepRecs
+			{
+				jobIds.add(sw.ID.toString());
+			}
+		}
+
+		for each  jid in jobIds
+		{
+			jobNo = "";
+			jobStat = "";
+			srcMatTxt = "";
+			prMatTxt = "";
+			mSent = 0.0;
+			mBack = 0.0;
+			outSt = "";
+			inSt = "";
+			jobErr = "";
+			found = false;
+
+			for each  pj in Print_Job[ID == jid.toLong()]
+			{
+				found = true;
+				jobNo = ifnull(pj.Job_No,"").toString().trim();
+				jobStat = ifnull(pj.Job_Status,"").toString().trim();
+				srcMatTxt = ifnull(pj.Source_Material,"").toString().trim();
+				prMatTxt = ifnull(pj.Printed_Material,"").toString().trim();
+				msS = ifnull(pj.Metres_Sent,"0").toString().trim();
+				if(msS == "")
+				{
+					msS = "0";
+				}
+				mbS = ifnull(pj.Metres_Returned,"0").toString().trim();
+				if(mbS == "")
+				{
+					mbS = "0";
+				}
+				mSent = msS.toDecimal();
+				mBack = mbS.toDecimal();
+				outSt = ifnull(pj.Inv_Out_Status,"").toString().trim();
+				inSt = ifnull(pj.Inv_In_Status,"").toString().trim();
+			}
+
+			if(found == false)
+			{
+				jobErr = "Print job not found";
+			}
+			if(jobNo == "")
+			{
+				jobNo = "PJ-" + jid;
+			}
+			if(outSt == "")
+			{
+				outSt = "Pending";
+			}
+
+			// Inventory item ids, off Raw_Material. Two lookups a job at most.
+			srcItem = "";
+			srcSku = "";
+			if(jobErr == "" && srcMatTxt != "")
+			{
+				for each  sm in Raw_Material[ID == srcMatTxt.toLong()]
+				{
+					srcItem = ifnull(sm.Inventory_Item_ID,"").toString().trim();
+					srcSku = ifnull(sm.SKU,"").toString().trim();
+				}
+			}
+			prItem = "";
+			prSku = "";
+			if(jobErr == "" && prMatTxt != "")
+			{
+				for each  pm in Raw_Material[ID == prMatTxt.toLong()]
+				{
+					prItem = ifnull(pm.Inventory_Item_ID,"").toString().trim();
+					prSku = ifnull(pm.SKU,"").toString().trim();
+				}
+			}
+
+			outDoc = "";
+			inDoc = "";
+
+			for each  legKey in {"OUT","IN"}
+			{
+				if(jobErr == "")
+				{
+					legSt = outSt;
+					if(legKey == "IN")
+					{
+						legSt = inSt;
+					}
+
+					// What this leg moves. RET is the IN leg of a cancelled job.
+					legRef = jobNo + "-OUT";
+					legItem = srcItem;
+					legSku = srcSku;
+					legQty = 0 - mSent;
+					legRun = true;
+					if(legKey == "IN")
+					{
+						if(jobStat == "Received")
+						{
+							legRef = jobNo + "-IN";
+							legItem = prItem;
+							legSku = prSku;
+							legQty = mBack;
+						}
+						else if(jobStat == "Cancelled")
+						{
+							legRef = jobNo + "-RET";
+							legItem = srcItem;
+							legSku = srcSku;
+							legQty = mSent;
+						}
+						else
+						{
+							legRun = false;
+						}
+					}
+					if(legSt != "Pending" && legSt != "Posting")
+					{
+						legRun = false;
+					}
+
+					//---- recovery: a leg left at Posting may already have landed ----
+					if(legRun == true && legSt == "Posting")
+					{
+						landed = false;
+						landedId = "";
+						chkCode = "-1";
+						chkList = List();
+						try
+						{
+							chkResp = invokeurl
+							[
+								url :adjUrl + "?organization_id=" + orgId + "&reference_number=" + legRef
+								type :GET
+								connection:"inventory_connection"
+							];
+							chkCode = ifnull(chkResp.get("code"),"-1").toString().trim();
+							chkList = ifnull(chkResp.get("inventory_adjustments"),List());
+						}
+						catch (eChk)
+						{
+							chkCode = "-1";
+						}
+						if(chkCode == "0")
+						{
+							for each  chkAdj in chkList
+							{
+								if(ifnull(chkAdj.get("reference_number"),"").toString().trim() == legRef)
+								{
+									landed = true;
+									landedId = ifnull(chkAdj.get("inventory_adjustment_id"),"").toString();
+								}
+							}
+							if(landed == true)
+							{
+								legSt = "Posted";
+								if(legKey == "OUT")
+								{
+									outDoc = landedId;
+								}
+								else
+								{
+									inDoc = landedId;
+								}
+							}
+							else
+							{
+								legSt = "Pending";
+							}
+						}
+						else
+						{
+							jobErr = legRef + " left at Posting and Inventory could not be asked whether it landed - try again later";
+							legRun = false;
+						}
+					}
+
+					// A cancelled job whose OUT never reached Inventory: Inventory
+					// still holds the cloth, so there is nothing to take off and
+					// nothing to give back.
+					if(legRun == true && legKey == "OUT" && legSt == "Pending" && jobStat == "Cancelled")
+					{
+						legSt = "Not_Needed";
+						legRun = false;
+					}
+
+					// THE IN LEG WAITS FOR THE OUT.
+					if(legRun == true && legKey == "IN" && outSt == "Not_Needed")
+					{
+						legSt = "Not_Needed";
+						legRun = false;
+					}
+					if(legRun == true && legKey == "IN" && outSt != "Posted")
+					{
+						legRun = false;
+					}
+
+					if(legRun == true && legSt == "Pending")
+					{
+						if(legQty == 0)
+						{
+							legSt = "Not_Needed";
+						}
+						else if(legItem == "")
+						{
+							jobErr = legSku + " has no Zoho Inventory item mapped - " + legRef + " not posted";
+						}
+						else
+						{
+							bodyJson = "{\"date\":\"" + zoho.currentdate.toString("yyyy-MM-dd") + "\",\"reason\":\"" + reasonTxt + "\",\"description\":\"Creator print job " + jobNo + " " + legKey + " " + legSku + "\",\"adjustment_type\":\"quantity\",\"reference_number\":\"" + legRef + "\",\"account_id\":\"" + accId + "\",\"line_items\":[{\"item_id\":\"" + legItem + "\",\"quantity_adjusted\":" + legQty + ",\"location_id\":\"" + locStore + "\"}]}";
+
+							if(writeAllowed == false)
+							{
+								info "postPrintAdjustments DRY RUN " + bodyJson;
+							}
+							else
+							{
+								// Posting is written BEFORE the call - see the header.
+								for each  pjMark in Print_Job[ID == jid.toLong()]
+								{
+									if(legKey == "OUT")
+									{
+										pjMark.Inv_Out_Status = "Posting";
+									}
+									else
+									{
+										pjMark.Inv_In_Status = "Posting";
+									}
+								}
+
+								postErr = "";
+								postId = "";
+								try
+								{
+									hdrMap = Map();
+									hdrMap.put("content-type","application/json");
+									postResp = invokeurl
+									[
+										url :adjUrl + "?organization_id=" + orgId
+										type :POST
+										parameters:bodyJson
+										headers:hdrMap
+										connection:"inventory_connection"
+									];
+									pCode = ifnull(postResp.get("code"),"-1").toString().trim();
+									if(pCode != "0")
+									{
+										postErr = "code " + pCode + ": " + ifnull(postResp.get("message"),"").toString();
+									}
+									else
+									{
+										adjObj = ifnull(postResp.get("inventory_adjustment"),Map());
+										postId = ifnull(adjObj.get("inventory_adjustment_id"),"").toString();
+									}
+								}
+								catch (ePost)
+								{
+									postErr = "invokeurl threw: " + ePost.toString();
+								}
+
+								if(postErr == "")
+								{
+									legSt = "Posted";
+									if(legKey == "OUT")
+									{
+										outDoc = postId;
+									}
+									else
+									{
+										inDoc = postId;
+									}
+									info "postPrintAdjustments: " + legRef + " posted, " + legQty + " of " + legSku + " -> adjustment " + postId;
+								}
+								else
+								{
+									legSt = "Pending";
+									jobErr = legRef + " refused by Inventory - " + postErr;
+								}
+							}
+						}
+					}
+
+					if(legKey == "OUT")
+					{
+						outSt = legSt;
+					}
+					else
+					{
+						inSt = legSt;
+					}
+				}
+			}
+
+			// STAMP THE LEG STATES, once per job, dry run excepted.
+			if(writeAllowed == true && found == true)
+			{
+				for each  pjEnd in Print_Job[ID == jid.toLong()]
+				{
+					pjEnd.Inv_Out_Status = outSt;
+					if(outDoc != "")
+					{
+						pjEnd.Inv_Out_Doc_ID = outDoc;
+					}
+					if(inSt != "")
+					{
+						pjEnd.Inv_In_Status = inSt;
+					}
+					if(inDoc != "")
+					{
+						pjEnd.Inv_In_Doc_ID = inDoc;
+					}
+					pjEnd.Inv_Last_Error = jobErr;
+				}
+			}
+
+			if(jobsJson != "")
+			{
+				jobsJson = jobsJson + ",";
+			}
+			jobsJson = jobsJson + "{\"jobId\":\"" + jid + "\",\"jobNo\":\"" + jobNo.replaceAll("\"","'") + "\",\"out\":\"" + outSt + "\",\"in\":\"" + inSt + "\",\"error\":\"" + jobErr.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
+		}
+
+		if(errTxt == "")
+		{
+			res = "{\"errors\":[],\"dryRun\":" + (!writeAllowed).toString() + ",\"jobs\":[" + jobsJson + "]}";
+		}
+	}
+	catch (e)
+	{
+		errTxt = "DELUGE: " + e.toString();
+	}
+
+	if(res == "")
+	{
+		res = "{\"errors\":[\"" + errTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"],\"jobs\":[" + jobsJson + "]}";
+	}
+
+	return res;
+}

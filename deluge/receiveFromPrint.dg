@@ -582,6 +582,10 @@ string receiveFromPrint(string payloadJson)
 				jUpd.Printed_Lot = targetLot;
 				jUpd.Job_Status = "Received";
 
+				// +Metres_Returned on the printed SKU is now owed to Zoho
+				// Inventory - posted just below by postPrintAdjustments.
+				jUpd.Inv_In_Status = "Pending";
+
 				// NOTHING DERIVED IS STORED ON THE HEADER beyond Metres_Returned.
 				// Metres lost is Metres_Sent - Metres_Returned, both on the
 				// record; pieces sent/returned are sums over the two subforms.
@@ -598,6 +602,33 @@ string receiveFromPrint(string payloadJson)
 				}
 			}
 
+			// ZOHO INVENTORY: +Metres_Returned on the printed SKU. If this job's
+			// OUT (-Metres_Sent on the source) has not posted yet it goes first
+			// - a job sent before the integration existed gets both here. Its
+			// own try/catch: the cloth is on the rack and the receipt is done,
+			// so an unreachable Inventory must not make it look failed. What did
+			// not post stays Pending with the reason in Inv_Last_Error, for
+			// postPrintAdjustments("") to retry.
+			invStatus = "Pending";
+			invError = "";
+			try
+			{
+				invRes = thisapp.postPrintAdjustments(jobIdTxt,"false");
+			}
+			catch (eInv)
+			{
+				invError = "Inventory post did not run: " + eInv.toString();
+			}
+			for each  pjInv in Print_Job[ID == jobIdTxt.toLong()]
+			{
+				invStatus = ifnull(pjInv.Inv_In_Status,"").toString().trim();
+				if(invError == "")
+				{
+					invError = ifnull(pjInv.Inv_Last_Error,"").toString().trim();
+				}
+			}
+			invError = invError.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
 			// REAL LOSS, WHOLE PIECES. The length cannot change, so every missing
 			// metre is a piece the printer lost or ruined. Reported, not
 			// disputed.
@@ -609,7 +640,7 @@ string receiveFromPrint(string payloadJson)
 				info "print job " + jobIdTxt + " short by " + piecesLost + " pieces (" + lossQty + " Mtr) - written off against the source SKU";
 			}
 
-			res = "{\"success\":true,\"printedLotId\":\"" + targetLot + "\",\"lotNumber\":\"" + lotNumOut + "\",\"metresSent\":" + metresSent + ",\"metresReturned\":" + metresReturned + ",\"loss\":" + lossQty + ",\"piecesSent\":" + piecesSent + ",\"piecesReturned\":" + piecesReturned + ",\"piecesLost\":" + piecesLost + ",\"lotWash\":" + lotWashOut + ",\"lotUnwash\":" + lotUnwashOut + ",\"rollRows\":" + rollRows + "}";
+			res = "{\"success\":true,\"inventory\":\"" + invStatus + "\",\"inventoryError\":\"" + invError + "\",\"printedLotId\":\"" + targetLot + "\",\"lotNumber\":\"" + lotNumOut + "\",\"metresSent\":" + metresSent + ",\"metresReturned\":" + metresReturned + ",\"loss\":" + lossQty + ",\"piecesSent\":" + piecesSent + ",\"piecesReturned\":" + piecesReturned + ",\"piecesLost\":" + piecesLost + ",\"lotWash\":" + lotWashOut + ",\"lotUnwash\":" + lotUnwashOut + ",\"rollRows\":" + rollRows + "}";
 		}
 	}
 	catch (e)
