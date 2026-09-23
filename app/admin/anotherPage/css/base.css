@@ -1,0 +1,1264 @@
+/* Admin calculation audit.
+   Same tokens AND the same type scale as the store and supervisor widgets so the
+   three read as one product: 'Inter', sans-serif (no system-ui ahead of the
+   generic), no body font-size (inherit the 16px root the other two use),
+   -webkit-font-smoothing, and rem units on the shared components. The item-card
+   accordion block below is copied verbatim from app/supervisor/css/style.css.
+   The one addition here is a monospace treatment for anything that is an
+   equation — a formula set in the body face reads as prose and stops being
+   checkable at a glance. */
+
+:root {
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --bg-color: #e9eef4;
+    --surface: #ffffff;
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+    --border: #e2e8f0;
+
+    --status-success: #10b981;
+    --status-success-bg: #d1fae5;
+    --status-warning: #f59e0b;
+    --status-warning-bg: #fef3c7;
+    --status-danger: #ef4444;
+    --status-danger-bg: #fee2e2;
+
+    /* One colour per calculation, used on the step tag and its left edge, so a
+       screenshot of any single block still says which of the three it is. */
+    --plan: #6366f1;
+    --plan-bg: #eef2ff;
+    --issue: #0891b2;
+    --issue-bg: #ecfeff;
+    --waste: #d97706;
+    /* Step 4 - what was RECORDED, not what the machine would do. Green because it
+       is the only figure on this screen that cannot move. */
+    --issued: #059669;
+    --issued-bg: #ecfdf5;
+    --waste-bg: #fffbeb;
+
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    --radius: 8px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    /* Same stack as the store and supervisor widgets - no system-ui ahead of the
+       generic, so a failed Inter load falls to the same face all three do. */
+    font-family: 'Inter', sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-main);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+.app-container {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 20px 24px 60px;
+}
+
+.hidden { display: none !important; }
+.muted { color: var(--text-muted); }
+.r { text-align: right; }
+.yes { color: var(--status-success); font-weight: 600; }
+.no { color: var(--status-danger); font-weight: 600; }
+
+/* ---- header ---- */
+
+.app-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 14px 0 16px;
+    margin-bottom: 4px;
+    background: var(--bg-color);
+    border-bottom: 1px solid var(--border);
+}
+
+.app-header h1 {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+}
+
+.app-date {
+    display: block;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+.app-header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.sup-select {
+    min-width: 240px;
+    padding: 8px 12px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--text-main);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+}
+
+.primary-btn {
+    padding: 8px 16px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: var(--primary);
+    border: 0;
+    border-radius: var(--radius);
+    cursor: pointer;
+}
+
+.primary-btn:hover { background: var(--primary-hover); }
+.primary-btn:disabled { opacity: 0.55; cursor: default; }
+
+/* ---- legend ----
+   The four glossary cards that stood above the data are gone, and with them
+   .legend / .legend-item / .legend-dot / .dot-*. The step colours they keyed
+   are still used, by .step-plan / .step-issue / .step-waste / .step-issued
+   further down this file — those are the live consumers of --plan, --issue,
+   --waste and --issued, so the variables stay.
+
+   .ans-legend below is a DIFFERENT class (the Material-used tab's footnote)
+   and is still in use. The comment beside it explains why the names differ. */
+
+/* ---- the verdict ----
+   What replaced the glossary cards in this space: not an explanation of the
+   screen, but the screen's conclusion about the order in front of it. */
+
+.verdict {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 14px 16px;
+    margin: 16px 0 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+}
+
+.verdict > div { flex: 1 1 auto; min-width: 0; }
+.verdict b { display: block; font-size: 0.875rem; margin-bottom: 2px; }
+.verdict > div > span { display: block; font-size: 0.75rem; color: var(--text-muted); }
+
+.verdict-mark {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    font-size: 13px;
+    font-weight: 700;
+    color: #fff;
+}
+
+.verdict-ok { border-left-color: var(--status-success); }
+.verdict-ok .verdict-mark { background: var(--status-success); }
+.verdict-bad { border-left-color: var(--status-danger); }
+.verdict-bad .verdict-mark { background: var(--status-danger); }
+.verdict-note { border-left-color: var(--status-warning); }
+.verdict-note .verdict-mark { background: var(--status-warning); }
+
+.verdict-list {
+    list-style: none;
+    margin: 10px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+/* Each finding is a control, not a bullet: it opens its own evidence. Styled to
+   say so — hover state, pointer, and a left edge in its severity colour. */
+.vf {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-color);
+    cursor: pointer;
+}
+
+.vf:hover { background: #fff; border-color: #cbd5e1; }
+.vf-bad { border-left-color: var(--status-danger); }
+.vf-note { border-left-color: var(--status-warning); }
+
+.vf b { display: block; font-size: 0.8125rem; margin-bottom: 1px; color: var(--text-main); }
+.vf-where { display: block; font-size: 0.6875rem; font-weight: 600; color: var(--text-muted); }
+.vf-detail { display: block; font-size: 0.6875rem; color: var(--text-muted); line-height: 1.45; }
+
+/* The badge on a collapsed item card. Collapsing the clean items only helps if
+   the ones that are left still say why they are worth opening. */
+.item-finding-badge {
+    padding: 1px 7px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    border-radius: 10px;
+}
+
+.item-finding-badge.is-bad { background: var(--status-danger-bg); color: #991b1b; }
+.item-finding-badge.is-note { background: var(--status-warning-bg); color: #92400e; }
+
+.item-card.has-bad { border-left: 3px solid var(--status-danger); }
+.item-card.has-note { border-left: 3px solid var(--status-warning); }
+
+/* A column that cannot apply to this row, as opposed to one that is empty.
+   Lighter than a real dash so the eye skips it instead of checking it. */
+.cell-na { color: #cbd5e1; }
+
+/* IN TRANSIT — issued and not yet confirmed. Amber rather than red: nothing has
+   gone wrong yet, it is cloth on a trolley, and it becomes a problem only if it
+   stays that way. It reads beside .is-lost, which is red and IS a fault. */
+.is-transit { color: #b45309; }
+
+/* ---- the account: one material's quantities in and out ---- */
+
+.account { margin-bottom: 14px; }
+
+.acc-line, .acc-sub, .acc-total {
+    display: grid;
+    grid-template-columns: 190px 130px 1fr;
+    gap: 10px;
+    align-items: baseline;
+    padding: 4px 0;
+    font-size: 0.75rem;
+}
+
+.acc-line + .acc-line { border-top: 1px dotted var(--border); }
+.acc-label { color: var(--text-main); }
+.acc-qty { text-align: right; font-family: var(--mono); }
+.acc-why { color: var(--text-muted); font-size: 0.6875rem; }
+
+.acc-key .acc-qty { font-weight: 700; }
+.acc-extra .acc-label { color: #b45309; }
+.acc-bad .acc-label, .acc-bad .acc-qty { color: var(--status-danger); }
+
+.acc-sub { border-top: 1px solid var(--border); }
+
+.acc-total {
+    border-top: 2px solid var(--text-main);
+    margin-top: 2px;
+    padding-top: 6px;
+}
+
+.acc-note {
+    grid-column: 1 / -1;
+    padding: 4px 0 4px 200px;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+}
+
+.acc-verdict {
+    margin-top: 8px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    line-height: 1.45;
+}
+
+.acc-verdict.is-ok { background: var(--status-success-bg); color: #065f46; }
+.acc-verdict.is-warn { background: var(--status-warning-bg); color: #92400e; }
+.acc-verdict.is-bad { background: var(--status-danger-bg); color: #991b1b; }
+
+/* ---- the reason trail ---- */
+
+.trail { margin-bottom: 14px; }
+
+.cause-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+
+.cause-chip {
+    padding: 2px 8px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    border-radius: 10px;
+    background: var(--bg-color);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+}
+
+/* One colour per cause. They are genuinely different conversations — a checker
+   rejection is not a supervisor ruining cloth — and the whole point of this
+   panel is that they stopped being one anonymous "Reissued" figure. */
+.cause-Reissue { background: var(--waste-bg); border-color: #fcd34d; color: #92400e; }
+.cause-Check_Remake { background: var(--status-danger-bg); border-color: #fca5a5; color: #991b1b; }
+.cause-Production_Remake { background: #ede9fe; border-color: #c4b5fd; color: #5b21b6; }
+.cause-Alteration { background: var(--issue-bg); border-color: #a5f3fc; color: #155e75; }
+
+.trail-event {
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    background: var(--bg-color);
+    border-radius: 6px;
+}
+
+.trail-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 0.75rem; }
+.trail-item { color: var(--text-muted); font-size: 0.6875rem; }
+
+.trail-line {
+    margin-top: 5px;
+    padding-left: 2px;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--text-main);
+}
+
+.trail-tag {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 1px 6px;
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    border-radius: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+}
+
+.trail-tag.is-check { background: var(--status-danger-bg); border-color: #fca5a5; color: #991b1b; }
+.trail-tag.is-damage { background: var(--waste-bg); border-color: #fcd34d; color: #92400e; }
+
+.trail-figs { display: block; margin-top: 1px; font-size: 0.6875rem; color: var(--text-muted); }
+
+.detail-note code {
+    padding: 1px 4px;
+    background: var(--bg-color);
+    border-radius: 3px;
+    font-family: var(--mono);
+}
+
+/* A group heading inside the Material-used table. Fabric is metres against a
+   marker and a trim is a count per garment — two questions that were being
+   interleaved row by row. */
+.grp-row td {
+    padding: 6px 10px !important;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: var(--bg-color);
+    border-top: 1px solid var(--border);
+}
+
+/* ---- empty / skeleton ---- */
+
+.empty-state {
+    text-align: center;
+    padding: 56px 24px;
+    background: var(--surface);
+    border-radius: var(--radius);
+    border: 1px dashed var(--border);
+}
+
+.empty-state .icon { font-size: 30px; }
+.empty-state h2 { margin: 8px 0 4px; font-size: 16px; }
+.empty-state p { margin: 0; color: var(--text-muted); }
+
+.skeleton-card {
+    padding: 20px;
+    background: var(--surface);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+}
+
+.skeleton-line {
+    height: 12px;
+    margin-bottom: 12px;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #eef2f7 25%, #e2e8f0 50%, #eef2f7 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.3s infinite;
+}
+
+.skeleton-line.w-40 { width: 40%; }
+.skeleton-line.w-70 { width: 70%; }
+
+@keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* ---- plan / item ---- */
+
+.plan-card { margin-bottom: 1.75rem; }
+
+.plan-head {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    margin-bottom: 0.75rem;
+}
+
+.plan-head h2 { margin: 0; font-size: 1.05rem; font-weight: 700; }
+
+/* SAME ACCORDION AS THE PRODUCTION WIDGET. The three widgets share these class
+   names and the supervisor / store cards are the reference - this block is
+   copied from app/supervisor/css/style.css so an item card reads identically
+   across all of them. */
+.item-card {
+    margin-bottom: 12px;
+    background: #ffffff;
+    border-radius: 4px;
+    border: 1px solid #cbd5e1;
+    box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
+    overflow: hidden;
+    scroll-margin-top: 5rem;
+}
+
+.item-header {
+    padding: 0.85rem 1.15rem;
+    background-color: #f8fafc;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.15s ease;
+}
+
+.item-header:hover { background-color: #f1f5f9; }
+.item-card:not(.open) .item-header { border-bottom: none; }
+
+.item-title-row { display: flex; align-items: center; gap: 0.75rem; }
+
+.item-serial {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.85rem;
+    height: 1.85rem;
+    border-radius: 50%;
+    background: #eff6ff;
+    color: var(--primary);
+    border: 1px solid #bfdbfe;
+    flex: 0 0 auto;
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.item-header-info h2 { margin: 0; font-size: 1rem; font-weight: 700; color: var(--text-main); }
+.item-sku-line { font-size: 0.75rem; color: var(--text-muted); font-family: var(--mono); margin-top: 0.25rem; }
+
+.item-meta-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    margin-top: 0.35rem;
+    font-weight: 500;
+}
+
+/* Ordered / produced count, and the item status - as pills, the same treatment
+   the production widget gives its "N pcs to produce" and status badge. */
+.item-qty {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--primary);
+    background: rgba(37, 99, 235, 0.1);
+    padding: 0.35rem 0.85rem;
+    border-radius: 9999px;
+    white-space: nowrap;
+}
+
+.item-status-badge {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #7c3aed;
+    background: #7c3aed15;
+    padding: 0.1rem 0.5rem;
+    border-radius: 1rem;
+}
+
+/* Round target with an inline SVG inside - the same shape the store and
+   supervisor widgets use. */
+.chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    color: var(--primary);
+    background: rgba(255, 255, 255, 0.75);
+    box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.25);
+    transition: transform 0.2s ease, background-color 0.15s ease;
+}
+.chevron svg { width: 0.95rem; height: 0.95rem; display: block; }
+.item-header:hover .chevron { background: #ffffff; box-shadow: inset 0 0 0 1px var(--primary); }
+/* DIRECT CHILD HEADER ONLY. As a plain descendant selector this rotated every
+   .chevron inside an open card - including the per-row toggles in the answer
+   table, so collapsed rows pointed up and open ones pointed down. */
+.item-card.open > .item-header .chevron { transform: rotate(90deg); }
+
+.item-body { display: none; padding: 1rem 1.25rem; }
+.item-card.open .item-body { display: block; }
+
+/* ---- one material line ---- */
+
+.line {
+    margin-bottom: 18px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.line:last-child { margin-bottom: 0; }
+
+.line-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    background: #f8fafc;
+    border-bottom: 1px solid var(--border);
+}
+
+.line-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.line-head-right { display: flex; gap: 6px; }
+.sku { font-size: 11px; color: var(--text-muted); font-family: var(--mono); }
+
+.line-plain { padding-bottom: 14px; }
+.line-plain .calc,
+.line-plain .check,
+.line-plain .stock-line { margin: 12px 16px 0; }
+
+/* ---- a step ---- */
+
+.step {
+    padding: 14px 16px 16px;
+    border-top: 3px solid transparent;
+}
+
+.step + .step { border-top-width: 1px; border-top-color: var(--border); }
+.step-plan { border-left: 3px solid var(--plan); }
+.step-issue { border-left: 3px solid var(--issue); }
+.step-waste { border-left: 3px solid var(--waste); }
+.step-issued { border-left: 3px solid var(--issued); }
+
+.step-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.step-head h4 { margin: 0; font-size: 13px; font-weight: 700; }
+
+/* PREDICTED vs RECORDED, the one distinction worth carrying in a heading.
+   .step-note — a full sentence of subtitle under every step, on every material,
+   on every item — is gone; this is what survived of it, because a remnant table
+   read as a record rather than a forecast sends somebody looking for pieces
+   that do not exist yet. */
+.step-qual {
+    margin-left: 6px;
+    padding: 1px 6px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: var(--bg-color);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    vertical-align: middle;
+}
+
+/* Which of the four numbered steps this line does not have, and why. The steps
+   are numbered, so a working that jumps 1 -> 4 reads as a fault without it. */
+.steps-skipped {
+    padding: 8px 16px 12px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    border-top: 1px dashed var(--border);
+}
+
+.steps-skipped b { font-weight: 600; color: var(--text-muted); }
+
+.step-tag {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #fff;
+    border-radius: 5px;
+}
+
+.tag-plan { background: var(--plan); }
+.tag-issue { background: var(--issue); }
+.tag-waste { background: var(--waste); }
+.tag-issued { background: var(--issued); }
+
+.sub {
+    margin: 16px 0 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+/* ---- inputs to a calculation ---- */
+
+.inputs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.input-chip {
+    padding: 7px 12px;
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.input-chip span {
+    display: block;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.input-chip b { font-size: 13px; font-family: var(--mono); }
+.input-chip.strong { background: var(--issue-bg); border-color: #a5f3fc; }
+
+/* ---- the working itself ---- */
+
+.calc {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.calc-row {
+    display: grid;
+    grid-template-columns: 190px 1fr 190px;
+    gap: 12px;
+    align-items: center;
+    padding: 9px 14px;
+    background: var(--surface);
+}
+
+.calc-row + .calc-row { border-top: 1px solid var(--border); }
+.calc-row:nth-child(odd) { background: #fbfcfe; }
+
+.calc-label { font-size: 12px; color: var(--text-muted); }
+
+.calc-expr,
+.expr {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-main);
+}
+
+.calc-result {
+    text-align: right;
+    font-family: var(--mono);
+    font-size: 13px;
+}
+
+.calc-result b { color: var(--primary); }
+
+@media (max-width: 720px) {
+    .calc-row { grid-template-columns: 1fr; gap: 2px; }
+    .calc-result { text-align: left; }
+}
+
+/* ---- verdicts and notes ---- */
+
+.check {
+    margin-top: 10px;
+    padding: 9px 12px;
+    font-size: 12px;
+    border-radius: 6px;
+}
+
+.check.ok { background: var(--status-success-bg); color: #065f46; }
+.check.bad { background: var(--status-danger-bg); color: #991b1b; }
+
+/* Neither a match nor a discrepancy: a reissue is costed from the pieces
+   reported spoiled, not from the order, so there is nothing here to agree or
+   disagree with. Amber keeps it distinct from both. */
+.check.note { background: #fef3c7; color: #92400e; }
+
+.aside {
+    margin-top: 10px;
+    padding: 9px 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+    background: #f8fafc;
+    border-left: 2px solid var(--border);
+    border-radius: 0 6px 6px 0;
+}
+
+.warn {
+    margin-top: 10px;
+    padding: 9px 12px;
+    font-size: 12px;
+    color: #92400e;
+    background: var(--status-warning-bg);
+    border-radius: 6px;
+}
+
+.warn.top { margin: 0 0 16px; }
+
+.stock-line {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.yield {
+    margin-top: 10px;
+    padding: 10px 12px;
+    font-size: 12px;
+    background: var(--waste-bg);
+    border-radius: 6px;
+}
+
+/* ---- tables ---- */
+
+.table-wrapper {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+th {
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: #f8fafc;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+}
+
+tr:last-child td { border-bottom: 0; }
+
+/* Dimmed rather than hidden. A remnant that was NOT offered is the thing an
+   admin came to ask about, so it has to stay on the page. */
+tr.dim td { opacity: 0.55; }
+tr.mine { background: #eff6ff; box-shadow: inset 3px 0 0 var(--primary); }
+
+/* ---- pills ---- */
+
+.pill {
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.pill-plain { background: #f1f5f9; color: var(--text-muted); }
+.pill-cut { background: var(--plan-bg); color: #3730a3; font-family: var(--mono); }
+.pill-status { background: var(--status-warning-bg); color: #92400e; }
+.pill-mine { background: var(--primary); color: #fff; }
+.pill-side { background: #dbeafe; color: #1e40af; }
+.pill-tail { background: #fce7f3; color: #9d174d; }
+.pill-partial_row { background: var(--status-warning-bg); color: #92400e; }
+
+/* ---- the typed quantity ---- */
+
+.qty-box {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    background: var(--waste-bg);
+    border: 1px solid #fde68a;
+    border-radius: 6px;
+}
+
+.qty-box label { font-size: 12px; font-weight: 600; }
+.qty-box .muted { font-size: 11px; }
+
+.qty-input {
+    width: 90px;
+    padding: 6px 10px;
+    font: inherit;
+    font-family: var(--mono);
+    font-size: 13px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+}
+
+.qty-input:focus {
+    outline: none;
+    border-color: var(--waste);
+    box-shadow: 0 0 0 2px rgb(217 119 6 / 0.15);
+}
+
+.chk { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+/* ---- answer table: the screen. Working lives behind the chevron. ---- */
+.ans-table th { white-space: nowrap; }
+.ans-table td.ans-mat { line-height: 1.35; }
+.ans-table td.ans-mat .sku { margin-left: 0.4rem; }
+.ans-table td.strong { font-weight: 700; }
+.ans-row:hover { background: #f6f9ff; }
+
+/* Only Planned vs Stored carry a verdict — they are the same calculation. */
+.chk-ok   { color: #15803d; font-weight: 700; }
+.chk-bad  { color: #b91c1c; font-weight: 700; }
+.chk-note { color: var(--text-muted); }
+
+/* A real button, not a decoration. 2rem square so it is comfortably clickable
+   in a dense table, and the chevron inside is the shared 1rem SVG. */
+.ans-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    border: 1px solid var(--border);
+    background: #ffffff;
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--primary);
+}
+/* The shared .chevron now carries the supervisor widget's pill background +
+   inset ring (to match the item-card accordion). Inside .ans-toggle - which is
+   already a bordered button - that would double the frame, so clear it here. */
+.ans-toggle .chevron { width: 100%; height: 100%; border-radius: 0; background: none; box-shadow: none; }
+.ans-toggle .chevron svg { width: 1.05rem; height: 1.05rem; stroke-width: 2.5; }
+.ans-toggle:hover { border-color: var(--primary); background: #f2f7ff; }
+.ans-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* OPEN STATE IS A TINT, NOT A FILL.
+   It was a solid var(--primary) background with color:#fff on the button - but
+   .chevron sets color: var(--primary) on the span itself, which beats a colour
+   inherited from the parent. The SVG strokes with currentColor, so it painted
+   itself blue on a blue background and the button rendered as a plain blue
+   square with no icon in it.
+   A tint cannot hide the chevron whatever currentColor resolves to, and it is
+   the right weight anyway: the open row already announces itself with the blue
+   left border on the working panel, so a filled button was saying it twice. */
+.ans-toggle.is-open { background: #e8f0ff; border-color: var(--primary); }
+.ans-toggle.is-open .chevron { transform: rotate(180deg); color: var(--primary); }
+
+.work-row > td { background: #fbfcfe; padding: 0.75rem 0.9rem; }
+
+/* ---- order picker filter ---- */
+.so-filter {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: inherit;
+    font-size: 0.875rem;
+    min-width: 11rem;
+}
+.so-count {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-family: monospace;
+    white-space: nowrap;
+}
+
+/* Planned offcut reuse. Green throughout the app — reuse is the good outcome. */
+.offcut-cell b { color: #15803d; }
+
+/* ---- answer table, layout fixes ----
+   .ans-legend, not .legend: that class is already a three-column grid further
+   up this file, and reusing it turned a paragraph into a grid where every text
+   node became a cell. */
+.ans-legend {
+    display: block;
+    line-height: 1.55;
+    margin-top: 0.5rem;
+}
+
+/* Name on one line, code and cut size beneath. As a single inline run the cut
+   size wrapped mid-phrase ("55 x 55 cm / cut") and the cell read as ragged
+   prose instead of a name with a subtitle. Same shape as mat-name / mat-sku
+   on the store screen. */
+.ans-table td.ans-mat { min-width: 15rem; }
+.ans-name { font-weight: 700; line-height: 1.3; }
+.ans-sub {
+    font-family: monospace;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 1px;
+    white-space: nowrap;
+}
+
+/* Figures line up digit for digit - this is an audit screen and the columns are
+   read down, not across. */
+.ans-table td.r { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* The working belongs to the row above it. Without the accent it floated
+   between two rows and it was not obvious which one it explained. */
+.work-row > td {
+    border-left: 3px solid var(--primary);
+    box-shadow: inset 0 1px 0 var(--border);
+}
+
+/* ---- tabs ---- */
+.tab-strip {
+    display: flex;
+    gap: 4px;
+    margin: 0 0 16px;
+    border-bottom: 1px solid var(--border);
+}
+.tab-btn {
+    border: 0;
+    background: none;
+    padding: 9px 16px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+}
+.tab-btn:hover { color: var(--primary); }
+.tab-btn.is-active { color: var(--primary); border-bottom-color: var(--primary); }
+.tab-panel { display: none; }
+.tab-panel.is-active { display: block; }
+
+/* ---- material used ---- */
+
+/* The visual break between what the order SPENT and what merely happened to it.
+   The right-hand group is reported, not netted, and a plain column border is
+   what stops someone reading across and subtracting. */
+.used-table th.used-sep, .used-table td.used-sep { border-left: 2px solid var(--border); }
+
+.used-row:hover { background: #f6f9ff; }
+.is-muted { color: #cbd5e1; }
+.is-lost { color: #b91c1c; }
+/* An offcut is green throughout the app - reuse is the good outcome. */
+.is-reuse { color: #15803d; }
+
+.var-over { color: #b45309; font-weight: 700; }
+.var-under { color: #15803d; font-weight: 700; }
+.var-none { color: var(--text-muted); }
+
+.reason-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.reason-line + .reason-line { border-top: 1px solid var(--border); }
+.reason-line b { color: var(--text); font-family: monospace; }
+.reason-tag {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: #eef2f7;
+    color: var(--text-muted);
+}
+.reason-tag.is-lost { background: #fee2e2; color: #b91c1c; }
+.reason-tag.is-reuse { background: #dcfce7; color: #15803d; }
+.reason-tag.is-cutting { background: #ffedd5; color: #b45309; }
+.reason-tag.is-fact { background: #e8f0ff; color: var(--primary); }
+/* Damage is somebody ruining material, which is not the same event as a
+   write-off nobody can account for - so it is its own colour rather than
+   borrowing the Lost red. Amber-red: worse than the cutting allowance beside
+   it, not as final as a loss. */
+.reason-tag.is-damage { background: #fee4e2; color: #c2410c; }
+.reason-looked { font-style: italic; }
+
+/* WHO DID IT, AND WHERE. On a damage line this carries the name, the stage and
+   the reason, and it is the whole point of opening the row - so it gets its own
+   line rather than trailing off the end of a run of small spans. */
+.reason-line .reason-looked { flex: 1 1 100%; }
+
+/* The lot an order is committed to. Narrow: it holds a short lot number and
+   at most one qualifying word, and it must not push the numbers off screen. */
+.lot-cell {
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+/* ---- Mobile Responsiveness for Order Audit Admin Widget (Mobile View Only: Max-Width 768px) ---- */
+@media (max-width: 768px) {
+    .app-container {
+        padding: 0.35rem 0.4rem !important;
+    }
+
+    .app-header {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 8px !important;
+        padding: 8px 0 !important;
+        margin-bottom: 8px !important;
+    }
+
+    .app-header-left {
+        display: flex !important;
+        justify-content: space-between !important;
+        align-items: baseline !important;
+        width: 100% !important;
+    }
+
+    .app-header h1 {
+        font-size: 1.25rem !important;
+    }
+
+    .app-header-right {
+        width: 100% !important;
+        display: flex !important;
+        flex-wrap: wrap !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        gap: 8px !important;
+    }
+
+    .so-filter,
+    .sup-select {
+        flex: 1 1 100% !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        height: 38px !important;
+        font-size: 13px !important;
+        padding: 6px 12px !important;
+        border-radius: 6px !important;
+    }
+
+    .app-header-right .so-count {
+        font-size: 12px !important;
+        color: var(--text-muted) !important;
+        font-weight: 500 !important;
+    }
+
+    .app-header-right .primary-btn {
+        height: 36px !important;
+        padding: 0 14px !important;
+        font-size: 13px !important;
+        white-space: nowrap !important;
+    }
+
+    .tab-strip {
+        display: flex !important;
+        width: 100% !important;
+        gap: 4px !important;
+        margin-bottom: 10px !important;
+        border-bottom: 2px solid var(--border) !important;
+    }
+
+    .tab-strip .tab-btn {
+        flex: 1 1 0 !important;
+        text-align: center !important;
+        padding: 8px 10px !important;
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        min-height: 36px !important;
+        white-space: nowrap !important;
+    }
+
+    /* The legend cards this block stacked no longer exist — they were four
+       glossary panels above the data, and on a phone they were the entire first
+       screen. Removed with them. */
+
+    .plan-card {
+        margin-bottom: 14px !important;
+    }
+
+    .item-card {
+        margin-bottom: 8px !important;
+        border-radius: 8px !important;
+    }
+
+    .item-header {
+        padding: 10px 12px !important;
+        gap: 8px !important;
+    }
+
+    .item-title-row {
+        gap: 8px !important;
+    }
+
+    .table-wrapper {
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        width: 100% !important;
+        border-radius: 6px !important;
+        border: 1px solid var(--border) !important;
+        margin-top: 6px !important;
+    }
+
+    .calc-block, .used-table, .calc-table {
+        min-width: 480px !important;
+    }
+
+    .used-table th, .used-table td,
+    .calc-table th, .calc-table td {
+        padding: 6px 8px !important;
+        font-size: 12px !important;
+    }
+
+    .reason-line {
+        padding: 5px 0 !important;
+        gap: 6px !important;
+    }
+
+    /* Item body & raw material breakdown lines on mobile */
+    .item-body {
+        padding: 10px 8px !important;
+    }
+
+    .line {
+        margin-bottom: 12px !important;
+        border-radius: 6px !important;
+    }
+
+    .line-head {
+        padding: 8px 10px !important;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        gap: 4px !important;
+    }
+
+    .line-head-right {
+        width: 100% !important;
+    }
+
+    .line-plain {
+        padding-bottom: 8px !important;
+    }
+
+    .line-plain .calc,
+    .line-plain .check,
+    .line-plain .stock-line {
+        margin: 8px 4px 0 !important;
+    }
+
+    .step {
+        padding: 10px 8px !important;
+    }
+
+    /* Stays a single row now. It was stacked into a column purely to give
+       .step-note — a full sentence of subtitle — a line of its own; the heading
+       that remains is a tag, a title and one small qualifier, which fits. */
+    .step-head {
+        margin-bottom: 8px !important;
+    }
+
+    /* Stack stat input chips vertically on mobile */
+    .inputs {
+        display: flex !important;
+        flex-direction: column !important;
+        width: 100% !important;
+        gap: 6px !important;
+        margin-bottom: 8px !important;
+    }
+
+    .input-chip {
+        width: 100% !important;
+        max-width: 100% !important;
+        padding: 6px 10px !important;
+        border-radius: 6px !important;
+        box-sizing: border-box !important;
+    }
+
+    /* Working calculation rows on mobile */
+    .calc {
+        border-radius: 6px !important;
+        width: 100% !important;
+    }
+
+    .calc-row {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        gap: 4px !important;
+        padding: 8px 10px !important;
+        width: 100% !important;
+    }
+
+    .calc-label {
+        font-size: 11px !important;
+        font-weight: 600 !important;
+        color: var(--text-muted) !important;
+    }
+
+    .calc-expr,
+    .expr {
+        font-size: 12px !important;
+        width: 100% !important;
+        word-break: break-word !important;
+        overflow-wrap: anywhere !important;
+    }
+
+    .calc-result {
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        text-align: left !important;
+        width: 100% !important;
+    }
+
+    .check,
+    .aside {
+        margin-top: 8px !important;
+        padding: 8px 10px !important;
+        font-size: 12px !important;
+        border-radius: 6px !important;
+    }
+}

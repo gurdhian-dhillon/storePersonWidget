@@ -1,8 +1,9 @@
-/* Production & Stock Dashboard — the layer on top of ../css/style.css.
-   Everything shared (tokens, Inter + the 16px type scale, header, tabs,
-   .table-wrapper, .pill, .chevron, .ans-toggle, .empty-state, .work-row) comes
-   from there, so this screen reads as the same product as the Order Audit,
-   store and supervisor widgets. Only what this screen adds is below. */
+/* Production & Stock Dashboard — the layer on top of base.css (this widget's
+   own copy of the Order Audit stylesheet, not a live link to it). Everything
+   shared (tokens, Inter + the 16px type scale, header, tabs, .table-wrapper,
+   .pill, .chevron, .ans-toggle, .empty-state, .work-row) comes from there, so
+   this screen reads as the same product as the Order Audit, store and
+   supervisor widgets. Only what this screen adds is below. */
 
 /* Tab strip, matched to the supervisor / store widgets: a rounded, tinted
    active tab rather than the Order Audit's flat underline. The shared
