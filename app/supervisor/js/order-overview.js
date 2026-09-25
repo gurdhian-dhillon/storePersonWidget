@@ -378,7 +378,7 @@ function ovBodyHtml(planId) {
     var rows = items.map(function (it) {
         var st = ovItemStatus(it.status);
         return '<tr>' +
-            '<td class="material-name-cell"><div class="mat-name">' + escapeHtml(it.name || '—') + '</div></td>' +
+            '<td class="material-name-cell">' + itemIdentHtml(it) + '</td>' +
             '<td class="col-num col-strong">' + fmt(it.qty) +
                 '<span class="unit"> pcs</span></td>' +
             '<td><span class="status-pill ' + st.cls + '">' + escapeHtml(st.text) + '</span></td>' +

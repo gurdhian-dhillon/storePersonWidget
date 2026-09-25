@@ -48,6 +48,7 @@ vm.runInContext(
   grab('function ordChevId(') + '\n' +
   src.slice(src.indexOf('var CHEV_SVG'), src.indexOf(';', src.indexOf('var CHEV_SVG')) + 1) + '\n' +
   grab('function lotColumn(') + '\n' +
+  grab('function lotRollBlockHtml(') + '\n' +
   grab('function matBreakdownHtml(') + '\n' +
   'this.lotColumn = lotColumn;' +
   'this.matBreakdownHtml = matBreakdownHtml;',
@@ -55,21 +56,22 @@ vm.runInContext(
 
 // ---- lotColumn -----------------------------------------------------------
 
-test('lotColumn: single lot, no rolls (pre-Step-5) -> plain lot line, no roll sub-line', () => {
+test('lotColumn: single lot, no rolls (pre-Step-5) -> lot name + metres, no roll card', () => {
   const html = ctx.lotColumn({ isFabric: true, unit: 'Mtr', lots: [{ lot: 'L1', qty: 10, rolls: [] }] });
-  assert.ok(/<b>L1<\/b>/.test(html));
-  assert.ok(!/rcv-roll/.test(html), 'no roll sub-line when rolls[] is empty');
+  assert.ok(/lr-lot-name">L1<\/span><span class="lr-lot-sum">10 Mtr<\/span>/.test(html), html);
+  assert.ok(!/lr-roll"/.test(html), 'no roll card when rolls[] is empty');
 });
 
-test('lotColumn: single lot, ONE roll -> roll sub-line with label and qty', () => {
+test('lotColumn: single lot, ONE roll -> one card, metres first, "piece off <roll>"', () => {
   const html = ctx.lotColumn({
     isFabric: true, unit: 'Mtr',
     lots: [{ lot: 'L1', qty: 10, rolls: [{ roll: 'L1-R1', qty: 10 }] }]
   });
-  assert.ok(/rcv-roll"><b>L1-R1<\/b> &middot; 10 Mtr/.test(html), html);
+  assert.ok(/lr-len">10<span class="lr-unit">Mtr<\/span><\/span><span class="lr-from">piece off <b>L1-R1<\/b>/.test(html), html);
+  assert.ok(!/lr-lot-sum/.test(html), 'one roll: the card carries the metres, the head does not repeat them');
 });
 
-test('lotColumn: single lot, TWO rolls -> TWO roll sub-lines, in order', () => {
+test('lotColumn: single lot, TWO rolls -> two cards in drain order + "in 2 pieces"', () => {
   const html = ctx.lotColumn({
     isFabric: true, unit: 'Mtr',
     lots: [{ lot: 'L1', qty: 6.05, rolls: [{ roll: 'L1-R1', qty: 5 }, { roll: 'L1-R2', qty: 1.05 }] }]
@@ -77,6 +79,8 @@ test('lotColumn: single lot, TWO rolls -> TWO roll sub-lines, in order', () => {
   const idxR1 = html.indexOf('L1-R1');
   const idxR2 = html.indexOf('L1-R2');
   assert.ok(idxR1 >= 0 && idxR2 >= 0 && idxR1 < idxR2, 'both rolls present, in drain order');
+  assert.ok(/lr-lot-sum">6.05 Mtr in 2 pieces/.test(html), html);
+  assert.strictEqual((html.match(/class="lr-roll"/g) || []).length, 2);
 });
 
 test('lotColumn: TWO lots, each with its own roll -> rolls stay under their own lot', () => {
@@ -87,11 +91,25 @@ test('lotColumn: TWO lots, each with its own roll -> rolls stay under their own 
       { lot: 'L2', qty: 4, rolls: [{ roll: 'L2-R1', qty: 4 }] }
     ]
   });
-  const idxL1 = html.indexOf('L1<');
+  const idxL1 = html.indexOf('>L1<');
   const idxR1 = html.indexOf('L1-R1');
-  const idxL2 = html.indexOf('L2<');
+  const idxL2 = html.indexOf('>L2<');
   const idxR2 = html.indexOf('L2-R1');
   assert.ok(idxL1 < idxR1 && idxR1 < idxL2 && idxL2 < idxR2, 'L1 roll appears before L2, not after both lots');
+  assert.strictEqual((html.match(/class="lr-lot"/g) || []).length, 2);
+});
+
+test('lotColumn: PRINT lot of many short rolls -> one card each, all under one lot', () => {
+  const rolls = [1.2, 1.35, 0.9, 1.1, 1.25, 0.8, 1.4, 1.0].map((q, i) => ({ roll: 'P1-R' + (i + 1), qty: q }));
+  const total = rolls.reduce((a, r) => a + r.qty, 0);
+  const html = ctx.lotColumn({ isFabric: true, unit: 'Mtr', lots: [{ lot: 'P1', qty: total, rolls }] });
+  assert.strictEqual((html.match(/class="lr-roll"/g) || []).length, 8);
+  assert.ok(/in 8 pieces/.test(html));
+});
+
+test('lotColumn: a roll with no metres recorded still shows, with a dash', () => {
+  const html = ctx.lotColumn({ isFabric: true, unit: 'Mtr', lots: [{ lot: 'L1', qty: 3, rolls: [{ roll: 'R9', qty: 0 }] }] });
+  assert.ok(/lr-len">&mdash;<\/span><span class="lr-from">piece off <b>R9/.test(html), html);
 });
 
 test('lotColumn: no lots at all -> "-" placeholder, unaffected by the roll change', () => {

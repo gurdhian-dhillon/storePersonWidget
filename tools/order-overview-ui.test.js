@@ -106,8 +106,26 @@ function makeCtx() {
   return ctx;
 }
 
+// itemIdentHtml is a page global from receive.js (loaded before this file in
+// widget.html). Pull the REAL one in rather than stubbing it, so the rows are
+// asserted against what the page actually draws.
+const recvSrc = fs.readFileSync(
+  path.join(__dirname, '..', 'app', 'supervisor', 'js', 'receive.js'), 'utf8');
+function grabFn(code, sig) {
+  const i = code.indexOf(sig);
+  if (i < 0) throw new Error('not found: ' + sig);
+  let d = 0, st = false;
+  for (let j = i; j < code.length; j++) {
+    if (code[j] === '{') { d++; st = true; }
+    else if (code[j] === '}') { d--; if (st && d === 0) return code.slice(i, j + 1); }
+  }
+  throw new Error('unbalanced: ' + sig);
+}
+const itemIdentSrc = grabFn(recvSrc, 'function itemIdentHtml(');
+
 function load(ctx) {
   vm.createContext(ctx);
+  vm.runInContext(itemIdentSrc, ctx, { filename: 'receive.js#itemIdentHtml' });
   vm.runInContext(src, ctx, { filename: 'order-overview.js' });
   return ctx;
 }
@@ -322,6 +340,25 @@ test('ovBodyHtml: renders items + remake note when remakeCount > 0', () => {
   assert.ok(/In production/.test(html), 'In_Production mapped to label');
   assert.ok(/Completed/.test(html), 'Complete mapped to label');
   assert.ok(/2 remake batches in progress/.test(html), 'remake note shown');
+});
+
+test('ovBodyHtml: each item shows SKU, size and colour under its name', () => {
+  const ctx = load(makeCtx());
+  ctx.OV_ITEM_CACHE['9'] = {
+    state: 'ok',
+    items: [
+      { name: 'Linen Evadne Duvet Cover', sku: 'DCBPEVA-5IND-1', size: "102'X 94' / 260 X 240 cm KING", color: 'Mustard & Purple', qty: 2, produced: 0, status: 'Awaiting_Material' },
+      { name: 'Runner', qty: 2, produced: 0, status: 'Complete' },
+    ],
+    remakeCount: 0,
+  };
+  const html = ctx.ovBodyHtml('9');
+  assert.ok(/ii-name">Linen Evadne Duvet Cover</.test(html), html);
+  assert.ok(/ii-sku">DCBPEVA-5IND-1</.test(html));
+  assert.ok(/ii-attr">102&#39;X 94&#39; \/ 260 X 240 cm KING</.test(html), 'size, escaped');
+  assert.ok(/ii-attr">Mustard &amp; Purple</.test(html), 'colour, escaped');
+  const runnerRow = html.slice(html.indexOf('Runner'));
+  assert.ok(!/ii-attrs/.test(runnerRow.slice(0, runnerRow.indexOf('</td>'))), 'no empty chip row when nothing is known');
 });
 
 test('ovOpenInProduction: stops propagation, sets hint, switches tab', () => {

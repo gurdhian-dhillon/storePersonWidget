@@ -7071,17 +7071,22 @@ function histMaterialGroups(h) {
         var lot = l.lot || '';
         var lk = lot || '(no lot)';
         if (!g.freshByLot[lk]) {
-            // roll: which physical roll(s) this lot's cloth came off, lot-
-            // rolls-model.md Step 5 - one label, or several joined "L2-R1
-            // 5m, L2-R2 1.05m". Carried as the raw string getStoreIssueHistory
-            // emits; a line grouped into an existing lot bucket keeps the
-            // FIRST line's roll rather than concatenating several, same as
-            // every other per-lot field here is a snapshot, not a merge.
-            g.freshByLot[lk] = { lot: lot, roll: l.roll || '', qty: 0 };
+            // rolls: every physical roll this lot's cloth came off, summed
+            // ACROSS LINES - a lot fanned over several plan-items is several
+            // Issue_Lines, each naming the roll(s) its own share came off.
+            // (It used to keep the first line's raw Roll_Label string and drop
+            // the rest, so a lot cut from three rolls could show one.)
+            g.freshByLot[lk] = { lot: lot, qty: 0, rolls: {}, rollOrder: [] };
             g.freshOrder.push(lk);
         }
-        g.freshByLot[lk].qty += Number(l.qty) || 0;
-        g.total += Number(l.qty) || 0;
+        var fb = g.freshByLot[lk];
+        var lineQty = Number(l.qty) || 0;
+        fb.qty += lineQty;
+        g.total += lineQty;
+        histParseRolls(l.roll, lineQty).forEach(function (r) {
+            if (!(r.label in fb.rolls)) { fb.rolls[r.label] = 0; fb.rollOrder.push(r.label); }
+            fb.rolls[r.label] = Math.round((fb.rolls[r.label] + r.mtr) * 100) / 100;
+        });
     });
 
     (h.waste || []).forEach(function (w) {
@@ -7094,6 +7099,59 @@ function histMaterialGroups(h) {
     });
 
     return order.map(function (k) { return byKey[k]; });
+}
+
+// Issue_Lines.Roll_Label -> [{label, mtr}]. One roll is a bare label ("R2",
+// "L1-R2") and the line's whole quantity came off it; several are joined
+// "L2-R1 5m, L2-R2 1.05m" with each roll's own metres. A segment in a multi-roll
+// label with no parseable metres keeps its label at 0 m rather than guessing a
+// share. Same parsing the supervisor's handover-detail.js parseRollLabel does.
+function histParseRolls(label, lineQty) {
+    var txt = String(label == null ? '' : label).trim();
+    if (!txt) return [];
+    var segs = txt.split(',').map(function (x) { return x.trim(); }).filter(function (x) { return x; });
+    var out = segs.map(function (t) {
+        var noM = t.slice(-1) === 'm' ? t.slice(0, -1) : t;
+        var sp = noM.lastIndexOf(' ');
+        if (sp > 0) {
+            var num = noM.slice(sp + 1).trim();
+            if (num !== '' && !isNaN(Number(num))) {
+                return { label: noM.slice(0, sp).trim(), mtr: Number(num), parsed: true };
+            }
+        }
+        return { label: t, mtr: 0, parsed: false };
+    });
+    if (out.length === 1 && !out[0].parsed) out[0].mtr = Number(lineQty) || 0;
+    return out.map(function (r) { return { label: r.label, mtr: r.mtr }; });
+}
+
+// WHAT THE STORE CUT, ONE CARD PER ROLL, per lot. The metres lead each card -
+// "5 m cut off R2" is the record of what left the rack - and the label is the
+// qualifier under it. Same block the supervisor's Receive tab draws for the
+// same cloth ("5 m piece off R2"), so both sides read one handover the same
+// way. A lot over several rolls says its total and how many cuts made it; the
+// cards wrap, so a printed lot of many short rolls stays a compact grid. A lot
+// with no roll recorded (issued before rolls existed) is its name and metres.
+function histLotRollHtml(f, unit) {
+    var u = escapeHtml(unit || '');
+    var labels = f.rollOrder || [];
+    var n = labels.length;
+    var head = '<div class="lr-lot-head">' +
+        (f.lot ? '<span class="lr-lot-name">' + escapeHtml(f.lot) + '</span>' : '') +
+        ((n !== 1)
+            ? '<span class="lr-lot-sum">' + fmt(f.qty) + ' ' + u + (n > 1 ? ' in ' + n + ' cuts' : '') + '</span>'
+            : '') +
+        '</div>';
+    var cards = n
+        ? '<div class="lr-rolls">' + labels.map(function (lbl) {
+            var q = Number(f.rolls[lbl]) || 0;
+            return '<div class="lr-roll">' +
+                '<span class="lr-len">' + (q > 0 ? fmt(q) + '<span class="lr-unit">' + u + '</span>' : '&mdash;') + '</span>' +
+                '<span class="lr-from">cut off <b>' + escapeHtml(lbl) + '</b></span>' +
+                '</div>';
+        }).join('') + '</div>'
+        : '';
+    return '<div class="lr-lot">' + head + cards + '</div>';
 }
 
 function histDistinctMaterialCount(h) {
@@ -7110,17 +7168,18 @@ function histMaterialRows(h) {
         var stack = g.freshOrder.map(function (lk) {
             var f = g.freshByLot[lk];
             // Lot only qualifies fabric — thread and labels are issued by count
-            // off no roll, so their line is just the quantity, no "no lot" tag.
-            // Roll sub-line under it, same convention the issue screen's own
-            // rollLinesFor uses — absent for a pre-Step-5 handover, and for
-            // non-fabric (no lot means no roll either).
-            return '<div class="hist-src-line">' +
-                (f.lot ? '<span class="hist-lot">' + escapeHtml(f.lot) + '</span> ' : '') +
-                '<span class="hist-src-qty">' + fmt(f.qty) +
-                '<span class="unit">' + escapeHtml(g.unit || '') + '</span></span>' +
-                (f.roll ? '<div class="hist-roll">' + escapeHtml(f.roll) + '</div>' : '') +
-                '</div>';
+            // off no roll, so their line is just the quantity, no lot block.
+            if (!f.lot && !(f.rollOrder || []).length) {
+                return '<div class="hist-src-line">' +
+                    '<span class="hist-src-qty">' + fmt(f.qty) +
+                    '<span class="unit">' + escapeHtml(g.unit || '') + '</span></span>' +
+                    '</div>';
+            }
+            return histLotRollHtml(f, g.unit);
         });
+        if (stack.length && g.freshOrder.some(function (lk) { return g.freshByLot[lk].lot; })) {
+            stack = ['<div class="lr">' + stack.join('') + '</div>'];
+        }
         g.waste.forEach(function (w) {
             var size = (w.cutWidth > 0 && w.cutLength > 0)
                 ? fmt(w.cutLength) + ' &times; ' + fmt(w.cutWidth) + '<span class="unit">cm</span>'

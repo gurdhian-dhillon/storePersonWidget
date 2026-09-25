@@ -41,12 +41,15 @@ const ctx = {
 };
 vm.createContext(ctx);
 vm.runInContext(
+  grab('function histParseRolls(') + '\n' +
+  grab('function histLotRollHtml(') + '\n' +
   grab('function histMaterialGroups(') + '\n' +
   grab('function histDistinctMaterialCount(') + '\n' +
   grab('function histMaterialRows(') + '\n' +
   'this.histMaterialGroups = histMaterialGroups;' +
   'this.histDistinctMaterialCount = histDistinctMaterialCount;' +
-  'this.histMaterialRows = histMaterialRows;',
+  'this.histMaterialRows = histMaterialRows;' +
+  'this.histParseRolls = histParseRolls;',
   ctx);
 
 // ---- fixture: one handover, thread fanned across 6 plan-items on 2 lots,
@@ -82,38 +85,72 @@ test('fresh lines group by lot within a material, qty summed', () => {
   assert.strictEqual(linen.freshByLot['L3'].qty, 4);
 });
 
-test('ROLL: a lot line carries its roll label through to the group', () => {
+test('ROLL: a single-roll line credits its whole qty to that roll', () => {
   const h = handover();
   h.lines[3].roll = 'L1-R1'; // the first L1 line (12.5)
   const linen = ctx.histMaterialGroups(h).find((x) => x.sku === 'RM-01');
-  assert.strictEqual(linen.freshByLot['L1'].roll, 'L1-R1');
+  assert.deepStrictEqual([...linen.freshByLot['L1'].rollOrder], ['L1-R1']);
+  assert.strictEqual(linen.freshByLot['L1'].rolls['L1-R1'], 12.5);
 });
 
-test('ROLL: a lot bucket keeps the FIRST line\'s roll, does not concatenate a second', () => {
+test('ROLL: two lines of one lot on two rolls keep BOTH rolls (used to drop the second)', () => {
   const h = handover();
-  h.lines[3].roll = 'L1-R1'; // first L1 line
-  h.lines[4].roll = 'L1-R2'; // second L1 line, same lot bucket
+  h.lines[3].roll = 'L1-R1'; // 12.5
+  h.lines[4].roll = 'L1-R2'; // 7.5
   const linen = ctx.histMaterialGroups(h).find((x) => x.sku === 'RM-01');
-  assert.strictEqual(linen.freshByLot['L1'].roll, 'L1-R1', 'snapshot of the first line, not a merge');
+  assert.deepStrictEqual([...linen.freshByLot['L1'].rollOrder], ['L1-R1', 'L1-R2']);
+  assert.strictEqual(linen.freshByLot['L1'].rolls['L1-R2'], 7.5);
   assert.strictEqual(linen.freshByLot['L1'].qty, 20, 'qty still sums across both lines');
 });
 
-test('ROLL: a lot line with NO roll (pre-Step-5 handover) leaves roll empty, nothing else affected', () => {
-  const linen = ctx.histMaterialGroups(handover()).find((x) => x.sku === 'RM-01');
-  assert.strictEqual(linen.freshByLot['L1'].roll, '');
-  assert.strictEqual(linen.freshByLot['L1'].qty, 20);
+test('ROLL: two lines on the SAME roll sum onto one card', () => {
+  const h = handover();
+  h.lines[3].roll = 'R4';
+  h.lines[4].roll = 'R4';
+  const linen = ctx.histMaterialGroups(h).find((x) => x.sku === 'RM-01');
+  assert.deepStrictEqual([...linen.freshByLot['L1'].rollOrder], ['R4']);
+  assert.strictEqual(linen.freshByLot['L1'].rolls['R4'], 20);
 });
 
-test('ROLL: rendered history shows the roll as a sub-line under the lot', () => {
+test('ROLL: a multi-roll label splits by its own metres, and sums with other lines', () => {
+  const h = handover();
+  h.lines[3].roll = 'L1-R1 5m, L1-R2 7.5m'; // 12.5 over two rolls
+  h.lines[4].roll = 'L1-R2 7.5m';           // 7.5 more off R2
+  const linen = ctx.histMaterialGroups(h).find((x) => x.sku === 'RM-01');
+  assert.strictEqual(linen.freshByLot['L1'].rolls['L1-R1'], 5);
+  assert.strictEqual(linen.freshByLot['L1'].rolls['L1-R2'], 15);
+});
+
+test('ROLL: no roll recorded (pre-rolls handover) -> no roll cards, lot and qty only', () => {
+  const linen = ctx.histMaterialGroups(handover()).find((x) => x.sku === 'RM-01');
+  assert.strictEqual(linen.freshByLot['L1'].rollOrder.length, 0);
+  const html = ctx.histMaterialRows(handover());
+  assert.ok(!/lr-roll"/.test(html), 'no roll card');
+  assert.ok(/lr-lot-name">L1<\/span><span class="lr-lot-sum">20 Mtr<\/span>/.test(html), html);
+});
+
+test('ROLL: rendered card leads with the metres, then "cut off <roll>"', () => {
   const h = handover();
   h.lines[3].roll = 'L1-R1';
+  h.lines[4].roll = 'L1-R2';
   const html = ctx.histMaterialRows(h);
-  assert.ok(/hist-roll">L1-R1<\/div>/.test(html), html);
+  assert.ok(/lr-len">12.5<span class="lr-unit">Mtr<\/span><\/span><span class="lr-from">cut off <b>L1-R1<\/b>/.test(html), html);
+  assert.ok(/lr-lot-sum">20 Mtr in 2 cuts/.test(html), 'lot total + number of cuts');
 });
 
-test('ROLL: no render output at all when the line carries no roll', () => {
-  const html = ctx.histMaterialRows(handover());
-  assert.ok(!/hist-roll/.test(html), 'no roll sub-line for a pre-Step-5 handover');
+test('ROLL: one roll -> no repeated total in the lot head (the card says it)', () => {
+  const h = handover();
+  h.lines[3].roll = 'R2';
+  h.lines[4].roll = 'R2';
+  const html = ctx.histMaterialRows(h);
+  assert.ok(/lr-lot-name">L1<\/span><\/div>/.test(html), html);
+});
+
+test('histParseRolls: bare label takes the line qty; odd labels are not misread', () => {
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ctx.histParseRolls('R2', 3))), [{ label: 'R2', mtr: 3 }]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ctx.histParseRolls('', 3))), []);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ctx.histParseRolls('FOAM', 2))), [{ label: 'FOAM', mtr: 2 }]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ctx.histParseRolls('R1 2m, R2', 5))), [{ label: 'R1', mtr: 2 }, { label: 'R2', mtr: 0 }]);
 });
 
 test('lotless fresh (thread) folds into one bucket', () => {
@@ -137,10 +174,16 @@ test('render: one <tr> per material, 3 columns', () => {
   assert.ok(/RM-05/.test(html) && /RM-01/.test(html));
 });
 
-test('render: fresh lot lines stacked with per-lot qty', () => {
+test('render: fresh lot blocks stacked with per-lot qty', () => {
   const html = ctx.histMaterialRows(handover());
-  assert.ok(/hist-lot[^>]*>L1<\/span> <span class="hist-src-qty">20/.test(html), 'L1 20 Mtr');
-  assert.ok(/hist-lot[^>]*>L3<\/span> <span class="hist-src-qty">4/.test(html), 'L3 4 Mtr');
+  assert.ok(/lr-lot-name">L1<\/span><span class="lr-lot-sum">20 Mtr/.test(html), 'L1 20 Mtr');
+  assert.ok(/lr-lot-name">L3<\/span><span class="lr-lot-sum">4 Mtr/.test(html), 'L3 4 Mtr');
+  assert.ok(html.indexOf('>L1<') < html.indexOf('>L3<'), 'lots in issue order');
+});
+
+test('render: lotless trim is just its quantity, no lot block', () => {
+  const html = ctx.histMaterialRows(handover());
+  assert.ok(/hist-src-qty">30<span class="unit">Cone/.test(html), html);
 });
 
 test('render: offcut line is green, shows size + lot + carton', () => {

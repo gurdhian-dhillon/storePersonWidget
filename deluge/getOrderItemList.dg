@@ -5,7 +5,9 @@ string getOrderItemList(string planId)
 	// the overview list itself pays nothing for item detail.
 	//
 	// BOUNDED: Plan_Item[Plan == planId] - one plan, ~110 rows at the outside,
-	// ONE query, walked twice in memory. No child queries.
+	// ONE query, walked twice in memory. The only child query is the
+	// Item_Master hop for SKU / size / colour, made once per DISTINCT item
+	// master (imCache) - so the supervisor sees what each line actually is.
 	//
 	// ONE ROW PER ORIGINAL ORDER LINE. Is_Remake rows (QC remakes, alteration
 	// batches) are NOT listed - but they are NOT ignored either. A rejected or
@@ -69,13 +71,51 @@ string getOrderItemList(string planId)
 		//------------------------------------------------------------------
 		// PASS 2 - emit one row per ORIGINAL, status rolled up.
 		//------------------------------------------------------------------
+		// Item_Master id -> SKU / size / colour, filled lazily, once per
+		// distinct master. Map.get on a missing key returns null, which is the
+		// "not fetched yet" test; imSeen records the fetch even when a field
+		// is blank.
+		imSeen = Map();
+		imSkuBy = Map();
+		imSizeBy = Map();
+		imColorBy = Map();
 		for each  itm in plItems
 		{
 			if(ifnull(itm.Is_Remake,false) == false)
 			{
 				// Item_Name is free text from the order line - flatten newlines
-				// for JSON. No Item_Master hop: the overview does not show SKU.
+				// for JSON.
 				nameTxt = ifnull(itm.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
+				// Item_Sku is a LOOKUP - it holds the Item_Master record id,
+				// not the SKU text. Size text carries inch marks (102"X 94"),
+				// so every value gets the quote swap before it goes into JSON.
+				skuTxt = "";
+				sizeTxt = "";
+				colorTxt = "";
+				imKey = ifnull(itm.Item_Sku,"").toString().trim();
+				if(imKey != "" && imKey.isNumber())
+				{
+					if(imSeen.get(imKey) == null)
+					{
+						imSeen.put(imKey,"1");
+						imSkuBy.put(imKey,"");
+						imSizeBy.put(imKey,"");
+						imColorBy.put(imKey,"");
+						for each  imR in Item_Master[ID == imKey.toLong()]
+						{
+							imSkuBy.put(imKey,ifnull(imR.SKU,"").toString().trim());
+							imSizeBy.put(imKey,ifnull(imR.Size,"").toString().trim());
+							imColorBy.put(imKey,ifnull(imR.Color,"").toString().trim());
+						}
+					}
+					skuTxt = ifnull(imSkuBy.get(imKey),"").toString();
+					sizeTxt = ifnull(imSizeBy.get(imKey),"").toString();
+					colorTxt = ifnull(imColorBy.get(imKey),"").toString();
+					skuTxt = skuTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+					sizeTxt = sizeTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+					colorTxt = colorTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+				}
 
 				ownStat = ifnull(itm.Item_Status,"").toString().trim();
 
@@ -92,7 +132,7 @@ string getOrderItemList(string planId)
 					itemsJson = itemsJson + ",";
 				}
 				// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-				itemsJson = itemsJson + "{\"itemId\":\"" + itm.ID + "\",\"name\":\"" + nameTxt + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"status\":\"" + rollStat + "\"}";
+				itemsJson = itemsJson + "{\"itemId\":\"" + itm.ID + "\",\"name\":\"" + nameTxt + "\",\"sku\":\"" + skuTxt + "\",\"size\":\"" + sizeTxt + "\",\"color\":\"" + colorTxt + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"status\":\"" + rollStat + "\"}";
 			}
 		}
 	}

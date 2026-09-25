@@ -860,6 +860,12 @@ was tested and retracted.
 - The supervisor picker is a **stand-in for login** until `zoho.loginuser` can be resolved to an
   `Employee`. It lists every employee — a login does not appear and disappear based on whether
   you have work.
+- **An item on a supervisor screen shows name + SKU + size + colour**, through the one helper
+  `itemIdentHtml` (global, `app/supervisor/js/receive.js`). A bare name is every size and colour
+  of a product at once. The Deluge reads that feed those screens send `sku`/`size`/`color`.
+- **A roll is shown by the METRES off it, the label second** — `.lr` lot blocks, one card per
+  roll: supervisor Receive reads "1.2 m · piece off R2", store History "1.2 m · cut off R2".
+  Both widgets carry identical `.lr` CSS. The store **Issue** tab keeps its own column layout.
 - **Sizes are always displayed Length × Width**, labelled `(L × W)` where the numbers appear.
   Field names and all maths keep width and length as they are — only display order is fixed.
 - Inter font, `--primary: #2563eb`, `#e9eef4` page background. Reused classes: `item-card`,

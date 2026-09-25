@@ -436,13 +436,20 @@ var HandoverDetail = (function () {
         var lotNumById = {};
         lots.forEach(function (l) { lotNumById[String(l.ID)] = flat(l.Lot_Number); });
 
-        var skuById = {};
-        itemMasters.forEach(function (im) { skuById[String(im.ID)] = flat(im.SKU); });
+        // SKU, size and colour off Item_Master - the cut list says WHAT is being
+        // made, not just a code. Same fields getProductionWidgetData sends.
+        var imById = {};
+        itemMasters.forEach(function (im) {
+            imById[String(im.ID)] = { sku: flat(im.SKU), size: flat(im.Size), color: flat(im.Color) };
+        });
 
         var piById = {};
         planItems.forEach(function (pi) {
+            var im = imById[lookupId(pi.Item_Sku)] || {};
             piById[String(pi.ID)] = {
-                sku: skuById[lookupId(pi.Item_Sku)] || '',
+                sku: im.sku || '',
+                size: im.size || '',
+                color: im.color || '',
                 name: flat(pi.Item_Name),
                 status: str(pi.Item_Status).trim(),
                 isRemake: truthy(pi.Is_Remake),
@@ -654,6 +661,8 @@ var HandoverDetail = (function () {
                 it = {
                     itemId: itemId,
                     sku: pi.sku || '',
+                    size: pi.size || '',
+                    color: pi.color || '',
                     name: pi.name || flat(rq.Item_Name) || '',
                     status: pi.status || '',
                     isRemake: pi.isRemake === true,
@@ -917,32 +926,19 @@ if (typeof module !== 'undefined' && module.exports) module.exports = HandoverDe
 
     function renderCloth(d) {
         var rows = (d.cloth || []).map(function (c) {
-            // Lot cell: one line per lot — "L1 → R1, R2, R3". Stacked when the
-            // material spans several lots. Trims (no lots) show "—".
+            // Lot cell: the SAME lot -> roll cards the Receive tab draws
+            // (lotRollBlockHtml, receive.js) - one block per lot, one card per
+            // roll with the metres leading and "piece off R2" under them, so
+            // one handover reads the same on both tabs. Trims (no lots) "—".
             var lotCell = '—';
             if (c.isFabric && c.lots.length) {
-                lotCell = '<div class="hd-lots">' + c.lots.map(function (l) {
-                    // Each roll's OWN length, not just its name. One lot commonly
-                    // spans several physical rolls issued together (a lot can run
-                    // short mid-roll); without the length here he cannot tell which
-                    // roll to unspool for which piece, or that R2 only has 3.15 Mtr
-                    // left on it versus R1's 18. mtr is 0 when Roll_Label carried no
-                    // parseable suffix (parseRollLabel's own fallback) - shown as
-                    // the bare roll name rather than a misleading "0 Mtr".
-                    var tags = (l.rolls || []).filter(function (r) { return r.roll; })
-                        .map(function (r) {
-                            return '<span class="hd-roll-list">' + esc(r.roll) +
-                                (r.mtr > 0 ? ' &middot; ' + f2(r.mtr) + ' Mtr' : '') + '</span>';
-                        });
-                    var rollTxt = tags.length
-                        ? tags.join('')
-                        : '<span class="hd-roll-none">roll not recorded</span>';
-                    return '<div class="hd-lot-line">' +
-                        '<b class="hd-lot-name">' + esc(l.lot) + '</b>' +
-                        '<span class="hd-lot-arrow">&rarr;</span>' +
-                        '<span class="hd-roll-group">' + rollTxt + '</span>' +
-                    '</div>';
-                }).join('') + '</div>';
+                lotCell = lotRollBlockHtml(c.lots.map(function (l) {
+                    return {
+                        lot: l.lot,
+                        qty: l.qtyIssued,
+                        rolls: (l.rolls || []).map(function (r) { return { roll: r.roll, qty: r.mtr }; })
+                    };
+                }), c.unit);
             } else if (c.isFabric) {
                 lotCell = '<span class="hd-roll-none">not recorded</span>';
             }
@@ -1019,9 +1015,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = HandoverDe
                         : (it.source && it.source !== 'Plan'
                             ? ' <span class="reissue-tag">' + esc(it.source.replace(/_/g, ' ')) + '</span>' : ''));
                     var st = itemStatus(it.status);
-                    var nameCell = '<td class="hd-i-name"><span class="mat-name">' +
-                        (it.sku ? '<span class="mat-sku">' + esc(it.sku) + '</span> ' : '') +
-                        esc(it.name || '—') + tags + '</span></td>';
+                    var nameCell = '<td class="hd-i-name">' + itemIdentHtml(it, tags) + '</td>';
                     var statusCell = '<td class="hd-i-status"><span class="status-pill ' + st.cls + '">' +
                         esc(st.text) + '</span></td>';
 

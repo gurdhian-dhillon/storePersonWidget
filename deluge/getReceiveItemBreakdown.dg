@@ -1,7 +1,7 @@
 string getReceiveItemBreakdown(string planId, string materialId)
 {
 	// READ-ONLY. For ONE plan and ONE material, the items on that plan that carry
-	// a requirement for it - SKU, name, still-owed metres/qty and pieces, and the
+	// a requirement for it - SKU, name, size, colour, still-owed metres/qty and pieces, and the
 	// item's status. The receive screen loads this lazily when the supervisor
 	// drills into an order under a material row, so a 100-order handover costs
 	// nothing until he opens one.
@@ -85,10 +85,17 @@ string getReceiveItemBreakdown(string planId, string materialId)
 
 				// Item_Sku is a LOOKUP to Item_Master - the field holds a record
 				// id, not the SKU text.
+				// Size and colour ride along on the same hop so the supervisor
+				// sees WHAT he is making, not just a code. Size text carries
+				// inch marks (102"X 94") - the quote swap keeps the JSON valid.
 				skuTxt = "";
+				sizeTxt = "";
+				colorTxt = "";
 				for each  imR in Item_Master[ID == pItem.Item_Sku]
 				{
 					skuTxt = ifnull(imR.SKU,"").toString().replaceAll("\"","'");
+					sizeTxt = ifnull(imR.Size,"").toString().trim().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+					colorTxt = ifnull(imR.Color,"").toString().trim().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
 				}
 
 				nameTxt = ifnull(pItem.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
@@ -100,7 +107,7 @@ string getReceiveItemBreakdown(string planId, string materialId)
 				{
 					itemsJson = itemsJson + ",";
 				}
-				itemsJson = itemsJson + "{\"itemId\":\"" + pItem.ID + "\",\"sku\":\"" + skuTxt + "\",\"name\":\"" + nameTxt + "\",\"status\":\"" + statTxt + "\",\"isFabric\":" + isFab + ",\"owedQty\":" + owedQty + ",\"owedPieces\":" + owedPcs + ",\"reqPieces\":" + reqPcs + ",\"issuedPieces\":" + issPcs + ",\"isRemake\":" + isRmk + ",\"remakeReason\":\"" + rmkWhy + "\",\"source\":\"" + srcTxt + "\"}";
+				itemsJson = itemsJson + "{\"itemId\":\"" + pItem.ID + "\",\"sku\":\"" + skuTxt + "\",\"size\":\"" + sizeTxt + "\",\"color\":\"" + colorTxt + "\",\"name\":\"" + nameTxt + "\",\"status\":\"" + statTxt + "\",\"isFabric\":" + isFab + ",\"owedQty\":" + owedQty + ",\"owedPieces\":" + owedPcs + ",\"reqPieces\":" + reqPcs + ",\"issuedPieces\":" + issPcs + ",\"isRemake\":" + isRmk + ",\"remakeReason\":\"" + rmkWhy + "\",\"source\":\"" + srcTxt + "\"}";
 			}
 		}
 	}

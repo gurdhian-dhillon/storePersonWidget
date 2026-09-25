@@ -154,23 +154,50 @@ function setEditMode(on) {
 function lotColumn(m) {
     var lots = (m.isFabric && m.lots) ? m.lots : [];
     if (lots.length === 0) return '<td class="col-lot">-</td>';
+    return '<td class="col-lot">' + lotRollBlockHtml(lots, m.unit) + '</td>';
+}
 
-    var parts = lots.map(function (l) {
-        var head = (lots.length > 1)
-            ? '<div class="rcv-lot"><b>' + escapeHtml(l.lot) + '</b> <span style="font-size: 0.9em; color: #666;">(' +
-              fmt(l.qty) + ' ' + escapeHtml(m.unit) + ')</span></div>'
-            : '<div class="rcv-lot"><b>' + escapeHtml(l.lot) + '</b></div>';
-
-        var rolls = l.rolls || [];
-        var rollLines = rolls.map(function (r) {
-            return '<div class="rcv-roll"><b>' + escapeHtml(r.roll) + '</b> &middot; ' +
-                fmt(r.qty) + ' ' + escapeHtml(m.unit) + '</div>';
-        }).join('');
-
-        return head + rollLines;
-    }).join('');
-
-    return '<td class="col-lot">' + parts + '</td>';
+// THE PIECE OF CLOTH HE IS HANDED, ONE CARD PER ROLL IT CAME OFF.
+//
+// What he checks on his bench is a length of cloth: "a 5 m piece". The roll
+// label (R2) only says which roll the store cut it from, so the METRES lead the
+// card, large, and the label sits under them as the qualifier - "piece off R2".
+// Swapping that emphasis is the whole change: the old line bolded the label and
+// greyed the metres, which is backwards for the person holding a tape measure.
+//
+// One lot is one block: the lot name, and - when it spans more than one roll -
+// its total and how many pieces make it up, so "L1 · 6.5 m in 3 pieces" can be
+// checked against three separate lengths without adding them up in his head.
+// The cards WRAP, so a printed lot that comes back as eight short rolls is two
+// or three rows of cards, not a column running off the bottom of the row.
+//
+// Drain order is kept (the order issueMaterialsHandover recorded the rolls).
+// A roll with no metres recorded still gets a card, with a dash, rather than
+// vanishing - a missing number is visible, a missing roll is not. A lot with no
+// roll recorded at all (a pre-rolls handover) is just its name and metres.
+function lotRollBlockHtml(lots, unit) {
+    var u = escapeHtml(unit || '');
+    return '<div class="lr">' + (lots || []).map(function (l) {
+        var rolls = (l.rolls || []).filter(function (r) { return r && r.roll; });
+        var n = rolls.length;
+        var head = '<div class="lr-lot-head">' +
+            '<span class="lr-lot-name">' + escapeHtml(l.lot || '—') + '</span>' +
+            ((n !== 1)
+                ? '<span class="lr-lot-sum">' + fmt(l.qty) + ' ' + u +
+                  (n > 1 ? ' in ' + n + ' pieces' : '') + '</span>'
+                : '') +
+            '</div>';
+        var cards = n
+            ? '<div class="lr-rolls">' + rolls.map(function (r) {
+                var q = Number(r.qty) || 0;
+                return '<div class="lr-roll">' +
+                    '<span class="lr-len">' + (q > 0 ? fmt(q) + '<span class="lr-unit">' + u + '</span>' : '&mdash;') + '</span>' +
+                    '<span class="lr-from">piece off <b>' + escapeHtml(r.roll) + '</b></span>' +
+                    '</div>';
+            }).join('') + '</div>'
+            : '';
+        return '<div class="lr-lot">' + head + cards + '</div>';
+    }).join('') + '</div>';
 }
 
 function rcvCols() { return EDIT ? 5 : 4; }
@@ -363,6 +390,28 @@ function toggleOrderBreakdown(i, j) {
     });
 }
 
+// WHAT HE IS MAKING, the same way on every tab that lists an item: the name on
+// top, then SKU, size and colour under it. A bare name ("Linen Evadne Duvet
+// Cover") is every size and colour of that product at once — the SKU and size
+// are what tell him it is the King set with pillowcases. Same three fields the
+// Production tab has always carried (getProductionWidgetData), shown here in
+// a column-friendly shape: size text is long ("102'X 94' / 260 X 240 cm KING /
+// Standard pillowcases ...") so the chips wrap rather than widen the table.
+//
+// Global — handover-detail.js and order-overview.js load after this file and
+// call it too. extraHtml (already escaped) goes after the name: remake tags.
+function itemIdentHtml(it, extraHtml) {
+    it = it || {};
+    var attrs = [];
+    if (it.sku) attrs.push('<span class="ii-sku">' + escapeHtml(it.sku) + '</span>');
+    if (it.size) attrs.push('<span class="ii-attr">' + escapeHtml(it.size) + '</span>');
+    if (it.color) attrs.push('<span class="ii-attr">' + escapeHtml(it.color) + '</span>');
+    return '<div class="ii">' +
+        '<div class="ii-name">' + escapeHtml(it.name || '—') + (extraHtml || '') + '</div>' +
+        (attrs.length ? '<div class="ii-attrs">' + attrs.join('') + '</div>' : '') +
+        '</div>';
+}
+
 function renderOrderItems(items, m) {
     if (!items || items.length === 0) {
         return '<div class="bd-empty">No item still owes this material.</div>';
@@ -371,13 +420,11 @@ function renderOrderItems(items, m) {
         var owed = it.isFabric
             ? (Number(it.owedPieces) || 0) + (Number(it.owedPieces) === 1 ? ' pc' : ' pcs')
             : fmt(it.owedQty) + ' ' + escapeHtml(m.unit);
-        var label = escapeHtml(it.sku || '') + (it.name ? ' &middot; ' + escapeHtml(it.name) : '');
+        var tag = it.isRemake === true
+            ? ' <span class="reissue-tag">' + escapeHtml((it.remakeReason || 'remake').replace(/_/g, ' ')) + '</span>'
+            : '';
         return '<tr>' +
-            '<td>' + label +
-                (it.isRemake === true
-                    ? ' <span class="reissue-tag">' + escapeHtml((it.remakeReason || 'remake').replace(/_/g, ' ')) + '</span>'
-                    : '') +
-            '</td>' +
+            '<td>' + itemIdentHtml(it, tag) + '</td>' +
             '<td class="bd-owed">' + owed + '</td>' +
             '<td><span class="status-pill status-partial">' + escapeHtml(itemStatusLabel(it.status)) + '</span></td>' +
             '</tr>';
