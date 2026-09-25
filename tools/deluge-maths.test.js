@@ -45,12 +45,19 @@ function inchesToCm(inchesTxt) {
 }
 
 function buildItemRequirements(item) {
-  // item: {isFabric, fabricWidthInches, cutLen, cutWid, perUnit, produceQty}
+  // item: {isFabric, fabricWidthInches, cutLen, cutWid, perUnit, produceQty,
+  //        requiredQuantity}
   // returns one requirement row as the Deluge would emit it.
-  let reqQty = 0.0, piecesPerRow = 0, perUnit = 0;
+  // requiredQuantity is BOM Required_Quantity: on a FABRIC row it is cut pieces
+  // per item - empty or below 1 reads as 1, otherwise rounded to whole pieces.
+  let reqQty = 0.0, piecesPerRow = 0, perUnit = 0, piecesPerItem = 1;
   const cutLen = item.cutLen || 0, cutWid = item.cutWid || 0;
   const produceQty = Math.trunc(Number(item.produceQty) || 0); // .toLong()
-  const piecesNeeded = item.isFabric ? produceQty : 0;
+  if (item.isFabric) {
+    const ppiTxt = (item.requiredQuantity === null || item.requiredQuantity === undefined) ? '' : String(item.requiredQuantity).trim();
+    if (ppiTxt !== '' && parseFloat(ppiTxt) >= 1) piecesPerItem = Math.round(parseFloat(ppiTxt));
+  }
+  const piecesNeeded = item.isFabric ? produceQty * piecesPerItem : 0;
   const widthCm = item.isFabric ? inchesToCm(item.fabricWidthInches) : 0;
   let warn = '', error = '';
 
@@ -68,7 +75,7 @@ function buildItemRequirements(item) {
     perUnit = item.perUnit || 0;
     reqQty = perUnit * produceQty;
   }
-  return { reqQty, cutLen, cutWid, pcs: piecesNeeded, perRow: piecesPerRow, perUnit, warn, error };
+  return { reqQty, cutLen, cutWid, pcs: piecesNeeded, perRow: piecesPerRow, perUnit, perItem: piecesPerItem, warn, error };
 }
 
 // ---- PORT 2: getStoreMaterialRequirements fresh-metres block -------------------
@@ -449,6 +456,42 @@ test('A15 THE regression: *1.0 before ceil (old code stranded a piece at 100@3)'
   const r = buildItemRequirements({ isFabric: true, fabricWidthInches: '66', cutLen: 55, cutWid: 55, produceQty: 100 });
   assert.notStrictEqual(Math.round(r.reqQty * 100) / 100, 18.15);
   approx(r.reqQty, 18.70);
+});
+
+// Pieces per item on a fabric row (BOM Required_Quantity). The case that asked
+// for it: DCBPEVA-5IND-1, a King duvet set with 2 pillowcases, x2 sets, on
+// 124" cloth. Duvet front/back are 1 cut per set; pillow front/back are 2.
+test('A17 duvet set: pillow rows plan 2 cut pieces per set', () => {
+  const W = '124';
+  const front  = buildItemRequirements({ isFabric: true, fabricWidthInches: W, cutLen: 244, cutWid: 264, produceQty: 2, requiredQuantity: 1 });
+  const back   = buildItemRequirements({ isFabric: true, fabricWidthInches: W, cutLen: 279, cutWid: 264, produceQty: 2, requiredQuantity: 1 });
+  const pFront = buildItemRequirements({ isFabric: true, fabricWidthInches: W, cutLen: 80,  cutWid: 50,  produceQty: 2, requiredQuantity: 2 });
+  const pBack  = buildItemRequirements({ isFabric: true, fabricWidthInches: W, cutLen: 95,  cutWid: 50,  produceQty: 2, requiredQuantity: 2 });
+  assert.strictEqual(front.pcs, 2);  approx(front.reqQty, 4.88);   // 1/row, 2 rows
+  assert.strictEqual(back.pcs, 2);   approx(back.reqQty, 5.58);
+  assert.strictEqual(pFront.pcs, 4); assert.strictEqual(pFront.perRow, 6); approx(pFront.reqQty, 0.80);
+  assert.strictEqual(pBack.pcs, 4);  approx(pBack.reqQty, 0.95);
+  assert.strictEqual(pFront.perItem, 2);
+});
+test('A18 one row of 2 pieces/item beats the same cut listed twice (no double rounding)', () => {
+  const once  = buildItemRequirements({ isFabric: true, fabricWidthInches: '124', cutLen: 80, cutWid: 50, produceQty: 2, requiredQuantity: 2 });
+  const twice = 2 * buildItemRequirements({ isFabric: true, fabricWidthInches: '124', cutLen: 80, cutWid: 50, produceQty: 2, requiredQuantity: 1 }).reqQty;
+  approx(once.reqQty, 0.80); approx(twice, 1.60);
+});
+test('A19 fabric Required_Quantity empty / 0 / 0.5 / 1 all plan 1 piece per item (existing BOMs unchanged)', () => {
+  for (const rq of [undefined, null, '', ' ', 0, '0', 0.5, 1, '1', '1.0']) {
+    const r = buildItemRequirements({ isFabric: true, fabricWidthInches: '66', cutLen: 55, cutWid: 55, produceQty: 100, requiredQuantity: rq });
+    assert.strictEqual(r.pcs, 100, 'requiredQuantity=' + JSON.stringify(rq));
+    approx(r.reqQty, 18.70);
+  }
+});
+test('A20 fractional pieces per item round to whole pieces', () => {
+  const r = buildItemRequirements({ isFabric: true, fabricWidthInches: '66', cutLen: 55, cutWid: 55, produceQty: 10, requiredQuantity: 2.4 });
+  assert.strictEqual(r.perItem, 2); assert.strictEqual(r.pcs, 20);
+});
+test('A21 non-fabric still reads Required_Quantity as quantity per item, not pieces', () => {
+  const r = buildItemRequirements({ isFabric: false, perUnit: 2, requiredQuantity: 2, produceQty: 5 });
+  approx(r.reqQty, 10); assert.strictEqual(r.pcs, 0); assert.strictEqual(r.perItem, 1);
 });
 
 // Property sweep A: plan-time oracle

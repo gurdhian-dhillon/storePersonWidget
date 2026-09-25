@@ -251,6 +251,25 @@ function damageQtyFor(m, pieces) {
     return round2((Number(m.perUnit) || 0) * p);
 }
 
+// Cut pieces of this material in ONE garment. A fabric row may need two cuts of
+// its size per item (a pair of pillow fronts on a duvet set) — BOM
+// Required_Quantity on a fabric row, carried through as perItem. Everything else
+// counts garments, so 1.
+function piecesPerGarment(m) {
+    if (!m || m.isFab !== true) return 1;
+    var n = Math.round(Number(m.perItem) || 0);
+    return n >= 1 ? n : 1;
+}
+
+// The spoiled count a row starts on, and the most it may say, for a given number
+// of garments — both in THAT ROW's pieces. -1 cap means no cap.
+function rowSeedFor(m, garments) {
+    return garments * piecesPerGarment(m);
+}
+function rowCapFor(m) {
+    return damageCtx.maxPieces >= 0 ? damageCtx.maxPieces * piecesPerGarment(m) : -1;
+}
+
 // Recompute one row's quantity from its own spoiled count.
 function syncDamageRow(i) {
     if (!damageCtx) return;
@@ -289,6 +308,8 @@ function renderDamageProposal() {
     var seed = damageCtx.pieces > 0 ? damageCtx.pieces : 1;
 
     var rows = damageCtx.materials.map(function (m, i) {
+        var rowSeed = rowSeedFor(m, seed);
+        var rowCap = rowCapFor(m);
         return '<tr>' +
             '<td class="col-tick">' +
             '<input type="checkbox" class="dmg-use" data-i="' + i + '" checked>' +
@@ -299,15 +320,15 @@ function renderDamageProposal() {
             '</td>' +
             '<td class="col-num">' +
             '<input type="number" class="dmg-pcs" data-i="' + i + '" min="0"' +
-            (damageCtx.maxPieces >= 0 ? ' max="' + damageCtx.maxPieces + '"' : '') +
-            ' step="1" value="' + seed + '">' +
+            (rowCap >= 0 ? ' max="' + rowCap + '"' : '') +
+            ' step="1" value="' + rowSeed + '">' +
             '</td>' +
             // Still editable. The spoiled count is the quick way to fill this
             // in, not a replacement for it — a part-used cone or a length he
             // measured himself is a number only he knows.
             '<td class="col-num">' +
             '<input type="number" class="dmg-qty" data-i="' + i + '" min="0" step="0.01" value="' +
-            damageQtyFor(m, seed) + '">' +
+            damageQtyFor(m, rowSeed) + '">' +
             '<span class="dmg-unit">' + escapeHtml(m.unit || '') + '</span>' +
             '</td>' +
             '</tr>';
@@ -338,8 +359,9 @@ function renderDamageProposal() {
         el.addEventListener('input', function () {
             var i = Number(el.getAttribute('data-i'));
             var val = Number(el.value);
-            if (damageCtx.maxPieces >= 0 && val > damageCtx.maxPieces) {
-                el.value = damageCtx.maxPieces;
+            var cap = rowCapFor(damageCtx.materials[i]);
+            if (cap >= 0 && val > cap) {
+                el.value = cap;
             }
             syncDamageRow(i);
         });
@@ -361,8 +383,9 @@ function renderDamageProposal() {
             damageCtx.pieces = n;
             var v = n > 0 ? n : 1;
             document.querySelectorAll('#damage-modal .dmg-pcs').forEach(function (el) {
-                el.value = v;
-                syncDamageRow(Number(el.getAttribute('data-i')));
+                var i = Number(el.getAttribute('data-i'));
+                el.value = rowSeedFor(damageCtx.materials[i], v);
+                syncDamageRow(i);
             });
         });
     }
@@ -417,9 +440,10 @@ function saveDamage() {
         var pcs = pcsEl ? Number(pcsEl.value) || 0 : 0;
         var useEl = document.querySelector('#damage-modal .dmg-use[data-i="' + i + '"]');
 
-        if (damageCtx.maxPieces >= 0 && pcs > damageCtx.maxPieces) {
+        var rowCap = rowCapFor(m);
+        if (rowCap >= 0 && pcs > rowCap) {
             invalidRow = true;
-            alert('Pieces spoiled for ' + (m.name || 'material') + ' cannot exceed ' + damageCtx.maxPieces + '.');
+            alert('Pieces spoiled for ' + (m.name || 'material') + ' cannot exceed ' + rowCap + '.');
             return;
         }
 

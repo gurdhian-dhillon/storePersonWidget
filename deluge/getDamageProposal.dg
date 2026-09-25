@@ -110,8 +110,10 @@ string getDamageProposal(string payloadJson)
 		// re-scale a row when he changes how many pieces of that material were
 		// spoiled - without a server round trip on every keystroke, and without
 		// a second, drifting copy of the arithmetic. They are the same two
-		// numbers buildItemRequirements used to produce "qty" here.
-		outJson = outJson + "{\"matId\":\"" + matIdTxt + "\",\"name\":\"" + ifnull(mm.get("name"),"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + skuTxt + "\",\"unit\":\"" + ifnull(mm.get("unit"),"").toString() + "\",\"isFab\":" + ifnull(mm.get("isFab"),false) + ",\"qty\":" + ifnull(mm.get("req"),0) + ",\"pieces\":" + ifnull(mm.get("pcs"),0) + ",\"cutLen\":" + ifnull(mm.get("cutLen"),0) + ",\"cutWid\":" + ifnull(mm.get("cutWid"),0) + ",\"perRow\":" + ifnull(mm.get("perRow"),0) + ",\"perUnit\":" + ifnull(mm.get("perUnit"),0) + "}";
+		// numbers buildItemRequirements used to produce "qty" here. perItem is
+		// cut pieces per garment on a fabric row (2 for a pair of pillow fronts),
+		// so one spoiled garment seeds 2 spoiled pieces of that cloth.
+		outJson = outJson + "{\"matId\":\"" + matIdTxt + "\",\"name\":\"" + ifnull(mm.get("name"),"").toString().replaceAll("\"","'") + "\",\"sku\":\"" + skuTxt + "\",\"unit\":\"" + ifnull(mm.get("unit"),"").toString() + "\",\"isFab\":" + ifnull(mm.get("isFab"),false) + ",\"qty\":" + ifnull(mm.get("req"),0) + ",\"pieces\":" + ifnull(mm.get("pcs"),0) + ",\"cutLen\":" + ifnull(mm.get("cutLen"),0) + ",\"cutWid\":" + ifnull(mm.get("cutWid"),0) + ",\"perRow\":" + ifnull(mm.get("perRow"),0) + ",\"perUnit\":" + ifnull(mm.get("perUnit"),0) + ",\"perItem\":" + ifnull(mm.get("perItem"),1) + "}";
 	}
 
 	res = "{\"errors\":[],\"planId\":\"" + planId + "\",\"item\":\"" + itemName + "\",\"qty\":" + qty + ",\"materials\":[" + outJson + "]}";

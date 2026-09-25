@@ -197,6 +197,18 @@ matter how few metres it has. Four separate silent-loss bugs came from forgettin
 >
 > A **Creator report** comparing the two columns will show fabric rows over 100 % issued. Expected.
 
+> **On a FABRIC BOM row, `Required_Quantity` is CUT PIECES PER ITEM.** A duvet set with two
+> pillowcases needs 2 pillow fronts of one cut per set, so that row carries 2 and plans
+> `Required_Pieces = items × 2`. Empty or below 1 reads as 1 — what every fabric row held before
+> it meant anything — so old BOMs plan unchanged. Read in exactly two places, the same way:
+> `buildItemRequirements` (plan time, and every remake/damage proposal through it) and
+> `getExpectedWaste` (off the item's BOM, keyed material + cut size, because `qtyOut` counts
+> items). Everything downstream already works off the stored `Required_Pieces` and needed nothing.
+> **Never list the same cut twice instead** — each row rounds up to whole marker rows on its own,
+> so 4 pillow fronts plan 1.60 m instead of 0.80 m and the waste prompt invents a second tail.
+> The damage dialog scales a fabric row's spoiled pieces and cap by the same number (`perItem`).
+> The BOM form must leave the field **editable** on fabric rows for any of this to be enterable.
+
 Anything that re-opens a requirement must wind back **every** counter the store screen reads:
 `Issued_Qty`, plus `Pieces_From_Raw` (fabric) and `Pieces_From_Waste` (remnants).
 

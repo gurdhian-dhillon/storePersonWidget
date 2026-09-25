@@ -14,7 +14,9 @@ string buildItemRequirements(string bomIdTxt, string produceQtyTxt, string conte
 	// Returns "[]" when there is no BOM, so the caller can insert the result
 	// without testing it. Shape of each element, unchanged from the original:
 	//   {"mat":"id","name":"...","isFab":true,"unit":"Mtr",
-	//    "req":12.5,"cutLen":55,"cutWid":55,"pcs":100}
+	//    "req":12.5,"cutLen":55,"cutWid":55,"pcs":100,
+	//    "perRow":5,"perUnit":0,"perItem":1}
+	// pcs is CUT PIECES = items x perItem, not items.
 	//
 	// contextTxt only labels the info log - "SO-00008" or "rework of PLAN-00010
 	// line 3" - so a warning can be traced back to what was being planned.
@@ -70,6 +72,7 @@ string buildItemRequirements(string bomIdTxt, string produceQtyTxt, string conte
 				// key that was never set would get nothing rather than zero.
 				piecesPerRow = 0;
 				perUnit = 0;
+				piecesPerItem = 1;
 
 				if(isFab)
 				{
@@ -83,10 +86,23 @@ string buildItemRequirements(string bomIdTxt, string produceQtyTxt, string conte
 					cutLen = ifnull(matRow.Cut_Size_Length,0);
 					cutWid = ifnull(matRow.Cut_Size_Width,0);
 
-					// One cut piece per finished item, always. BOM
-					// Required_Quantity is only meaningful for non-fabric
-					// (cones, kg) and is deliberately not read here.
-					piecesNeeded = produceQty;
+					// On a FABRIC row, BOM Required_Quantity is CUT PIECES PER
+					// ITEM - a duvet set with two pillowcases needs 2 pillow
+					// fronts of one cut per set. Empty or below 1 reads as 1,
+					// which is what every fabric row held before this meant
+					// anything, so existing BOMs plan exactly as they did.
+					// Whole pieces only: half a cut piece is not a thing.
+					// getExpectedWaste reads the same field the same way.
+					ppiTxt = ifnull(matRow.Required_Quantity,"").toString().trim();
+					if(ppiTxt != "")
+					{
+						ppiDec = ppiTxt.toDecimal();
+						if(ppiDec >= 1)
+						{
+							piecesPerItem = ppiDec.round(0).toLong();
+						}
+					}
+					piecesNeeded = produceQty * piecesPerItem;
 
 					if(widthCm <= 0 || cutWid <= 0 || cutLen <= 0)
 					{
@@ -147,7 +163,7 @@ string buildItemRequirements(string bomIdTxt, string produceQtyTxt, string conte
 				matDisp = matDisp.replaceAll("\"","'");
 
 				// IDs forced to string - 18-digit ids break JSON.parse.
-				matsJson = matsJson + "{\"mat\":\"" + rawMatId + "\",\"name\":\"" + matDisp + "\",\"isFab\":" + isFab + ",\"unit\":\"" + rm.Unit + "\",\"req\":" + reqQty + ",\"cutLen\":" + cutLen + ",\"cutWid\":" + cutWid + ",\"pcs\":" + piecesNeeded + ",\"perRow\":" + piecesPerRow + ",\"perUnit\":" + perUnit + "}";
+				matsJson = matsJson + "{\"mat\":\"" + rawMatId + "\",\"name\":\"" + matDisp + "\",\"isFab\":" + isFab + ",\"unit\":\"" + rm.Unit + "\",\"req\":" + reqQty + ",\"cutLen\":" + cutLen + ",\"cutWid\":" + cutWid + ",\"pcs\":" + piecesNeeded + ",\"perRow\":" + piecesPerRow + ",\"perUnit\":" + perUnit + ",\"perItem\":" + piecesPerItem + "}";
 			}
 		}
 	}

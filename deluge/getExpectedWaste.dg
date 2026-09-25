@@ -314,6 +314,60 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 		}
 	}
 
+	//----------------------------------------------------------------------
+	// CUT PIECES PER ITEM, per fabric line. qtyOut counts ITEMS - a duvet set
+	// is one - but a fabric line may need two cuts of its size per item (the
+	// pair of pillow fronts). BOM Required_Quantity holds that on a fabric row,
+	// the same number buildItemRequirements planned the cloth from, so it is
+	// read back off the item's BOM rather than inferred from Required_Pieces,
+	// which a reissue row would skew.
+	//
+	// Keyed material|cutW|cutL, sizes in tenths of a cm as whole numbers so
+	// 36.8 on the BOM and 36.8 on the requirement land on one key whatever
+	// type each field stores it as. Anything unmatched - no BOM, a cut edited
+	// on the requirement - reads as 1, which is how it behaved before.
+	//----------------------------------------------------------------------
+	ppiMap = Map();
+	if(itemIdTxt != "" && itemIdTxt.isNumber())
+	{
+		for each  ppiItem in Plan_Item[ID == itemIdTxt.toLong()]
+		{
+			if(ppiItem.BOM != null)
+			{
+				for each  ppiBom in BOM[ID == ppiItem.BOM]
+				{
+					for each  ppiRow in ppiBom.Material_Required
+					{
+						if(ppiRow.Item != null)
+						{
+							ppiW = ifnull(ppiRow.Cut_Size_Width,"0").toString().trim();
+							if(ppiW == "")
+							{
+								ppiW = "0";
+							}
+							ppiL = ifnull(ppiRow.Cut_Size_Length,"0").toString().trim();
+							if(ppiL == "")
+							{
+								ppiL = "0";
+							}
+							ppiQ = ifnull(ppiRow.Required_Quantity,"").toString().trim();
+							ppiN = 1;
+							if(ppiQ != "")
+							{
+								if(ppiQ.toDecimal() >= 1)
+								{
+									ppiN = ppiQ.toDecimal().round(0).toLong();
+								}
+							}
+							ppiKey = ppiRow.Item.toString() + "|" + (ppiW.toDecimal() * 10).round(0).toLong() + "|" + (ppiL.toDecimal() * 10).round(0).toLong();
+							ppiMap.put(ppiKey,ppiN);
+						}
+					}
+				}
+			}
+		}
+	}
+
 	for each  plan in Production_Planning[ID == pid]
 	{
 		for each  mr in Material_Requirement[Plan == plan.ID]
@@ -355,6 +409,15 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 					cutW = ifnull(mr.Cut_Size_Width,0);
 					cutL = ifnull(mr.Cut_Size_Length,0);
 
+					// Items cut x cut pieces per item for THIS line - see ppiMap.
+					rowPpi = 1;
+					ppiLook = ppiMap.get(matId.toString() + "|" + (cutW.toString().toDecimal() * 10).round(0).toLong() + "|" + (cutL.toString().toDecimal() * 10).round(0).toLong());
+					if(ppiLook != null)
+					{
+						rowPpi = ppiLook;
+					}
+					rowPcsCut = pcsCut * rowPpi;
+
 					fabricWidthCm = 0.0;
 					for each  rm in Raw_Material[ID == matId]
 					{
@@ -377,7 +440,7 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 					else
 					{
 						genJson = "";
-						remain = pcsCut;
+						remain = rowPcsCut;
 
 						//--------------------------------------------------
 						// Pass 1 - the waste pieces he actually received.
@@ -881,7 +944,7 @@ string getExpectedWaste(string planId, string planItemId, string qtyOut)
 						{
 							fabJson = fabJson + ",";
 						}
-						fabJson = fabJson + "{\"materialId\":\"" + matId + "\",\"material\":\"" + matLabel + "\",\"cutWidth\":" + cutW + ",\"cutLength\":" + cutL + ",\"fabricWidthCm\":" + fabricWidthCm + ",\"piecesCut\":" + pcsCut + ",\"freshMetres\":" + (freshCm / 100) + ",\"lots\":[" + ifnull(lotsByMat.get(matId.toString()),"").toString() + "],\"waste\":[" + genJson + "]}";
+						fabJson = fabJson + "{\"materialId\":\"" + matId + "\",\"material\":\"" + matLabel + "\",\"cutWidth\":" + cutW + ",\"cutLength\":" + cutL + ",\"fabricWidthCm\":" + fabricWidthCm + ",\"piecesCut\":" + rowPcsCut + ",\"freshMetres\":" + (freshCm / 100) + ",\"lots\":[" + ifnull(lotsByMat.get(matId.toString()),"").toString() + "],\"waste\":[" + genJson + "]}";
 					}
 				}
 			}
