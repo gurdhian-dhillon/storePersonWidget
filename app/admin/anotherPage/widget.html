@@ -11,6 +11,8 @@
          lives in report.css. -->
     <link rel="stylesheet" href="css/base.css">
     <link rel="stylesheet" href="css/report.css">
+    <!-- The Sales order pipeline tab. Its own file, every class prefixed pl-. -->
+    <link rel="stylesheet" href="css/pipeline.css">
 </head>
 <body>
     <div class="app-container">
@@ -81,6 +83,10 @@
          / Plan_Item walks could hit Creator's uncatchable statement limit on a
          page containing one large order. Pure read; loaded before main.js. -->
     <script src="js/pipeline-data.js"></script>
+    <!-- The pipeline tab itself: strip, lists, the one expand per order,
+         Pending and Packed. main.js calls renderPipeline / loadPipeline /
+         loadSalesOrderProgress / refreshPipeline from here. -->
+    <script src="js/pipeline-view.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

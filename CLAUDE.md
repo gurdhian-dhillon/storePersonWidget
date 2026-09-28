@@ -754,6 +754,41 @@ Three, all Creator JS API **v2** — `ZOHO.CREATOR.DATA.invokeCustomApi`, **no `
 | `app/checker/` | Checking — the inspection queue and `saveItemCheck` |
 | `app/finishing/` | Finishing — folding / pressing / branding |
 | `app/packing/` | Packing — supervisor picker, orders as an accordion, one card per box |
+| `app/admin/anotherPage/` | Production & Stock Dashboard — Sales order pipeline / Employee report / Raw materials / Disputes |
+
+> **THE SALES ORDER PIPELINE PLACES EVERY PIECE; IT NEVER GUESSES.** `pipeline-data.js` (getRecords
+> joins) puts each Plan_Item's pieces in exactly one of: waiting for material, ready to start, in
+> production (by open stage), waiting for checking, passed/waiting for finishing, in finishing,
+> finished — from `Item_Status`, `Stage_Log`, `Item_Check` (inspected/approved/rejected/altered) and
+> `Finishing_Data` (**Done means done**). Rejected, lost and altered pieces leave their flow and
+> reappear as the target of the batch that replaces them, so a line's places add back to what was
+> ordered; what does not on a short-closed order is what was deliberately not made. A flow whose
+> production is over (`Complete` / `Awaiting_Check`) with pieces unaccounted counts them **lost**,
+> never "in production". A remake batch at `Awaiting_Material` with no `Material_Requirement` rows
+> is the **supervisor's** to request (Reissue tab), not the store's to issue — the screen says which.
+> `pipeline-view.js` draws it: the strip (one card per `Sales_Order.Order_Status`, the four factory
+> statuses in one "In the factory" group), one expand per order, Packed off `getPackingHistory`.
+> It keeps its own `PIPE` state — **not** the shared `DATA`, which the employee report replaces on
+> every day change. The old "View progress" pop-up guessed its numbers from one stage name and is
+> gone; Dispatched is drawn as it was until dispatch is built.
+>
+> **TWO DEPTHS: THE LIST READS OPEN STAGE LOGS ONLY; OPENING AN ORDER READS ITS FULL HISTORY.**
+> The whole trail at real volume is ~100,000 `Stage_Log` rows, so `page()` asks for
+> `Stage_Status == "In_Progress"` and takes a line's **loss off its `Production_Loss` batches**
+> (`spreadLoss`) — exact because `coverProductionLoss` keeps coverage equal to the logs' loss.
+> "Last moved" includes `Plan_Item.Modified_Time` and the plan's `Added_Time`, which is what catches
+> an order whose material arrived and nobody started. `detail()` reads one plan's full `Stage_Log`,
+> its `Finishing_Data` and `Item_Master` (size/colour) when the order is opened, and must place the
+> same pieces the list did (`tools/admin-pipeline-scale.test.js`). Ids chunk at 25; Finishing_Data
+> is one read bounded by the oldest plan's `Added_Time`, falling back to id chunks if Creator
+> refuses the date criteria. A rate limit never marks a report missing for the session.
+> **Lines are joined by `Remake_Of`, not `Item_Name`** — by name, two sizes of one product merged.
+> Packed/Dispatched read no piece data and show the last 30 days (`Sales_Order.Modified_Time`),
+> because nothing writes `Dispatched` and Packed otherwise grows for ever; a Packed order is never
+> flagged late for the same reason. Pending reads `Sales_Order` + its nested `Item_Table` through
+> getRecords (`getPendingSalesOrders` is only the fallback — it walks every line of every pending
+> order in one execution). `getOrderPipelineCounts` is now `string`, default namespace, like every
+> other Custom API; the strip's counts are replaced by each list's exact length once it loads.
 
 > **PACKING IS ITS OWN WIDGET.** It was briefly a second tab inside `app/finishing/`; it is not
 > any more, so the finishing widget does one job. `app/packing/js/main.js` is still written as a

@@ -1,26 +1,48 @@
-map Admin_Space.getOrderPipelineCounts()
+string getOrderPipelineCounts()
 {
 	// One count per Sales_Order.Order_Status, and it has to carry EVERY status
-	// the picklist offers. "Finishing Complete" was missing, so every order
+	// the picklist offers. "Finishing Complete" was missing once, so every order
 	// between finishing and packing dropped out of the pipeline entirely - the
 	// cards stopped summing to the number of orders and nothing on the screen
 	// said which bucket had swallowed them.
 	//
 	// Add a status to the picklist, add it here in the same pass.
-	responseMap = Map();
-	pendingCount = Sales_Order[Order_Status == "Pending"].count();
-	inProgressCount = Sales_Order[Order_Status == "In Progress"].count();
-	completedCount = Sales_Order[Order_Status == "Production Complete"].count();
-	qcCount = Sales_Order[Order_Status == "Checking Passed"].count();
-	finishingCount = Sales_Order[Order_Status == "Finishing Complete"].count();
-	packedCount = Sales_Order[Order_Status == "Packed"].count();
-	dispatchedCount = Sales_Order[Order_Status == "Dispatched"].count();
-	responseMap.put("pending",pendingCount);
-	responseMap.put("inProgress",inProgressCount);
-	responseMap.put("completed",completedCount);
-	responseMap.put("qcPassed",qcCount);
-	responseMap.put("finishingComplete",finishingCount);
-	responseMap.put("packed",packedCount);
-	responseMap.put("dispatched",dispatchedCount);
-	return responseMap;
+	//
+	// A STRING, IN THE DEFAULT NAMESPACE, like every other Custom API in this
+	// app. It used to be `map Admin_Space.getOrderPipelineCounts()`, and the
+	// widget's call was refused with "Improper Configuration" before any of
+	// this ran - so the strip lived on the Order Audit fallback, which only
+	// reads the newest 200 sales orders and undercounts once there are more.
+	// JSON built by hand (CLAUDE.md: Map.toString() is not reliable JSON).
+	//
+	// Seven .count() calls - no rows are fetched, so this costs the same at
+	// ten orders or ten thousand.
+	errTxt = "";
+	pendingCount = 0;
+	inProgressCount = 0;
+	completedCount = 0;
+	qcCount = 0;
+	finishingCount = 0;
+	packedCount = 0;
+	dispatchedCount = 0;
+	try
+	{
+		pendingCount = Sales_Order[Order_Status == "Pending"].count();
+		inProgressCount = Sales_Order[Order_Status == "In Progress"].count();
+		completedCount = Sales_Order[Order_Status == "Production Complete"].count();
+		qcCount = Sales_Order[Order_Status == "Checking Passed"].count();
+		finishingCount = Sales_Order[Order_Status == "Finishing Complete"].count();
+		packedCount = Sales_Order[Order_Status == "Packed"].count();
+		dispatchedCount = Sales_Order[Order_Status == "Dispatched"].count();
+	}
+	catch (e)
+	{
+		errTxt = e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+	}
+	errJson = "";
+	if(errTxt != "")
+	{
+		errJson = "\"" + errTxt + "\"";
+	}
+	return "{\"errors\":[" + errJson + "],\"pending\":" + pendingCount + ",\"inProgress\":" + inProgressCount + ",\"completed\":" + completedCount + ",\"qcPassed\":" + qcCount + ",\"finishingComplete\":" + finishingCount + ",\"packed\":" + packedCount + ",\"dispatched\":" + dispatchedCount + "}";
 }

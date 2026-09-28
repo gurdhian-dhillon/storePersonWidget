@@ -73,6 +73,10 @@ function iso(offsetDays) {
         String(d.getDate()).padStart(2, '0');
 }
 
+function byTypeOf(line, t) {
+    return (line.flows || []).filter(function (f) { return f.flowType === t; })[0] || { pos: {} };
+}
+
 const ORDERS = 'Sales_Order_Report';
 const PLANS = 'Production_Planning_Report';
 const ITEMS = 'Plan_Item_Report';
@@ -123,7 +127,10 @@ function baseTables() {
           Qty_Ordered: 10, Qty_Produced: 0, Item_Status: 'Awaiting_Material', Is_Remake: false },
         { ID: 'I3', Plan: { ID: '102' }, Item_Name: 'Linen Sylph Throw', Line_No: 1,
           Qty_Ordered: 15, Qty_Produced: 15, Qty_Accepted: 15, Qty_Rejected: 0,
-          Item_Status: 'Complete', Is_Remake: false },
+          Item_Status: 'Complete', Is_Remake: false,
+          // Closing a stage writes the Plan_Item, so its Modified_Time is when
+          // the item last moved — the list reads that, not the closed logs.
+          Modified_Time: iso(-30) },
         { ID: 'I4', Plan: { ID: '103' }, Item_Name: 'Fern Napkin', Line_No: 1,
           Qty_Ordered: 50, Qty_Produced: 0, Item_Status: 'Awaiting_Material', Is_Remake: false },
         { ID: 'I5', Plan: { ID: '103' }, Item_Name: 'Fern Napkin (remake)', Line_No: 2,
@@ -202,7 +209,7 @@ check('a week out is +7', P.daysFromToday(iso(7)) === 7);
 // ===========================================================================
 console.log('\nTHE PAGE — joins, and a FIXED number of fetches:');
 // ===========================================================================
-P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (res) {
+P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(async function (res) {
     const byId = {};
     res.orders.forEach(function (o) { byId[o.salesOrder] = o; });
 
@@ -248,15 +255,34 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (res) {
 
     // Current stage: the open one furthest along, else the last one done.
     check('current stage is the open one', so3000.currentStage === 'Stitching');
-    check('and it is marked in progress', so3000.currentStageStatus === 'In_Progress');
-    check('last completed stage recorded', so3000.lastCompletedStage === 'Cutting');
+
+    // WHERE THE PIECES ARE - every one placed from a record, none guessed.
+    // I1: 10 ordered, Cutting done 10/10, Stitching open, 4 produced -> 6 at
+    // Stitching and 4 waiting for checking. I2: 10 with no material yet, an
+    // order line, so the store's to issue.
+    const p3 = so3000.pos || {};
+    check('6 pieces in production, all at Stitching',
+        p3.inProduction === 6 && p3.stages && p3.stages.Stitching && p3.stages.Stitching.qty === 6,
+        JSON.stringify(p3.stages));
+    check('4 produced pieces waiting for checking', p3.awaitingCheck === 4, 'got ' + p3.awaitingCheck);
+    check('10 waiting for material, on the store', p3.waitingMaterial === 10 && p3.waitingStore === 10);
+    check('every ordered piece is placed (20)', so3000.placed === 20 && so3000.unplaced === 0,
+        so3000.placed + ' placed, ' + so3000.unplaced + ' unplaced');
+    check('nothing finished yet, 0%', so3000.finishedQty === 0 && so3000.pct === 0);
 
     const so2000 = byId['SO-2000'];
     check('a finished item counts as complete', so2000.completedItems === 1);
     check('remake items counted', byId['SO-1099'].remakeItems === 1);
 
     // ===================================================================
-    console.log('\nITEM BREAKDOWN — one name, its concurrent production flows:');
+    console.log('\nITEM BREAKDOWN — one line, its concurrent production flows (the expand):');
+    // The list loads only OPEN stage logs; which stage a flow last CLOSED is
+    // the expand's to say, so this section reads the order through detail().
+    const listPlaced = byId['SO-0001'].placed;
+    await P.detail(byId['SO-0001']);
+    check('the expand is exact and places the same pieces the list did',
+        byId['SO-0001'].exact === true && byId['SO-0001'].placed === listPlaced,
+        listPlaced + ' vs ' + byId['SO-0001'].placed);
     // ===================================================================
     // The bug: the drawer merged an order line and its remake / loss /
     // alteration batches into ONE row with ONE stage pill — impossible, since
@@ -268,13 +294,15 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (res) {
 
     const fdc = so0001.items[0] || {};
     check('the parent is the product name', fdc.name === 'Fern Duvet Cover');
-    check('parent headline qtys come from the ORDER LINE (I6), not summed',
-        fdc.qtyOrdered === 12 && fdc.qtyProduced === 10 && fdc.qtyAccepted === 8 && fdc.qtyRejected === 3,
-        JSON.stringify({ o: fdc.qtyOrdered, p: fdc.qtyProduced, a: fdc.qtyAccepted, r: fdc.qtyRejected }));
-    check('qtyAltered is the alteration flow quantity (1)', fdc.qtyAltered === 1);
-    check('hasRemake / hasLoss / hasAlteration all set',
-        fdc.hasRemake === true && fdc.hasLoss === true && fdc.hasAlteration === true,
-        JSON.stringify({ r: fdc.hasRemake, l: fdc.hasLoss, a: fdc.hasAlteration }));
+    check('the line ordered / produced come from the ORDER LINE (I6), not summed',
+        fdc.ordered === 12 && fdc.produced === 10,
+        JSON.stringify({ o: fdc.ordered, p: fdc.produced }));
+    check('its checks: 8 approved and waiting for finishing, 3 rejected, 1 altered',
+        fdc.pos.waitingFinishing === 8 && fdc.pos.rejected === 3 && fdc.pos.altered === 1,
+        JSON.stringify(fdc.pos));
+    check('production over, 2 short of ordered -> 2 LOST, not in production',
+        fdc.pos.lost === 2 && byTypeOf(fdc, 'original').pos.inProduction === 0,
+        JSON.stringify(byTypeOf(fdc, 'original').pos));
 
     check('flows[] has all FOUR Plan_Item rows', Array.isArray(fdc.flows) && fdc.flows.length === 4,
         JSON.stringify((fdc.flows || []).map(function (f) { return f.id + ':' + f.flowType; })));
@@ -289,29 +317,36 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (res) {
     // I6 finished Stitching and is Item_Status Complete -> its flow carries the
     // last real stage (Stitching/Done) and status Complete; the drawer's pill
     // maps that to "checking passed".
-    check('the ORIGINAL flow keeps its own last stage + status',
-        byType.original.stage === 'Stitching' && byType.original.status === 'Complete',
-        JSON.stringify({ s: byType.original.stage, st: byType.original.status }));
-    check('the CHECK-REMAKE flow is at its own stage (Stitching, running)',
-        byType.check_remake.stage === 'Stitching' && byType.check_remake.stageStatus === 'Running',
-        JSON.stringify(byType.check_remake));
+    check('the ORIGINAL flow is out of production: no open stage, last was Stitching',
+        byType.original.stage === '' && byType.original.lastStage === 'Stitching' &&
+        byType.original.status === 'Complete',
+        JSON.stringify({ s: byType.original.stage, l: byType.original.lastStage, st: byType.original.status }));
+    check('the CHECK-REMAKE flow: its 3 pieces at Stitching',
+        byType.check_remake.stage === 'Stitching' && byType.check_remake.pos.inProduction === 3,
+        JSON.stringify(byType.check_remake.pos));
     check('the ALTERATION flow is at Cutting',
-        byType.alteration.stage === 'Cutting', JSON.stringify(byType.alteration));
-    check('the PRODUCTION-LOSS flow has no stage yet and is awaiting material',
-        byType.production_loss.stage === '' && byType.production_loss.awaitingMaterial === true,
-        JSON.stringify(byType.production_loss));
+        byType.alteration.stage === 'Cutting' && byType.alteration.pos.inProduction === 1,
+        JSON.stringify(byType.alteration.pos));
+    check('the PRODUCTION-LOSS flow waits for material - and nobody has asked for it',
+        byType.production_loss.stage === '' && byType.production_loss.pos.waitingMaterial === 2 &&
+        byType.production_loss.pos.waitingRequest === 2,
+        JSON.stringify(byType.production_loss.pos));
 
     // Order-level totals must NOT double-count the batches.
     check('order orderedQty is the order line only (12), not 12+3+1+2',
         so0001.orderedQty === 12, 'got ' + so0001.orderedQty);
     check('order producedQty is the order line only (10)', so0001.producedQty === 10,
         'got ' + so0001.producedQty);
-    check('order rejectedQty counts the checked line (3)', so0001.rejectedQty === 3,
-        'got ' + so0001.rejectedQty);
+    check('order rejected pieces: the checked line 3', so0001.pos.rejected === 3,
+        'got ' + so0001.pos.rejected);
     check('order remakeItems counts all three batches (3)', so0001.remakeItems === 3,
         'got ' + so0001.remakeItems);
-    check('order lossFlows counts the production-loss batch (1)', so0001.lossFlows === 1,
-        'got ' + so0001.lossFlows);
+    check('rework still to come: 3 remade, 2 lost-and-remade, 1 in alteration',
+        so0001.pos.rework.check_remake === 3 && so0001.pos.rework.production_loss === 2 &&
+        so0001.pos.rework.alteration === 1, JSON.stringify(so0001.pos.rework));
+    const so2k = byId['SO-2000'];
+    check('a line checked and finished counts as FINISHED, 100%',
+        so2k.finishedQty === 15 && so2k.pct === 100, so2k.finishedQty + ' / ' + so2k.pct + '%');
 
     // A plain line with no batches is a parent with one flow.
     const sylph = (byId['SO-2000'].items || [])[0] || {};
@@ -401,8 +436,10 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(function (res) {
                 JSON.stringify(r2.notes));
             check('stage-derived fields are simply empty, not wrong',
                 r2.orders.every(function (o) { return o.currentStage === ''; }));
-            check('and nothing is falsely called stuck without stage data',
-                r2.orders.every(function (o) {
+            // Without stage data, idle can only come from the other records
+            // (SO-2000's item was last written 30 days ago) — never invented.
+            check('and nothing that moved recently is called idle without stage data',
+                r2.orders.filter(function (o) { return o.salesOrder !== 'SO-2000'; }).every(function (o) {
                     return P2.risk(o).every(function (x) { return x.level !== 'stuck'; });
                 }));
 
