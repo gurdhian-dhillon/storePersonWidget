@@ -271,14 +271,29 @@ string saveItemCheck(string payloadJson)
 		rootBom = rtRec.BOM;
 	}
 
+	// Stage names come off the Stage lookup through the Production_Stage master
+	// (a lookup holds an id, not a name). Alteration_Stage.Stage_Name stays the
+	// NAME - it is a
+	// snapshot, like Stage_Log.Phase_Name, and is matched against it.
 	seqByStage = Map();
 	if(rootBom != null)
 	{
+		stageNameById = Map();
+		for each  psRec in Production_Stage[ID != 0]
+		{
+			stageNameById.put(psRec.ID.toString(),ifnull(psRec.Stage_Name,"").toString().trim());
+		}
+
 		for each  bomRec in BOM[ID == rootBom]
 		{
 			for each  bomStg in bomRec.Production_Stages
 			{
-				opName = ifnull(bomStg.Operation,"").toString().trim();
+				opName = "";
+				stgKey = ifnull(bomStg.Stage,"").toString().trim();
+				if(stgKey != "")
+				{
+					opName = ifnull(stageNameById.get(stgKey),"").toString().trim();
+				}
 				if(opName != "")
 				{
 					// Kept as text so the comparison further down is like with

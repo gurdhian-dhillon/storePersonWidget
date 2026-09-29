@@ -1,0 +1,11 @@
+// Production_Stage form workflow.
+// Record Event: Edited -> Form Event: Before form submission -> Load of the form.
+//
+// Greys the name out when an existing stage is opened, so nobody types a new
+// one and only finds out at Submit. validateProductionStage is the real guard -
+// it refuses the rename however the record is changed; this only saves the
+// round trip. Why a name is fixed once saved: see that file.
+//
+// Bare field name for a client task, no "input.".
+
+disable Stage_Name;

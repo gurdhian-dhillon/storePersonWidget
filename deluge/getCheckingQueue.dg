@@ -180,6 +180,15 @@ string getCheckingQueue(string supervisorId)
 			bomStagesById = Map();
 			skuById = Map();
 
+			// Production_Stage id -> Stage_Name, read once. BOM stage rows
+			// carry a Stage LOOKUP (an id); the checker's alteration picker
+			// wants the name, which is what Stage_Log.Phase_Name holds.
+			stageNameById = Map();
+			for each  psRec in Production_Stage[ID != 0]
+			{
+				stageNameById.put(psRec.ID.toString(),ifnull(psRec.Stage_Name,"").toString().trim());
+			}
+
 			for each  itm in awaiting
 			{
 				//----------------------------------------------------------
@@ -365,10 +374,16 @@ string getCheckingQueue(string supervisorId)
 								seqTxt = "0";
 							}
 
-							// Stage names are free text on the BOM until the
-							// stage master lands, so they are escaped like any
-							// other free text.
-							opTxt = ifnull(bstg.Operation,"").toString().trim().replaceAll("\"","'");
+							// The Stage lookup through the master. Escaped like
+							// any other free text - the master's names are typed
+							// by the client.
+							opTxt = "";
+							stgKey = ifnull(bstg.Stage,"").toString().trim();
+							if(stgKey != "")
+							{
+								opTxt = ifnull(stageNameById.get(stgKey),"").toString().trim();
+							}
+							opTxt = opTxt.replaceAll("\"","'");
 
 							if(opTxt != "")
 							{

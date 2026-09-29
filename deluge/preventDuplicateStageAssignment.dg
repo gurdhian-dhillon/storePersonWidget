@@ -24,11 +24,25 @@
 // If it ever matters, the edit version is at the bottom.
 //
 // .count() not .size() - size() is a List method, a query result needs count().
+//
+// THE STAGE IS Assigned_Stage, a lookup to Production_Stage. A lookup holds an
+// id, so the message fetches the name to show. The field is mandatory on the
+// form; the empty guard is only there so an empty value never matches every
+// other empty one.
 
-if(Operator_Assignment[Stage == input.Stage].count() > 0)
+newStg = ifnull(input.Assigned_Stage,"").toString().trim();
+if(newStg != "")
 {
-	alert "There is already an assignment for " + input.Stage + ". Open that record and change its operators instead of adding a second one.";
-	cancel submit;
+	if(Operator_Assignment[Assigned_Stage == input.Assigned_Stage].count() > 0)
+	{
+		stgLabel = newStg;
+		for each  psRec in Production_Stage[ID == input.Assigned_Stage]
+		{
+			stgLabel = ifnull(psRec.Stage_Name,"").toString();
+		}
+		alert "There is already an assignment for " + stgLabel + ". Open that record and change its operators instead of adding a second one.";
+		cancel submit;
+	}
 }
 
 // Create-or-edit version, IF the self-exclusion is ever needed. Ids forced to
@@ -37,7 +51,7 @@ if(Operator_Assignment[Stage == input.Stage].count() > 0)
 //
 //	thisId = ifnull(input.ID,"").toString();
 //	dupFound = false;
-//	for each  oaRec in Operator_Assignment[Stage == input.Stage]
+//	for each  oaRec in Operator_Assignment[Assigned_Stage == input.Assigned_Stage]
 //	{
 //		if(oaRec.ID.toString() != thisId)
 //		{
@@ -46,6 +60,6 @@ if(Operator_Assignment[Stage == input.Stage].count() > 0)
 //	}
 //	if(dupFound == true)
 //	{
-//		alert "There is already an assignment for " + input.Stage + ".";
+//		alert "There is already an assignment for that stage.";
 //		cancel submit;
 //	}

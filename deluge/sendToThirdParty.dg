@@ -67,7 +67,7 @@ string sendToThirdParty(string payloadJson)
 	//   Party_Name         Single Line
 	//   Contact_Person     Single Line
 	//   Phone              Single Line
-	//   Applicable_Stages  Multi Select  - the same stage names as the BOM
+	//   Stages             Multi Select Lookup -> Production_Stage
 	//   Status             Dropdown      - Active / Inactive
 	//   Remarks            Multi Line
 	//
@@ -175,6 +175,16 @@ string sendToThirdParty(string payloadJson)
 
 	// Sequence -> phase name, off the BOM. Keyed as text so the comparison is
 	// like with like; a mixed-type comparison throws rather than returning false.
+	//
+	// The name comes off the Stage lookup through the Production_Stage master -
+	// a lookup holds an id, and Phase_Name and every match downstream want the
+	// name.
+	stageNameById = Map();
+	for each  psRec in Production_Stage[ID != 0]
+	{
+		stageNameById.put(psRec.ID.toString(),ifnull(psRec.Stage_Name,"").toString().trim());
+	}
+
 	phaseBySeq = Map();
 	seqOrder = List();
 	for each  bomRec in BOM[ID == bomId]
@@ -182,7 +192,13 @@ string sendToThirdParty(string payloadJson)
 		for each  st in bomRec.Production_Stages
 		{
 			sq = ifnull(st.Sequence_No,0);
-			phaseBySeq.put(sq.toString(),ifnull(st.Operation,"").toString());
+			stgNm = "";
+			stgKey = ifnull(st.Stage,"").toString().trim();
+			if(stgKey != "")
+			{
+				stgNm = ifnull(stageNameById.get(stgKey),"").toString().trim();
+			}
+			phaseBySeq.put(sq.toString(),stgNm);
 			if(seqOrder.contains(sq) == false)
 			{
 				seqOrder.add(sq);

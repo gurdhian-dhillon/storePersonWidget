@@ -1,0 +1,252 @@
+string migrateProductionStages(string dryRun, int pageNo)
+{
+	// ONE-OFF MIGRATION, run from Creator's Execute. Not a Custom API.
+	//
+	// Moves the three stage dropdowns onto the Production_Stage master:
+	//
+	//   BOM.Production_Stages.Operation      -> .Stage           (lookup)
+	//   Third_Party.Applicable_Stages        -> .Stages          (multi lookup)
+	//   Operator_Assignment.Stage            -> .Assigned_Stage  (lookup)
+	//
+	// Every name it meets that the master does not hold yet becomes a
+	// Production_Stage record (Is_Active = true) first. Names are matched EXACTLY,
+	// the same way production matches them - "Machine Embroidery" and "Manual
+	// Machine Embroidery" are two stages, and so are "Cutting" and "cutting".
+	//
+	// THE OLD FIELDS ARE NOT TOUCHED. Every reader prefers the lookup and falls
+	// back to the dropdown, so this can run before or after the code deploy and
+	// can be run twice. A row whose lookup is already filled is skipped - a stage
+	// someone has since picked by hand is never overwritten.
+	//
+	// dryRun: "false" writes. ANYTHING ELSE is a dry run that writes nothing and
+	// reports what it would do - the safe default if the argument is mistyped.
+	//
+	// pageNo: BOMs are walked 30 at a time, sort by ID, because the
+	// statement-execution limit is NOT catchable and ~110 BOMs x ~6 stage rows in
+	// one run is the shape that trips it. Run page 1, 2, 3 ... until the report
+	// says "morePages":false. Third parties and operator assignments are small
+	// and done on every page (idempotent, so repeating them costs nothing).
+	//
+	// Dropdown CHOICES that no record uses are invisible to Deluge, so they are
+	// not created here. Add any such stage in the Production_Stage form by hand.
+
+	res = "{\"success\":false,\"error\":\"Nothing ran\"}";
+	try
+	{
+		isDry = true;
+		if(ifnull(dryRun,"").toString().trim().toLowerCase() == "false")
+		{
+			isDry = false;
+		}
+
+		pg = ifnull(pageNo,1);
+		if(pg < 1)
+		{
+			pg = 1;
+		}
+		pageSize = 30;
+		fromIdx = (pg - 1) * pageSize + 1;
+		toIdx = pg * pageSize;
+
+		// Existing master: exact name -> id (text).
+		idByName = Map();
+		for each  psRec in Production_Stage[ID != 0]
+		{
+			psNm = ifnull(psRec.Stage_Name,"").toString().trim();
+			if(psNm != "")
+			{
+				idByName.put(psNm,psRec.ID.toString());
+			}
+		}
+
+		//------------------------------------------------------------------
+		// 1. COLLECT every stage name this page will need.
+		//------------------------------------------------------------------
+		bomPage = BOM[ID != 0] sort by ID range from fromIdx to toIdx;
+		bomCount = bomPage.count();
+
+		wanted = List();
+		for each  bmRec in bomPage
+		{
+			for each  bsRow in bmRec.Production_Stages
+			{
+				opNm = ifnull(bsRow.Operation,"").toString().trim();
+				if(opNm != "" && wanted.contains(opNm) == false)
+				{
+					wanted.add(opNm);
+				}
+			}
+		}
+
+		tpAll = Third_Party[ID != 0];
+		for each  tpRec in tpAll
+		{
+			tpOld = ifnull(tpRec.Applicable_Stages,"");
+			if(tpOld.toString().trim() != "")
+			{
+				for each  tpNmRaw in tpOld
+				{
+					tpNm = tpNmRaw.toString().trim();
+					if(tpNm != "" && wanted.contains(tpNm) == false)
+					{
+						wanted.add(tpNm);
+					}
+				}
+			}
+		}
+
+		oaAll = Operator_Assignment[ID != 0];
+		for each  oaRec in oaAll
+		{
+			oaNm = ifnull(oaRec.Stage,"").toString().trim();
+			if(oaNm != "" && wanted.contains(oaNm) == false)
+			{
+				wanted.add(oaNm);
+			}
+		}
+
+		//------------------------------------------------------------------
+		// 2. CREATE the missing master records.
+		//
+		// The id is re-fetched by name rather than taken from the insert - the
+		// return of "insert into" is not trusted as a record id in this repo.
+		// In a dry run the name is marked resolvable with a placeholder so the
+		// counts below still say what a real run would fill.
+		//------------------------------------------------------------------
+		createdJson = "";
+		for each  wNm in wanted
+		{
+			if(idByName.get(wNm) == null)
+			{
+				if(createdJson != "")
+				{
+					createdJson = createdJson + ",";
+				}
+				createdJson = createdJson + "\"" + wNm.replaceAll("\"","'") + "\"";
+
+				if(isDry == false)
+				{
+					insert into Production_Stage
+					[
+						Added_User=zoho.loginuser
+						Stage_Name=wNm
+						Is_Active=true
+					];
+					for each  psNew in Production_Stage[Stage_Name == wNm]
+					{
+						idByName.put(wNm,psNew.ID.toString());
+					}
+				}
+				else
+				{
+					idByName.put(wNm,"DRY");
+				}
+			}
+		}
+
+		//------------------------------------------------------------------
+		// 3. FILL the lookups. Only where the lookup is still empty.
+		//------------------------------------------------------------------
+		bomRowsFilled = 0;
+		unmatchedJson = "";
+		for each  bmRec2 in bomPage
+		{
+			for each  bsRow2 in bmRec2.Production_Stages
+			{
+				curLk = ifnull(bsRow2.Stage,"").toString().trim();
+				opNm2 = ifnull(bsRow2.Operation,"").toString().trim();
+				if(curLk == "" && opNm2 != "")
+				{
+					tgtId = ifnull(idByName.get(opNm2),"").toString();
+					if(tgtId == "")
+					{
+						if(unmatchedJson != "")
+						{
+							unmatchedJson = unmatchedJson + ",";
+						}
+						unmatchedJson = unmatchedJson + "\"" + opNm2.replaceAll("\"","'") + "\"";
+					}
+					else
+					{
+						bomRowsFilled = bomRowsFilled + 1;
+						if(isDry == false)
+						{
+							bsRow2.Stage = tgtId.toLong();
+						}
+					}
+				}
+			}
+		}
+
+		// A party is filled whole or not at all - a Stages list missing one of
+		// the old names would quietly stop offering him for that stage.
+		tpFilled = 0;
+		for each  tpRec2 in tpAll
+		{
+			tpCur = ifnull(tpRec2.Stages,"");
+			tpOld2 = ifnull(tpRec2.Applicable_Stages,"");
+			if(tpCur.toString().trim() == "" && tpOld2.toString().trim() != "")
+			{
+				tpIds = List();
+				tpAllFound = true;
+				for each  tpNmRaw2 in tpOld2
+				{
+					tpNm2 = tpNmRaw2.toString().trim();
+					if(tpNm2 != "")
+					{
+						tpTgt = ifnull(idByName.get(tpNm2),"").toString();
+						if(tpTgt == "")
+						{
+							tpAllFound = false;
+						}
+						else if(tpTgt != "DRY")
+						{
+							tpIds.add(tpTgt.toLong());
+						}
+					}
+				}
+				if(tpAllFound == true)
+				{
+					tpFilled = tpFilled + 1;
+					if(isDry == false)
+					{
+						tpRec2.Stages = tpIds;
+					}
+				}
+			}
+		}
+
+		oaFilled = 0;
+		for each  oaRec2 in oaAll
+		{
+			oaCur = ifnull(oaRec2.Assigned_Stage,"").toString().trim();
+			oaNm2 = ifnull(oaRec2.Stage,"").toString().trim();
+			if(oaCur == "" && oaNm2 != "")
+			{
+				oaTgt = ifnull(idByName.get(oaNm2),"").toString();
+				if(oaTgt != "")
+				{
+					oaFilled = oaFilled + 1;
+					if(isDry == false)
+					{
+						oaRec2.Assigned_Stage = oaTgt.toLong();
+					}
+				}
+			}
+		}
+
+		morePages = "false";
+		if(bomCount >= pageSize)
+		{
+			morePages = "true";
+		}
+
+		res = "{\"success\":true,\"dryRun\":" + isDry + ",\"page\":" + pg + ",\"bomsOnPage\":" + bomCount + ",\"morePages\":" + morePages + ",\"stagesCreated\":[" + createdJson + "],\"bomRowsFilled\":" + bomRowsFilled + ",\"thirdPartiesFilled\":" + tpFilled + ",\"assignmentsFilled\":" + oaFilled + ",\"unmatched\":[" + unmatchedJson + "]}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"" + e.toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ") + "\"}";
+	}
+	info res;
+	return res;
+}

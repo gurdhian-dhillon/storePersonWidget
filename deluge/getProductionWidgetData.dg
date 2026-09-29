@@ -95,10 +95,34 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 	try
 	{
 		//------------------------------------------------------------------
+		// THE STAGE MASTER, read once: Production_Stage id -> Stage_Name.
+		//
+		// BOM.Production_Stages.Stage, Third_Party.Stages and
+		// Operator_Assignment.Assigned_Stage are LOOKUPS, and a lookup holds a
+		// record id - .toString() on one gives 18 digits, not a name. Everything
+		// downstream (Stage_Log.Phase_Name, the widget, the third-party match)
+		// still works on the NAME, so each lookup is turned back into one here
+		// and nothing past this function knows the master exists.
+		//
+		// Master data, a few dozen rows - a fetch-all is the right shape.
+		// Inactive stages are included on purpose: Is_Active only takes a stage
+		// out of the PICKERS, and a BOM that already carries one must still run.
+		//
+		// The lookups are the ONLY source - the old dropdowns (Operation,
+		// Applicable_Stages, Stage) are no longer read. A lookup left empty
+		// reads as no stage at all, so the forms make them mandatory.
+		//------------------------------------------------------------------
+		stageNameById = Map();
+		for each psRec in Production_Stage[ID != 0]
+		{
+			stageNameById.put(psRec.ID.toString(),ifnull(psRec.Stage_Name,"").toString().trim());
+		}
+
+		//------------------------------------------------------------------
 		// Third parties: fetched once at the top level, matched to stages in
 		// the WIDGET by exact string.
 		//
-		// A query on Applicable_Stages would have to use "contains", which is a
+		// A query on the stage list would have to use "contains", which is a
 		// SUBSTRING match, and the stage names collide - "Machine Embroidery"
 		// sits inside "Manual Machine Embroidery". Substring matching would
 		// offer the wrong parties for a stage.
@@ -117,20 +141,22 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 		tpSorted = Third_Party[ID != 0] sort by Party_Name;
 		for each tp in tpSorted
 		{
-			// Iterated as a list rather than split off toString() - a
-			// multi-select rendered to a string is not a shape worth relying
-			// on, and an empty one is EMPTY, not null, so it is guarded first.
+			// Stages is a multi-select LOOKUP to Production_Stage: each entry
+			// is a record id, turned into the name through the master. Iterated
+			// as a list rather than split off toString() - a multi-select
+			// rendered to a string is not a shape worth relying on, and an
+			// empty one is EMPTY, not null, so it is guarded first.
 			tpStgJson = "";
-			tpStgRaw = ifnull(tp.Applicable_Stages,"");
-			if(tpStgRaw.toString().trim() != "")
+			tpLkRaw = ifnull(tp.Stages,"");
+			if(tpLkRaw.toString().trim() != "")
 			{
-				for each tstg in tpStgRaw
+				for each tlk in tpLkRaw
 				{
-					tstgTxt = tstg.toString().trim().replaceAll("\"","'");
-					if(tstgTxt != "")
+					tlkTxt = ifnull(stageNameById.get(tlk.toString()),"").toString().replaceAll("\"","'");
+					if(tlkTxt != "")
 					{
 						if(tpStgJson != "") { tpStgJson = tpStgJson + ","; }
-						tpStgJson = tpStgJson + "\"" + tstgTxt + "\"";
+						tpStgJson = tpStgJson + "\"" + tlkTxt + "\"";
 					}
 				}
 			}
@@ -167,7 +193,14 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 		opStages = Map();
 		for each oa in Operator_Assignment[Is_Active == true]
 		{
-			oaStage = ifnull(oa.Stage,"").toString().trim();
+			// Assigned_Stage is a lookup to Production_Stage - an id, turned
+			// into the name through the master.
+			oaStage = "";
+			oaLk = ifnull(oa.Assigned_Stage,"").toString().trim();
+			if(oaLk != "")
+			{
+				oaStage = ifnull(stageNameById.get(oaLk),"").toString().trim();
+			}
 			if(oaStage != "")
 			{
 				// A record with no operators is NOT "restrict to nobody" - it is
@@ -660,8 +693,15 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 					{
 						for each stage in bomRec.Production_Stages
 						{
+							// Stage lookup -> name through the master.
+							stgNm = "";
+							stgKey = ifnull(stage.Stage,"").toString().trim();
+							if(stgKey != "")
+							{
+								stgNm = ifnull(stageNameById.get(stgKey),"").toString().trim();
+							}
 							if(phasesJson != "") { phasesJson = phasesJson + ","; }
-							phasesJson = phasesJson + "{\"sequence\":" + ifnull(stage.Sequence_No,0) + ",\"operation\":\"" + stage.Operation + "\"}";
+							phasesJson = phasesJson + "{\"sequence\":" + ifnull(stage.Sequence_No,0) + ",\"operation\":\"" + stgNm.replaceAll("\"","'") + "\"}";
 						}
 					}
 				}

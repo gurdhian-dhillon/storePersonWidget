@@ -1,0 +1,70 @@
+// Production_Stage form workflow.
+// Record Event: Created or Edited -> Form Event: On form submission ->
+// Validations on form submission.
+//
+// THREE RULES, each because production matches stages BY NAME:
+//
+// 1. The name is trimmed. "Cutting " is not "Cutting" to an == match, and the
+//    supervisor screen only offers the waste prompt on exactly "Cutting".
+//
+// 2. No second stage with the same name in a DIFFERENT CASE. The field's own
+//    "No duplicate values" property is exact-match only, so "cutting" would get
+//    past it and become a stage that silently never gets the waste prompt.
+//
+// 3. A SAVED NAME CANNOT BE CHANGED. Stage_Log.Phase_Name stores the name the
+//    stage had on the day, and the supervisor screen finds a stage's log by
+//    comparing that text with the BOM's. Rename "Stitching" while an item is
+//    mid-production and its finished Stitching log stops matching - the screen
+//    shows the stage as not started and lets it be started twice. To rename:
+//    set the old stage Inactive, create the new one, change the BOMs.
+//    A typo on a stage nothing uses yet: delete it and create it again
+//    (preventProductionStageDelete allows that while nothing points at it).
+//    lockProductionStageName also greys the field on edit; this is the guard
+//    that holds when the record is changed some other way.
+//
+// Ids forced to string before comparing - mixed-type comparison throws.
+
+newName = ifnull(input.Stage_Name,"").toString().trim();
+input.Stage_Name = newName;
+
+if(newName == "")
+{
+	alert "Enter the stage name.";
+	cancel submit;
+}
+
+thisId = ifnull(input.ID,"").toString().trim();
+
+oldName = "";
+if(thisId != "")
+{
+	for each  psOld in Production_Stage[ID == thisId.toLong()]
+	{
+		oldName = ifnull(psOld.Stage_Name,"").toString().trim();
+	}
+}
+
+if(oldName != "" && oldName != newName)
+{
+	alert "A stage's name cannot be changed once saved - production history is recorded under \"" + oldName + "\". Set this stage Inactive and create a new one instead.";
+	cancel submit;
+}
+
+clashName = "";
+newLower = newName.toLowerCase();
+for each  psRec in Production_Stage[ID != 0]
+{
+	if(psRec.ID.toString() != thisId)
+	{
+		if(ifnull(psRec.Stage_Name,"").toString().trim().toLowerCase() == newLower)
+		{
+			clashName = ifnull(psRec.Stage_Name,"").toString().trim();
+		}
+	}
+}
+
+if(clashName != "")
+{
+	alert "There is already a stage called \"" + clashName + "\". Use that one - stage names are matched exactly, so two spellings would be two different stages.";
+	cancel submit;
+}

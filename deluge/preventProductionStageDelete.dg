@@ -1,0 +1,65 @@
+// Production_Stage form workflow.
+// Record Event: Deleted -> Form Event: Validations on record deletion.
+//
+// REMOVING A STAGE MEANS SETTING IT INACTIVE, NOT DELETING IT.
+// Deleting a record a lookup points at blanks that lookup - so deleting
+// "Stitching" would silently empty the Stitching row on every BOM that has it,
+// and every item of those products would lose the stage mid-production.
+// Is_Active = false takes it out of every picker and leaves the BOMs working.
+//
+// Delete is allowed only while NOTHING points at the stage - which is exactly
+// the "I made a typo a minute ago" case.
+//
+// Production history is not checked: Stage_Log / Stage_Assignment /
+// Alteration_Stage store the stage NAME as text, so deleting the master record
+// cannot change them.
+//
+// Walked rather than queried on the subform field - BOM, Third_Party and
+// Operator_Assignment are master data, a few hundred rows at most, and a loop
+// is certain where criteria on a subform field and on a multi-lookup are not.
+// No reliable break in Deluge, so the loops just count.
+
+delId = input.ID.toString();
+
+bomUses = 0;
+for each  bmRec in BOM[ID != 0]
+{
+	for each  bsRow in bmRec.Production_Stages
+	{
+		if(ifnull(bsRow.Stage,"").toString().trim() == delId)
+		{
+			bomUses = bomUses + 1;
+		}
+	}
+}
+
+tpUses = 0;
+for each  tpRec in Third_Party[ID != 0]
+{
+	tpLk = ifnull(tpRec.Stages,"");
+	if(tpLk.toString().trim() != "")
+	{
+		for each  tlk in tpLk
+		{
+			if(tlk.toString() == delId)
+			{
+				tpUses = tpUses + 1;
+			}
+		}
+	}
+}
+
+oaUses = 0;
+for each  oaRec in Operator_Assignment[ID != 0]
+{
+	if(ifnull(oaRec.Assigned_Stage,"").toString().trim() == delId)
+	{
+		oaUses = oaUses + 1;
+	}
+}
+
+if(bomUses + tpUses + oaUses > 0)
+{
+	alert "\"" + ifnull(input.Stage_Name,"") + "\" is in use (" + bomUses + " BOM rows, " + tpUses + " third parties, " + oaUses + " operator assignments). Untick Active instead - that removes it from every picker without breaking the BOMs that have it.";
+	cancel delete;
+}

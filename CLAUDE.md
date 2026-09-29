@@ -1072,20 +1072,26 @@ blow the statement limit at 111 plans even after the `matPlanIdx` fix, confirmed
 ## Deliberate gaps — do not "fix" without asking
 
 - **No roles or login.** Pickers stand in. Blocks all authorisation work.
-- **Stages are a hardcoded picklist, and will not stay that way.** The same set of stage names
-  is spelled out as dropdown options in `BOM.Production_Stages.Operation` and
-  `Third_Party.Applicable_Stages` — and matched everywhere **by exact string**.
-  (`Machine_Master.Applicable_Stages` was a third; machines are no longer read.) Planned: an admin **stage master** where he adds and edits
-  stages, with `BOM.Production_Stages` becoming a **lookup** to it rather than free text.
-  > Two things to keep true until then, because both get harder the more code assumes strings:
-  > **stage names are compared with `==`, never `contains`** — they collide as substrings
-  > ("Machine Embroidery" is inside "Manual Machine Embroidery"), which is why
-  > `getProductionWidgetData` reads the multi-selects as lists instead of querying them. And
-  > **`Stage_Log.Phase_Name` stores the name, not a reference** — it is a snapshot of what the
-  > stage was called on the day, so renaming a stage later must not rewrite finished history.
-  > When the master lands, `Phase_Name` stays as the snapshot and a `Stage` lookup goes
-  > *alongside* it. Keep new stage picklists **single**-select where the grain allows
-  > (`Operator_Assignment.Stage` does) — a multi-select is what forces the `contains` problem.
+- **Stages live in the `Production_Stage` master; production history still matches them BY
+  NAME.** `BOM.Production_Stages.Stage`, `Third_Party.Stages` and
+  `Operator_Assignment.Assigned_Stage` are lookups to it. The functions that read them
+  (`getProductionWidgetData`, `sendToThirdParty`, `saveItemCheck`, `getCheckingQueue`,
+  `preventDuplicateStageAssignment`) turn the id back into `Stage_Name` straight away. The old
+  dropdowns (`Operation`, `Applicable_Stages`, `Operator_Assignment.Stage`) are no longer read by
+  anything but the one-off `migrateProductionStages`.
+  Setup, migration and cleanup steps: `docs/stage-master.md`.
+  > **`Stage_Log.Phase_Name`, `Stage_Assignment.Phase_Name` and `Alteration_Stage.Stage_Name`
+  > stay text snapshots**, and the supervisor screen finds a stage's log by comparing names.
+  > That is why a stage's **name is locked once saved** (`validateProductionStage`) and removing
+  > one means **unticking `Is_Active`**, never deleting it (`preventProductionStageDelete`).
+  > **Stage names are compared with `==`, never `contains`**, because they collide as substrings
+  > ("Machine Embroidery" is inside "Manual Machine Embroidery"). The waste prompt still keys on
+  > the exact name `Cutting`.
+  >
+  > **A BOM edit re-orders stages for every open item of that product, immediately.**
+  > `Plan_Item.BOM` points at the shared BOM, and the screen re-reads it on every load. Moving a
+  > stage nobody has started is safe. Moving a started or finished one strands the item. Nothing
+  > guards this yet; see the last section of `docs/stage-master.md`.
 - **Damage salvage is double-counted as loss, at Cutting only.** He ruins a panel, salvages
   the usable part into the waste box, *and* reports the damage to get cloth reissued. **Stock is
   correct** — the remnant is really on the rack and the reissue is really new cloth, nothing is
