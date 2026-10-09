@@ -1,54 +1,80 @@
 string sendToPrint(string payloadJson)
 {
-	// Store person cuts full-width pieces off a source lot and sends them to an
-	// outside printer. The pieces are PHYSICALLY CUT here - the named source rolls
-	// shrink - and the cloth moves state into In_Print_Qty, still ours.
+	// Creates one print JOB ORDER: the paper the store hands one printer, one row
+	// per piece size, exactly as the paper reads -
 	//
-	//   { "sourceMaterialId":"123", "sourceLotId":"901", "sourceState":"Wash",
-	//     "targetMaterialId":"456",        // an EXISTING printed SKU
-	//     "printerId":"77",
-	//     "lines":[ {"lengthCm":300,"count":3}, {"lengthCm":275,"count":4} ],
-	//     "rollPlan":[ {"rollId":"111","label":"L2-R1","metres":9.0}, ... ],  // optional
-	//     "remarks":"" }
+	//   { "printerId":"78", "remarks":"",
+	//     "lines":[
+	//       { "sourceMaterialId":"1", "sourceLotId":"10", "sourceState":"Wash",
+	//         "targetMaterialId":"3", "lengthCm":550, "count":5, "rate":175 },
+	//       { "sourceMaterialId":"1", "sourceLotId":"10", "sourceState":"Wash",
+	//         "targetMaterialId":"4", "lengthCm":550, "count":5, "rate":175 },
+	//       { "sourceMaterialId":"2", "sourceLotId":"21", "sourceState":"Unwash",
+	//         "targetMaterialId":"7", "lengthCm":275, "count":8, "rate":90 } ] }
+	//
+	// ONE VENDOR PER JOB ORDER, ANY NUMBER OF BASES. Each row names its own base
+	// fabric, the lot (the tone) and washed/unwashed, the printed SKU it becomes,
+	// the piece length, how many, and the RATE PER PIECE for that size - the
+	// printer prices a 5.50 m piece and a 2.75 m piece differently.
+	//
+	// ROWS BECOME JOBS BY (base lot, state, printed SKU). A Print_Job is still one
+	// tone of one base going to one printed SKU, because everything downstream is
+	// built on that: receiveFromPrint creates THAT SKU's lot from THAT job's
+	// Send_Lines, cancelPrintJob returns THAT job's metres to THAT lot and state,
+	// postPrintAdjustments posts -metres on THAT base. Two sizes of one design off
+	// one lot are two Send_Lines of one job; the same design off a second lot is a
+	// second job. Every job of the press carries Print_Batch = the first job's
+	// number - that batch IS the job order, and raisePrintPO turns it into ONE
+	// Purchase Order, one line per priced row.
+	//
+	// THE RATE IS ON THE ROW (Send_Lines.Rate), not on the job. That column is the
+	// price history: print-data.js reads it back and the create form fills a row's
+	// rate from the last one for the same printer + design + piece length.
+	// Blank / 0 = not priced - the row still goes, it just puts no line on the PO.
+	//
+	// BUDGET AND ROLLS ARE PER LOT. Rows off one lot are summed: each STATE's metres
+	// must fit that state's column, and the lot's rolls are cut for the lot's
+	// TOTAL - rolls hold washed and unwashed cloth alike (Σ Roll_Length = Wash +
+	// Unwash + In_Wash), so one plan per lot, shortest roll first. That plan is
+	// then dealt out to the lot's jobs in order for each job's Source_Rolls. There
+	// is no hand-edited roll plan any more; the form shows the auto plan.
+	//
+	// EVERYTHING IS VALIDATED BEFORE ANYTHING IS WRITTEN - every row, every
+	// material, every lot, every budget, every roll. A bad tenth row must not leave
+	// the first nine sent.
 	//
 	// NO MINTING. Printed SKUs are created in Zoho Inventory and pushed to Creator.
-	// The target is one the store person picked - the widget filters the list to
-	// the same width (the "printed fabric" Type_field filter is OFF for now, both
-	// here and in the widget). The pick is his and there is no system link (no
-	// Print_Base) between plain and printed.
-	//
-	// NO Fabric_Piece, NO Pattern. Printed stock is ordinary short rolls
-	// (Lot_Rolls, Origin "Printed"), created by receiveFromPrint. See
-	// docs/printing-v2-plan.md.
+	// The pick is his; the only system rule is THE SAME WIDTH as the base - a piece
+	// coming back has to be full width of both, or the allocator is handed cloth it
+	// cannot cut as it expects. (The "printed fabric" Type_field filter is OFF, here
+	// and in the widget.) No Fabric_Piece, no Pattern: printed stock is ordinary
+	// short rolls, created by receiveFromPrint. See docs/printing-v2-plan.md §14.
 	//
 	// PRINTING IS A STORE-SIDE CONVERSION, NOT A PRODUCTION STAGE. It does not go
 	// near sendToThirdParty, Stage_Log or Stage_Assignment.
 	//
 	// THE LOT HOLDS THE TRUTH, Raw_Material HOLDS A MAINTAINED TOTAL. Both are
-	// written here, in one pass, so they cannot disagree. The parent is not a
-	// derived roll-up: recomputing a sum per material on every screen load is a
-	// query per material, and that is the road to the statement limit - NOT
-	// catchable, shows as a bare 500 with no error card.
+	// written here, in one pass. The SKU total does not change at send: Wash /
+	// Unwash goes down, In_Print_Qty goes up, mirrored on the parent.
 	//
-	// THE SKU TOTAL DOES NOT CHANGE AT SEND. Wash/Unwash goes down, In_Print_Qty
-	// goes up, both mirrored onto the parent - the metres have only walked state.
-	//
-	// THE ROLLS ARE DECREMENTED HERE. Σ Roll_Length must equal the lot's shelf
-	// columns (Wash + Unwash + In_Wash), so cutting pieces off a roll and moving
-	// the same metres out of Wash_Quantity happen together. lot-rolls-model.md
-	// Step 7.
-	//
-	// MOVE THE LEDGER FIRST, WRITE THE JOB SECOND. No transaction here, so pick
+	// MOVE THE LEDGER FIRST, WRITE THE JOBS SECOND. No transaction here, so pick
 	// the safer failure: a move with no job leaves metres parked in In_Print_Qty
 	// and rolls short - visible to reconcileRawMaterial, correctable by hand,
-	// invents nothing. A job with no move could be cancelled and credit cloth
-	// that never left. Stuck beats imaginary.
+	// invents nothing. A job with no move could be cancelled and credit cloth that
+	// never left. Stuck beats imaginary.
+	//
+	// AFTER THE JOBS: postPrintAdjustments per job (-metres on the base, in Zoho
+	// Inventory) and raisePrintPO for the batch, each in its own try - neither can
+	// make a send that happened look failed.
+	//
+	// HELD AS PARALLEL LISTS AND MAPS, never a List of Maps - a hand-appended List
+	// of maps does not reliably survive being iterated later in Deluge, and
+	// List.set() does not exist (CLAUDE.md). Map.put() overwrites, so running
+	// totals live in Maps keyed by text.
 	//
 	// ONE EXIT, AT THE BOTTOM. Deluge's "all paths return" check does NOT count a
-	// return inside try/catch - a function whose every return sat in the try
-	// failed to save with "Missing return statement" against line 3. So nothing
-	// returns early: errTxt is set, later blocks guard on it being empty, and the
-	// one return is after the catch. Same shape as saveStockInward.
+	// return inside try/catch, so nothing returns early: errTxt is set, later
+	// blocks guard on it, and the one return is after the catch.
 
 	res = "";
 	errTxt = "";
@@ -57,203 +83,29 @@ string sendToPrint(string payloadJson)
 	{
 		inp = payloadJson.toMap();
 
-		srcMatId = ifnull(inp.get("sourceMaterialId"),"").toString().trim();
-		srcLotId = ifnull(inp.get("sourceLotId"),"").toString().trim();
-		tgtMatId = ifnull(inp.get("targetMaterialId"),"").toString().trim();
 		printerId = ifnull(inp.get("printerId"),"").toString().trim();
-		srcState = ifnull(inp.get("sourceState"),"").toString().trim();
 		remarks = ifnull(inp.get("remarks"),"").toString().trim().replaceAll("\"","'");
 
-		// size() is right - these are Lists, not query results.
-		linesRaw = ifnull(inp.get("lines"),list());
-		rollPlanRaw = ifnull(inp.get("rollPlan"),list());
+		// size() is right - this is a List, not a query result.
+		rowsRaw = ifnull(inp.get("lines"),list());
 
-		if(srcMatId == "" || srcMatId.isNumber() == false)
+		if(printerId == "" || printerId.isNumber() == false)
 		{
-			errTxt = "No source material given";
+			errTxt = "No printer chosen - a job order goes to one printer";
 		}
-		if(errTxt == "" && (srcLotId == "" || srcLotId.isNumber() == false))
+		if(errTxt == "" && rowsRaw.size() == 0)
 		{
-			errTxt = "No source lot given - the tone that goes out matters";
+			errTxt = "Nothing to send - add at least one line";
 		}
-		if(errTxt == "" && (tgtMatId == "" || tgtMatId.isNumber() == false))
+		// Bounded: every row costs a few statements and every new material or lot
+		// a query. An unbounded list is the uncatchable statement limit.
+		if(errTxt == "" && rowsRaw.size() > 40)
 		{
-			errTxt = "No target printed material chosen";
-		}
-		if(errTxt == "" && srcState != "Wash" && srcState != "Unwash")
-		{
-			errTxt = "Source state must be Wash or Unwash";
-		}
-		if(errTxt == "" && (printerId == "" || printerId.isNumber() == false))
-		{
-			errTxt = "No printer given";
-		}
-		if(errTxt == "" && linesRaw.size() == 0)
-		{
-			errTxt = "Nothing to send - add at least one piece line";
-		}
-		if(errTxt == "" && srcMatId == tgtMatId)
-		{
-			errTxt = "Source and target are the same material";
+			errTxt = "At most 40 lines in one job order - split it into two";
 		}
 
-		//--------------------------------------------------------------------
-		// THE SOURCE MATERIAL. Its width is the check the target must pass.
-		// Names first assigned inside an if are not safe to read after it when
-		// that branch did not run, so they are initialised here.
-		//--------------------------------------------------------------------
-		srcName = "";
-		srcSku = "";
-		srcIsFab = false;
-		srcWidth = "";
-		srcInvItem = "";
-
-		if(errTxt == "")
-		{
-			// A query result needs .count() - .size() is a List method.
-			srcRecs = Raw_Material[ID == srcMatId.toLong()];
-			if(srcRecs.count() == 0)
-			{
-				errTxt = "Source material not found";
-			}
-			else
-			{
-				for each  smChk in srcRecs
-				{
-					srcSku = ifnull(smChk.SKU,"").toString().trim().replaceAll("\"","'");
-					srcName = ifnull(smChk.Material_Display_Name,"").toString().trim().replaceAll("\"","'");
-					if(srcName == "")
-					{
-						srcName = ifnull(smChk.Name,"").toString().trim().replaceAll("\"","'");
-					}
-
-					// Tested AS TEXT - a Decision box gives a boolean, a yes/no
-					// dropdown gives "Yes", an untouched field gives EMPTY, and
-					// comparing the last two against the boolean true is silently
-					// false.
-					fabTxt = ifnull(smChk.Is_Fabric,"").toString().trim().toLowerCase();
-					if(fabTxt == "true" || fabTxt == "yes" || fabTxt == "1" || fabTxt == "y")
-					{
-						srcIsFab = true;
-					}
-
-					srcWidth = ifnull(smChk.Fabric_Width_Inches,"").toString().trim();
-					srcInvItem = ifnull(smChk.Inventory_Item_ID,"").toString().trim();
-				}
-			}
-		}
-
-		if(errTxt == "" && srcIsFab != true)
-		{
-			errTxt = srcSku + " is not a fabric - printing applies to fabric only";
-		}
-
-		//--------------------------------------------------------------------
-		// THE TARGET MATERIAL. Must be a fabric and the SAME WIDTH as the source
-		// - the one invariant the whole design rests on: a piece coming back has
-		// to be full width of both, or the allocator is handed cloth it cannot
-		// cut as it expects. (The "printed fabric" Type_field check is OFF for
-		// now - see the note where it used to be.)
-		//
-		// Checked server-side and not only on the screen, because a Custom API
-		// is callable from anywhere.
-		//--------------------------------------------------------------------
-		tgtName = "";
-		tgtSku = "";
-		tgtIsFab = false;
-		tgtType = "";
-		tgtWidth = "";
-		tgtInvItem = "";
-
-		if(errTxt == "")
-		{
-			tgtRecs = Raw_Material[ID == tgtMatId.toLong()];
-			if(tgtRecs.count() == 0)
-			{
-				errTxt = "Target printed material not found";
-			}
-			else
-			{
-				for each  tmChk in tgtRecs
-				{
-					tgtSku = ifnull(tmChk.SKU,"").toString().trim().replaceAll("\"","'");
-					tgtName = ifnull(tmChk.Material_Display_Name,"").toString().trim().replaceAll("\"","'");
-					if(tgtName == "")
-					{
-						tgtName = ifnull(tmChk.Name,"").toString().trim().replaceAll("\"","'");
-					}
-
-					tfabTxt = ifnull(tmChk.Is_Fabric,"").toString().trim().toLowerCase();
-					if(tfabTxt == "true" || tfabTxt == "yes" || tfabTxt == "1" || tfabTxt == "y")
-					{
-						tgtIsFab = true;
-					}
-
-					tgtType = ifnull(tmChk.Type_field,"").toString().trim().toLowerCase();
-					tgtWidth = ifnull(tmChk.Fabric_Width_Inches,"").toString().trim();
-					tgtInvItem = ifnull(tmChk.Inventory_Item_ID,"").toString().trim();
-				}
-			}
-		}
-
-		if(errTxt == "" && tgtIsFab != true)
-		{
-			errTxt = tgtSku + " is not a fabric";
-		}
-		// THE "printed fabric" TYPE CHECK IS OFF FOR NOW - width is the only guard.
-		// tgtType is still read above so re-enabling is one line. When it goes
-		// back, the widget's targetsFor() filter must be re-added in the same pass
-		// (app/js/main.js).
-		// Compared as NUMBERS, not strings - "60" and "60.0" are the same width,
-		// and the widget's targetsFor() also compares numerically, so a string
-		// compare here would offer a target the server then rejects. A material
-		// with no width recorded (0) cannot pair with another width-less one -
-		// that is a blank waiting to be filled, not a match.
-		srcWidthN = 0.0;
-		if(errTxt == "" && srcWidth != "")
-		{
-			srcWidthN = srcWidth.toDecimal();
-		}
-		tgtWidthN = 0.0;
-		if(errTxt == "" && tgtWidth != "")
-		{
-			tgtWidthN = tgtWidth.toDecimal();
-		}
-		if(errTxt == "" && (srcWidthN <= 0 || tgtWidthN <= 0))
-		{
-			errTxt = "One of these materials has no fabric width on record - set it before printing";
-		}
-		diffW = srcWidthN - tgtWidthN;
-		if(diffW < 0)
-		{
-			diffW = diffW * -1;
-		}
-		if(errTxt == "" && diffW > 0.01)
-		{
-			errTxt = "Width mismatch - source is " + srcWidth + " in, target " + tgtWidth + " in. A printed piece must be full width of both.";
-		}
-
-		//--------------------------------------------------------------------
-		// BOTH SKUs MUST EXIST IN ZOHO INVENTORY. Sending posts -metres on the
-		// source there (postPrintAdjustments) and receiving posts +metres on
-		// the target. Refused HERE, before anything moves, rather than letting
-		// the job go out and leaving Inventory to drift - the same reason
-		// postTransferOrders refuses a whole voucher with an unmapped line.
-		//--------------------------------------------------------------------
-		if(errTxt == "" && srcInvItem == "")
-		{
-			errTxt = srcSku + " has no Zoho Inventory item mapped - map it before sending cloth to print";
-		}
-		if(errTxt == "" && tgtInvItem == "")
-		{
-			errTxt = tgtSku + " has no Zoho Inventory item mapped - map it before sending cloth to print";
-		}
-
-		//--------------------------------------------------------------------
-		// THE PRINTER. Nested rather than && onto the errTxt guard - Deluge is
-		// not dependable about short-circuiting and .toLong() on an empty
-		// printerId would throw out of a block that had decided not to run.
-		//--------------------------------------------------------------------
+		// Nested rather than && onto the guard - Deluge is not dependable about
+		// short-circuiting and .toLong() on an empty id would throw.
 		if(errTxt == "")
 		{
 			if(Third_Party[ID == printerId.toLong()].count() == 0)
@@ -263,135 +115,332 @@ string sendToPrint(string payloadJson)
 		}
 
 		//--------------------------------------------------------------------
-		// THE SOURCE LOT. Must belong to THIS material and not be Blocked.
-		// Its Lot_Rolls come back nested on the record - no extra query.
+		// PASS 1 - THE ROWS. Each is checked on its own, then its materials and
+		// its lot are checked ONCE (cached by id), then it is added to its job
+		// group and to its lot's running totals.
 		//--------------------------------------------------------------------
-		lotWashHave = 0.0;
-		lotUnwashHave = 0.0;
-		lotInPrintHave = 0.0;
-		lotNumOut = "";
-		targetLot = 0;
-		lotRollCount = 0;
+		// material id -> "1" once checked, plus what later blocks need
+		matOk = Map();
+		matSku = Map();
+		matWidth = Map();
 
-		if(errTxt == "")
-		{
-			lotRecs = Raw_Material_Lot[ID == srcLotId.toLong()];
-			if(lotRecs.count() == 0)
-			{
-				errTxt = "Source lot not found";
-			}
-			else
-			{
-				for each  lchk in lotRecs
-				{
-					if(ifnull(lchk.Material,"").toString().trim() != srcMatId)
-					{
-						errTxt = "That lot belongs to a different material";
-					}
-					else if(ifnull(lchk.Status,"Active").toString().trim() == "Blocked")
-					{
-						errTxt = "That lot is blocked - nothing can be sent off it";
-					}
-					else
-					{
-						targetLot = lchk.ID;
-						lotNumOut = ifnull(lchk.Lot_Number,"").toString().trim().replaceAll("\"","'");
+		// lot id -> facts, read once
+		lotOk = Map();
+		lotNum = Map();
+		lotMat = Map();
+		lotWashM = Map();
+		lotUnwashM = Map();
 
-						// Creator fields never written are EMPTY, not null.
-						// ifnull() does not catch empty and .toDecimal() throws
-						// on it - normalise to string, test, convert.
-						lwS = ifnull(lchk.Wash_Quantity,"0").toString().trim();
-						if(lwS == "")
-						{
-							lwS = "0";
-						}
-						luS = ifnull(lchk.Unwash_Quantity,"0").toString().trim();
-						if(luS == "")
-						{
-							luS = "0";
-						}
-						lpS = ifnull(lchk.In_Print_Qty,"0").toString().trim();
-						if(lpS == "")
-						{
-							lpS = "0";
-						}
+		// job groups, in first-seen order: key = lot|state|target
+		gKeys = List();
+		gSrcMat = List();
+		gLot = List();
+		gState = List();
+		gTgt = List();
+		gMetres = Map();
+		gPieces = Map();
+		gAmount = Map();
 
-						lotWashHave = lwS.toDecimal();
-						lotUnwashHave = luS.toDecimal();
-						lotInPrintHave = lpS.toDecimal();
+		// lot + state budgets, in first-seen order
+		lsKeys = List();
+		lsLot = List();
+		lsState = List();
+		lsMat = List();
+		needLS = Map();
 
-						for each  rcCnt in lchk.Lot_Rolls
-						{
-							lotRollCount = lotRollCount + 1;
-						}
-					}
-				}
-			}
-		}
+		// lots, in first-seen order, and each lot's total for the roll plan
+		lotOrder = List();
+		needLot = Map();
 
-		if(errTxt == "" && targetLot == 0)
-		{
-			errTxt = "Could not resolve a lot to send off";
-		}
-		if(errTxt == "" && lotRollCount == 0)
-		{
-			errTxt = "Lot " + lotNumOut + " has no rolls recorded - it must be received into rolls before cloth can be sent to print";
-		}
-
-		//--------------------------------------------------------------------
-		// THE PIECE LINES. He types the lengths - a physical constraint (how
-		// the cloth is cut, what the printer's table takes) - so nothing
-		// computes or rounds them. Enforced: a positive length and a WHOLE
-		// positive count. No break in Deluge, so the loop runs to the end and
-		// errTxt carries the first fault out.
-		//--------------------------------------------------------------------
 		totalCm = 0.0;
-		lineCount = 0;
 		piecesSent = 0;
+		rowNo = 0;
 
 		if(errTxt == "")
 		{
-			for each  lnRaw in linesRaw
+			for each  rRaw in rowsRaw
 			{
 				if(errTxt == "")
 				{
-					ln = lnRaw.toMap();
+					rowNo = rowNo + 1;
+					rw = rRaw.toMap();
 
-					lStr = ifnull(ln.get("lengthCm"),"0").toString().trim();
+					sMat = ifnull(rw.get("sourceMaterialId"),"").toString().trim();
+					sLot = ifnull(rw.get("sourceLotId"),"").toString().trim();
+					sState = ifnull(rw.get("sourceState"),"").toString().trim();
+					tMat = ifnull(rw.get("targetMaterialId"),"").toString().trim();
+
+					// Creator / JSON blanks are EMPTY, not null - normalise
+					// before .toDecimal(), which throws on empty.
+					lStr = ifnull(rw.get("lengthCm"),"0").toString().trim();
 					if(lStr == "")
 					{
 						lStr = "0";
 					}
-					cStr = ifnull(ln.get("count"),"0").toString().trim();
+					cStr = ifnull(rw.get("count"),"0").toString().trim();
 					if(cStr == "")
 					{
 						cStr = "0";
 					}
+					rtStr = ifnull(rw.get("rate"),"0").toString().trim();
+					if(rtStr == "")
+					{
+						rtStr = "0";
+					}
+					rLen = lStr.toDecimal();
+					rCntDec = cStr.toDecimal();
+					rCnt = rCntDec.toLong();
+					rRate = rtStr.toDecimal();
 
-					lnLen = lStr.toDecimal();
-					lnCntDec = cStr.toDecimal();
-					lnCnt = lnCntDec.toLong();
+					if(sMat == "" || sMat.isNumber() == false)
+					{
+						errTxt = "Line " + rowNo + ": no base fabric chosen";
+					}
+					else if(sLot == "" || sLot.isNumber() == false)
+					{
+						errTxt = "Line " + rowNo + ": no lot chosen - the tone that goes out matters";
+					}
+					else if(sState != "Wash" && sState != "Unwash")
+					{
+						errTxt = "Line " + rowNo + ": washed or unwashed?";
+					}
+					else if(tMat == "" || tMat.isNumber() == false)
+					{
+						errTxt = "Line " + rowNo + ": no print fabric chosen";
+					}
+					else if(tMat == sMat)
+					{
+						errTxt = "Line " + rowNo + ": base and print fabric are the same material";
+					}
+					else if(rLen <= 0)
+					{
+						errTxt = "Line " + rowNo + ": needs a piece length in cm";
+					}
+					else if(rCntDec <= 0)
+					{
+						errTxt = "Line " + rowNo + ": needs a piece count above zero";
+					}
+					else if(rCnt.toDecimal() != rCntDec)
+					{
+						errTxt = "Line " + rowNo + ": piece count must be a whole number - " + cStr + " is not";
+					}
+					else if(rRate < 0)
+					{
+						errTxt = "Line " + rowNo + ": the rate cannot be negative";
+					}
 
-					if(lnLen <= 0)
+					//---- base fabric, once -----------------------------------
+					// Must be a fabric, have a width, and exist in Zoho Inventory
+					// (sending posts -metres on it there). Refused HERE, before
+					// anything moves - the same reason postTransferOrders refuses a
+					// whole voucher with an unmapped line.
+					if(errTxt == "" && ifnull(matOk.get(sMat),"") == "")
 					{
-						errTxt = "Every send line needs a piece length in cm";
+						bRecs = Raw_Material[ID == sMat.toLong()];
+						if(bRecs.count() == 0)
+						{
+							errTxt = "Line " + rowNo + ": base fabric not found";
+						}
+						else
+						{
+							for each  bm in bRecs
+							{
+								bSku = ifnull(bm.SKU,"").toString().trim().replaceAll("\"","'");
+								// Tested AS TEXT - a Decision box gives a boolean, a
+								// yes/no dropdown "Yes", an untouched field EMPTY.
+								bFab = ifnull(bm.Is_Fabric,"").toString().trim().toLowerCase();
+								bWid = ifnull(bm.Fabric_Width_Inches,"").toString().trim();
+								bInv = ifnull(bm.Inventory_Item_ID,"").toString().trim();
+								if(bWid == "")
+								{
+									bWid = "0";
+								}
+								if(bFab != "true" && bFab != "yes" && bFab != "1" && bFab != "y")
+								{
+									errTxt = bSku + " is not a fabric - printing applies to fabric only";
+								}
+								else if(bWid.toDecimal() <= 0)
+								{
+									errTxt = bSku + " has no fabric width on record - set it before printing";
+								}
+								else if(bInv == "")
+								{
+									errTxt = bSku + " has no Zoho Inventory item mapped - map it before sending cloth to print";
+								}
+								else
+								{
+									matOk.put(sMat,"1");
+									matSku.put(sMat,bSku);
+									matWidth.put(sMat,bWid);
+								}
+							}
+						}
 					}
-					else if(lnCntDec <= 0)
+
+					//---- print fabric, once ----------------------------------
+					// Same three checks - receiving posts +metres on it.
+					if(errTxt == "" && ifnull(matOk.get(tMat),"") == "")
 					{
-						errTxt = "Every send line needs a piece count above zero";
+						pRecs = Raw_Material[ID == tMat.toLong()];
+						if(pRecs.count() == 0)
+						{
+							errTxt = "Line " + rowNo + ": print fabric not found";
+						}
+						else
+						{
+							for each  pm in pRecs
+							{
+								pSku = ifnull(pm.SKU,"").toString().trim().replaceAll("\"","'");
+								pFab = ifnull(pm.Is_Fabric,"").toString().trim().toLowerCase();
+								pWid = ifnull(pm.Fabric_Width_Inches,"").toString().trim();
+								pInv = ifnull(pm.Inventory_Item_ID,"").toString().trim();
+								if(pWid == "")
+								{
+									pWid = "0";
+								}
+								if(pFab != "true" && pFab != "yes" && pFab != "1" && pFab != "y")
+								{
+									errTxt = pSku + " is not a fabric";
+								}
+								else if(pWid.toDecimal() <= 0)
+								{
+									errTxt = pSku + " has no fabric width on record - set it before printing";
+								}
+								else if(pInv == "")
+								{
+									errTxt = pSku + " has no Zoho Inventory item mapped - map it before sending cloth to print";
+								}
+								else
+								{
+									matOk.put(tMat,"1");
+									matSku.put(tMat,pSku);
+									matWidth.put(tMat,pWid);
+								}
+							}
+						}
 					}
-					else if(lnCnt.toDecimal() != lnCntDec)
+
+					//---- same width ------------------------------------------
+					// Compared as NUMBERS - "60" and "60.0" are one width.
+					if(errTxt == "")
 					{
-						errTxt = "Piece count must be a whole number - " + cStr + " is not";
+						wDiff = matWidth.get(sMat).toString().toDecimal() - matWidth.get(tMat).toString().toDecimal();
+						if(wDiff < 0)
+						{
+							wDiff = wDiff * -1;
+						}
+						if(wDiff > 0.01)
+						{
+							errTxt = "Line " + rowNo + ": width mismatch - " + matSku.get(sMat) + " is " + matWidth.get(sMat) + " in, " + matSku.get(tMat) + " is " + matWidth.get(tMat) + " in. A printed piece must be full width of both.";
+						}
 					}
-					else
+
+					//---- the lot, once ---------------------------------------
+					// Must belong to THIS base, not be Blocked, and have rolls.
+					if(errTxt == "" && ifnull(lotOk.get(sLot),"") == "")
 					{
-						totalCm = totalCm + (lnLen * lnCnt);
-						piecesSent = piecesSent + lnCnt;
-						lineCount = lineCount + 1;
+						lRecs = Raw_Material_Lot[ID == sLot.toLong()];
+						if(lRecs.count() == 0)
+						{
+							errTxt = "Line " + rowNo + ": lot not found";
+						}
+						else
+						{
+							for each  lchk in lRecs
+							{
+								lNumTxt = ifnull(lchk.Lot_Number,"").toString().trim().replaceAll("\"","'");
+								lwS = ifnull(lchk.Wash_Quantity,"0").toString().trim();
+								if(lwS == "")
+								{
+									lwS = "0";
+								}
+								luS = ifnull(lchk.Unwash_Quantity,"0").toString().trim();
+								if(luS == "")
+								{
+									luS = "0";
+								}
+								lRollCount = 0;
+								for each  rcCnt in lchk.Lot_Rolls
+								{
+									lRollCount = lRollCount + 1;
+								}
+
+								if(ifnull(lchk.Material,"").toString().trim() != sMat)
+								{
+									errTxt = "Line " + rowNo + ": lot " + lNumTxt + " belongs to a different material";
+								}
+								else if(ifnull(lchk.Status,"Active").toString().trim() == "Blocked")
+								{
+									errTxt = "Line " + rowNo + ": lot " + lNumTxt + " is blocked - nothing can be sent off it";
+								}
+								else if(lRollCount == 0)
+								{
+									errTxt = "Lot " + lNumTxt + " has no rolls recorded - it must be received into rolls before cloth can be sent to print";
+								}
+								else
+								{
+									lotOk.put(sLot,"1");
+									lotNum.put(sLot,lNumTxt);
+									lotMat.put(sLot,sMat);
+									lotWashM.put(sLot,lwS);
+									lotUnwashM.put(sLot,luS);
+									lotOrder.add(sLot);
+									needLot.put(sLot,"0");
+								}
+							}
+						}
+					}
+					else if(errTxt == "" && ifnull(lotMat.get(sLot),"").toString() != sMat)
+					{
+						errTxt = "Line " + rowNo + ": lot " + lotNum.get(sLot) + " belongs to a different material";
+					}
+
+					//---- add the row to its job and its lot ------------------
+					if(errTxt == "")
+					{
+						rCm = rLen * rCnt;
+						rMtr = rCm / 100;
+
+						gk = sLot + "|" + sState + "|" + tMat;
+						if(gKeys.contains(gk) == false)
+						{
+							gKeys.add(gk);
+							gSrcMat.add(sMat);
+							gLot.add(sLot);
+							gState.add(sState);
+							gTgt.add(tMat);
+							gMetres.put(gk,"0");
+							gPieces.put(gk,"0");
+							gAmount.put(gk,"0");
+						}
+						gMetres.put(gk,gMetres.get(gk).toString().toDecimal() + rMtr);
+						gPieces.put(gk,gPieces.get(gk).toString().toLong() + rCnt);
+						gAmount.put(gk,gAmount.get(gk).toString().toDecimal() + (rCnt * rRate));
+
+						lsk = sLot + "|" + sState;
+						if(lsKeys.contains(lsk) == false)
+						{
+							lsKeys.add(lsk);
+							lsLot.add(sLot);
+							lsState.add(sState);
+							lsMat.add(sMat);
+							needLS.put(lsk,"0");
+						}
+						needLS.put(lsk,needLS.get(lsk).toString().toDecimal() + rMtr);
+						needLot.put(sLot,needLot.get(sLot).toString().toDecimal() + rMtr);
+
+						totalCm = totalCm + rCm;
+						piecesSent = piecesSent + rCnt;
 					}
 				}
 			}
+		}
+
+		// Bounded too: each job is an insert, an Inventory post and a few
+		// queries.
+		if(errTxt == "" && gKeys.size() > 15)
+		{
+			errTxt = "At most 15 base/print fabric combinations in one job order - split it into two";
 		}
 
 		metresSent = 0.0;
@@ -405,248 +454,170 @@ string sendToPrint(string payloadJson)
 		}
 
 		//--------------------------------------------------------------------
-		// THE BUDGET. REJECT, NEVER SILENTLY TRIM. A trimmed Metres_Sent that
-		// disagrees with the Send_Lines beside it would read as printer loss
-		// for ever - the return is checked against those lines.
+		// THE BUDGETS, per lot and state. REJECT, NEVER SILENTLY TRIM - a
+		// trimmed Metres_Sent disagreeing with its Send_Lines would read as
+		// printer loss for ever.
 		//--------------------------------------------------------------------
 		if(errTxt == "")
 		{
-			stateHave = lotUnwashHave;
-			if(srcState == "Wash")
+			bi = 0;
+			for each  bKey in lsKeys
 			{
-				stateHave = lotWashHave;
-			}
-			if(metresSent > stateHave)
-			{
-				errTxt = "Lot " + lotNumOut + " has only " + stateHave + " Mtr " + srcState + " - " + metresSent + " Mtr asked for";
+				if(errTxt == "")
+				{
+					bLot = lsLot.get(bi);
+					bState = lsState.get(bi);
+					bHave = lotUnwashM.get(bLot).toString().toDecimal();
+					bWord = "unwashed";
+					if(bState == "Wash")
+					{
+						bHave = lotWashM.get(bLot).toString().toDecimal();
+						bWord = "washed";
+					}
+					bNeed = needLS.get(bKey).toString().toDecimal();
+					if(bNeed > bHave + 0.0001)
+					{
+						errTxt = "Lot " + lotNum.get(bLot) + " of " + matSku.get(lsMat.get(bi)) + " has only " + bHave + " Mtr " + bWord + " - this job order needs " + bNeed;
+					}
+				}
+				bi = bi + 1;
 			}
 		}
 
 		//--------------------------------------------------------------------
-		// THE ROLL PLAN. Which physical rolls get cut, and how much off each.
-		//
-		// Given in the payload -> validated: every rollId on THIS lot, Available,
-		// each metres > 0 and <= the roll's CURRENT length (re-read here, inside
-		// this execution - the concurrency guard), and Σ metres == metresSent.
-		//
-		// Omitted -> auto: SHORTEST Available roll first (consolidates the rack
-		// over time - a short roll left sitting becomes scrap), take
-		// min(rollLen, remaining) off each until remaining is 0.
-		//
-		// Held as three parallel Lists indexed together - planRollId / planLabel
-		// / planMetres - because a hand-appended List of maps does not reliably
-		// survive being iterated later in Deluge (CLAUDE.md).
+		// THE ROLL PLAN, one per lot: SHORTEST Available roll first
+		// (consolidates the rack - a short roll left sitting becomes scrap),
+		// min(rollLen, remaining) off each until the lot's total is covered.
+		// All lots' plans go into one set of parallel lists, tagged by lot.
 		//--------------------------------------------------------------------
+		planLot = List();
 		planRollId = List();
 		planLabel = List();
 		planMetres = List();
 
-		// Snapshot the Available rolls once: id, label, current length. Sorted
-		// shortest-first for the auto path; the given-plan path looks up by id.
-		rollIds = List();
-		rollLabels = List();
-		rollLens = List();
-
 		if(errTxt == "")
 		{
-			for each  lsnap in Raw_Material_Lot[ID == targetLot]
-			{
-				for each  rsnap in lsnap.Lot_Rolls
-				{
-					// EMPTY is not null - ifnull does not catch it, so a blank
-					// status is normalised to Available explicitly here, the same
-					// as print-data.js does on the read side. Otherwise the
-					// preview offers a roll the server then silently excludes.
-					rStatus = ifnull(rsnap.Roll_Status,"Available").toString().trim();
-					if(rStatus == "")
-					{
-						rStatus = "Available";
-					}
-					rLenS = ifnull(rsnap.Roll_Length,"0").toString().trim();
-					if(rLenS == "")
-					{
-						rLenS = "0";
-					}
-					rLen = rLenS.toDecimal();
-					if(rStatus == "Available" && rLen > 0)
-					{
-						rollIds.add(rsnap.ID.toString());
-						rollLabels.add(ifnull(rsnap.Roll_Label,"").toString().trim().replaceAll("\"","'"));
-						rollLens.add(rLen);
-					}
-				}
-			}
-		}
-
-		if(errTxt == "" && rollIds.size() == 0)
-		{
-			errTxt = "Lot " + lotNumOut + " has no cuttable rolls (all consumed or blocked)";
-		}
-
-		//---- given plan ---------------------------------------------------
-		if(errTxt == "" && rollPlanRaw.size() > 0)
-		{
-			planSum = 0.0;
-			seenRollIds = List();
-			for each  rpRaw in rollPlanRaw
+			for each  pLot in lotOrder
 			{
 				if(errTxt == "")
 				{
-					rp = rpRaw.toMap();
-					rpId = ifnull(rp.get("rollId"),"").toString().trim();
-					rpMtrS = ifnull(rp.get("metres"),"0").toString().trim();
-					if(rpMtrS == "")
-					{
-						rpMtrS = "0";
-					}
-					rpMtr = rpMtrS.toDecimal();
+					lotNeed = needLot.get(pLot).toString().toDecimal();
 
-					if(rpId == "" || rpId.isNumber() == false)
+					// Snapshot the Available rolls: id, label, current length.
+					rollIds = List();
+					rollLabels = List();
+					rollLens = List();
+					rollCounter = List();
+					rcI = 0;
+					for each  lsnap in Raw_Material_Lot[ID == pLot.toLong()]
 					{
-						errTxt = "A roll in the plan has no id - reload the screen";
+						for each  rsnap in lsnap.Lot_Rolls
+						{
+							// EMPTY is not null - a blank status is Available, the
+							// same as print-data.js reads it.
+							rStatus = ifnull(rsnap.Roll_Status,"Available").toString().trim();
+							if(rStatus == "")
+							{
+								rStatus = "Available";
+							}
+							rLenS = ifnull(rsnap.Roll_Length,"0").toString().trim();
+							if(rLenS == "")
+							{
+								rLenS = "0";
+							}
+							rLen = rLenS.toDecimal();
+							if(rStatus == "Available" && rLen > 0)
+							{
+								rollIds.add(rsnap.ID.toString());
+								rollLabels.add(ifnull(rsnap.Roll_Label,"").toString().trim().replaceAll("\"","'"));
+								rollLens.add(rLen);
+								rollCounter.add(rcI);
+								rcI = rcI + 1;
+							}
+						}
 					}
-					else if(rpMtr <= 0)
+
+					if(rollIds.size() == 0)
 					{
-						errTxt = "Every roll in the plan needs metres above zero";
-					}
-					else if(seenRollIds.contains(rpId))
-					{
-						errTxt = "The cut plan names one roll twice - reload the screen";
+						errTxt = "Lot " + lotNum.get(pLot) + " has no cuttable rolls (all consumed or blocked)";
 					}
 					else
 					{
-						seenRollIds.add(rpId);
-						rpIdx = rollIds.indexOf(rpId);
-						if(rpIdx < 0)
+						// Selection sort by length, append-only (no List.set).
+						// rollCounter bounds the outer pass so the inner pass is
+						// the only iterator over rollIds - two live iterators over
+						// one list do not work. A tie on length goes to the
+						// earlier position: only a STRICTLY shorter roll wins.
+						usedPos = List();
+						for each  pcnt in rollCounter
 						{
-							errTxt = "Roll " + rpId + " is not a cuttable roll on lot " + lotNumOut + " - reload the screen";
+							bestPos = -1;
+							bestLen = 0.0;
+							scanPos = 0;
+							for each  sc in rollIds
+							{
+								if(usedPos.contains(scanPos) == false)
+								{
+									scLen = rollLens.get(scanPos);
+									takeThis = false;
+									if(bestPos < 0)
+									{
+										takeThis = true;
+									}
+									else if(scLen < bestLen)
+									{
+										takeThis = true;
+									}
+									if(takeThis == true)
+									{
+										bestPos = scanPos;
+										bestLen = scLen;
+									}
+								}
+								scanPos = scanPos + 1;
+							}
+							if(bestPos >= 0)
+							{
+								usedPos.add(bestPos);
+							}
 						}
-						else if(rpMtr > rollLens.get(rpIdx))
+
+						remain = lotNeed;
+						for each  op in usedPos
 						{
-							errTxt = "Roll " + rollLabels.get(rpIdx) + " has " + rollLens.get(rpIdx) + " Mtr, plan asks " + rpMtr + " - reload the screen";
+							if(remain > 0.001)
+							{
+								opLen = rollLens.get(op);
+								take = opLen;
+								if(take > remain)
+								{
+									take = remain;
+								}
+								planLot.add(pLot);
+								planRollId.add(rollIds.get(op));
+								planLabel.add(rollLabels.get(op));
+								planMetres.add(take);
+								remain = remain - take;
+							}
 						}
-						else
+
+						if(remain > 0.01)
 						{
-							planRollId.add(rpId);
-							planLabel.add(rollLabels.get(rpIdx));
-							planMetres.add(rpMtr);
-							planSum = planSum + rpMtr;
+							errTxt = "Lot " + lotNum.get(pLot) + " has " + (lotNeed - remain) + " Mtr across its rolls, " + lotNeed + " Mtr asked for";
 						}
 					}
 				}
 			}
-
-			if(errTxt == "")
-			{
-				diff = planSum - metresSent;
-				if(diff < 0)
-				{
-					diff = diff * -1;
-				}
-				if(diff > 0.01)
-				{
-					errTxt = "The roll plan totals " + planSum + " Mtr but the pieces need " + metresSent + " Mtr";
-				}
-			}
-		}
-
-		//---- auto plan --------------------------------------------------
-		if(errTxt == "" && rollPlanRaw.size() == 0)
-		{
-			// Selection sort by length ascending over the parallel Lists.
-			// List.set() does NOT exist in Deluge (CLAUDE.md), so the ordered
-			// position list is APPEND-ONLY: each outer pass finds the smallest
-			// not-yet-used position and add()s it. A counter list (rollIds
-			// itself) bounds the outer pass - two live iterators over one list
-			// do not work.
-			//
-			// TIE ON LENGTH IS BROKEN BY LIST POSITION, not by comparing labels -
-			// the scan runs low position to high and only takes a STRICTLY
-			// shorter roll, so the first-seen of two equal-length rolls wins.
-			// This avoids a string "<" relational, which is not verified in
-			// Deluge (only date relationals and substring are).
-			usedPos = List();
-			for each  pcnt in rollIds
-			{
-				bestPos = -1;
-				bestLen = 0.0;
-				scanPos = 0;
-				for each  sc in rollIds
-				{
-					if(usedPos.contains(scanPos) == false)
-					{
-						scLen = rollLens.get(scanPos);
-						takeThis = false;
-						if(bestPos < 0)
-						{
-							takeThis = true;
-						}
-						else if(scLen < bestLen)
-						{
-							takeThis = true;
-						}
-						if(takeThis == true)
-						{
-							bestPos = scanPos;
-							bestLen = scLen;
-						}
-					}
-					scanPos = scanPos + 1;
-				}
-				if(bestPos >= 0)
-				{
-					usedPos.add(bestPos);
-				}
-			}
-
-			remain = metresSent;
-			for each  op in usedPos
-			{
-				if(remain > 0.001)
-				{
-					opLen = rollLens.get(op);
-					take = opLen;
-					if(take > remain)
-					{
-						take = remain;
-					}
-					planRollId.add(rollIds.get(op));
-					planLabel.add(rollLabels.get(op));
-					planMetres.add(take);
-					remain = remain - take;
-				}
-			}
-
-			if(remain > 0.01)
-			{
-				totAvail = metresSent - remain;
-				errTxt = "Lot " + lotNumOut + " has " + totAvail + " Mtr across its rolls, " + metresSent + " Mtr asked for";
-			}
-		}
-
-		if(errTxt == "" && planRollId.size() == 0)
-		{
-			errTxt = "Could not work out which rolls to cut";
 		}
 
 		//--------------------------------------------------------------------
-		// MOVE THE LEDGER. Rolls first, then lot, then parent - all before the
-		// job is written.
+		// MOVE THE LEDGER. Rolls, then lots, then parents - all before any job.
 		//
 		// TWO PASSES OVER THE ROLLS. Pass 1 re-reads every planned roll's
 		// CURRENT length (inside this execution - the concurrency guard) and
-		// checks the WHOLE plan fits before a single row is touched. Only if all
-		// of it fits does pass 2 write. A single-pass "check then write per
-		// roll" leaves earlier rolls decremented when a later one comes up
-		// short - Σ Roll_Length then disagrees with the shelf columns and the
-		// error message ("Nothing was sent") is a lie.
+		// checks the WHOLE plan fits before a single row is touched. Only then
+		// does pass 2 write.
 		//--------------------------------------------------------------------
-		lotWashOut = 0.0;
-		lotUnwashOut = 0.0;
-		lotInPrintOut = 0.0;
-		matInPrintOut = 0.0;
-
-		// ---- pass 1: verify, no writes ----
 		if(errTxt == "")
 		{
 			pIdx = 0;
@@ -656,7 +627,7 @@ string sendToPrint(string payloadJson)
 				{
 					pTake = planMetres.get(pIdx);
 					pFound = false;
-					for each  lotChk in Raw_Material_Lot[ID == targetLot]
+					for each  lotChk in Raw_Material_Lot[ID == planLot.get(pIdx).toLong()]
 					{
 						for each  rollChk in lotChk.Lot_Rolls
 						{
@@ -671,7 +642,6 @@ string sendToPrint(string payloadJson)
 								if(pTake > rHaveS.toDecimal() + 0.0001)
 								{
 									errTxt = "Roll " + planLabel.get(pIdx) + " has " + rHaveS.toDecimal() + " Mtr, the cut plan needs " + pTake + " - a concurrent change moved the stock. Nothing was sent; reload and try again.";
-									info "sendToPrint: roll " + pid + " short at pre-check - aborting, nothing written";
 								}
 							}
 						}
@@ -685,14 +655,13 @@ string sendToPrint(string payloadJson)
 			}
 		}
 
-		// ---- pass 2: write ----
 		if(errTxt == "")
 		{
 			pIdx = 0;
 			for each  pid2 in planRollId
 			{
 				pTake2 = planMetres.get(pIdx);
-				for each  lotMv in Raw_Material_Lot[ID == targetLot]
+				for each  lotMv in Raw_Material_Lot[ID == planLot.get(pIdx).toLong()]
 				{
 					for each  rollRow in lotMv.Lot_Rolls
 					{
@@ -718,90 +687,95 @@ string sendToPrint(string payloadJson)
 				}
 				pIdx = pIdx + 1;
 			}
+
+			// Lots, then parents, one lot+state at a time. Read FRESH off the
+			// record each time - one lot may give washed and unwashed cloth in
+			// the same press, and the parent is the sum over every lot.
+			mi = 0;
+			for each  mKey in lsKeys
+			{
+				mLot = lsLot.get(mi);
+				mState = lsState.get(mi);
+				mMat = lsMat.get(mi);
+				mNeed = needLS.get(mKey).toString().toDecimal();
+
+				for each  lotUpd in Raw_Material_Lot[ID == mLot.toLong()]
+				{
+					uwS = ifnull(lotUpd.Wash_Quantity,"0").toString().trim();
+					if(uwS == "")
+					{
+						uwS = "0";
+					}
+					uuS = ifnull(lotUpd.Unwash_Quantity,"0").toString().trim();
+					if(uuS == "")
+					{
+						uuS = "0";
+					}
+					upS = ifnull(lotUpd.In_Print_Qty,"0").toString().trim();
+					if(upS == "")
+					{
+						upS = "0";
+					}
+					if(mState == "Wash")
+					{
+						lotUpd.Wash_Quantity = uwS.toDecimal() - mNeed;
+					}
+					else
+					{
+						lotUpd.Unwash_Quantity = uuS.toDecimal() - mNeed;
+					}
+					lotUpd.In_Print_Qty = upS.toDecimal() + mNeed;
+				}
+
+				for each  rmUpd in Raw_Material[ID == mMat.toLong()]
+				{
+					mwS = ifnull(rmUpd.Wash_Quantity,"0").toString().trim();
+					if(mwS == "")
+					{
+						mwS = "0";
+					}
+					muS = ifnull(rmUpd.Unwash_Quantity,"0").toString().trim();
+					if(muS == "")
+					{
+						muS = "0";
+					}
+					mpS = ifnull(rmUpd.In_Print_Qty,"0").toString().trim();
+					if(mpS == "")
+					{
+						mpS = "0";
+					}
+					if(mState == "Wash")
+					{
+						rmUpd.Wash_Quantity = mwS.toDecimal() - mNeed;
+					}
+					else
+					{
+						rmUpd.Unwash_Quantity = muS.toDecimal() - mNeed;
+					}
+					qW = ifnull(rmUpd.Wash_Quantity,"0").toString().trim();
+					qU = ifnull(rmUpd.Unwash_Quantity,"0").toString().trim();
+					qA = ifnull(rmUpd.Unallocated_Qty,"0").toString().trim();
+					rmUpd.Quantity = if(qW=="",0.0,qW.toDecimal()) + if(qU=="",0.0,qU.toDecimal()) + if(qA=="",0.0,qA.toDecimal());
+					rmUpd.In_Print_Qty = mpS.toDecimal() + mNeed;
+				}
+				mi = mi + 1;
+			}
 		}
 
-		if(errTxt == "")
-		{
-			for each  lotUpd in Raw_Material_Lot[ID == targetLot]
-			{
-				lotWashOut = lotWashHave;
-				lotUnwashOut = lotUnwashHave;
-				lotInPrintOut = lotInPrintHave + metresSent;
-
-				if(srcState == "Wash")
-				{
-					lotWashOut = lotWashHave - metresSent;
-					lotUpd.Wash_Quantity = lotWashOut;
-				}
-				else
-				{
-					lotUnwashOut = lotUnwashHave - metresSent;
-					lotUpd.Unwash_Quantity = lotUnwashOut;
-				}
-
-				lotUpd.In_Print_Qty = lotInPrintOut;
-			}
-
-			// THE PARENT MIRRORS BOTH MOVES, so the SKU total is unchanged.
-			// Read fresh off the record - the parent is the sum over every lot,
-			// not over this one.
-			for each  rmUpd in Raw_Material[ID == srcMatId.toLong()]
-			{
-				mwS = ifnull(rmUpd.Wash_Quantity,"0").toString().trim();
-				if(mwS == "")
-				{
-					mwS = "0";
-				}
-				muS = ifnull(rmUpd.Unwash_Quantity,"0").toString().trim();
-				if(muS == "")
-				{
-					muS = "0";
-				}
-				mpS = ifnull(rmUpd.In_Print_Qty,"0").toString().trim();
-				if(mpS == "")
-				{
-					mpS = "0";
-				}
-
-				matInPrintOut = mpS.toDecimal() + metresSent;
-
-				if(srcState == "Wash")
-				{
-					rmUpd.Wash_Quantity = mwS.toDecimal() - metresSent;
-				}
-				else
-				{
-					rmUpd.Unwash_Quantity = muS.toDecimal() - metresSent;
-				}
-				qW = ifnull(rmUpd.Wash_Quantity,"0").toString().trim();
-				qU = ifnull(rmUpd.Unwash_Quantity,"0").toString().trim();
-				qA = ifnull(rmUpd.Unallocated_Qty,"0").toString().trim();
-				rmUpd.Quantity = if(qW=="",0.0,qW.toDecimal()) + if(qU=="",0.0,qU.toDecimal()) + if(qA=="",0.0,qA.toDecimal());
-
-				rmUpd.In_Print_Qty = matInPrintOut;
-			}
-		}
-
 		//--------------------------------------------------------------------
-		// THE JOB. Job_Status, not Status - six forms already share that link
-		// name. Metres_Returned starts at 0 so the loss figure reads as a real
-		// number from the moment the job exists.
+		// THE JOBS - one per (lot, state, print fabric). Job_Status, not Status -
+		// six forms already share that link name.
+		//
+		// THE JOB NUMBER, PJ-00001 upward - the reference on the Zoho Inventory
+		// adjustments, so the document there and the job here share one
+		// identifier. SORTED ON ID, never on Job_No (a text sort reads PJ-99999
+		// above PJ-100000), largest parsed number wins. Read once; the jobs take
+		// the next numbers in order. THE BATCH is the first one's number.
 		//--------------------------------------------------------------------
-		jobId = 0;
-		jobNo = "";
-
-		//--------------------------------------------------------------------
-		// THE JOB NUMBER, PJ-00001 upward. It is the reference on the Zoho
-		// Inventory adjustments (PJ-00001-OUT / -IN / -RET), so the document
-		// there and the job here share one identifier. Built the way
-		// issueMaterialsHandover builds the SIV: SORTED ON ID, never on Job_No
-		// (a text sort reads PJ-99999 above PJ-100000), largest parsed number
-		// wins, blanks skipped.
-		//--------------------------------------------------------------------
+		lastJNum = 0;
 		if(errTxt == "")
 		{
 			lastJobs = Print_Job[ID != 0] sort by ID desc range from 1 to 10;
-			lastJNum = 0;
 			for each  lj in lastJobs
 			{
 				ljTxt = ifnull(lj.Job_No,"").toString().trim();
@@ -822,157 +796,274 @@ string sendToPrint(string payloadJson)
 					}
 				}
 			}
-			nextJNum = lastJNum + 1;
-			if(nextJNum < 10)
-			{
-				jPad = "0000" + nextJNum;
-			}
-			else if(nextJNum < 100)
-			{
-				jPad = "000" + nextJNum;
-			}
-			else if(nextJNum < 1000)
-			{
-				jPad = "00" + nextJNum;
-			}
-			else if(nextJNum < 10000)
-			{
-				jPad = "0" + nextJNum;
-			}
-			else
-			{
-				jPad = "" + nextJNum;
-			}
-			jobNo = "PJ-" + jPad;
 		}
 
-		// Inv_Out_Status starts Pending - the OUT adjustment is owed from the
-		// moment the cloth leaves. No comments inside the insert block below.
+		batchNo = "";
+		newJobIds = List();
+		newJobNos = List();
+
+		// How much of each planned roll earlier jobs have been dealt, keyed by
+		// plan position as text.
+		usedOnRoll = Map();
+
 		if(errTxt == "")
 		{
-			newJobId = insert into Print_Job
-			[
-				Job_No=jobNo
-				Inv_Out_Status="Pending"
-				Source_State=srcState
-				Metres_Sent=metresSent
-				Metres_Returned=0
-				Sent_On=zoho.currentdate
-				Job_Status="At_Printer"
-				Remarks=remarks
-				Added_User=zoho.loginuser
-			];
-
-			jobId = newJobId.toLong();
-
-			// Lookups and subforms set AFTER the insert - a null lookup fails
-			// the whole insert block, and subform rows go in as a Collection in
-			// one call.
-			for each  pjUpd in Print_Job[ID == jobId]
+			gi = 0;
+			for each  gKey in gKeys
 			{
-				pjUpd.Source_Material = srcMatId.toLong();
-				pjUpd.Source_Lot = targetLot;
-				pjUpd.Printed_Material = tgtMatId.toLong();
-				pjUpd.Printer = printerId.toLong();
-
-				sendRows = Collection();
-				for each  sndRaw in linesRaw
+				nextJNum = lastJNum + 1 + gi;
+				if(nextJNum < 10)
 				{
-					snd = sndRaw.toMap();
-					sLenS = ifnull(snd.get("lengthCm"),"0").toString().trim();
-					if(sLenS == "")
-					{
-						sLenS = "0";
-					}
-					sCntS = ifnull(snd.get("count"),"0").toString().trim();
-					if(sCntS == "")
-					{
-						sCntS = "0";
-					}
-					sLen = sLenS.toDecimal();
-					sCnt = sCntS.toDecimal().toLong();
-					if(sLen > 0 && sCnt > 0)
-					{
-						sRow = Print_Job.Send_Lines();
-						sRow.Piece_Length_Cm=sLen;
-						sRow.Piece_Count=sCnt;
-						sendRows.insert(sRow);
-					}
+					jPad = "0000" + nextJNum;
 				}
-				pjUpd.Send_Lines.insert(sendRows);
-
-				// Which source rolls were cut, for the audit trail and so a
-				// cancel can state what went out. cancelPrintJob does NOT read
-				// these back to un-cut (you cannot un-cut) - the bounced bundle
-				// re-enters as one new roll.
-				srcRollRows = Collection();
-				sri = 0;
-				for each  srid in planRollId
+				else if(nextJNum < 100)
 				{
-					srRow = Print_Job.Source_Rolls();
-					srRow.Roll_Label = planLabel.get(sri);
-					srRow.Metres = planMetres.get(sri);
-					srcRollRows.insert(srRow);
-					sri = sri + 1;
+					jPad = "000" + nextJNum;
 				}
-				pjUpd.Source_Rolls.insert(srcRollRows);
+				else if(nextJNum < 1000)
+				{
+					jPad = "00" + nextJNum;
+				}
+				else if(nextJNum < 10000)
+				{
+					jPad = "0" + nextJNum;
+				}
+				else
+				{
+					jPad = "" + nextJNum;
+				}
+				jobNo = "PJ-" + jPad;
+				if(gi == 0)
+				{
+					batchNo = jobNo;
+				}
+
+				thisSrc = gSrcMat.get(gi);
+				thisLot = gLot.get(gi);
+				thisState = gState.get(gi);
+				thisTgt = gTgt.get(gi);
+				thisMetres = gMetres.get(gKey).toString().toDecimal();
+
+				// Inv_Out_Status starts Pending - the OUT adjustment is owed from
+				// the moment the cloth leaves. No comments inside the insert block.
+				newJobId = insert into Print_Job
+				[
+					Job_No=jobNo
+					Print_Batch=batchNo
+					Inv_Out_Status="Pending"
+					Source_State=thisState
+					Metres_Sent=thisMetres
+					Metres_Returned=0
+					Sent_On=zoho.currentdate
+					Job_Status="At_Printer"
+					Remarks=remarks
+					Added_User=zoho.loginuser
+				];
+
+				jobId = newJobId.toLong();
+				newJobIds.add(jobId.toString());
+				newJobNos.add(jobNo);
+
+				// Lookups and subforms set AFTER the insert - a null lookup fails
+				// the whole insert block, and subform rows go in as a Collection.
+				for each  pjUpd in Print_Job[ID == jobId]
+				{
+					pjUpd.Source_Material = thisSrc.toLong();
+					pjUpd.Source_Lot = thisLot.toLong();
+					pjUpd.Printed_Material = thisTgt.toLong();
+					pjUpd.Printer = printerId.toLong();
+
+					// This job's rows, in the order he typed them, each with
+					// its own rate.
+					sendRows = Collection();
+					for each  sndRaw in rowsRaw
+					{
+						snd = sndRaw.toMap();
+						sk = ifnull(snd.get("sourceLotId"),"").toString().trim() + "|" + ifnull(snd.get("sourceState"),"").toString().trim() + "|" + ifnull(snd.get("targetMaterialId"),"").toString().trim();
+						if(sk == gKey)
+						{
+							sLenS = ifnull(snd.get("lengthCm"),"0").toString().trim();
+							if(sLenS == "")
+							{
+								sLenS = "0";
+							}
+							sCntS = ifnull(snd.get("count"),"0").toString().trim();
+							if(sCntS == "")
+							{
+								sCntS = "0";
+							}
+							sRateS = ifnull(snd.get("rate"),"0").toString().trim();
+							if(sRateS == "")
+							{
+								sRateS = "0";
+							}
+							sRow = Print_Job.Send_Lines();
+							sRow.Piece_Length_Cm=sLenS.toDecimal();
+							sRow.Piece_Count=sCntS.toDecimal().toLong();
+							sRow.Rate=sRateS.toDecimal();
+							sendRows.insert(sRow);
+						}
+					}
+					pjUpd.Send_Lines.insert(sendRows);
+
+					// Which rolls this job's pieces came off: its lot's plan,
+					// dealt out in order - this job takes whatever earlier jobs
+					// on the same lot left on each roll. For the audit trail and
+					// so a cancel can say what went out; cancelPrintJob does not
+					// read them back (you cannot un-cut).
+					srcRollRows = Collection();
+					need = thisMetres;
+					sri = 0;
+					for each  srid in planRollId
+					{
+						if(need > 0.001 && planLot.get(sri) == thisLot)
+						{
+							usedS = ifnull(usedOnRoll.get(sri.toString()),"0").toString().trim();
+							if(usedS == "")
+							{
+								usedS = "0";
+							}
+							usedK = usedS.toDecimal();
+							leftK = planMetres.get(sri) - usedK;
+							if(leftK > 0.001)
+							{
+								takeK = leftK;
+								if(takeK > need)
+								{
+									takeK = need;
+								}
+								srRow = Print_Job.Source_Rolls();
+								srRow.Roll_Label = planLabel.get(sri);
+								srRow.Metres = takeK;
+								srcRollRows.insert(srRow);
+								usedOnRoll.put(sri.toString(),usedK + takeK);
+								need = need - takeK;
+							}
+						}
+						sri = sri + 1;
+					}
+					pjUpd.Source_Rolls.insert(srcRollRows);
+				}
+
+				info "print job " + jobNo + " (" + jobId + ") - " + thisMetres + " Mtr " + thisState + " off lot " + lotNum.get(thisLot) + " of " + matSku.get(thisSrc) + " -> " + matSku.get(thisTgt) + ", batch " + batchNo;
+				gi = gi + 1;
 			}
-
-			info "print job " + jobId + " - " + metresSent + " Mtr " + srcState + " off lot " + lotNumOut + " of " + srcSku + " -> " + tgtSku + " (" + piecesSent + " pieces over " + lineCount + " lines, " + planRollId.size() + " rolls cut)";
 		}
 
-		if(errTxt == "" && jobId == 0)
+		if(errTxt == "" && newJobIds.size() == 0)
 		{
 			errTxt = "The print job could not be created";
 		}
 
 		//--------------------------------------------------------------------
-		// ZOHO INVENTORY: -Metres_Sent on the source SKU, now. Its own
-		// try/catch and never an error for this call - the cloth has left and
-		// the job exists; an unreachable Inventory must not make the send look
-		// failed. A leg that did not post stays Pending on the job with the
-		// reason in Inv_Last_Error, and postPrintAdjustments("") retries it.
-		// Read back off the record rather than parsed out of the reply, so
-		// what the screen is told is what is stored.
+		// ZOHO INVENTORY: -Metres_Sent on each job's base, now. Its own try per
+		// job, never an error for this call - the cloth has left and the jobs
+		// exist. A leg that did not post stays Pending with the reason in
+		// Inv_Last_Error, and postPrintAdjustments("") retries it. Read back off
+		// the record, so what the screen is told is what is stored.
+		// `inventory` is Posted only when every job's OUT posted.
 		//--------------------------------------------------------------------
-		invStatus = "Pending";
+		invStatus = "Posted";
 		invError = "";
+		jobsJson = "";
+		if(errTxt == "")
+		{
+			ji = 0;
+			for each  njId in newJobIds
+			{
+				oneErr = "";
+				try
+				{
+					invRes = thisapp.postPrintAdjustments(njId,"false");
+				}
+				catch (eInv)
+				{
+					oneErr = "Inventory post did not run: " + eInv.toString();
+				}
+				oneSt = "";
+				for each  pjInv in Print_Job[ID == njId.toLong()]
+				{
+					oneSt = ifnull(pjInv.Inv_Out_Status,"").toString().trim();
+					if(oneErr == "")
+					{
+						oneErr = ifnull(pjInv.Inv_Last_Error,"").toString().trim();
+					}
+				}
+				if(oneSt != "Posted")
+				{
+					invStatus = "Pending";
+					if(oneErr != "")
+					{
+						if(invError != "")
+						{
+							invError = invError + " | ";
+						}
+						invError = invError + newJobNos.get(ji) + ": " + oneErr;
+					}
+				}
+
+				jgKey = gKeys.get(ji);
+				if(jobsJson != "")
+				{
+					jobsJson = jobsJson + ",";
+				}
+				jobsJson = jobsJson + "{\"jobId\":\"" + njId + "\",\"jobNo\":\"" + newJobNos.get(ji) + "\",\"sourceSku\":\"" + matSku.get(gSrcMat.get(ji)) + "\",\"lotNumber\":\"" + lotNum.get(gLot.get(ji)) + "\",\"state\":\"" + gState.get(ji) + "\",\"sku\":\"" + matSku.get(gTgt.get(ji)) + "\",\"pieces\":" + gPieces.get(jgKey) + ",\"metresSent\":" + gMetres.get(jgKey) + ",\"amount\":" + gAmount.get(jgKey) + ",\"inventory\":\"" + oneSt + "\"}";
+				ji = ji + 1;
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// THE PURCHASE ORDER. One per job order, through raisePrintPO, in its
+		// own try: the cloth has left and the jobs exist, so a PO failure
+		// (service item missing, printer unmapped, Inventory down) must not undo
+		// a send that happened. raisePrintPO stamps PO_Number on every job of the
+		// batch, or leaves the reason in PO_Last_Error for the card to show, and
+		// is safe to run again: raisePrintPO(batchNo,"false").
+		//--------------------------------------------------------------------
+		poNumberTxt = "";
+		poErrTxt = "";
+		poNotPriced = false;
 		if(errTxt == "")
 		{
 			try
 			{
-				invRes = thisapp.postPrintAdjustments(jobId.toString(),"false");
-			}
-			catch (eInv)
-			{
-				invError = "Inventory post did not run: " + eInv.toString();
-			}
-			for each  pjInv in Print_Job[ID == jobId]
-			{
-				invStatus = ifnull(pjInv.Inv_Out_Status,"").toString().trim();
-				if(invError == "")
+				poResTxt = thisapp.raisePrintPO(batchNo,"false");
+				poResMap = poResTxt.toMap();
+				if(ifnull(poResMap.get("success"),"false").toString() == "true")
 				{
-					invError = ifnull(pjInv.Inv_Last_Error,"").toString().trim();
+					poNumberTxt = ifnull(poResMap.get("poNumber"),"").toString();
+					if(ifnull(poResMap.get("notPriced"),"false").toString() == "true")
+					{
+						poNotPriced = true;
+					}
 				}
+				else
+				{
+					poErrTxt = ifnull(poResMap.get("error"),"PO not raised").toString();
+				}
+			}
+			catch (poErr)
+			{
+				poErrTxt = "raisePrintPO did not run: " + poErr.toString();
 			}
 		}
 
 		if(errTxt == "")
 		{
-			// Ids forced to string - 18-digit ids break JSON.parse on the widget.
-			planJson = "";
-			pj2 = 0;
-			for each  plbl in planLabel
+			// What was cut, per roll, for the screen. Ids forced to string.
+			cutsJson = "";
+			ci = 0;
+			for each  clbl in planLabel
 			{
-				if(planJson != "")
+				if(cutsJson != "")
 				{
-					planJson = planJson + ",";
+					cutsJson = cutsJson + ",";
 				}
-				planJson = planJson + "{\"rollId\":\"" + planRollId.get(pj2) + "\",\"label\":\"" + plbl.replaceAll("\"","'") + "\",\"metres\":" + planMetres.get(pj2) + "}";
-				pj2 = pj2 + 1;
+				cutsJson = cutsJson + "{\"lotNumber\":\"" + lotNum.get(planLot.get(ci)) + "\",\"rollId\":\"" + planRollId.get(ci) + "\",\"label\":\"" + clbl.replaceAll("\"","'") + "\",\"metres\":" + planMetres.get(ci) + "}";
+				ci = ci + 1;
 			}
 
-			res = "{\"success\":true,\"jobId\":\"" + jobId + "\",\"jobNo\":\"" + jobNo + "\",\"inventory\":\"" + invStatus + "\",\"inventoryError\":\"" + invError.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\",\"metresSent\":" + metresSent + ",\"rollPlan\":[" + planJson + "],\"lotWash\":" + lotWashOut + ",\"lotUnwash\":" + lotUnwashOut + ",\"lotInPrint\":" + lotInPrintOut + ",\"materialInPrint\":" + matInPrintOut + "}";
+			res = "{\"success\":true,\"batchNo\":\"" + batchNo + "\",\"jobId\":\"" + newJobIds.get(0) + "\",\"jobNo\":\"" + newJobNos.get(0) + "\",\"jobs\":[" + jobsJson + "],\"poNumber\":\"" + poNumberTxt.replaceAll("\"","'") + "\",\"poError\":\"" + poErrTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\",\"poNotPriced\":" + poNotPriced + ",\"inventory\":\"" + invStatus + "\",\"inventoryError\":\"" + invError.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\",\"metresSent\":" + metresSent + ",\"pieces\":" + piecesSent + ",\"cuts\":[" + cutsJson + "]}";
 		}
 	}
 	catch (e)
@@ -988,7 +1079,7 @@ string sendToPrint(string payloadJson)
 		{
 			errTxt = "Nothing was sent";
 		}
-		res = "{\"success\":false,\"error\":\"" + errTxt.replaceAll("\"","'") + "\"}";
+		res = "{\"success\":false,\"error\":\"" + errTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
 	}
 
 	return res;

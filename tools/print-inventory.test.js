@@ -342,9 +342,12 @@ test('postPrintAdjustments.dg: store location, one account, the three reference 
 
 test('sendToPrint.dg refuses an unmapped source or target before anything moves', () => {
     const s = dg('sendToPrint.dg');
-    const refuse = s.indexOf('srcInvItem == ""');
-    assert.ok(refuse > 0 && s.indexOf('tgtInvItem == ""') > 0);
-    assert.ok(refuse < s.indexOf('MOVE THE LEDGER. Rolls first'), 'refusal precedes the ledger move');
+    // base (bInv) and print fabric (pInv), checked per row as each is first seen
+    const refuse = s.indexOf('bInv == ""');
+    const refuseT = s.indexOf('pInv == ""');
+    assert.ok(refuse > 0 && refuseT > 0);
+    const ledger = s.indexOf('MOVE THE LEDGER. Rolls, then lots');
+    assert.ok(ledger > 0 && refuse < ledger && refuseT < ledger, 'refusal precedes the ledger move');
     assert.ok(s.includes('Inv_Out_Status="Pending"'));
 });
 

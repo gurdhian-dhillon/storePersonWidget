@@ -38,7 +38,8 @@ function addMat(W, o) {
     const m = Object.assign({
         ID: nid(W), SKU: 'RM-x', Name: 'x', Material_Display_Name: '', Is_Fabric: 'true',
         Type_field: 'Plain Fabric', Fabric_Width_Inches: '60',
-        Wash_Quantity: 0, Unwash_Quantity: 0, In_Print_Qty: 0, Unallocated_Qty: 0, Quantity: 0
+        Wash_Quantity: 0, Unwash_Quantity: 0, In_Print_Qty: 0, Unallocated_Qty: 0, Quantity: 0,
+        Inventory_Item_ID: 'I-x'
     }, o);
     W.mats.push(m); return m;
 }
@@ -69,170 +70,189 @@ function shelf(l) { return r2(dec(l.Wash_Quantity) + dec(l.Unwash_Quantity) + de
 // ===========================================================================
 function sendToPrint(W, p) {
     let err = '';
-    const srcMatId = ifnullStr(p.sourceMaterialId, '').trim();
-    const srcLotId = ifnullStr(p.sourceLotId, '').trim();
-    const tgtMatId = ifnullStr(p.targetMaterialId, '').trim();
     const printerId = ifnullStr(p.printerId, '').trim();
-    const srcState = ifnullStr(p.sourceState, '').trim();
-    const linesRaw = p.lines || [];
-    const rollPlanRaw = p.rollPlan || [];
+    const rowsRaw = p.lines || [];
 
-    if (srcMatId === '' || !isNum(srcMatId)) err = 'No source material given';
-    if (!err && (srcLotId === '' || !isNum(srcLotId))) err = 'No source lot given';
-    if (!err && (tgtMatId === '' || !isNum(tgtMatId))) err = 'No target printed material chosen';
-    if (!err && srcState !== 'Wash' && srcState !== 'Unwash') err = 'Source state must be Wash or Unwash';
-    if (!err && (printerId === '' || !isNum(printerId))) err = 'No printer given';
-    if (!err && linesRaw.length === 0) err = 'Nothing to send';
-    if (!err && srcMatId === tgtMatId) err = 'Source and target are the same material';
-
-    let srcWidth = '', srcRec = null;
-    if (!err) {
-        const rs = byId(W.mats, srcMatId);
-        if (!rs.length) err = 'Source material not found';
-        else { srcRec = rs[0]; srcWidth = str(srcRec.Fabric_Width_Inches).trim();
-               if (str(srcRec.Is_Fabric).toLowerCase() !== 'true') err = 'not a fabric'; }
-    }
-
-    let tgtWidth = '';
-    if (!err) {
-        const rs = byId(W.mats, tgtMatId);
-        if (!rs.length) err = 'Target printed material not found';
-        else {
-            const t = rs[0];
-            if (str(t.Is_Fabric).toLowerCase() !== 'true') err = t.SKU + ' is not a fabric';
-            // "printed fabric" Type check is OFF for now — width only.
-            else {
-                tgtWidth = str(t.Fabric_Width_Inches).trim();
-                const sw = srcWidth === '' ? 0 : parseFloat(srcWidth);
-                const tw = tgtWidth === '' ? 0 : parseFloat(tgtWidth);
-                if (sw <= 0 || tw <= 0) err = 'no fabric width on record';
-                else if (Math.abs(sw - tw) > 0.01) err = 'Width mismatch';
-            }
-        }
-    }
+    if (printerId === '' || !isNum(printerId)) err = 'No printer chosen';
+    if (!err && rowsRaw.length === 0) err = 'Nothing to send - add at least one line';
+    if (!err && rowsRaw.length > 40) err = 'At most 40 lines';
     if (!err && !byId(W.printers, printerId).length) err = 'Printer not found';
 
-    let lot = null, lotWash = 0, lotUnwash = 0, lotInPrint = 0, lotNum = '';
+    // ---- pass 1: the rows ----------------------------------------------------
+    const matOk = {}, lotOk = {};
+    const gKeys = [], groups = {};          // key -> { src, lot, state, tgt, metres, pieces, amount }
+    const lsKeys = [], needLS = {};         // lot|state -> metres
+    const lotOrder = [], needLot = {};
+    let totalCm = 0, rowNo = 0;
+
+    function checkMat(id, kind) {
+        const rs = byId(W.mats, id);
+        if (!rs.length) return 'Line ' + rowNo + ': ' + kind + ' not found';
+        const m = rs[0];
+        const w = str(m.Fabric_Width_Inches).trim() === '' ? 0 : parseFloat(m.Fabric_Width_Inches);
+        if (str(m.Is_Fabric).toLowerCase() !== 'true') return m.SKU + ' is not a fabric';
+        if (w <= 0) return m.SKU + ' has no fabric width on record';
+        if (str(m.Inventory_Item_ID).trim() === '') return m.SKU + ' has no Zoho Inventory item mapped';
+        matOk[id] = { sku: m.SKU, width: w };
+        return '';
+    }
+
     if (!err) {
-        const ls = byId(W.lots, srcLotId);
-        if (!ls.length) err = 'Source lot not found';
-        else {
-            lot = ls[0];
-            if (String(lot.Material) !== srcMatId) err = 'That lot belongs to a different material';
-            else if (str(lot.Status) === 'Blocked') err = 'That lot is blocked';
-            else {
-                lotNum = str(lot.Lot_Number);
-                lotWash = dec(lot.Wash_Quantity); lotUnwash = dec(lot.Unwash_Quantity);
-                lotInPrint = dec(lot.In_Print_Qty);
+        for (const rw of rowsRaw) {
+            rowNo++;
+            const sMat = ifnullStr(rw.sourceMaterialId, '').trim();
+            const sLot = ifnullStr(rw.sourceLotId, '').trim();
+            const sState = ifnullStr(rw.sourceState, '').trim();
+            const tMat = ifnullStr(rw.targetMaterialId, '').trim();
+            const len = dec(rw.lengthCm), cd = dec(rw.count), c = Math.trunc(cd), rate = dec(rw.rate);
+
+            if (sMat === '' || !isNum(sMat)) err = 'Line ' + rowNo + ': no base fabric chosen';
+            else if (sLot === '' || !isNum(sLot)) err = 'Line ' + rowNo + ': no lot chosen';
+            else if (sState !== 'Wash' && sState !== 'Unwash') err = 'Line ' + rowNo + ': washed or unwashed?';
+            else if (tMat === '' || !isNum(tMat)) err = 'Line ' + rowNo + ': no print fabric chosen';
+            else if (tMat === sMat) err = 'Line ' + rowNo + ': base and print fabric are the same material';
+            else if (len <= 0) err = 'Line ' + rowNo + ': needs a piece length in cm';
+            else if (cd <= 0) err = 'Line ' + rowNo + ': needs a piece count above zero';
+            else if (c !== cd) err = 'Line ' + rowNo + ': piece count must be a whole number';
+            else if (rate < 0) err = 'Line ' + rowNo + ': the rate cannot be negative';
+            if (err) break;
+
+            if (!matOk[sMat]) { err = checkMat(sMat, 'base fabric'); if (err) break; }
+            if (!matOk[tMat]) { err = checkMat(tMat, 'print fabric'); if (err) break; }
+            if (Math.abs(matOk[sMat].width - matOk[tMat].width) > 0.01) {
+                err = 'Line ' + rowNo + ': width mismatch - ' + matOk[sMat].sku + ' / ' + matOk[tMat].sku; break;
             }
+
+            if (!lotOk[sLot]) {
+                const ls = byId(W.lots, sLot);
+                if (!ls.length) { err = 'Line ' + rowNo + ': lot not found'; break; }
+                const l = ls[0];
+                if (String(l.Material) !== sMat) { err = 'Line ' + rowNo + ': lot ' + l.Lot_Number + ' belongs to a different material'; break; }
+                if (str(l.Status) === 'Blocked') { err = 'Line ' + rowNo + ': lot ' + l.Lot_Number + ' is blocked'; break; }
+                if (lotRolls(W, l.ID).length === 0) { err = 'Lot ' + l.Lot_Number + ' has no rolls recorded'; break; }
+                lotOk[sLot] = { rec: l, mat: sMat, num: str(l.Lot_Number), wash: dec(l.Wash_Quantity), unwash: dec(l.Unwash_Quantity) };
+                lotOrder.push(sLot); needLot[sLot] = 0;
+            } else if (lotOk[sLot].mat !== sMat) {
+                err = 'Line ' + rowNo + ': lot ' + lotOk[sLot].num + ' belongs to a different material'; break;
+            }
+
+            const mtr = (len * c) / 100;
+            const gk = sLot + '|' + sState + '|' + tMat;
+            if (!groups[gk]) { gKeys.push(gk); groups[gk] = { src: sMat, lot: sLot, state: sState, tgt: tMat, metres: 0, pieces: 0, amount: 0 }; }
+            groups[gk].metres += mtr; groups[gk].pieces += c; groups[gk].amount += c * rate;
+            const lsk = sLot + '|' + sState;
+            if (needLS[lsk] == null) { lsKeys.push(lsk); needLS[lsk] = 0; }
+            needLS[lsk] += mtr; needLot[sLot] += mtr;
+            totalCm += len * c;
         }
     }
-    if (!err && lot && lotRolls(W, lot.ID).length === 0)
-        err = 'Lot ' + lotNum + ' has no rolls recorded';
+    if (!err && gKeys.length > 15) err = 'At most 15 base/print fabric combinations';
+    const metresSent = totalCm / 100;
+    if (!err && metresSent <= 0) err = 'Nothing to send - the lines add up to zero';
 
-    let totalCm = 0, pieces = 0;
+    // ---- budgets, per lot + state ---------------------------------------------
     if (!err) {
-        for (const ln of linesRaw) {
-            const len = dec(ln.lengthCm), cd = dec(ln.count), c = Math.trunc(cd);
-            if (len <= 0) { err = 'needs a piece length'; break; }
-            if (cd <= 0) { err = 'count above zero'; break; }
-            if (c !== cd) { err = 'whole number'; break; }
-            totalCm += len * c; pieces += c;
-        }
-    }
-    let metresSent = 0;
-    if (!err) { metresSent = totalCm / 100; if (metresSent <= 0) err = 'adds up to zero'; }
-
-    if (!err) {
-        const have = srcState === 'Wash' ? lotWash : lotUnwash;
-        if (metresSent > have) err = 'Lot ' + lotNum + ' has only ' + have + ' Mtr ' + srcState;
-    }
-
-    // ---- roll plan --------------------------------------------------------
-    const avail = !err ? lotRolls(W, lot.ID)
-        .filter(r => r.Roll_Status === 'Available' && dec(r.Roll_Length) > 0)
-        .map(r => ({ id: String(r.ID), label: str(r.Roll_Label), len: dec(r.Roll_Length) })) : [];
-    if (!err && avail.length === 0) err = 'no cuttable rolls';
-
-    let plan = [];  // {id,label,metres}
-    if (!err && rollPlanRaw.length > 0) {
-        let sum = 0; const seen = [];
-        for (const rp of rollPlanRaw) {
-            const rid = ifnullStr(rp.rollId, '').trim(), m = dec(rp.metres);
-            if (rid === '' || !isNum(rid)) { err = 'roll in the plan has no id'; break; }
-            if (m <= 0) { err = 'metres above zero'; break; }
-            if (seen.indexOf(rid) !== -1) { err = 'names one roll twice'; break; }
-            seen.push(rid);
-            const hit = avail.find(a => a.id === rid);
-            if (!hit) { err = 'Roll ' + rid + ' is not a cuttable roll'; break; }
-            if (m > hit.len) { err = 'Roll ' + hit.label + ' has ' + hit.len; break; }
-            plan.push({ id: rid, label: hit.label, metres: m }); sum += m;
-        }
-        if (!err && Math.abs(sum - metresSent) > 0.01) err = 'roll plan totals ' + sum;
-    } else if (!err) {
-        // sort by length ascending, tie -> original position (stable)
-        const sorted = avail.map((r, i) => ({ r, i })).sort((a, b) =>
-            a.r.len !== b.r.len ? a.r.len - b.r.len : a.i - b.i).map(x => x.r);
-        let remain = metresSent;
-        for (const r of sorted) {
-            if (remain <= 0.001) break;
-            const take = Math.min(r.len, remain);
-            plan.push({ id: r.id, label: r.label, metres: take });
-            remain -= take;
-        }
-        if (remain > 0.01) err = 'Lot ' + lotNum + ' has ' + r2(metresSent - remain) + ' Mtr across its rolls';
-    }
-    if (!err && plan.length === 0) err = 'Could not work out which rolls to cut';
-
-    // ---- move the ledger: pass 1 verify all, pass 2 write --------------
-    let lotWashOut = 0, lotUnwashOut = 0, lotInPrintOut = 0, matInPrintOut = 0;
-    if (!err) {
-        for (const pr of plan) {
-            const rr = W.rolls.find(x => String(x.ID) === pr.id);
-            if (!rr) { err = 'Roll ' + pr.label + ' vanished'; break; }
-            if (pr.metres > dec(rr.Roll_Length) + 0.0001) {
-                err = 'Roll ' + pr.label + ' has ' + dec(rr.Roll_Length) + ' Mtr, the cut plan needs ' +
-                      pr.metres + ' - a concurrent change moved the stock. Nothing was sent; reload and try again.';
+        for (const k of lsKeys) {
+            const [lot, state] = k.split('|');
+            const L = lotOk[lot];
+            const have = state === 'Wash' ? L.wash : L.unwash;
+            if (needLS[k] > have + 0.0001) {
+                err = 'Lot ' + L.num + ' of ' + matOk[L.mat].sku + ' has only ' + have + ' Mtr ' +
+                      (state === 'Wash' ? 'washed' : 'unwashed') + ' - this job order needs ' + r2(needLS[k]);
                 break;
             }
         }
     }
+
+    // ---- roll plan, one per lot, on the lot's TOTAL ----------------------------
+    const plan = [];   // {lot, id, label, metres}
+    if (!err) {
+        for (const lot of lotOrder) {
+            const avail = lotRolls(W, lot)
+                .filter(r => r.Roll_Status === 'Available' && dec(r.Roll_Length) > 0)
+                .map(r => ({ id: String(r.ID), label: str(r.Roll_Label), len: dec(r.Roll_Length) }));
+            if (!avail.length) { err = 'Lot ' + lotOk[lot].num + ' has no cuttable rolls'; break; }
+            const sorted = avail.map((r, i) => ({ r, i })).sort((a, b) =>
+                a.r.len !== b.r.len ? a.r.len - b.r.len : a.i - b.i).map(x => x.r);
+            let remain = needLot[lot];
+            for (const r of sorted) {
+                if (remain <= 0.001) break;
+                const take = Math.min(r.len, remain);
+                plan.push({ lot, id: r.id, label: r.label, metres: take });
+                remain -= take;
+            }
+            if (remain > 0.01) { err = 'Lot ' + lotOk[lot].num + ' has ' + r2(needLot[lot] - remain) + ' Mtr across its rolls'; break; }
+        }
+    }
+
+    // ---- move the ledger: verify every roll, then write ---------------------
     if (!err) {
         for (const pr of plan) {
             const rr = W.rolls.find(x => String(x.ID) === pr.id);
-            rr.Roll_Length = r2(dec(rr.Roll_Length) - pr.metres);
-            if (rr.Roll_Length <= 0) rr.Roll_Status = 'Consumed';
+            if (!rr) { err = 'Roll ' + pr.label + ' vanished'; break; }
+            if (pr.metres > dec(rr.Roll_Length) + 0.0001) { err = 'Roll ' + pr.label + ' has ' + dec(rr.Roll_Length) + ' Mtr - a concurrent change moved the stock. Nothing was sent'; break; }
         }
     }
-    if (!err) {
-        lotWashOut = lotWash; lotUnwashOut = lotUnwash; lotInPrintOut = r2(lotInPrint + metresSent);
-        if (srcState === 'Wash') { lotWashOut = r2(lotWash - metresSent); lot.Wash_Quantity = lotWashOut; }
-        else { lotUnwashOut = r2(lotUnwash - metresSent); lot.Unwash_Quantity = lotUnwashOut; }
-        lot.In_Print_Qty = lotInPrintOut;
-
-        const mat = byId(W.mats, srcMatId)[0];
-        matInPrintOut = r2(dec(mat.In_Print_Qty) + metresSent);
-        if (srcState === 'Wash') mat.Wash_Quantity = r2(dec(mat.Wash_Quantity) - metresSent);
-        else mat.Unwash_Quantity = r2(dec(mat.Unwash_Quantity) - metresSent);
-        mat.Quantity = r2(dec(mat.Wash_Quantity) + dec(mat.Unwash_Quantity) + dec(mat.Unallocated_Qty));
-        mat.In_Print_Qty = matInPrintOut;
-    }
-
     if (err) return { success: false, error: err };
 
-    const job = {
-        ID: nid(W), Source_Material: srcMatId, Source_Lot: srcLotId, Printed_Material: tgtMatId,
-        Printer: printerId, Source_State: srcState, Metres_Sent: metresSent, Metres_Returned: 0,
-        Job_Status: 'At_Printer',
-        Send_Lines: linesRaw.map(l => ({ Piece_Length_Cm: dec(l.lengthCm), Piece_Count: Math.trunc(dec(l.count)) })),
-        Source_Rolls: plan.map(pr => ({ Roll_Label: pr.label, Metres: pr.metres })),
-        Receive_Lines: []
-    };
-    W.jobs.push(job);
-    return { success: true, jobId: job.ID, metresSent: r2(metresSent),
-             rollPlan: plan.map(pr => ({ rollId: pr.id, label: pr.label, metres: r2(pr.metres) })),
-             lotWash: lotWashOut, lotUnwash: lotUnwashOut, lotInPrint: lotInPrintOut,
-             materialInPrint: matInPrintOut };
+    for (const pr of plan) {
+        const rr = W.rolls.find(x => String(x.ID) === pr.id);
+        rr.Roll_Length = r2(dec(rr.Roll_Length) - pr.metres);
+        if (rr.Roll_Length <= 0) rr.Roll_Status = 'Consumed';
+    }
+    for (const k of lsKeys) {
+        const [lot, state] = k.split('|');
+        const l = lotOk[lot].rec, need = needLS[k];
+        if (state === 'Wash') l.Wash_Quantity = r2(dec(l.Wash_Quantity) - need);
+        else l.Unwash_Quantity = r2(dec(l.Unwash_Quantity) - need);
+        l.In_Print_Qty = r2(dec(l.In_Print_Qty) + need);
+        const m = byId(W.mats, lotOk[lot].mat)[0];
+        if (state === 'Wash') m.Wash_Quantity = r2(dec(m.Wash_Quantity) - need);
+        else m.Unwash_Quantity = r2(dec(m.Unwash_Quantity) - need);
+        m.Quantity = r2(dec(m.Wash_Quantity) + dec(m.Unwash_Quantity) + dec(m.Unallocated_Qty));
+        m.In_Print_Qty = r2(dec(m.In_Print_Qty) + need);
+    }
+
+    // ---- one job per (lot, state, print fabric) -----------------------------
+    let lastJNum = 0;
+    W.jobs.forEach(j => {
+        const parts = str(j.Job_No).split('-');
+        const n = parts.length > 1 ? parts[parts.length - 1].trim() : '';
+        if (/^\d+$/.test(n) && Number(n) > lastJNum) lastJNum = Number(n);
+    });
+    const usedOnRoll = {};
+    let batchNo = '';
+    const made = [];
+    gKeys.forEach((gk, gi) => {
+        const g = groups[gk];
+        const jobNo = 'PJ-' + String(lastJNum + 1 + gi).padStart(5, '0');
+        if (gi === 0) batchNo = jobNo;
+        let need = g.metres;
+        const rolls = [];
+        plan.forEach((pr, k) => {
+            if (need <= 0.001 || pr.lot !== g.lot) return;
+            const used = usedOnRoll[k] || 0, left = pr.metres - used;
+            if (left <= 0.001) return;
+            const take = Math.min(left, need);
+            rolls.push({ Roll_Label: pr.label, Metres: r2(take) });
+            usedOnRoll[k] = used + take; need -= take;
+        });
+        const job = {
+            ID: nid(W), Job_No: jobNo, Print_Batch: batchNo,
+            Source_Material: g.src, Source_Lot: g.lot, Printed_Material: g.tgt, Printer: printerId,
+            Source_State: g.state, Metres_Sent: r2(g.metres), Metres_Returned: 0, Job_Status: 'At_Printer',
+            Send_Lines: rowsRaw.filter(rw => ifnullStr(rw.sourceLotId, '') + '|' + ifnullStr(rw.sourceState, '') + '|' + ifnullStr(rw.targetMaterialId, '') === gk)
+                .map(rw => ({ Piece_Length_Cm: dec(rw.lengthCm), Piece_Count: Math.trunc(dec(rw.count)), Rate: dec(rw.rate) })),
+            Source_Rolls: rolls, Receive_Lines: []
+        };
+        W.jobs.push(job);
+        made.push({ jobId: job.ID, jobNo, sku: matOk[g.tgt].sku, sourceSku: matOk[g.src].sku, lotNumber: lotOk[g.lot].num,
+                    state: g.state, pieces: g.pieces, metresSent: r2(g.metres), amount: r2(g.amount) });
+    });
+
+    return { success: true, batchNo, jobId: made[0].jobId, jobNo: made[0].jobNo, jobs: made,
+             metresSent: r2(metresSent),
+             cuts: plan.map(pr => ({ lotNumber: lotOk[pr.lot].num, rollId: pr.id, label: pr.label, metres: r2(pr.metres) })) };
 }
 function str(v) { return v === null || v === undefined ? '' : String(v); }
 
@@ -447,39 +467,57 @@ function fixture(opts) {
     return { W, src, srcLot, tgt, printer };
 }
 const LINES = [{ lengthCm: 300, count: 3 }, { lengthCm: 275, count: 4 }];  // 9 + 11 = 20 m, 7 pieces
+// Rows off the fixture's base, lot L1, washed, into its print fabric, unless
+// `rows` gives the whole list. `lines` (length/count/rate) shape the default
+// rows, so the receive/cancel lifecycle tests read as they always did.
+function rowOf(f, l, o) {
+    return Object.assign({ sourceMaterialId: f.src.ID, sourceLotId: f.srcLot.ID, sourceState: 'Wash',
+                           targetMaterialId: f.tgt.ID, lengthCm: l.lengthCm, count: l.count, rate: l.rate || 0 }, o || {});
+}
 function send(f, over) {
-    return sendToPrint(f.W, Object.assign({
-        sourceMaterialId: f.src.ID, sourceLotId: f.srcLot.ID, sourceState: 'Wash',
-        targetMaterialId: f.tgt.ID, printerId: f.printer.ID, lines: LINES
-    }, over || {}));
+    over = over || {};
+    const rowOver = over.sourceState ? { sourceState: over.sourceState } : null;
+    const rows = over.rows || (over.lines || LINES).map(l => rowOf(f, l, rowOver));
+    return sendToPrint(f.W, { printerId: over.printerId !== undefined ? over.printerId : f.printer.ID, lines: rows });
+}
+// A second print fabric at the same width — the floral beside the checks.
+function addFloral(f) {
+    return addMat(f.W, { SKU: 'RM-101', Name: 'Grey Floral', Type_field: 'printed fabric',
+                         Fabric_Width_Inches: '60' });
+}
+// A second base with its own lot and rolls — white cotton, 58 in.
+function addCotton(f) {
+    const base = addMat(f.W, { SKU: 'RM-002', Name: 'White Cotton', Fabric_Width_Inches: '58',
+                               Wash_Quantity: 0, Unwash_Quantity: 30, Quantity: 30 });
+    const lot = addLot(f.W, { Material: base.ID, Lot_Number: 'W1', Wash_Quantity: 0, Unwash_Quantity: 30 });
+    addRoll(f.W, lot.ID, 'W1-R1', 30);
+    const stripes = addMat(f.W, { SKU: 'RM-103', Name: 'Blue Stripes', Fabric_Width_Inches: '58' });
+    return { base, lot, stripes };
 }
 
 // ===========================================================================
-// TESTS — sendToPrint
+// TESTS — sendToPrint, one row per piece size
 // ===========================================================================
 console.log('\nsendToPrint');
 
-test('S1 happy path: job created, metres out of Wash into In_Print_Qty', () => {
+test('S1 happy path: one job, metres out of Wash into In_Print_Qty, SKU total unchanged', () => {
     const f = fixture();
     const r = send(f);
     assert.ok(r.success, r.error);
     assert.strictEqual(r.metresSent, 20);
+    assert.strictEqual(f.W.jobs.length, 1);
     assert.strictEqual(f.srcLot.Wash_Quantity, 80);
     assert.strictEqual(f.srcLot.In_Print_Qty, 20);
     assert.strictEqual(f.src.Wash_Quantity, 80);
     assert.strictEqual(f.src.In_Print_Qty, 20);
-    // SKU total unchanged
     assert.strictEqual(f.src.Quantity, 100);   // 80 wash + 20 unwash
 });
 
-test('S2 auto plan is shortest roll first', () => {
+test('S2 the lot is cut shortest roll first', () => {
     const f = fixture();  // rolls 8, 42, 70
     const r = send(f);
-    // 20 m: all 8 off R1, then 12 off R2
-    assert.deepStrictEqual(r.rollPlan.map(p => [p.label, p.metres]),
-        [['L1-R1', 8], ['L1-R2', 12]]);
+    assert.deepStrictEqual(r.cuts.map(p => [p.label, p.metres]), [['L1-R1', 8], ['L1-R2', 12]]);
     const rolls = lotRolls(f.W, f.srcLot.ID);
-    assert.strictEqual(rolls.find(x => x.Roll_Label === 'L1-R1').Roll_Length, 0);
     assert.strictEqual(rolls.find(x => x.Roll_Label === 'L1-R1').Roll_Status, 'Consumed');
     assert.strictEqual(rolls.find(x => x.Roll_Label === 'L1-R2').Roll_Length, 30);
     assert.strictEqual(rolls.find(x => x.Roll_Label === 'L1-R3').Roll_Length, 70);
@@ -495,7 +533,7 @@ test('S4 budget: cannot send more than the chosen state holds', () => {
     const f = fixture({ lotWash: 15, wash: 15 });
     const r = send(f);
     assert.ok(!r.success);
-    assert.ok(/only 15 Mtr Wash/.test(r.error), r.error);
+    assert.ok(/has only 15 Mtr washed/.test(r.error), r.error);
 });
 
 test('S5 rolls cannot cover the metres -> reject, nothing moved', () => {
@@ -503,7 +541,7 @@ test('S5 rolls cannot cover the metres -> reject, nothing moved', () => {
     const r = send(f);
     assert.ok(!r.success);
     assert.ok(/across its rolls/.test(r.error), r.error);
-    assert.strictEqual(f.srcLot.Wash_Quantity, 100);   // untouched
+    assert.strictEqual(f.srcLot.Wash_Quantity, 100);
 });
 
 test('S6 lot with no rolls at all -> reject', () => {
@@ -515,84 +553,154 @@ test('S6 lot with no rolls at all -> reject', () => {
 
 test('S7 target Type is NOT checked for now — any same-width fabric is accepted', () => {
     const f = fixture();
-    f.tgt.Type_field = 'Plain Fabric';   // not "printed fabric"
-    const r = send(f);
-    assert.ok(r.success, r.error);        // width matches, so it goes through
+    f.tgt.Type_field = 'Plain Fabric';
+    assert.ok(send(f).success);
 });
 
-test('S8 width mismatch is refused', () => {
+test('S8 width mismatch is refused, naming the line', () => {
     const f = fixture({ tgtWidth: '44' });
     const r = send(f);
     assert.ok(!r.success);
-    assert.ok(/Width mismatch/.test(r.error), r.error);
+    assert.ok(/Line 1: width mismatch/.test(r.error), r.error);
 });
 
-test('S9 manual roll plan honoured when it totals the metres', () => {
-    const f = fixture();  // rolls 8, 42, 70
-    const rolls = lotRolls(f.W, f.srcLot.ID);
-    const r2Id = rolls.find(x => x.Roll_Label === 'L1-R2').ID;
-    const r3Id = rolls.find(x => x.Roll_Label === 'L1-R3').ID;
-    const r = send(f, { rollPlan: [{ rollId: r2Id, metres: 5 }, { rollId: r3Id, metres: 15 }] });
-    assert.ok(r.success, r.error);
-    assert.strictEqual(rolls.find(x => x.Roll_Label === 'L1-R1').Roll_Length, 8);   // untouched
-    assert.strictEqual(rolls.find(x => x.Roll_Label === 'L1-R2').Roll_Length, 37);
-    assert.strictEqual(rolls.find(x => x.Roll_Label === 'L1-R3').Roll_Length, 55);
-});
-
-test('S10 manual roll plan that does not total the metres is refused', () => {
+test('S9 an unmapped print fabric is refused before anything moves', () => {
     const f = fixture();
-    const r2Id = lotRolls(f.W, f.srcLot.ID).find(x => x.Roll_Label === 'L1-R2').ID;
-    const r = send(f, { rollPlan: [{ rollId: r2Id, metres: 10 }] });
-    assert.ok(!r.success);
-    assert.ok(/roll plan totals 10/.test(r.error), r.error);
+    f.tgt.Inventory_Item_ID = '';
+    const r = send(f);
+    assert.ok(!r.success && /no Zoho Inventory item mapped/.test(r.error), r.error);
+    assert.strictEqual(f.srcLot.Wash_Quantity, 100);
 });
 
-test('S11 manual roll plan over a roll length is refused', () => {
+test('S10 no printer -> refused', () => {
     const f = fixture();
-    const r1Id = lotRolls(f.W, f.srcLot.ID).find(x => x.Roll_Label === 'L1-R1').ID;
-    const r = send(f, { rollPlan: [{ rollId: r1Id, metres: 20 }] });
-    assert.ok(!r.success);
-    assert.ok(/L1-R1 has 8/.test(r.error), r.error);
+    const r = send(f, { printerId: '' });
+    assert.ok(!r.success && /No printer chosen/.test(r.error), r.error);
 });
 
-test('S12 fractional / zero-count lines refused', () => {
+test('S11 a lot of another material is refused, naming the line', () => {
+    const f = fixture(); const c = addCotton(f);
+    const r = send(f, { rows: [rowOf(f, { lengthCm: 100, count: 1 }, { sourceLotId: c.lot.ID })] });
+    assert.ok(!r.success && /Line 1: lot W1 belongs to a different material/.test(r.error), r.error);
+});
+
+test('S12 fractional / zero-count / negative-rate lines refused', () => {
     const f = fixture();
-    assert.ok(!send(f, { lines: [{ lengthCm: 300, count: 2.5 }] }).success);
-    assert.ok(!send(f, { lines: [{ lengthCm: 0, count: 3 }] }).success);
+    assert.ok(/whole number/.test(send(f, { lines: [{ lengthCm: 300, count: 2.5 }] }).error));
+    assert.ok(/piece length/.test(send(f, { lines: [{ lengthCm: 0, count: 3 }] }).error));
+    assert.ok(/cannot be negative/.test(send(f, { lines: [{ lengthCm: 300, count: 3, rate: -1 }] }).error));
+    assert.strictEqual(f.W.jobs.length, 0);
 });
 
-test('S13 Source_Rolls subform records what was cut', () => {
+test('S13 Source_Rolls records what was cut', () => {
     const f = fixture();
     const r = send(f);
     const job = byId(f.W.jobs, r.jobId)[0];
-    assert.deepStrictEqual(job.Source_Rolls.map(x => [x.Roll_Label, x.Metres]),
-        [['L1-R1', 8], ['L1-R2', 12]]);
+    assert.deepStrictEqual(job.Source_Rolls.map(x => [x.Roll_Label, x.Metres]), [['L1-R1', 8], ['L1-R2', 12]]);
 });
 
-test('S14 a hand plan that over-draws one roll is rejected whole, nothing written', () => {
-    // The .dg verifies the WHOLE plan (pass 1) before decrementing any roll
-    // (pass 2). A concurrent-shrink race can only be checked at Execute, but the
-    // testable property is: a plan where one roll does not fit writes NOTHING -
-    // not the roll that would have fit, not the lot counter, no job.
-    const f = fixture({ rolls: [['L1-R1', 8], ['L1-R2', 8]], lotWash: 100, wash: 100 });
-    const r1 = lotRolls(f.W, f.srcLot.ID).find(x => x.Roll_Label === 'L1-R1');
-    const r2 = lotRolls(f.W, f.srcLot.ID).find(x => x.Roll_Label === 'L1-R2');
-    const wash0 = f.srcLot.Wash_Quantity, jobs0 = f.W.jobs.length;
-    const r = send(f, { lines: [{ lengthCm: 300, count: 5 }],   // 15 m
-        rollPlan: [{ rollId: r1.ID, metres: 7 }, { rollId: r2.ID, metres: 8 }, { rollId: r2.ID, metres: 8 }] });
-    assert.ok(!r.success);   // names r2 twice
-    assert.strictEqual(r1.Roll_Length, 8);   // untouched
-    assert.strictEqual(r2.Roll_Length, 8);
-    assert.strictEqual(f.srcLot.Wash_Quantity, wash0);
-    assert.strictEqual(f.W.jobs.length, jobs0);
-});
-
-test('S15 a hand plan naming one roll twice is refused', () => {
+test('S14 each row keeps its own rate on the job\'s Send_Lines', () => {
     const f = fixture();
-    const rid = lotRolls(f.W, f.srcLot.ID).find(x => x.Roll_Label === 'L1-R3').ID;
-    const r = send(f, { rollPlan: [{ rollId: rid, metres: 10 }, { rollId: rid, metres: 10 }] });
+    send(f, { lines: [{ lengthCm: 550, count: 2, rate: 175 }, { lengthCm: 275, count: 4, rate: 90 }] });
+    assert.deepStrictEqual(f.W.jobs[0].Send_Lines.map(l => [l.Piece_Length_Cm, l.Piece_Count, l.Rate]),
+        [[550, 2, 175], [275, 4, 90]]);
+});
+
+// ===========================================================================
+// TESTS — a job order: rows become jobs by (lot, state, print fabric)
+// ===========================================================================
+console.log('\nsendToPrint — job orders');
+
+test('M1 two designs off one lot -> two jobs, numbered in order, one batch', () => {
+    const f = fixture(); const floral = addFloral(f);
+    const r = send(f, { rows: [ rowOf(f, { lengthCm: 550, count: 5, rate: 175 }),
+                                rowOf(f, { lengthCm: 550, count: 5, rate: 175 }, { targetMaterialId: floral.ID }) ] });
+    assert.ok(r.success, r.error);
+    assert.deepStrictEqual(r.jobs.map(j => j.jobNo), ['PJ-00001', 'PJ-00002']);
+    assert.strictEqual(r.batchNo, 'PJ-00001');
+    assert.ok(f.W.jobs.every(j => j.Print_Batch === 'PJ-00001'));
+    assert.deepStrictEqual(r.jobs.map(j => j.amount), [875, 875]);
+});
+
+test('M2 two sizes of ONE design off ONE lot are ONE job with two Send_Lines', () => {
+    const f = fixture();
+    const r = send(f, { rows: [ rowOf(f, { lengthCm: 550, count: 2, rate: 175 }),
+                                rowOf(f, { lengthCm: 275, count: 4, rate: 90 }) ] });
+    assert.strictEqual(r.jobs.length, 1);
+    assert.strictEqual(f.W.jobs[0].Send_Lines.length, 2);
+    assert.strictEqual(r.jobs[0].amount, 710);       // 2x175 + 4x90
+});
+
+test('M3 MIXED BASES in one job order: one job per base, each off its own lot, one batch', () => {
+    const f = fixture(); const c = addCotton(f);
+    const r = send(f, { rows: [
+        rowOf(f, { lengthCm: 550, count: 2, rate: 175 }),                                         // 11 m washed off L1
+        rowOf(f, { lengthCm: 275, count: 4, rate: 90 },
+              { sourceMaterialId: c.base.ID, sourceLotId: c.lot.ID, sourceState: 'Unwash', targetMaterialId: c.stripes.ID })  // 11 m unwashed off W1
+    ] });
+    assert.ok(r.success, r.error);
+    assert.deepStrictEqual(r.jobs.map(j => [j.sourceSku, j.lotNumber, j.state, j.sku]),
+        [['RM-001', 'L1', 'Wash', 'RM-100'], ['RM-002', 'W1', 'Unwash', 'RM-103']]);
+    assert.ok(f.W.jobs.every(j => j.Print_Batch === r.batchNo));
+    assert.strictEqual(f.srcLot.Wash_Quantity, 89);
+    assert.strictEqual(c.lot.Unwash_Quantity, 19);
+    assert.strictEqual(c.base.In_Print_Qty, 11);
+    assert.strictEqual(f.W.jobs[1].Source_Rolls[0].Roll_Label, 'W1-R1');
+    assert.strictEqual(rollSum(f.W, c.lot.ID), shelf(c.lot));
+});
+
+test('M4 washed AND unwashed off one lot: two jobs, budgets per state, ONE roll plan for the lot', () => {
+    const f = fixture();   // L1: 100 washed, 20 unwashed, rolls 8 / 42 / 70
+    const r = send(f, { rows: [ rowOf(f, { lengthCm: 1000, count: 1 }),                          // 10 washed
+                                rowOf(f, { lengthCm: 500, count: 1 }, { sourceState: 'Unwash' }) ] });  // 5 unwashed
+    assert.ok(r.success, r.error);
+    assert.strictEqual(r.jobs.length, 2);
+    assert.strictEqual(f.srcLot.Wash_Quantity, 90);
+    assert.strictEqual(f.srcLot.Unwash_Quantity, 15);
+    assert.deepStrictEqual(r.cuts.map(c => [c.label, c.metres]), [['L1-R1', 8], ['L1-R2', 7]]);
+    assert.deepStrictEqual(f.W.jobs[0].Source_Rolls.map(x => [x.Roll_Label, x.Metres]), [['L1-R1', 8], ['L1-R2', 2]]);
+    assert.deepStrictEqual(f.W.jobs[1].Source_Rolls.map(x => [x.Roll_Label, x.Metres]), [['L1-R2', 5]]);
+    assert.strictEqual(rollSum(f.W, f.srcLot.ID), shelf(f.srcLot));
+});
+
+test('M5 the budget is per lot+state over ALL rows: rows that fit alone but not together are refused', () => {
+    const f = fixture({ lotWash: 50, wash: 50 }); const floral = addFloral(f);
+    const r = send(f, { rows: [ rowOf(f, { lengthCm: 550, count: 5 }),
+                                rowOf(f, { lengthCm: 550, count: 5 }, { targetMaterialId: floral.ID }) ] });   // 55 > 50
     assert.ok(!r.success);
-    assert.ok(/names one roll twice/.test(r.error), r.error);
+    assert.ok(/has only 50 Mtr washed - this job order needs 55/.test(r.error), r.error);
+});
+
+test('M6 a bad LAST row leaves every earlier row unsent', () => {
+    const f = fixture(); const c = addCotton(f);
+    const wide = addMat(f.W, { SKU: 'RM-109', Fabric_Width_Inches: '90' });
+    const r = send(f, { rows: [ rowOf(f, { lengthCm: 550, count: 2 }),
+                                rowOf(f, { lengthCm: 275, count: 4 }, { sourceMaterialId: c.base.ID, sourceLotId: c.lot.ID,
+                                      sourceState: 'Unwash', targetMaterialId: wide.ID }) ] });
+    assert.ok(!r.success && /Line 2: width mismatch/.test(r.error), r.error);
+    assert.strictEqual(f.W.jobs.length, 0);
+    assert.strictEqual(f.srcLot.Wash_Quantity, 100);
+    assert.strictEqual(lotRolls(f.W, f.srcLot.ID).find(x => x.Roll_Label === 'L1-R1').Roll_Length, 8);
+});
+
+test('M7 numbering continues from the jobs already on file', () => {
+    const f = fixture(); const floral = addFloral(f);
+    send(f, { lines: [{ lengthCm: 100, count: 1 }] });      // PJ-00001
+    const r = send(f, { rows: [ rowOf(f, { lengthCm: 100, count: 1 }),
+                                rowOf(f, { lengthCm: 100, count: 1 }, { targetMaterialId: floral.ID }) ] });
+    assert.deepStrictEqual(r.jobs.map(j => j.jobNo), ['PJ-00002', 'PJ-00003']);
+    assert.strictEqual(r.batchNo, 'PJ-00002');
+});
+
+test('M8 cancelling ONE job of a job order returns only its own metres', () => {
+    const f = fixture(); const floral = addFloral(f);
+    send(f, { rows: [ rowOf(f, { lengthCm: 550, count: 5 }),
+                      rowOf(f, { lengthCm: 550, count: 5 }, { targetMaterialId: floral.ID }) ] });
+    const c = cancelPrintJob(f.W, { jobId: f.W.jobs[1].ID, reason: 'unprinted' });
+    assert.ok(c.success, c.error);
+    assert.strictEqual(c.metres, 27.5);
+    assert.strictEqual(f.srcLot.In_Print_Qty, 27.5);
+    assert.strictEqual(f.W.jobs[0].Job_Status, 'At_Printer');
 });
 
 // ===========================================================================

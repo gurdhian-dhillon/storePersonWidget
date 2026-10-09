@@ -1,0 +1,437 @@
+string raisePrintPO(string batchNo, string dryRun)
+{
+	// Creates ONE draft Purchase Order in Zoho Inventory for one print JOB ORDER -
+	// every Print_Job that sendToPrint wrote in one press, found by Print_Batch -
+	// with one line per PRICED ROW of the job order: quantity = pieces of that size,
+	// rate = the per-piece rate agreed for that size (Send_Lines.Rate).
+	//
+	// Custom API, POST, two string arguments:
+	//   batchNo  the batch - the first job's number, e.g. "PJ-00012"
+	//   dryRun   "true" builds the body, logs it, and posts nothing
+	//
+	// Called inline by sendToPrint right after the jobs are written, in its own
+	// try/catch there. Also callable by hand (Execute) and from the job card's
+	// "Raise PO" button, to retry one that failed.
+	//
+	// Returns
+	//   { "success":true, "poNumber":"PO-00042", "poId":"...", "lines":2,
+	//     "already":false, "notPriced":false, "dryRun":false }
+	//   { "success":false, "error":"..." }
+	//
+	// THE PO NUMBER IS INVENTORY'S OWN SERIES. Nothing here numbers it; the body
+	// carries reference_number = the batch, and the purchaseorder_number Inventory
+	// assigns comes back and is stamped as PO_Number on every job of the batch.
+	//
+	// NO PRINTED SKU IS PUT ON THE PO. Every line points at ONE shared service item
+	// ("Printing Charges"), so receiving or billing the PO moves no stock. The
+	// printed metres already reach Inventory through postPrintAdjustments' IN leg;
+	// a PO line on the printed SKU itself would add them a second time the day
+	// somebody received it. The design goes in the line's name and the details in
+	// its description, so the document still says what the money was for.
+	//
+	// IT IS SAFE TO RUN TWICE, and that is checked in two places:
+	//   1. a job of the batch already carrying a PO_Number -> that number is
+	//      returned and nothing is posted;
+	//   2. otherwise Inventory is asked for a PO whose reference_number is this
+	//      batch BEFORE posting - a run that died after the POST but before the
+	//      stamp (the statement limit is not catchable) is adopted rather than
+	//      duplicated. If that check cannot be made, nothing is posted.
+	//
+	// A batch with no priced row (every rate 0 / blank) is NOT an error - it
+	// returns success with notPriced:true and no PO. Only a real failure is
+	// written to PO_Last_Error on the batch's jobs, for the job card to show.
+	//
+	// Needs in Zoho Inventory:
+	//   - a Service-type item named exactly "Printing Charges"
+	//   - the printer's contact_id on Third_Party.Inventory_Contact_ID
+	//     (written by syncThirdParties)
+	//
+	// ONE EXIT, AT THE BOTTOM - errTxt carries a fault forward and later blocks
+	// guard on it. Same shape as sendToPrint and postPrintAdjustments.
+
+	res = "";
+	errTxt = "";
+	poNumber = "";
+	poId = "";
+	already = false;
+	notPriced = false;
+	isDry = false;
+	lineCount = 0;
+	bn = "";
+
+	try
+	{
+		orgId = "60076905558";
+		baseUrl = "https://www.zohoapis.in/inventory/v1/";
+		chargeItemName = "Printing Charges";
+
+		dr = ifnull(dryRun,"").toString().trim().toLowerCase();
+		if(dr == "true" || dr == "yes" || dr == "1")
+		{
+			isDry = true;
+		}
+
+		bn = ifnull(batchNo,"").toString().trim();
+		if(bn == "")
+		{
+			errTxt = "No print batch given";
+		}
+
+		//--------------------------------------------------------------------
+		// THE BATCH. One printer for the whole job order - sendToPrint takes
+		// one printerId per press, so two would mean a hand-edited record.
+		// Each priced row of a non-cancelled job becomes one line, built as
+		// hand-made JSON (Map.toString() does not emit valid JSON once it nests).
+		//--------------------------------------------------------------------
+		jobCount = 0;
+		printerTxt = "";
+		printerMixed = false;
+		linesJson = "";
+
+		if(errTxt == "")
+		{
+			batchJobs = Print_Job[Print_Batch == bn] sort by ID asc;
+			for each  pj in batchJobs
+			{
+				jobCount = jobCount + 1;
+
+				pTxt = ifnull(pj.Printer,"").toString().trim();
+				if(printerTxt == "")
+				{
+					printerTxt = pTxt;
+				}
+				else if(pTxt != "" && pTxt != printerTxt)
+				{
+					printerMixed = true;
+				}
+
+				haveNo = ifnull(pj.PO_Number,"").toString().trim();
+				if(haveNo != "")
+				{
+					poNumber = haveNo;
+					already = true;
+				}
+
+				jStatus = ifnull(pj.Job_Status,"").toString().trim();
+				jNo = ifnull(pj.Job_No,"").toString().trim();
+				jState = ifnull(pj.Source_State,"").toString().trim();
+
+				if(jStatus != "Cancelled")
+				{
+					// The design and the cloth it came off, once per job. Lookups
+					// hold ids - resolved through the master record, never
+					// .toString()'d into the document.
+					prSku = "";
+					prName = "";
+					prWidth = "";
+					prTxt = ifnull(pj.Printed_Material,"").toString().trim();
+					if(prTxt != "")
+					{
+						for each  prm in Raw_Material[ID == prTxt.toLong()]
+						{
+							prSku = ifnull(prm.SKU,"").toString().trim();
+							prName = ifnull(prm.Material_Display_Name,"").toString().trim();
+							if(prName == "")
+							{
+								prName = ifnull(prm.Name,"").toString().trim();
+							}
+							prWidth = ifnull(prm.Fabric_Width_Inches,"").toString().trim();
+						}
+					}
+					srcSkuTxt = "";
+					smTxt = ifnull(pj.Source_Material,"").toString().trim();
+					if(smTxt != "")
+					{
+						for each  srm in Raw_Material[ID == smTxt.toLong()]
+						{
+							srcSkuTxt = ifnull(srm.SKU,"").toString().trim();
+						}
+					}
+					lotTxt = "";
+					slotTxt = ifnull(pj.Source_Lot,"").toString().trim();
+					if(slotTxt != "")
+					{
+						for each  slr in Raw_Material_Lot[ID == slotTxt.toLong()]
+						{
+							lotTxt = ifnull(slr.Lot_Number,"").toString().trim();
+						}
+					}
+
+					lnName = prName;
+					if(lnName == "")
+					{
+						lnName = prSku;
+					}
+					if(lnName.length() > 100)
+					{
+						lnName = lnName.substring(0,100);
+					}
+					// Free text into hand-built JSON needs the whole chain.
+					lnName = lnName.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
+					// ONE PO LINE PER PRICED ROW. The rate is per piece AND per
+					// size - the printer prices a 5.50 m piece and a 2.75 m one
+					// differently - so it lives on Send_Lines.Rate, and each row
+					// of the paper is one line of the PO.
+					for each  sl in pj.Send_Lines
+					{
+						slCntS = ifnull(sl.Piece_Count,"0").toString().trim();
+						if(slCntS == "")
+						{
+							slCntS = "0";
+						}
+						slLenS = ifnull(sl.Piece_Length_Cm,"0").toString().trim();
+						if(slLenS == "")
+						{
+							slLenS = "0";
+						}
+						// EMPTY is not null - normalise before .toDecimal().
+						slRateS = ifnull(sl.Rate,"0").toString().trim();
+						if(slRateS == "")
+						{
+							slRateS = "0";
+						}
+						slCnt = slCntS.toDecimal().toLong();
+						slRate = slRateS.toDecimal();
+
+						if(slCnt > 0 && slRate > 0)
+						{
+							// Sizes read Length x Width (CLAUDE.md), width as the
+							// fabric's own inches.
+							descTxt = prSku + " | " + (slLenS.toDecimal() / 100).round(2) + " m";
+							if(prWidth != "")
+							{
+								descTxt = descTxt + " x " + prWidth + " in";
+							}
+							descTxt = descTxt + " | base " + srcSkuTxt;
+							if(lotTxt != "")
+							{
+								descTxt = descTxt + " lot " + lotTxt;
+							}
+							if(jState == "Unwash")
+							{
+								descTxt = descTxt + " (unwashed)";
+							}
+							else if(jState == "Wash")
+							{
+								descTxt = descTxt + " (washed)";
+							}
+							descTxt = descTxt + " | " + jNo;
+							descTxt = descTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
+
+							if(linesJson != "")
+							{
+								linesJson = linesJson + ",";
+							}
+							linesJson = linesJson + "{\"item_id\":\"__ITEM__\",\"name\":\"" + lnName + "\",\"description\":\"" + descTxt + "\",\"quantity\":" + slCnt + ",\"rate\":" + slRate + "}";
+							lineCount = lineCount + 1;
+						}
+					}
+				}
+			}
+
+			if(jobCount == 0)
+			{
+				errTxt = "No print jobs carry batch " + bn;
+			}
+			else if(printerMixed == true)
+			{
+				errTxt = "Batch " + bn + " names two different printers - one PO cannot cover both";
+			}
+		}
+
+		// Already raised, or nothing priced: done, nothing to post.
+		if(errTxt == "" && already == false && lineCount == 0)
+		{
+			notPriced = true;
+		}
+		goOn = false;
+		if(errTxt == "" && already == false && notPriced == false)
+		{
+			goOn = true;
+		}
+
+		//--------------------------------------------------------------------
+		// THE PRINTER'S Inventory contact. Stored on the Third_Party by
+		// syncThirdParties so no name-match is needed here.
+		//--------------------------------------------------------------------
+		vendorInvId = "";
+		vendorName = "";
+		if(goOn == true)
+		{
+			if(printerTxt == "" || printerTxt.isNumber() == false)
+			{
+				errTxt = "The jobs of " + bn + " name no printer";
+			}
+			else
+			{
+				for each  tp in Third_Party[ID == printerTxt.toLong()]
+				{
+					vendorInvId = ifnull(tp.Inventory_Contact_ID,"").toString().trim();
+					vendorName = ifnull(tp.Party_Name,"").toString().trim();
+				}
+				if(vendorInvId == "")
+				{
+					errTxt = vendorName + " has no Inventory contact id - run syncThirdParties";
+				}
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// THE ONE SHARED SERVICE ITEM, looked up by name.
+		//--------------------------------------------------------------------
+		chargeItemId = "";
+		if(errTxt == "" && goOn == true)
+		{
+			itemSearchResp = invokeurl
+			[
+				url :baseUrl + "items?name=" + zoho.encryption.urlEncode(chargeItemName) + "&organization_id=" + orgId
+				type :GET
+				connection:"inventory_connection"
+			];
+			if(ifnull(itemSearchResp.get("code"),"-1").toString().trim() == "0")
+			{
+				foundItems = ifnull(itemSearchResp.get("items"),list());
+				for each  fi in foundItems
+				{
+					if(chargeItemId == "" && ifnull(fi.get("name"),"").toString().trim().equalsIgnoreCase(chargeItemName))
+					{
+						chargeItemId = ifnull(fi.get("item_id"),"").toString().trim();
+					}
+				}
+			}
+			if(chargeItemId == "")
+			{
+				errTxt = "Service item '" + chargeItemName + "' not found in Inventory - create it first";
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// ALREADY IN INVENTORY? A PO carrying this batch as its reference was
+		// raised by a run that died before stamping it. Adopt it. If the check
+		// itself fails, post nothing - a duplicate PO to a vendor is worse than
+		// a retry.
+		//--------------------------------------------------------------------
+		if(errTxt == "" && goOn == true)
+		{
+			chkResp = invokeurl
+			[
+				url :baseUrl + "purchaseorders?reference_number=" + zoho.encryption.urlEncode(bn) + "&organization_id=" + orgId
+				type :GET
+				connection:"inventory_connection"
+			];
+			if(ifnull(chkResp.get("code"),"-1").toString().trim() != "0")
+			{
+				errTxt = "Could not check Inventory for an existing PO on " + bn + " - nothing posted: " + ifnull(chkResp.get("message"),"").toString();
+			}
+			else
+			{
+				existingPos = ifnull(chkResp.get("purchaseorders"),list());
+				for each  epo in existingPos
+				{
+					if(poNumber == "" && ifnull(epo.get("reference_number"),"").toString().trim().equalsIgnoreCase(bn))
+					{
+						poNumber = ifnull(epo.get("purchaseorder_number"),"").toString().trim();
+						poId = ifnull(epo.get("purchaseorder_id"),"").toString().trim();
+						already = true;
+					}
+				}
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// POST. Draft - Inventory's default for a new PO; the store raises it
+		// to the printer from Inventory once the template exists.
+		//--------------------------------------------------------------------
+		if(errTxt == "" && goOn == true && already == false)
+		{
+			bodyJson = "{\"vendor_id\":\"" + vendorInvId + "\",\"reference_number\":\"" + bn + "\",\"date\":\"" + zoho.currentdate.toString("yyyy-MM-dd") + "\",\"line_items\":[" + linesJson.replaceAll("__ITEM__",chargeItemId) + "]}";
+
+			if(isDry == true)
+			{
+				info "raisePrintPO DRY RUN " + bodyJson;
+			}
+			else
+			{
+				hdrMap = Map();
+				hdrMap.put("content-type","application/json");
+				apiResp = invokeurl
+				[
+					url :baseUrl + "purchaseorders?organization_id=" + orgId
+					type :POST
+					parameters:bodyJson
+					headers:hdrMap
+					connection:"inventory_connection"
+				];
+				if(ifnull(apiResp.get("code"),"-1").toString().trim() != "0")
+				{
+					errTxt = "Inventory refused the PO: " + ifnull(apiResp.get("message"),"").toString();
+				}
+				else
+				{
+					poObj = ifnull(apiResp.get("purchaseorder"),Map());
+					poNumber = ifnull(poObj.get("purchaseorder_number"),"").toString().trim();
+					poId = ifnull(poObj.get("purchaseorder_id"),"").toString().trim();
+					info "raisePrintPO: " + bn + " -> " + poNumber + " (" + lineCount + " lines)";
+				}
+			}
+		}
+
+		//--------------------------------------------------------------------
+		// STAMP the number on every job of the batch, and clear any earlier
+		// failure. Done for an adopted PO too - that is the point of adopting.
+		//--------------------------------------------------------------------
+		if(errTxt == "" && isDry == false && poNumber != "")
+		{
+			for each  pjS in Print_Job[Print_Batch == bn]
+			{
+				pjS.PO_Number = poNumber;
+				if(poId != "")
+				{
+					pjS.PO_ID = poId;
+				}
+				pjS.PO_Last_Error = "";
+			}
+		}
+
+		if(errTxt == "")
+		{
+			res = "{\"success\":true,\"poNumber\":\"" + poNumber.replaceAll("\"","'") + "\",\"poId\":\"" + poId + "\",\"lines\":" + lineCount + ",\"already\":" + already + ",\"notPriced\":" + notPriced + ",\"dryRun\":" + isDry + "}";
+		}
+	}
+	catch (e)
+	{
+		// Creator reports every runtime failure to a widget as a generic code
+		// 9430, so the real message has to travel back inside the payload.
+		errTxt = "DELUGE: " + e.toString();
+	}
+
+	if(res == "")
+	{
+		if(errTxt == "")
+		{
+			errTxt = "PO not raised";
+		}
+
+		// Leave the reason on the jobs so the card can say it after the alert
+		// is gone. Its own try - recording the failure must not replace it.
+		if(bn != "" && isDry == false)
+		{
+			try
+			{
+				for each  pjE in Print_Job[Print_Batch == bn]
+				{
+					pjE.PO_Last_Error = errTxt;
+				}
+			}
+			catch (eStamp)
+			{
+				info "raisePrintPO: could not stamp PO_Last_Error - " + eStamp.toString();
+			}
+		}
+
+		res = "{\"success\":false,\"error\":\"" + errTxt.replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ") + "\"}";
+	}
+
+	return res;
+}

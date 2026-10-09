@@ -315,6 +315,18 @@ receipt settles it. A shortfall goes to `Disputed_Qty` and raises a `Stock_Dispu
 > back at cancel (`-RET`). The IN/RET leg never posts while the OUT is still owed. Details and
 > the leg-state machine: `docs/printing-v2-plan.md` §12.
 
+> **A PRINT JOB ORDER IS ONE PRINTER, ANY BASES, ONE PO.** The Print tab is the list of job
+> orders plus "+ Create print job". Each row reads like the printer's paper: base fabric, lot,
+> washed/unwashed, print fabric, piece length, pieces, **rate per piece for that size**.
+> `sendToPrint` takes `lines[]` and groups them into one `Print_Job` per **(base lot, state, print
+> fabric)**, joined by `Print_Batch` (= the first `Job_No`), so receive, cancel and
+> `postPrintAdjustments` stay per job and never read the batch. Budgets are per lot+state, the roll
+> plan per lot (auto, shortest first). `raisePrintPO(batchNo, dryRun)` raises one draft PO — a line
+> per priced row on a **"Printing Charges" service item**, never the printed SKU (that would add
+> printed stock twice, on top of the `-IN` adjustment) — and stamps Inventory's `PO_Number` on
+> every job. **`Send_Lines.Rate` is the price history**, keyed printer + print fabric + piece
+> length. There is no `Rate_Per_Piece` on the job. Details: `docs/printing-v2-plan.md` §14.
+
 **The same rule runs backwards for offcuts.** A declared remnant is not stock: while
 `Waste_Master.Status` is `Pending_Receipt`, `Piece_Count` holds what the supervisor *declared*,
 not what is on the rack. `receiveWastePieces` is where the two get compared — what the store

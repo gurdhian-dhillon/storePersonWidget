@@ -14,11 +14,24 @@
  *                            rolls: [ { rollId, label, length, status, origin } ] } ] } ],
  *     target:  [ same shape ],        // Type_field ~ "printed fabric"
  *     printers:[ { id, name } ],
- *     jobs:    [ { jobId, jobNo, invOutStatus, invError, sourceMaterialId, sourceName, sourceSku,
- *                  sourceLotId, sourceLotNumber,
- *                  printedMaterialId, printedName, printedSku,
- *                  printerName, sourceState, metresSent, sentOn, jobStatus,
- *                  sendLines: [ { lineIndex, lengthCm, count } ] } ] }
+ *     jobs:    [ { jobId, jobNo, printBatch, jobStatus, invOutStatus, invError,
+ *                  sourceMaterialId, sourceName, sourceSku, sourceLotId, sourceLotNumber,
+ *                  sourceState, printedMaterialId, printedName, printedSku,
+ *                  printerId, printerName, metresSent, metresReturned, piecesReturned,
+ *                  sentOn, sentOnTs, returnedOn, poNumber, poError,
+ *                  sendLines: [ { lineIndex, lengthCm, count, rate } ] } ],   // ALL, newest first
+ *     rateHistory: [ { printerId, printerName, printedMaterialId, printedSku, printedName,
+ *                      lengthCm, rate, sentOn, jobNo, poNumber } ] }          // newest first
+ *
+ * jobs IS EVERY Print_Job, whatever its status. The screen groups them into job
+ * orders by Print_Batch and shows the open ones, or the recently closed ones.
+ *
+ * rateHistory IS THE PRICE HISTORY: one row per PRICED SEND LINE - the rate is
+ * per piece and per size, so a 5.50 m and a 2.75 m piece of one design are two
+ * prices. At_Printer and Received alike; Cancelled jobs are left out (the cloth
+ * came back unprinted, so the rate was never paid). Built off the SAME
+ * Print_Job_Report read, so it costs no extra call; the create form looks up
+ * "last price" for printer + design + piece length in it.
  *
  * NO minting, NO Print_Base, NO pattern, NO Fabric_Piece — printed stock is
  * ordinary short rolls (Lot_Rolls, Origin "Printed"). See docs/printing-v2-plan.md.
@@ -132,6 +145,23 @@ var PrintData = (function () {
     // A lot column that was never written comes back empty, not 0.
     function qty(v) { return r2(num(v)); }
 
+    // Creator hands a Date field back in the APP's display format, which is a
+    // setting, not a contract: "04-Aug-2026", "2026-08-04", "08/04/2026"... The
+    // two unambiguous shapes are read; anything else is null, and the screen
+    // treats a null date as "recent" rather than hiding the job order.
+    var MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+                   jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+    function parseCreatorDate(s) {
+        s = String(s || '').trim();
+        var m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+        if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3]);
+        m = /^(\d{1,2})[-\s]([A-Za-z]{3})[A-Za-z]*[-\s,]+(\d{4})/.exec(s);
+        if (m && MONTHS[m[2].toLowerCase()] != null) {
+            return Date.UTC(+m[3], MONTHS[m[2].toLowerCase()], +m[1]);
+        }
+        return null;
+    }
+
     // ---- assembly -------------------------------------------------------
     function assemble(rawMats, lots, printers, jobs) {
         // Roll rows of a lot — the Lot_Rolls subform, nested in the parent
@@ -219,18 +249,34 @@ var PrintData = (function () {
         });
         printerList.sort(function (a, b) { return a.name.localeCompare(b.name); });
 
-        // Jobs still at the printer. Send_Lines nested in the record.
-        var jobList = [];
-        jobs.forEach(function (pj) {
-            if (str(pj.Job_Status).trim() !== 'At_Printer') return;
+        // Newest first by record ID: Creator ids grow with creation, and
+        // Sent_On comes back as a display string ("04-Aug-2026") that does not
+        // sort. Ids are 18 digits - past Number precision - so they are
+        // compared as text, longer first.
+        function newestFirst(a, b) {
+            var x = String(a.ID), y = String(b.ID);
+            if (x.length !== y.length) return y.length - x.length;
+            return x < y ? 1 : (x > y ? -1 : 0);
+        }
+        var jobsSorted = jobs.slice().sort(newestFirst);
 
+        // EVERY job, whatever its status - the screen groups them into job
+        // orders (by Print_Batch) and shows the open ones, or the recent closed
+        // ones. Send_Lines nested in the record, each with its own rate.
+        var jobList = [];
+        var rateHistory = [];
+        jobsSorted.forEach(function (pj) {
+            var status = str(pj.Job_Status).trim();
             var srcMatId = lookupId(pj.Source_Material);
             var srcLotId = lookupId(pj.Source_Lot);
             var prMatId = lookupId(pj.Printed_Material);
             var prnId = lookupId(pj.Printer);
+            var sentOn = pj.Sent_On ? String(pj.Sent_On) : '';
+            var jobNo = str(pj.Job_No).trim();
+            var poNumber = str(pj.PO_Number).trim();
 
             var slRaw = subform(pj, 'Send_Lines');
-            if (!slRaw.length) {
+            if (!slRaw.length && status === 'At_Printer') {
                 console.warn('[print-data] job ' + pj.ID + ' has no Send_Lines subform in the ' +
                     'report payload. Keys present:', Object.keys(pj).sort().join(', '));
             }
@@ -239,13 +285,37 @@ var PrintData = (function () {
                 sendLines.push({
                     lineIndex: i,
                     lengthCm: qty(sl.Piece_Length_Cm),
-                    count: num(sl.Piece_Count)
+                    count: num(sl.Piece_Count),
+                    rate: r2(num(sl.Rate))
                 });
             });
+            var piecesReturned = 0;
+            subform(pj, 'Receive_Lines').forEach(function (rl) { piecesReturned += num(rl.Piece_Count); });
+
+            // PRICE HISTORY: one row per priced send line - the rate is per
+            // piece AND per size. Cancelled jobs are left out: the cloth came
+            // back unprinted, so the rate was never paid.
+            if (status !== 'Cancelled') {
+                sendLines.forEach(function (l) {
+                    if (!(l.rate > 0)) return;
+                    rateHistory.push({
+                        printerId: prnId,
+                        printerName: partyNameById[prnId] || lookupText(pj.Printer, 'Party_Name'),
+                        printedMaterialId: prMatId,
+                        printedSku: matSkuById[prMatId] || '',
+                        printedName: matNameById[prMatId] || lookupText(pj.Printed_Material, 'Material_Display_Name'),
+                        lengthCm: l.lengthCm,
+                        rate: l.rate,
+                        sentOn: sentOn,
+                        jobNo: jobNo,
+                        poNumber: poNumber
+                    });
+                });
+            }
 
             jobList.push({
                 jobId: String(pj.ID),
-                jobNo: str(pj.Job_No).trim(),
+                jobNo: jobNo,
                 sourceMaterialId: srcMatId,
                 sourceName: matNameById[srcMatId] || lookupText(pj.Source_Material, 'Material_Display_Name'),
                 sourceSku: matSkuById[srcMatId] || '',
@@ -254,15 +324,26 @@ var PrintData = (function () {
                 printedMaterialId: prMatId,
                 printedName: matNameById[prMatId] || lookupText(pj.Printed_Material, 'Material_Display_Name'),
                 printedSku: matSkuById[prMatId] || '',
+                printerId: prnId,
                 printerName: partyNameById[prnId] || lookupText(pj.Printer, 'Party_Name'),
                 sourceState: str(pj.Source_State).trim(),
                 metresSent: qty(pj.Metres_Sent),
-                sentOn: pj.Sent_On ? String(pj.Sent_On) : '',
-                jobStatus: str(pj.Job_Status).trim(),
+                metresReturned: qty(pj.Metres_Returned),
+                piecesReturned: piecesReturned,
+                sentOn: sentOn,
+                sentOnTs: parseCreatorDate(sentOn),
+                returnedOn: pj.Returned_On ? String(pj.Returned_On) : '',
+                jobStatus: status,
                 // Zoho Inventory OUT adjustment (-metres on the source SKU).
                 // Blank = sent before the integration existed.
                 invOutStatus: str(pj.Inv_Out_Status).trim(),
                 invError: str(pj.Inv_Last_Error).trim(),
+                // The job order. PO_Number is Inventory's own series, stamped
+                // by raisePrintPO on every job of the batch. A priced job with
+                // no number shows PO_Last_Error.
+                printBatch: str(pj.Print_Batch).trim(),
+                poNumber: poNumber,
+                poError: str(pj.PO_Last_Error).trim(),
                 sendLines: sendLines
             });
         });
@@ -271,7 +352,8 @@ var PrintData = (function () {
             source: source,
             target: target,
             printers: printerList,
-            jobs: jobList
+            jobs: jobList,
+            rateHistory: rateHistory
         };
     }
 
@@ -293,6 +375,7 @@ var PrintData = (function () {
         load: load,
         // exposed for tests
         _assemble: assemble,
+        _parseDate: parseCreatorDate,
         PRINTED_TYPE: PRINTED_TYPE
     };
 })();

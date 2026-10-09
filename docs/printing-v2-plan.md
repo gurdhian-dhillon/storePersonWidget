@@ -601,3 +601,251 @@ argument lists are unchanged.
 **Test order:** `postPrintAdjustments("<an At_Printer job id>","true")` → check the logged body →
 send one real small job → confirm `PJ-…-OUT` in Inventory at the right location → receive it →
 confirm `PJ-…-IN` → send and cancel another → confirm `-RET` nets to zero.
+
+---
+
+## 13. Print price history + the job-order PO (built 2026-10-09, branch `print-price-history`)
+
+> **Superseded the same day by §14** — the send form below (one base per press, design blocks,
+> `Rate_Per_Piece` on the job) never shipped. Read §14; this section is kept for the reasoning on
+> the PO (service item, idempotency, batch) which §14 keeps unchanged.
+
+The store hands the printer a **job order**: one paper, one printer, several designs off the same
+base cloth, each with its own **rate per piece** (the 2247/381/100 order to Sanwariya Prints: Red
+Checks and Red Floral, 5 × 5.50 m each, ₹175/pc, 10 pcs, ~55 m). This section makes the app carry
+that paper: what each design cost, and one Inventory Purchase Order per job order.
+
+### Decisions
+
+| | |
+|---|---|
+| Unit | **per piece**, as the printer quotes it. ₹175 × 10 pcs = ₹1,750, not ₹175 × 55 m |
+| One send | **one job order** → one `Print_Job` per design + **one PO** with a line per priced design |
+| PO number | **Inventory's own series** (`purchaseorder_number`), stamped back on every job. The batch (`PJ-…`) is the PO's `reference_number` |
+| PO line item | a **"Printing Charges" service item** — never the printed SKU, so receiving/billing the PO can't add printed stock a second time on top of `postPrintAdjustments`' IN leg |
+| Price history key | **printer + printed SKU (design)**. The base cloth joins the key later if the client says rates depend on it |
+| Where history shows | a hint beside each design's rate box, auto-filling on an exact match. No history table yet |
+| PO template | the store builds it in Inventory; nothing here depends on it |
+
+### Why one job per design (and not one job with several targets)
+
+A `Print_Job` takes exactly one printed SKU — `receiveFromPrint` creates *that* SKU's lot, the
+receive screen is one row per piece of *that* SKU, `postPrintAdjustments` posts +metres on *that*
+SKU. Several designs on one job would need all three rebuilt. Instead `sendToPrint` writes N jobs and
+joins them with **`Print_Batch`** = the first job's number — the same shape as `Batch_Voucher` on
+issue chunks. Receive, cancel and the Inventory adjustments stay per job and never read the batch;
+only `raisePrintPO` does.
+
+### `sendToPrint` — payload change (same one `payloadJson` argument, no Creator API change)
+
+```
+{ "sourceMaterialId":"123", "sourceLotId":"901", "sourceState":"Wash", "printerId":"78",
+  "designs":[ { "targetMaterialId":"456", "ratePerPiece":175, "lines":[{"lengthCm":550,"count":5}] },
+              { "targetMaterialId":"457", "ratePerPiece":175, "lines":[{"lengthCm":550,"count":5}] } ],
+  "rollPlan":[ ... ],   // optional, over the TOTAL metres
+  "remarks":"" }
+→ { "success":true, "batchNo":"PJ-00012", "jobId":"…", "jobNo":"PJ-00012",
+    "jobs":[ {"jobId","jobNo","sku","pieces","metresSent","ratePerPiece","inventory"}, … ],
+    "poNumber":"PO-00042", "poError":"", "poNotPriced":false,
+    "inventory":"Posted", "inventoryError":"", "metresSent":55, "rollPlan":[…], lot balances… }
+```
+
+- **Top-level `targetMaterialId` / `lines` are gone.** Widget and `.dg` deploy together.
+- Every design is validated (target exists, fabric, same width, Inventory-mapped, whole counts, not
+  the same SKU twice, rate ≥ 0) **before any write** — a bad second design leaves the first unsent.
+- Budget and roll plan are worked on the **total**; the ledger moves once. The plan is then **dealt
+  out in order** for each job's `Source_Rolls` (design 1 takes the first metres).
+- Job numbers are read once and taken in order (`PJ-00012`, `PJ-00013`).
+- `postPrintAdjustments` runs per job; `inventory` is `Posted` only if every job's OUT posted.
+- Then `raisePrintPO(batchNo,"false")` in its own try — a PO failure never fails the send.
+- Blank / 0 rate = **not priced**: the job goes, it just puts no line on the PO. The widget asks first.
+- Capped at 10 designs per send (statement limit).
+
+### `raisePrintPO(batchNo, dryRun)` — new
+
+One draft PO for every job with that `Print_Batch`. Line per priced, non-cancelled job:
+`item_id` = Printing Charges, `name` = printed SKU's display name, `quantity` = Σ `Send_Lines`
+pieces, `rate` = `Rate_Per_Piece`, `description` =
+`RM-113 | 5 pcs of 5.5 m x 116 in wide | from RM-045 lot L2 | PJ-00012`.
+
+- **Idempotent twice over:** a job already carrying `PO_Number` → returned, nothing posted; else
+  Inventory is asked for a PO with `reference_number == batch` **before** posting, and one found is
+  adopted (covers a crash between the POST and the stamp). If that check fails, nothing is posted.
+- Success stamps `PO_Number`, `PO_ID` on every job of the batch and clears `PO_Last_Error`; failure
+  writes the reason to `PO_Last_Error` on all of them.
+- Nothing priced → `success:true, notPriced:true`, no PO, no error.
+- Body is hand-built JSON with `content-type: application/json` — the `postPrintAdjustments` shape,
+  not `raiseThirdPartyPO`'s `Map.toString()`.
+- `dryRun "true"` logs the body and writes nothing.
+
+### Price history — read side only
+
+No new function. `print-data.js` already reads every `Print_Job`; it now also returns
+**`rateHistory`**: every job with `Rate_Per_Piece > 0` and not `Cancelled`, newest first (by record
+ID compared as text — `Sent_On` is a display string and 18-digit ids exceed `Number`). Jobs at the
+printer also carry `ratePerPiece`, `printBatch`, `poNumber`, `poError`, `printerId`.
+
+The send form (`lastPrintRate` / `rateHint` / `applyDesignRate` in `app/js/main.js`):
+
+| Found | Hint | Fills the box? |
+|---|---|---|
+| this printer + this design | `last ₹175.00/pc · 04-Aug-2026 · PJ-00012` | **yes** |
+| this printer, another design | amber: *no past price for this design here · last from this printer ₹150.00/pc on RM-102* | no |
+| this design, another printer | amber: *Zed Prints charged ₹150.00/pc · …* | no |
+| nothing | grey: *no past price for this printer and design* | no |
+
+A rate he **typed** is never overwritten; an auto-filled one is replaced on a printer/SKU change, or
+cleared when there is no exact match any more.
+
+### Widget
+
+- Send form: Lot · Send · **Printer** on top; then one bordered block per **design** — Printed SKU,
+  **Rate per piece (₹)** + hint, the length × count lines, "5 pieces · 27.5 Mtr · ₹875.00";
+  **+ Another design**; total line "Fabric used: 55 Mtr · 10 pieces · PO ₹1750.00". One cut plan for
+  the whole press. A design added and left blank is ignored.
+- Job card (at the printer): `₹175.00/pc · ₹875.00` and the PO number on the meta line. Priced with no
+  PO → red **No PO** pill (reason on hover) and a **Raise PO** button that retries the whole batch.
+- Alert after send only when the PO **failed**.
+
+### Creator changes (manual)
+
+**`Print_Job`, new fields — nothing mandatory:**
+
+| Field | Type | Notes |
+|---|---|---|
+| `Rate_Per_Piece` | Decimal | 2 dp, default 0 |
+| `Print_Batch` | Single Line | first job's `Job_No` |
+| `PO_Number` | Single Line | Inventory's number |
+| `PO_ID` | Single Line | Inventory's id |
+| `PO_Last_Error` | Multi Line | why the PO did not go |
+
+**`Print_Job_Report`** must include those five (the widget reads them, and `rateHistory` reads
+`Rate_Per_Piece`, `Printer`, `Printed_Material`, `Sent_On`, `Job_No`, `PO_Number` on **every** job,
+not only those at the printer).
+
+**New Custom API `raisePrintPO`** — two string args `batchNo`, `dryRun`, POST. Re-paste
+`sendToPrint` (argument list unchanged).
+
+**Zoho Inventory:** a **Service** item named exactly **`Printing Charges`** (purchasable, with a
+purchase account); every printer's `Third_Party.Inventory_Contact_ID` filled (`syncThirdParties`).
+
+**Test order:** paste `raisePrintPO` → send a small 2-design job → check two jobs, same
+`Print_Batch`, `Rate_Per_Piece` set → `raisePrintPO("<batch>","true")` → check the logged body →
+confirm the draft PO in Inventory (vendor, `reference_number`, 2 lines, qty = pieces) → run
+`raisePrintPO("<batch>","false")` again and confirm **no second PO** → open the send form again,
+pick the same printer + design and confirm the rate auto-fills.
+
+### Verified / not verified
+
+- **Verified here (Node):** `print-tab-ui` 34, `print-writers` 45 (incl. 9 multi-design), `print-data`
+  17 (incl. `rateHistory`), new `print-po` 16 (port of `raisePrintPO` against a fake Inventory +
+  `.dg` pins), the rest of the print suites unchanged and green, `node --check`, `dgscan` clean on both
+  touched `.dg`.
+- **Not verified — needs Execute:** both `.dg` files. In particular: Inventory's
+  `purchaseorders?reference_number=` filter (if the param is ignored the code still filters by exact
+  match, but only over the first page), a `name` override on a service-item line (copied from
+  `raiseThirdPartyPO`), and `Decimal.round(2)` in the description text.
+
+### Gaps, deliberately left
+
+- **Cancelling a job does not touch its PO.** The PO is a draft; fix the line in Inventory by hand.
+  Automating it means editing a PO that may already have been sent to the printer.
+- **The PO is not re-raised when a design is added later** — one press, one PO.
+- **No history table** — the hint is the history for now. `rateHistory` already holds the rows if a
+  list is wanted.
+
+---
+
+## 14. The job-order screen — mixed bases, rate per size (built 2026-10-09)
+
+Replaces §13's send form. Decided with the user:
+
+| | |
+|---|---|
+| Screen | **the print jobs**, one card per **job order**; "+ Create print job" opens the form. The fabric list is gone |
+| Job order | **one printer**, any number of rows, **any number of base fabrics** — one PO |
+| A row | exactly as the paper reads: base fabric · **lot** · washed/unwashed · print fabric · piece length · pieces · **rate per piece** |
+| Rate | **per piece AND per size** — a 5.50 m and a 2.75 m piece of one design are two prices. Stored on **`Send_Lines.Rate`**. `Rate_Per_Piece` on the job is **dropped** (never create it; delete it if it was created) |
+| Lot / rolls | he picks the lot and the state per row (defaults: first unblocked lot with cloth in that state); rolls are auto-planned per lot, shortest first, shown read-only. **No hand-edited roll plan any more** |
+| Price history key | **printer + print fabric + piece length**. Only the exact match fills the rate; this printer's price at another length and another printer's price are shown, amber, never filled |
+| Jobs screen filter | **At the printer** (default) / **Recent — last 60 days** (closed job orders) |
+
+### Rows become jobs
+
+`sendToPrint` groups the rows by **(base lot, state, print fabric)** — one `Print_Job` each, all with
+`Print_Batch` = the first job's number. Two sizes of one design off one lot = one job with two
+`Send_Lines`; the same design off a second lot (or washed and unwashed of one lot) = a second job.
+That keeps every per-job rule untouched: receive creates that print fabric's lot from that job's
+lines, cancel returns that job's metres to that lot and state, `postPrintAdjustments` posts
+−metres on that base.
+
+### `sendToPrint` — payload (still one `payloadJson` argument, no Creator API change)
+
+```
+{ "printerId":"78", "remarks":"",
+  "lines":[ { "sourceMaterialId":"1","sourceLotId":"10","sourceState":"Wash",
+              "targetMaterialId":"3","lengthCm":550,"count":5,"rate":175 }, … ] }
+→ { "success":true, "batchNo":"PJ-00012", "jobId", "jobNo",
+    "jobs":[ {jobId, jobNo, sourceSku, lotNumber, state, sku, pieces, metresSent, amount, inventory} ],
+    "poNumber", "poError", "poNotPriced", "inventory", "inventoryError",
+    "metresSent", "pieces", "cuts":[ {lotNumber, rollId, label, metres} ] }
+```
+
+- Everything is validated **before any write** — every row, every material (fabric, width,
+  Inventory-mapped), every lot (this base's, not blocked, has rolls), width match per row.
+- **Budget per lot + state** over all rows; **roll plan per lot** on the lot's total (rolls hold
+  washed and unwashed alike). The plan is dealt out to that lot's jobs in order for `Source_Rolls`.
+- Lots and parents are updated per lot+state, read fresh each time.
+- Caps: 40 rows, 15 jobs per job order (statement limit).
+- Then per job `postPrintAdjustments`, then `raisePrintPO(batch)` — each in its own try.
+
+### `raisePrintPO` — one line per priced ROW
+
+Reads `Send_Lines.Rate`; quantity = that row's pieces. Description:
+`RM-113 | 5.5 m x 116 in | base RM-045 lot L2 (washed) | PJ-00012`. Everything else in §13
+(service item, idempotency, `PO_Last_Error`, dry run) is unchanged.
+
+### Read side — `print-data.js`
+
+- `jobs` is now **every** job, newest first, with `sendLines[].rate`, `metresReturned`,
+  `piecesReturned` (Σ `Receive_Lines`), `returnedOn`, `sentOnTs` (parsed from `04-Aug-2026` or
+  `2026-08-04`; anything else → null, which the Recent filter treats as recent).
+- `rateHistory` is one row per priced send line: `{printerId, printedMaterialId, lengthCm, rate,
+  sentOn, jobNo, …}`.
+
+### Widget
+
+- Toolbar: **At the printer (n)** / **Recent — last 60 days**, **+ Create print job**.
+- Order card: `PJ-00012 · Sanwariya Prints`, sent date, designs, pieces, metres, ₹, PO number;
+  pills **No PO** / **Inventory not updated** / status (At printer, Partly back, Received,
+  Cancelled). Inside: one block per job — design, SKU, job no, base + lot + state, sizes with rates,
+  metres + ₹, and **Receive** which opens the unchanged per-piece receive form under it. Closed jobs
+  show the outcome (pieces back, shortfall, or came back unprinted). **Raise PO** retries the batch.
+- Create form: printer, the rows table, + Add line (copies base, lot, state, print fabric of the row
+  above), totals, the read-only cut plan per lot (red when a lot cannot give it), note, Create.
+- Also fixed: the old Print tab used `status-warning` / `status-danger`, which do not exist in the
+  store stylesheet — those pills rendered with no colour. Now `status-partial` / `status-shortfall`.
+
+### Creator changes (manual) — replaces §13's list
+
+**`Print_Job`, new fields — nothing mandatory:** `Print_Batch` (Single Line), `PO_Number` (Single
+Line), `PO_ID` (Single Line), `PO_Last_Error` (Multi Line). **Not** `Rate_Per_Piece`.
+
+**`Print_Job.Send_Lines` subform, new field:** `Rate` (Decimal, 2 dp, default 0).
+
+**`Print_Job_Report`**: include the four fields, `Send_Lines` (with `Rate`), `Receive_Lines`,
+`Metres_Returned`, `Returned_On` — the screen now reads closed jobs too.
+
+**Custom API `raisePrintPO`** (two string args `batchNo`, `dryRun`, POST). Re-paste `sendToPrint`.
+
+**Zoho Inventory:** Service item **`Printing Charges`**; printers' `Inventory_Contact_ID` filled.
+
+### Verified / not
+
+- **Node:** `print-tab-ui` 32, `print-writers` 43 (incl. mixed bases, washed + unwashed off one lot,
+  bad last row writes nothing), `print-data` 17, `print-po` 18 (incl. per-size lines, two bases on
+  one PO), `print-inventory` 18; `node --check`; `dgscan` clean on all five print `.dg`. The screen
+  was rendered headless at desktop and phone width and checked by eye.
+- **Not:** any Deluge Execute. Watch on first run: `Send_Lines.Rate` set through
+  `Print_Job.Send_Lines()` row objects, the Map-based running totals in `sendToPrint`, and the
+  §13 items (reference-number filter, name override on a service line).

@@ -2374,6 +2374,157 @@ th.col-num {
     font-variant-numeric: tabular-nums;
 }
 
+/* ---- Print: the job-order screen ----
+   Toolbar (At the printer / Recent, + Create print job) over the create form and
+   the job-order cards. The toolbar is the History tab's .day-bar; the create
+   button is pushed to the right. */
+.print-toolbar #print-create-btn {
+    margin-left: auto;
+}
+
+/* The create form is an always-open card. Its rows read like the printer's
+   paper: one row per piece size. Selects carrying SKU + name get room; the
+   number boxes stay narrow. */
+.print-create {
+    border-color: var(--primary);
+}
+.print-create-head {
+    cursor: default;
+}
+.pc-table td {
+    vertical-align: top;
+}
+.pc-table .note-input.pc-wide {
+    min-width: 11rem;
+}
+.pc-table .note-input {
+    min-width: 6.5rem;
+}
+.pc-table .issue-input {
+    min-width: 4.5rem;
+    max-width: 6.5rem;
+}
+.pc-table .pc-remove {
+    min-width: 0;
+    padding: 0.2rem 0.55rem;
+    font-size: 1rem;
+    line-height: 1;
+}
+.pc-remarks {
+    flex: 1 1 16rem;
+    min-width: 0;
+}
+.print-send-footer {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+/* "last ₹175.00/pc · 04-Aug-2026 · PJ-00012" under the rate box — the price
+   history, read back off Send_Lines.Rate. Amber when it is another size's or
+   another printer's price (shown, never filled in); grey italic when there is
+   none. Same colours as the outsource popup's rate hint. */
+.print-rate-hist {
+    margin-top: 0.2rem;
+    font-size: 0.75rem;
+    color: #64748b;
+    white-space: normal;
+    max-width: 10rem;
+}
+.print-rate-hist.is-other {
+    color: #b45309;
+}
+.print-rate-hist.is-none {
+    color: #94a3b8;
+    font-style: italic;
+}
+
+/* One lot of the cut plan: what it gives, and the rolls to pull. Red when the
+   lot cannot give it. */
+.pc-cut {
+    padding: 0.35rem 0;
+    font-size: 0.9em;
+}
+.pc-cut + .pc-cut {
+    border-top: 1px dashed #bbf7d0;
+}
+.pc-cut.is-short {
+    color: var(--status-danger);
+}
+.pc-cut-rolls {
+    color: var(--text-muted);
+    font-size: 0.92em;
+}
+
+/* A priced job order whose purchase order did not go through, with its retry. */
+.print-po-missing {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--status-danger-bg);
+    color: var(--status-danger);
+    border-radius: 6px;
+    font-size: 0.9em;
+}
+
+/* One design of a job order — one Print_Job. Its rows and total on one line,
+   Receive on the right; the receive form opens underneath. */
+.print-order-job {
+    padding: 0.75rem 0;
+    border-top: 1px solid var(--border);
+}
+.print-order-job:first-of-type {
+    border-top: none;
+}
+.poj-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+.poj-what .mat-name {
+    font-weight: 600;
+}
+.poj-what .mat-sku {
+    margin-top: 0.1rem;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+}
+.poj-sizes {
+    margin-top: 0.2rem;
+    font-size: 0.85em;
+    color: var(--text-muted);
+}
+.poj-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+.poj-total {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+}
+.poj-outcome {
+    margin-top: 0.4rem;
+    font-size: 0.88em;
+    color: var(--text-muted);
+}
+.poj-outcome.is-short {
+    color: var(--status-danger);
+}
+.print-recv {
+    margin-top: 0.5rem;
+    padding: 0.25rem 0 0.5rem;
+    background: #f8fafc;
+    border-radius: 8px;
+}
+
 /* ---- Send-to-print cut plan ----
    Which physical roll to cut and how much off it. Auto-planned shortest-first
    and editable; the foot goes red when an edit does not add up to the metres
@@ -3412,6 +3563,34 @@ th.col-num {
         border-radius: 4px !important;
         min-height: 26px !important;
         white-space: nowrap !important;
+    }
+
+    /* The create table keeps usable field widths on a phone and scrolls sideways
+       inside its own box — the generic mobile rule zeroes every table input's
+       min-width, which collapses a SKU picker to a few pixels. */
+    .item-body .pc-table .note-input {
+        min-width: 7rem !important;
+    }
+    .item-body .pc-table .note-input.pc-wide {
+        min-width: 10.5rem !important;
+    }
+    .item-body .pc-table .issue-input {
+        min-width: 4.25rem !important;
+    }
+    .pc-table {
+        width: auto !important;
+    }
+    .print-send-footer .pc-remarks {
+        flex: 1 1 100% !important;
+    }
+
+    /* Print job orders: the design row stacks, the rate hint may wrap. */
+    .poj-right {
+        width: 100%;
+        justify-content: space-between;
+    }
+    .print-po-missing {
+        margin: 0 0 0.5rem !important;
     }
 
     /* Form Fields on Mobile (Print & Stock In forms) */
