@@ -1,7 +1,15 @@
 string recheckOrderComplete(string orderIdTxt)
 {
 	// Recomputes where a sales order should be, and moves it there. It owns BOTH
-	// post-production statuses: "Checking Passed" and "Finishing Complete".
+	// post-production statuses: "Finishing Complete" and "Checking Passed".
+	//
+	// THE ORDER IS PRODUCTION COMPLETE -> FINISHING COMPLETE -> CHECKING PASSED ->
+	// PACKED. Finishing (thread cutting, pressing) now runs BEFORE checking, and
+	// folding, branding and boxing happen on the packing screen after it. So
+	// Finishing Complete means every batch is off the floor and has had its
+	// finishing closed; Checking Passed means every item is Complete and the
+	// ordered quantity has been accepted. Packing only takes an order that has
+	// Checking Passed.
 	//
 	// A PLAIN DELUGE FUNCTION, NOT A CUSTOM API. Nothing calls it from a widget -
 	// it is called through thisapp by every function that can change the answer:
@@ -101,11 +109,32 @@ string recheckOrderComplete(string orderIdTxt)
 
 				itemCount = 0;
 				stillMaking = false;
+				inProduction = false;
+				awaitingFinish = false;
 				openNames = "";
+				productionNames = "";
+				finishNames = "";
 				orphanNames = "";
 
 				for each  plR in Production_Planning[Sales_Order == orderId]
 				{
+					// FINISHING IS READ ONCE PER PLAN, NOT ONCE PER BATCH. Every
+					// finished batch calls this function, so a query per
+					// Awaiting_Check item inside the walk costs about n squared
+					// halves across an order - on a 110-batch order that is the
+					// shape that reaches the uncatchable statement limit. One
+					// query on Finishing_Data.Plan returns every Done batch of
+					// the plan, held as a list of item ids AS STRINGS.
+					doneItemKeys = List();
+
+					for each  fdP in Finishing_Data[Plan == plR.ID && Finishing_Status == "Done"]
+					{
+						if(fdP.Plan_Item != null)
+						{
+							doneItemKeys.add(fdP.Plan_Item.toString());
+						}
+					}
+
 					for each  itR in Plan_Item[Plan == plR.ID]
 					{
 						itemCount = itemCount + 1;
@@ -114,7 +143,9 @@ string recheckOrderComplete(string orderIdTxt)
 
 						// Awaiting_Check counts as still making. It is the whole
 						// point of the status: an item nobody has inspected has not
-						// finished, whatever production thinks.
+						// finished, whatever production thinks. stillMaking is the
+						// CHECKING test - anything short of Complete holds
+						// Checking Passed back.
 						if(stTxt != "Complete")
 						{
 							stillMaking = true;
@@ -124,6 +155,42 @@ string recheckOrderComplete(string orderIdTxt)
 								openNames = openNames + ", ";
 							}
 							openNames = openNames + ifnull(itR.Item_Name,"").toString() + " (" + stTxt + ")";
+						}
+
+						// THE FINISHING TEST SPLITS THAT SAME STATUS IN TWO.
+						// Awaiting_Check means production is over, and finishing
+						// now runs between that and the inspector, so an
+						// Awaiting_Check batch is either waiting to be finished
+						// or finished and waiting to be checked - told apart by
+						// its Finishing_Data row reading Done. Anything before
+						// Awaiting_Check is still on the floor. Complete has
+						// been through both, since saveItemCheck refuses an
+						// unfinished batch.
+						//
+						// The test is a list lookup against the plan's Done batches,
+						// read once above, so it costs no query per batch.
+						if(stTxt == "Awaiting_Check")
+						{
+							if(doneItemKeys.contains(itR.ID.toString()) == false)
+							{
+								awaitingFinish = true;
+
+								if(finishNames != "")
+								{
+									finishNames = finishNames + ", ";
+								}
+								finishNames = finishNames + ifnull(itR.Item_Name,"").toString();
+							}
+						}
+						else if(stTxt != "Complete")
+						{
+							inProduction = true;
+
+							if(productionNames != "")
+							{
+								productionNames = productionNames + ", ";
+							}
+							productionNames = productionNames + ifnull(itR.Item_Name,"").toString() + " (" + stTxt + ")";
 						}
 
 						// A Creator numeric never written is an EMPTY STRING, not
@@ -236,43 +303,106 @@ string recheckOrderComplete(string orderIdTxt)
 				{
 					verdict = "SKIP: order " + orderId + " has no original lines";
 				}
-				else if(stillMaking == true)
-				{
-					//--------------------------------------------------
-					// NOTHING PASSES WHILE THE ORDER IS STILL BEING MADE.
-					//
-					// The quantity test below cannot see this. A batch that has
-					// produced nothing yet has no acceptances to be short of, so
-					// it is invisible to a test that only reads counters - and
-					// Short_Closed makes that test unconditionally true.
-					//
-					// APPLIES EVEN WHEN SHORT-CLOSED, deliberately. Short_Closed
-					// is an answer about QUANTITY - "the customer is getting
-					// fewer than they ordered". It is not a statement that
-					// unfinished work has stopped, and treating it as one is what
-					// once let a queued batch pass while the store still held a
-					// live requirement for it.
-					//--------------------------------------------------
-					verdict = "NOT YET: still open -> " + openNames;
-				}
-				else if(whole == false)
-				{
-					verdict = "NOT YET: short -> " + shortLines;
-				}
 				else
 				{
 					//--------------------------------------------------
-					// EVERY LINE IS SATISFIED. Two statuses can follow, in
-					// order, and BOTH ARE DECIDED IN THIS ONE PASS.
+					// TWO STATUSES CAN FOLLOW, IN ORDER, AND BOTH ARE DECIDED IN
+					// THIS ONE PASS: "Finishing Complete", then "Checking Passed".
 					//
-					// FORWARD ONLY. This runs on every check, and once every
-					// line is satisfied it stays satisfied - so an unguarded
-					// write would drag an order back from Packed or Dispatched
-					// and put it in front of packing a second time. Same rule
-					// saveProductionPhase applies to the order and
-					// resolveDispute applies to the plan.
+					// FINISHING RUNS BEFORE CHECKING. A batch comes off the
+					// floor, is thread-cut and pressed, and only then is it
+					// inspected. So the order reads Production Complete while
+					// batches are still being finished, Finishing Complete once
+					// every batch that exists has been, and Checking Passed once
+					// the inspector has accepted the whole quantity.
+					//
+					// FORWARD ONLY. This runs on every finishing close and every
+					// check, and once a test is satisfied it stays satisfied - so
+					// an unguarded write would drag an order back from Packed or
+					// Dispatched and put it in front of packing a second time.
+					// Same rule saveProductionPhase applies to the order and
+					// resolveDispute applies to the plan. The one legitimate
+					// backward move is saveItemCheck pulling an order to In
+					// Progress when a rejection opens a new batch, and that is
+					// its own write, not this function's.
 					//--------------------------------------------------
-					if(statusNow == "Production Complete" || statusNow == "In Progress")
+					verdict = "NO MOVE: order " + orderId + " is '" + statusNow + "'";
+
+					//--------------------------------------------------
+					// 1. FINISHING COMPLETE: every batch is off the floor AND
+					// every batch that is waiting for the checker has had its
+					// finishing closed.
+					//
+					// Neither half stands alone. A batch still being cut has no
+					// finishing row to be missing, so a test that only read
+					// Finishing_Data would pass an order that is mostly unmade.
+					// And Short_Closed does NOT forgive either half - it is an
+					// answer about quantity, not a statement that unfinished
+					// work has stopped.
+					//
+					// There is no quantity test here, deliberately. Pieces lost
+					// in production are replaced by a Production_Loss batch
+					// sitting at Awaiting_Material, which is "in production"
+					// above and holds the order back for the same reason, so
+					// quantity is already enforced by the batches themselves.
+					// Counting accepted pieces is the CHECKER's test, below.
+					//--------------------------------------------------
+					if(inProduction == true)
+					{
+						verdict = "NOT YET: still in production -> " + productionNames;
+					}
+					else if(awaitingFinish == true)
+					{
+						verdict = "NOT YET: waiting for finishing -> " + finishNames;
+					}
+					else if(statusNow == "Production Complete" || statusNow == "In Progress")
+					{
+						for each  soFin in Sales_Order[ID == orderId]
+						{
+							soFin.Order_Status = "Finishing Complete";
+						}
+
+						statusNow = "Finishing Complete";
+
+						verdict = "FINISHING COMPLETE: order " + orderId;
+					}
+
+					//--------------------------------------------------
+					// 2. CHECKING PASSED: every item Complete - saveItemCheck is
+					// the only writer of that - and every original line's
+					// quantity accepted, or Short_Closed.
+					//
+					// Complete implies finished, since saveItemCheck refuses a
+					// batch whose Finishing_Data is not Done, so this needs no
+					// second look at finishing. It is allowed to fire from any of
+					// the three open statuses so that an order whose finishing
+					// close was lost still moves once its last check lands.
+					//--------------------------------------------------
+					if(stillMaking == true)
+					{
+						//--------------------------------------------------
+						// NOTHING PASSES WHILE THE ORDER IS STILL BEING MADE,
+						// FINISHED OR CHECKED.
+						//
+						// The quantity test cannot see this. A batch that has
+						// produced nothing yet has no acceptances to be short of,
+						// so it is invisible to a test that only reads counters -
+						// and Short_Closed makes that test unconditionally true.
+						//
+						// APPLIES EVEN WHEN SHORT-CLOSED, deliberately.
+						// Short_Closed is an answer about QUANTITY - "the customer
+						// is getting fewer than they ordered". It is not a
+						// statement that unfinished work has stopped, and treating
+						// it as one is what once let a queued batch pass while the
+						// store still held a live requirement for it.
+						//--------------------------------------------------
+						verdict = verdict + " | CHECKING: still open -> " + openNames;
+					}
+					else if(whole == false)
+					{
+						verdict = verdict + " | CHECKING: short -> " + shortLines;
+					}
+					else if(statusNow == "Finishing Complete" || statusNow == "Production Complete" || statusNow == "In Progress")
 					{
 						for each  soSet in Sales_Order[ID == orderId]
 						{
@@ -281,134 +411,10 @@ string recheckOrderComplete(string orderIdTxt)
 
 						statusNow = "Checking Passed";
 
-						verdict = "PASSED: order " + orderId;
+						verdict = verdict + " | PASSED: order " + orderId;
 						if(shortClosed == true)
 						{
 							verdict = verdict + " (closed short)";
-						}
-					}
-					else
-					{
-						verdict = "NO MOVE: order " + orderId + " is '" + statusNow + "'";
-					}
-
-					//--------------------------------------------------
-					// AND THEN FINISHING, IN THE SAME FUNCTION.
-					//
-					// This block used to be recheckFinishingComplete, called
-					// from here through thisapp. That made the chain
-					// saveItemCheck -> recheckOrderComplete ->
-					// recheckFinishingComplete two levels deep, which nothing
-					// else in this app does and which nobody could confirm
-					// without running it. Folding it in removes the question
-					// instead of betting on the answer: every caller of this
-					// function is now exactly one level deep, and the order's
-					// status is recomputed in ONE place rather than by two
-					// functions that have to be called in the right order.
-					//
-					// completeFinishingJob calls THIS function now.
-					//
-					// IT RUNS WHETHER OR NOT THE BLOCK ABOVE WROTE ANYTHING.
-					// Finishing is per BATCH and starts as soon as a check
-					// approves something, so on any order with a second line -
-					// or a single rejection, which makes a second batch - the
-					// last batch is usually finished long before the order
-					// passes checking. If this only ran on the transition, an
-					// order already at Checking Passed when its last batch
-					// finished would sit there fully folded for ever. If it
-					// only ran on the finishing side, an order whose last
-					// event was a CHECK - a batch that produced nothing, a
-					// short close - would do the same from the other side.
-					//
-					// Only from "Checking Passed", so a Packed or Dispatched
-					// order is never pulled back.
-					//--------------------------------------------------
-					if(statusNow == "Checking Passed")
-					{
-						//------------------------------------------
-						// EVERY approved batch must be finished, AND the
-						// quantity must be met. Neither test stands alone:
-						// approvals across rounds can sum past the ordered
-						// quantity, and a batch still in production has no
-						// check yet to be missing.
-						//
-						// "FINISHED" IS Finishing_Status == "Done". Done means
-						// done; anything else means the job is still open, so
-						// a row carrying neither value holds the order back
-						// where it can be seen rather than passing it on. A
-						// batch counts ONCE however many rows it has.
-						//------------------------------------------
-						totalOrderedQty = 0;
-
-						for each  soQ in Sales_Order[ID == orderId]
-						{
-							for each  soRowQ in soQ.Item_Table
-							{
-								totalOrderedQty = totalOrderedQty + ifnull(soRowQ.Quantity,0).toLong();
-							}
-						}
-
-						allFinished = true;
-						anyApproved = false;
-						totalFinishedQty = 0;
-						openBatches = "";
-
-						for each  chkF in Item_Check[Sales_Order == orderId && Qty_Approved > 0]
-						{
-							anyApproved = true;
-
-							batchDone = false;
-
-							for each  fdF in Finishing_Data[Item_Check == chkF.ID]
-							{
-								if(ifnull(fdF.Finishing_Status,"").toString().trim() == "Done")
-								{
-									batchDone = true;
-								}
-							}
-
-							if(batchDone == true)
-							{
-								totalFinishedQty = totalFinishedQty + ifnull(chkF.Qty_Approved,0).toLong();
-							}
-							else
-							{
-								allFinished = false;
-
-								if(openBatches != "")
-								{
-									openBatches = openBatches + ", ";
-								}
-
-								openBatches = openBatches + chkF.ID.toString();
-							}
-						}
-
-						// Short_Closed forgives the QUANTITY and nothing else,
-						// exactly as it does above. Without it a short-closed
-						// order stopped dead here: every batch it had was
-						// finished, nothing would ever ask again, and the
-						// missing pieces were never going to be made.
-						if(anyApproved == false)
-						{
-							verdict = verdict + " | FINISHING: no approved batches";
-						}
-						else if(allFinished == false)
-						{
-							verdict = verdict + " | FINISHING: batches still open -> " + openBatches;
-						}
-						else if(totalFinishedQty < totalOrderedQty && shortClosed == false)
-						{
-							verdict = verdict + " | FINISHING: finished " + totalFinishedQty + " of " + totalOrderedQty;
-						}
-						else
-						{
-							for each  soFin in Sales_Order[ID == orderId]
-							{
-								soFin.Order_Status = "Finishing Complete";
-							}
-
-							verdict = verdict + " | FINISHING COMPLETE (finished " + totalFinishedQty + " / ordered " + totalOrderedQty + ")";
 						}
 					}
 				}

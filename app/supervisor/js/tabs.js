@@ -875,15 +875,21 @@ function renderSupHistory(items, stageCount, producedTotal) {
         // three days. Said explicitly rather than dropped: without knowing how
         // far the item has got, a day's stage rows are hard to act on.
         //
-        // THREE STATES NOW, not two. Production finishing is Awaiting_Check;
-        // Complete means the inspector has signed it off. Reading the old
+        // THREE STATES NOW, not two. Production finishing is Awaiting_Check, and
+        // from there the batch goes to finishing (thread cutting, pressing) and then
+        // the inspector; Complete means the inspector has signed it off. Reading the old
         // two-way test on the new data called a finished batch "still in
         // production" on the very day it was finished.
         var progress;
         if (done) {
             progress = 'Finished · ' + fmt(it.qtyProduced) + ' of ' + fmt(it.qtyOrdered) + ' pcs (whole item)';
         } else if (waiting) {
-            progress = 'With the checker · ' + fmt(it.qtyProduced) + ' of ' + fmt(it.qtyOrdered) + ' pcs made';
+            // Finishing is the supervisor's own and the checking team is somebody
+            // else, so the line says which of the two holds the batch (it.finishing
+            // comes off the batch's Finishing_Data).
+            var heldBy = it.finishing === 'Done' ? 'With the checking team'
+                : (it.finishing === 'Open' ? 'In finishing' : 'Waiting for finishing');
+            progress = heldBy + ' · ' + fmt(it.qtyProduced) + ' of ' + fmt(it.qtyOrdered) + ' pcs made';
         } else {
             progress = 'Still in production · ordered ' + fmt(it.qtyOrdered) + ' pcs';
         }

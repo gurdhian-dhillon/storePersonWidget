@@ -34,9 +34,12 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 	//    produced total therefore counts BOTH states - counting Complete alone
 	//    would read 0 pcs finished on the very day the work was finished, which is
 	//    the day this screen is almost always looking at.
-	//  - An item at Awaiting_Check has left his hands. statusLabel says so in
-	//    words, so the widget does not have to re-derive it and cannot fall back
-	//    to "still in production" for a batch that is on the inspector's rack.
+	//  - An item at Awaiting_Check has left PRODUCTION, but not necessarily his
+	//    hands: finishing (thread cutting, pressing) is the supervisor's own and
+	//    comes first, and only once it is Done does the batch go to the checking
+	//    team, who are somebody else. statusLabel says which in words, from the
+	//    batch's Finishing_Data, so the widget does not have to re-derive it and
+	//    cannot fall back to "still in production" for a batch that is finished.
 	//
 	// The check OUTCOME travels with the item when there is one - approved,
 	// rejected, sent to alteration, who inspected it and when. That is the honest
@@ -289,9 +292,42 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 		// which is exactly wrong for a batch sitting on the inspector's rack.
 		//------------------------------------------------------------
 		statusTxt = itemStatus;
+
+		// Finishing is the supervisor's own and the checking team is somebody
+		// else, so a batch at Awaiting_Check has to say WHICH of the two holds it:
+		// "None" nobody has started finishing it, "Open" it is in finishing,
+		// "Done" it is with the checking team. Empty for every other status;
+		// queried only for a batch at Awaiting_Check. Done means done.
+		finStat = "";
+		if(itemStatus.trim() == "Awaiting_Check")
+		{
+			finStat = "None";
+
+			for each  fdHi in Finishing_Data[Plan_Item == k.toLong()]
+			{
+				if(ifnull(fdHi.Finishing_Status,"").toString().trim() == "Done")
+				{
+					finStat = "Done";
+				}
+				else if(finStat != "Done")
+				{
+					finStat = "Open";
+				}
+			}
+		}
+
 		if(itemStatus == "Awaiting_Check")
 		{
-			statusTxt = "Waiting for checking";
+			statusTxt = "Waiting for finishing";
+
+			if(finStat == "Open")
+			{
+				statusTxt = "In finishing";
+			}
+			else if(finStat == "Done")
+			{
+				statusTxt = "With the checking team";
+			}
 		}
 		else if(itemStatus == "Complete")
 		{
@@ -347,7 +383,7 @@ string getSupervisorProductionHistory(string supervisorId, string dateTxt)
 			itemsJson = itemsJson + ",";
 		}
 		// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-		itemsJson = itemsJson + "{\"id\":\"" + k + "\",\"item\":\"" + itemName + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"qtyOrdered\":" + qtyOrdered + ",\"qtyProduced\":" + qtyProduced + ",\"status\":\"" + itemStatus + "\",\"statusLabel\":\"" + statusTxt + "\",\"check\":" + chkJson + ",\"stages\":[" + stagesByItem.get(k) + "]}";
+		itemsJson = itemsJson + "{\"id\":\"" + k + "\",\"item\":\"" + itemName + "\",\"salesOrder\":\"" + soNo + "\",\"planNo\":\"" + planNo + "\",\"qtyOrdered\":" + qtyOrdered + ",\"qtyProduced\":" + qtyProduced + ",\"status\":\"" + itemStatus + "\",\"finishing\":\"" + finStat + "\",\"statusLabel\":\"" + statusTxt + "\",\"check\":" + chkJson + ",\"stages\":[" + stagesByItem.get(k) + "]}";
 	}
 
 	}

@@ -1070,12 +1070,24 @@ function renderItemCard(plan, item, index) {
 		statusText = "Ready to start";
 		statusColor = "#2563eb"; // Blue
 	} else if (item.status === "Awaiting_Check") {
-		// Production is finished and the inspector has not been yet. Without its
-		// own branch this falls into the catch-all below, which sees every stage
-		// closed and prints "Finishing" — neither a stage any more nor what is
-		// actually happening to the garments.
-		statusText = "Waiting for checking";
-		statusColor = "#0891b2"; // Teal — done, not an error, not finished either
+		// Production is finished, and the batch is now with one of two TEAMS that
+		// must not be run together: finishing (thread cutting, pressing) is the
+		// supervisor's own, and only once it is Done does the batch go to the
+		// checking team, who are somebody else. item.finishing says which, off the
+		// batch's Finishing_Data: "None" not started, "Open" in finishing, "Done"
+		// with the checking team. Without its own branch this falls into the
+		// catch-all below, which sees every stage closed and prints "Production
+		// finished" — not what is actually happening to the garments.
+		if (item.finishing === "Done") {
+			statusText = "With the checking team";
+			statusColor = "#0891b2"; // Teal — out of his hands
+		} else if (item.finishing === "Open") {
+			statusText = "In finishing";
+			statusColor = "#2563eb"; // Blue — his to finish
+		} else {
+			statusText = "Waiting for finishing";
+			statusColor = "#d97706"; // Amber — his to start
+		}
 	} else if (item.status === "Complete") {
 		statusText = "Completed";
 		statusColor = "#16a34a"; // Green
@@ -1367,7 +1379,16 @@ function renderItemCard(plan, item, index) {
 	// else the question is asked for him, when a stage closes with fewer pieces
 	// out than went in — and an alteration stage never does, so without this
 	// button he cannot ask for so much as a reel of thread while fixing a batch.
-	const reqMatBtn = isAlt
+	//
+	// BOTH ALTERATION BUTTONS GO AWAY ONCE THE BATCH HAS BEEN SENT ON. Declaring
+	// the batch finished moves it to Awaiting_Check, where it goes through
+	// finishing and then the checker - it is no longer in his hands. Offering
+	// "Alteration finished" again at that point invited him to re-declare a batch
+	// that finishing may already be pressing, and "Request material" for work that
+	// is over. Awaiting_Check and Complete are both "has left production".
+	const leftProduction = item.status === "Awaiting_Check" || item.status === "Complete";
+
+	const reqMatBtn = isAlt && !leftProduction
 		? `<button type="button" class="damage-btn btn-request-material">Request material</button>`
 		: "";
 
@@ -1385,8 +1406,8 @@ function renderItemCard(plan, item, index) {
 	// STAGES_OPEN / MATERIAL_PENDING regardless — this only avoids offering a
 	// button that would be turned down.
 	const closeAltBtn =
-		isAlt && item.canCloseAlteration === true
-			? `<button type="button" class="primary-btn btn-close-alteration">Alteration finished</button>`
+		isAlt && item.canCloseAlteration === true && !leftProduction
+			?`<button type="button" class="primary-btn btn-close-alteration">Alteration finished</button>`
 			: "";
 
 	if (!hasPhases) {

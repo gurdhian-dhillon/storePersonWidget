@@ -72,12 +72,12 @@ var PipelineData = (function () {
     var CHUNK = 25;
 
     // Sales_Order.Order_Status, in the order the workflow runs (CLAUDE.md).
-    var FLOW = ['Pending', 'In Progress', 'Production Complete', 'Checking Passed',
-                'Finishing Complete', 'Packed', 'Dispatched'];
+    var FLOW = ['Pending', 'In Progress', 'Production Complete', 'Finishing Complete',
+                'Checking Passed', 'Packed', 'Dispatched'];
 
     // "In the factory": everything between planning and packing.
-    var IN_PRODUCTION = ['In Progress', 'Production Complete', 'Checking Passed',
-                         'Finishing Complete'];
+    var IN_PRODUCTION = ['In Progress', 'Production Complete', 'Finishing Complete',
+                         'Checking Passed'];
 
     // At risk: due within this many days with pieces nobody has started.
     var AT_RISK_DAYS = 7;
@@ -288,22 +288,34 @@ var PipelineData = (function () {
         });
     }
 
-    // FINISHING ON THE LIST. Finishing_Data carries no Plan, only Item_Check
-    // and Plan_Item, so the only exact key is the check id — at volume
-    // thousands of ids, hundreds of calls. Instead: every job still open, plus
-    // every job added since the oldest plan on screen started (a finishing job
-    // cannot predate its plan). One walk, filtered in memory by check id.
+    // FINISHING ON THE LIST. Finishing runs BEFORE checking, so a Finishing_Data
+    // row belongs to a Plan_Item (one production batch) and the only exact key is
+    // the item id - at volume thousands of ids, hundreds of calls. Instead: every
+    // job still open, plus every job added since the oldest plan on screen
+    // started (a finishing job cannot predate its plan). One walk, filtered in
+    // memory by item id.
     //
     // Whether this org's getRecords accepts a date-time criteria has not been
-    // proven live, so a refusal falls back to the exact id chunks — slower,
-    // never wrong. A handful of checks goes straight to the ids.
-    function fetchFinishing(checkIds, since) {
-        if (checkIds.length <= CHUNK || !since) return fetchByIds('finish', 'Item_Check', checkIds);
+    // proven live, so a refusal falls back to the exact id chunks - slower,
+    // never wrong. A handful of items goes straight to the ids.
+    // ONLY A BATCH AT Awaiting_Check CAN BE IN FINISHING. Production closes into
+    // Awaiting_Check and checking moves it on to Complete, so finishing decides
+    // where a batch's UNCHECKED pieces sit only while it is at that status;
+    // before it there is no finishing row and after it the check has placed every
+    // piece. Reading Finishing_Data for every item on screen asked for rows that
+    // could not change a figure, and on a large plan that is the rate-limit risk.
+    function awaitingIds(items) {
+        return items.filter(function (it) { return str(it.Item_Status).trim() === 'Awaiting_Check'; })
+            .map(function (it) { return str(it.ID); });
+    }
+
+    function fetchFinishing(itemIds, since) {
+        if (itemIds.length <= CHUNK || !since) return fetchByIds('finish', 'Plan_Item', itemIds);
         var crit = '(Finishing_Status != "Done" || Added_Time >= "' + critDate(since) + '")';
         return fetch('finish', crit).then(function (res) {
             if (!res.error) return res;
-            console.warn('[pipeline] finishing by date refused (' + res.error + ') — reading by check id');
-            return fetchByIds('finish', 'Item_Check', checkIds);
+            console.warn('[pipeline] finishing by date refused (' + res.error + ') - reading by item id');
+            return fetchByIds('finish', 'Plan_Item', itemIds);
         });
     }
 
@@ -418,7 +430,9 @@ var PipelineData = (function () {
     //   Stage_Log (per item)        which stage is open (and, in the expand,
     //                               what each closed stage lost)
     //   Item_Check (per item)       inspected, approved, rejected, altered
-    //   Finishing_Data (per check)  In_Progress or Done — DONE MEANS DONE
+    //   Finishing_Data (per item)   In_Progress or Done - DONE MEANS DONE.
+    //                               Finishing runs BEFORE checking, so it is read
+    //                               per production batch, not per check
     //   Material_Requirement        whether a batch's cloth was ever asked for
     //
     // A FLOW is one Plan_Item: the order line itself, or a batch hanging off it
@@ -441,9 +455,11 @@ var PipelineData = (function () {
     };
     var FLOW_ORDER = { original: 0, check_remake: 1, production_loss: 2, alteration: 3 };
 
-    // The seven places, in the order a piece moves through them.
-    var PLACES = ['waitingMaterial', 'readyToStart', 'inProduction', 'awaitingCheck',
-                  'waitingFinishing', 'inFinishing', 'finished'];
+    // The seven places, in the order a piece moves through them. Finishing
+    // (thread cutting, pressing) comes BEFORE checking now, and `finished` is the
+    // end of the line this screen draws: checked and approved, ready to pack.
+    var PLACES = ['waitingMaterial', 'readyToStart', 'inProduction', 'waitingFinishing',
+                  'inFinishing', 'awaitingCheck', 'finished'];
 
     function emptyPos() {
         return {
@@ -500,7 +516,10 @@ var PipelineData = (function () {
         var produced = num(it.Qty_Produced);
         var status = str(it.Item_Status).trim();
 
-        // ---- checking and finishing ----
+        // ---- finishing, then checking ----
+        // What the checker has already judged: approved pieces have been through
+        // finishing AND checking, so they are the end of the line (ready to pack);
+        // rejected and altered ones leave this flow.
         var inspected = 0;
         (ctx.checksByItem[iid] || []).forEach(function (c) {
             var a = num(c.Qty_Approved), r = num(c.Qty_Rejected), t = num(c.Qty_Alteration);
@@ -508,12 +527,18 @@ var PipelineData = (function () {
             inspected += insp > 0 ? insp : (a + r + t);
             pos.rejected += r;
             pos.altered += t;
-            var fin = ctx.finishByCheck[str(c.ID)];
-            if (fin === 'Done') pos.finished += a;
-            else if (fin) pos.inFinishing += a;        // a job exists and is not Done
-            else pos.waitingFinishing += a;
+            pos.finished += a;
         });
-        pos.awaitingCheck = Math.max(0, produced - inspected);
+
+        // Everything produced and not yet judged is somewhere in finishing or
+        // waiting for the checker. The batch's one Finishing_Data row says which:
+        // Done releases it to the checker, an open row means somebody is part way
+        // through, and no row means nobody has started. DONE MEANS DONE.
+        var unchecked = Math.max(0, produced - inspected);
+        var fin = ctx.finishByItem[iid];
+        if (fin === 'Done') pos.awaitingCheck = unchecked;
+        else if (fin) pos.inFinishing = unchecked;      // a job exists and is not Done
+        else pos.waitingFinishing = unchecked;
 
         // ---- production ----
         var logs = (ctx.stagesByItem[iid] || []).slice().sort(function (a, b) { return a.seq - b.seq; });
@@ -579,7 +604,7 @@ var PipelineData = (function () {
         });
     }
 
-    // Rework still to come off a batch — what is not yet finished.
+    // Rework still to come off a batch - what has not yet reached the end.
     function addRework(f) {
         if (f.flowType === 'original') return;
         var p = f.pos;
@@ -623,7 +648,7 @@ var PipelineData = (function () {
             if (shipping) {
                 return fetchByIds('items', 'Plan', planIds).then(function (itemRes) {
                     if (itemRes.error) notes.push(itemRes.error);
-                    var ctx = { full: false, checksByItem: {}, finishByCheck: {}, stagesByItem: {}, requested: {} };
+                    var ctx = { full: false, checksByItem: {}, finishByItem: {}, stagesByItem: {}, requested: {} };
                     var itemsByPlan = groupBy(itemRes.rows || [], 'Plan');
                     orders.forEach(function (o) { foldOrder(o, itemsByPlan[o.planId] || [], ctx, null); });
                     return null;
@@ -647,14 +672,14 @@ var PipelineData = (function () {
                 }).map(function (it) { return str(it.ID); });
 
                 return Promise.all([
-                    fetchFinishing(checks.map(function (c) { return str(c.ID); }), oldest),
+                    fetchFinishing(awaitingIds(items), oldest),
                     fetchByIds('reqs', 'Plan_Item', awaitBatchIds)
                 ]).then(function (res2) {
                     var finRes = res2[0], reqRes = res2[1];
                     if (finRes.error) notes.push(finRes.error);
                     if (reqRes.error) notes.push(reqRes.error);
 
-                    var ctx = { full: false, checksByItem: {}, finishByCheck: {}, stagesByItem: {}, requested: {} };
+                    var ctx = { full: false, checksByItem: {}, finishByItem: {}, stagesByItem: {}, requested: {} };
                     var lastByPlan = {};
                     function moved(pid, v) {
                         var d = parseDate(v);
@@ -662,8 +687,10 @@ var PipelineData = (function () {
                     }
                     Object.keys(planAdded).forEach(function (pid) { moved(pid, planAdded[pid]); });
 
-                    var planOfCheck = indexChecks(checks, ctx, moved);
-                    indexFinishing(finRes.rows || [], ctx, planOfCheck, moved);
+                    indexChecks(checks, ctx, moved);
+                    var planOfItem = {};
+                    items.forEach(function (it) { planOfItem[str(it.ID)] = idOf(it.Plan); });
+                    indexFinishing(finRes.rows || [], ctx, planOfItem, moved);
                     (reqRes.rows || []).forEach(function (rq) { ctx.requested[idOf(rq.Plan_Item)] = true; });
                     // The criteria asks for open logs only; filtered again here
                     // because the list's loss arithmetic depends on it.
@@ -698,26 +725,23 @@ var PipelineData = (function () {
     }
 
     function indexChecks(checks, ctx, moved) {
-        var planOfCheck = {};
         checks.forEach(function (c) {
             var pi = idOf(c.Plan_Item);
             if (pi) (ctx.checksByItem[pi] || (ctx.checksByItem[pi] = [])).push(c);
-            planOfCheck[str(c.ID)] = idOf(c.Plan);
             moved(idOf(c.Plan), c.Check_Date || c.Added_Time);
         });
-        return planOfCheck;
     }
 
     // DONE MEANS DONE; any other value is an open job (CLAUDE.md). Rows for
-    // checks not on screen (the date-bounded read) are skipped.
-    function indexFinishing(rows, ctx, planOfCheck, moved) {
+    // items not on screen (the date-bounded read) are skipped.
+    function indexFinishing(rows, ctx, planOfItem, moved) {
         rows.forEach(function (fd) {
-            var cid = idOf(fd.Item_Check);
-            if (planOfCheck[cid] === undefined) return;
+            var iid = idOf(fd.Plan_Item);
+            if (planOfItem[iid] === undefined) return;
             var st = str(fd.Finishing_Status).trim();
-            // A Done row wins over a stray open one for the same check.
-            if (ctx.finishByCheck[cid] !== 'Done') ctx.finishByCheck[cid] = st === 'Done' ? 'Done' : 'Open';
-            moved(planOfCheck[cid], fd.Modified_Time || fd.Added_Time);
+            // A Done row wins over a stray open one for the same batch.
+            if (ctx.finishByItem[iid] !== 'Done') ctx.finishByItem[iid] = st === 'Done' ? 'Done' : 'Open';
+            moved(planOfItem[iid], fd.Modified_Time || fd.Added_Time);
         });
     }
 
@@ -824,10 +848,11 @@ var PipelineData = (function () {
         o.unplaced = o.items.reduce(function (a, g) { return a + g.unplaced; }, 0);
         o.shortPieces = o.shortClosed ? (o.pos.cancelled + o.unplaced) : 0;
 
-        // Once the order says finishing is complete (or it is packed), every
-        // piece it will ship is finished — whatever a stray open finishing row
-        // says. The status is the forward-only record of that.
-        if (o.status === 'Finishing Complete' || o.status === 'Packed' || o.status === 'Dispatched') {
+        // Once the order says checking has passed (or it is packed), every
+        // piece it will ship has been through finishing and checking - whatever
+        // a stray open finishing row says. The status is the forward-only record
+        // of that.
+        if (o.status === 'Checking Passed' || o.status === 'Packed' || o.status === 'Dispatched') {
             o.finishedQty = Math.max(0, o.orderedQty - o.shortPieces);
         } else {
             o.finishedQty = o.pos.finished;
@@ -863,31 +888,32 @@ var PipelineData = (function () {
     /* ----------------------------------------------------------------------
      * detail(order) -> the same order, re-folded from its full records.
      *
-     * One plan's Stage_Log (~880 rows on a Faire order — one call), its
-     * Finishing_Data by check id, and Item_Master for size and colour. Kept on
+     * One plan's Stage_Log (~880 rows on a Faire order - one call), its
+     * Finishing_Data by item id, and Item_Master for size and colour. Kept on
      * the order (order.exact), so opening it again costs nothing.
      * -------------------------------------------------------------------- */
     function detail(o) {
         if (!o || !o.planId || !o._src || o.exact) return Promise.resolve(o);
         var src = o._src;
         var notes = [];
-        var checkIds = src.checks.map(function (c) { return str(c.ID); });
         var skuIds = src.items.map(function (it) { return idOf(it.Item_Sku); });
 
         return Promise.all([
             fetch('stages', 'Plan == ' + o.planId),
-            fetchByIds('finish', 'Item_Check', checkIds),
+            fetchByIds('finish', 'Plan_Item', awaitingIds(src.items)),
             fetchByIds('itemMaster', 'ID', skuIds)
         ]).then(function (res) {
             res.forEach(function (r) { if (r.error) notes.push(r.error); });
-            var ctx = { full: true, checksByItem: {}, finishByCheck: {}, stagesByItem: {}, requested: src.requested };
+            var ctx = { full: true, checksByItem: {}, finishByItem: {}, stagesByItem: {}, requested: src.requested };
             var last = src.last;
             function moved(pid, v) {
                 var d = parseDate(v);
                 if (d && (!last || d.getTime() > last.getTime())) last = d;
             }
-            var planOfCheck = indexChecks(src.checks, ctx, moved);
-            indexFinishing(res[1].rows || [], ctx, planOfCheck, moved);
+            indexChecks(src.checks, ctx, moved);
+            var planOfItem = {};
+            src.items.forEach(function (it) { planOfItem[str(it.ID)] = idOf(it.Plan); });
+            indexFinishing(res[1].rows || [], ctx, planOfItem, moved);
             indexStages(res[0].rows || [], ctx, moved);
 
             o.skuInfo = {};

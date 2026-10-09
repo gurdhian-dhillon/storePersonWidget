@@ -1163,12 +1163,38 @@ string getProductionWidgetData(string supervisorId, string planId, string itemPa
 					}
 				}
 
+				// WHICH TEAM HOLDS A BATCH THAT HAS LEFT PRODUCTION. Awaiting_Check
+				// alone cannot say: finishing (the supervisor's own) comes first and
+				// the checking team second, and they are different people. So a
+				// batch at Awaiting_Check carries the state of its Finishing_Data:
+				// "None" nobody has started finishing it, "Open" it is on the
+				// press, "Done" it has gone to the checking team. Anything that is
+				// not Done is Open - Done means done. Empty for every other status,
+				// and queried only for a batch at Awaiting_Check.
+				finStat = "";
+				if(ifnull(itm.Item_Status,"").toString().trim() == "Awaiting_Check")
+				{
+					finStat = "None";
+
+					for each  fdPw in Finishing_Data[Plan_Item == itm.ID]
+					{
+						if(ifnull(fdPw.Finishing_Status,"").toString().trim() == "Done")
+						{
+							finStat = "Done";
+						}
+						else if(finStat != "Done")
+						{
+							finStat = "Open";
+						}
+					}
+				}
+
 				// Item_Name is typed at sales-order entry, free text like every
 				// other name field in this app - unescaped here, it is the one
 				// double quote away from breaking JSON.parse for the WHOLE
 				// Production tab, every plan on it, not just this item's card.
 				itemNameTxt = ifnull(itm.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," ").replaceAll("\t"," ");
-				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"size\":\"" + itemSize + "\",\"color\":\"" + itemColor + "\",\"name\":\"" + itemNameTxt + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"isAlteration\":" + isAltTxt + ",\"canCloseAlteration\":" + canCloseTxt + ",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "]}";
+				itemsJson = itemsJson + "{\"id\":\"" + itm.ID + "\",\"sku\":\"" + sku + "\",\"size\":\"" + itemSize + "\",\"color\":\"" + itemColor + "\",\"name\":\"" + itemNameTxt + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"status\":\"" + ifnull(itm.Item_Status,"") + "\",\"finishing\":\"" + finStat + "\",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"isRemake\":" + ifnull(itm.Is_Remake,false) + ",\"remakeReason\":\"" + ifnull(itm.Remake_Reason,"").toString().trim() + "\",\"isAlteration\":" + isAltTxt + ",\"canCloseAlteration\":" + canCloseTxt + ",\"phases\":[" + phasesJson + "],\"materials\":[" + allMatsJson + "],\"logs\":[" + logsJson + "]}";
 				}
 			}
 

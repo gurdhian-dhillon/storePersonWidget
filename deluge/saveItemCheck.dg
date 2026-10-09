@@ -195,6 +195,25 @@ string saveItemCheck(string payloadJson)
 		return "{\"success\":false,\"error\":\"Item " + itemId + " has no plan\"}";
 	}
 
+	//----------------------------------------------------------------------
+	// FINISHING COMES FIRST. getCheckingQueue only offers a batch whose
+	// Finishing_Data reads Done, but a Custom API is callable from anywhere, so
+	// the rule is enforced here too: an inspector cannot judge garments that
+	// have not been thread-cut and pressed. Done means done - an open or
+	// hand-made row does not release the batch.
+	//----------------------------------------------------------------------
+	finishedOk = false;
+
+	for each  fdGate in Finishing_Data[Plan_Item == itemId && Finishing_Status == "Done"]
+	{
+		finishedOk = true;
+	}
+
+	if(finishedOk == false)
+	{
+		return "{\"success\":false,\"error\":\"" + itemName.replaceAll("\"","'") + " has not been finished yet - thread cutting and pressing must be closed in the Finishing screen before it can be checked\"}";
+	}
+
 	// count(), not size() - this is a query result, not a List.
 	if(Item_Check[Plan_Item == itemId].count() > 0)
 	{
@@ -885,7 +904,11 @@ string saveItemCheck(string payloadJson)
 	// PLAN AND ORDER GO BACK TO WORK.
 	//
 	// Only when something was actually created, and only FROM Production
-	// Complete. Forward-only is the same rule saveProductionPhase applies to
+	// Complete or Finishing Complete. Finishing runs before checking now, so an
+	// order whose every batch has been finished sits at Finishing Complete while
+	// the inspector works through them - a rejection found then reopens work
+	// exactly as it did from Production Complete, and the order must say so.
+	// Forward-only is the same rule saveProductionPhase applies to
 	// the order and resolveDispute applies to the plan - an order already
 	// packed or dispatched is never dragged backwards by a late check, and a
 	// plan already at work owns its own status.
@@ -917,7 +940,7 @@ string saveItemCheck(string payloadJson)
 			for each  soBack in Sales_Order[ID == orderId]
 			{
 				sStNow = ifnull(soBack.Order_Status,"").toString().trim();
-				if(sStNow == "Production Complete")
+				if(sStNow == "Production Complete" || sStNow == "Finishing Complete")
 				{
 					soBack.Order_Status = "In Progress";
 					logLines.add("ORDER " + orderId + " pulled back to In Progress");

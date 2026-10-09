@@ -181,7 +181,7 @@ function baseTables() {
           Qty_Inspected: 12, Qty_Approved: 8, Qty_Rejected: 3, Qty_Alteration: 1 }
     ];
     t[FINISH] = [
-        { ID: 'F1', Item_Check: { ID: 'CK1' }, Finishing_Status: 'Done' }
+        { ID: 'F1', Plan_Item: { ID: 'I3' }, Finishing_Status: 'Done' }
     ];
     return t;
 }
@@ -226,7 +226,9 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(async function (
         perForm[ITEMS] === 1, JSON.stringify(perForm));
     check('one fetch of Stage_Log for the whole page', perForm[STAGES] === 1);
     check('one fetch of Item_Check for the whole page', perForm[CHECKS] === 1);
-    check('Finishing_Data fetched once, not once per check', perForm[FINISH] === 1);
+    // Only an item at Awaiting_Check can be in finishing, so the read is at most one
+    // call and is skipped when nothing is waiting there.
+    check('Finishing_Data fetched at most once, not once per item', (perForm[FINISH] || 0) <= 1, perForm[FINISH]);
     check('total calls stay in single figures for a page of orders',
         ASKED.length <= 9, ASKED.length + ' calls');
 
@@ -264,7 +266,10 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(async function (
     check('6 pieces in production, all at Stitching',
         p3.inProduction === 6 && p3.stages && p3.stages.Stitching && p3.stages.Stitching.qty === 6,
         JSON.stringify(p3.stages));
-    check('4 produced pieces waiting for checking', p3.awaitingCheck === 4, 'got ' + p3.awaitingCheck);
+    // Finishing runs BEFORE checking, so produced pieces with no Finishing_Data
+    // row are waiting for FINISHING, not for the checker.
+    check('4 produced pieces waiting for finishing', p3.waitingFinishing === 4 && p3.awaitingCheck === 0,
+        'got ' + p3.waitingFinishing + ' / ' + p3.awaitingCheck);
     check('10 waiting for material, on the store', p3.waitingMaterial === 10 && p3.waitingStore === 10);
     check('every ordered piece is placed (20)', so3000.placed === 20 && so3000.unplaced === 0,
         so3000.placed + ' placed, ' + so3000.unplaced + ' unplaced');
@@ -297,8 +302,8 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(async function (
     check('the line ordered / produced come from the ORDER LINE (I6), not summed',
         fdc.ordered === 12 && fdc.produced === 10,
         JSON.stringify({ o: fdc.ordered, p: fdc.produced }));
-    check('its checks: 8 approved and waiting for finishing, 3 rejected, 1 altered',
-        fdc.pos.waitingFinishing === 8 && fdc.pos.rejected === 3 && fdc.pos.altered === 1,
+    check('its checks: 8 approved and ready to pack, 3 rejected, 1 altered',
+        fdc.pos.finished === 8 && fdc.pos.waitingFinishing === 0 && fdc.pos.rejected === 3 && fdc.pos.altered === 1,
         JSON.stringify(fdc.pos));
     check('production over, 2 short of ordered -> 2 LOST, not in production',
         fdc.pos.lost === 2 && byTypeOf(fdc, 'original').pos.inProduction === 0,
@@ -345,7 +350,7 @@ P.page({ status: 'In Production', page: 1, pageSize: 25 }).then(async function (
         so0001.pos.rework.check_remake === 3 && so0001.pos.rework.production_loss === 2 &&
         so0001.pos.rework.alteration === 1, JSON.stringify(so0001.pos.rework));
     const so2k = byId['SO-2000'];
-    check('a line checked and finished counts as FINISHED, 100%',
+    check('a line finished and checked counts as READY TO PACK, 100%',
         so2k.finishedQty === 15 && so2k.pct === 100, so2k.finishedQty + ' / ' + so2k.pct + '%');
 
     // A plain line with no batches is a parent with one flow.

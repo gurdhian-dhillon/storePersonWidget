@@ -111,8 +111,9 @@ function idsIn(crit) { return (crit.match(/==\s*\d+/g) || []).length; }
 
 // ---------------------------------------------------------------------------
 // A factory of N orders, one plan each. Every plan: an item mid-Stitching whose
-// Cutting stage lost 2 (covered by a Production_Loss batch), an item finished
-// and checked, and an item with material in hand and no stage.
+// Cutting stage lost 2 (covered by a Production_Loss batch), an item whose
+// production is over and is in finishing (finishing runs BEFORE checking), and
+// an item with material in hand and no stage.
 // ---------------------------------------------------------------------------
 function factory(n) {
     const t = { Sales_Order_Report: [], Production_Planning_Report: [], Plan_Item_Report: [],
@@ -121,7 +122,7 @@ function factory(n) {
     for (let i = 1; i <= n; i++) {
         const so = String(1000 + i), plan = String(5000 + i);
         const a = String(700000 + i * 10 + 1), b = String(700000 + i * 10 + 2), c = String(700000 + i * 10 + 3),
-              loss = String(700000 + i * 10 + 4), chk = String(900000 + i);
+              loss = String(700000 + i * 10 + 4);
         t.Sales_Order_Report.push({ ID: so, Sales_Order: 'SO-' + so, Order_Status: 'In Progress',
             Expected_Delivery_Date: iso(20), Customer: L('1', 'Faire') });
         t.Production_Planning_Report.push({ ID: plan, Sales_Order: L(so), Plan_No: 'PLAN-' + plan,
@@ -129,7 +130,7 @@ function factory(n) {
         t.Plan_Item_Report.push(
             { ID: a, Plan: L(plan), Line_No: 1, Item_Name: 'Duvet', Item_Sku: L('31', 'DUV-K'), Item_Status: 'In_Production',
               Qty_Ordered: 10, Qty_Produced: 0, Modified_Time: creatorTs(-2) },
-            { ID: b, Plan: L(plan), Line_No: 2, Item_Name: 'Sheet', Item_Sku: L('32', 'SHT-K'), Item_Status: 'Complete',
+            { ID: b, Plan: L(plan), Line_No: 2, Item_Name: 'Sheet', Item_Sku: L('32', 'SHT-K'), Item_Status: 'Awaiting_Check',
               Qty_Ordered: 5, Qty_Produced: 5 },
             { ID: c, Plan: L(plan), Line_No: 3, Item_Name: 'Napkin', Item_Sku: L('33', 'NAP'), Item_Status: 'Ready_For_Production',
               Qty_Ordered: 4, Qty_Produced: 0 },
@@ -139,14 +140,12 @@ function factory(n) {
             { Plan: L(plan), Plan_Item: L(a), Phase_Name: 'Cutting', Sequence_No: 1, Stage_Status: 'Done', Qty_In: 10, Qty_Out: 8, Log_Date: iso(-4) },
             { Plan: L(plan), Plan_Item: L(a), Phase_Name: 'Stitching', Sequence_No: 2, Stage_Status: 'In_Progress', Qty_In: 8, Qty_Out: 0, Log_Date: iso(-2) },
             { Plan: L(plan), Plan_Item: L(b), Phase_Name: 'Cutting', Sequence_No: 1, Stage_Status: 'Done', Qty_In: 5, Qty_Out: 5, Log_Date: iso(-6) });
-        t.All_Items.push({ ID: chk, Plan: L(plan), Plan_Item: L(b), Qty_Inspected: 5, Qty_Approved: 5, Qty_Rejected: 0, Qty_Alteration: 0,
-            Added_Time: creatorTs(-3) });
-        t.Finishing_Data_Report.push({ ID: String(800000 + i), Item_Check: L(chk), Finishing_Status: i % 3 ? 'Done' : 'In_Progress',
+        t.Finishing_Data_Report.push({ ID: String(800000 + i), Plan_Item: L(b), Finishing_Status: i % 3 ? 'Done' : 'In_Progress',
             Added_Time: creatorTs(-2) });
     }
-    // A finishing job from long ago, for a check that is not on screen — the
+    // A finishing job from long ago, for an item that is not on screen - the
     // date-bounded read must not pull it, and must not be confused by it.
-    t.Finishing_Data_Report.push({ ID: '899999', Item_Check: L('123'), Finishing_Status: 'Done', Added_Time: creatorTs(-200) });
+    t.Finishing_Data_Report.push({ ID: '899999', Plan_Item: L('123'), Finishing_Status: 'Done', Added_Time: creatorTs(-200) });
     t.Item_Master_Report.push({ ID: '31', SKU: 'DUV-K', Size: 'King', Color: 'White' },
         { ID: '32', SKU: 'SHT-K', Size: 'King', Color: 'Grey' }, { ID: '33', SKU: 'NAP', Size: '45 x 45', Color: 'Natural' });
     return t;
@@ -188,9 +187,12 @@ function summary(orders) {
     check('material in hand, no stage: 4 ready to start', o1.pos.readyToStart === 4, o1.pos.readyToStart);
     check('every ordered piece placed (19)', o1.placed === 19 && o1.orderedQty === 19 && o1.unplaced === 0,
         o1.placed + '/' + o1.orderedQty);
-    check('finishing joined through the date-bounded read (SO-1001 Done)', o1.pos.finished === 5, o1.pos.finished);
+    check('finishing joined through the date-bounded read (SO-1001 Done -> with the checker)',
+        o1.pos.awaitingCheck === 5 && o1.pos.inFinishing === 0 && o1.pos.waitingFinishing === 0,
+        JSON.stringify({ c: o1.pos.awaitingCheck, f: o1.pos.inFinishing, w: o1.pos.waitingFinishing }));
     const o3 = res.orders.filter(o => o.salesOrder === 'SO-1003')[0];
-    check('an open finishing job reads as in finishing (SO-1003)', o3.pos.inFinishing === 5 && o3.pos.finished === 0);
+    check('an open finishing job reads as in finishing (SO-1003)',
+        o3.pos.inFinishing === 5 && o3.pos.awaitingCheck === 0 && o3.pos.finished === 0);
 
     // The expand re-reads the full logs; it must place the same pieces.
     const before = summary([o1]);

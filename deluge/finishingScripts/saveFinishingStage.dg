@@ -1,11 +1,16 @@
 string saveFinishingStage(string payloadJson)
 {
-	// Stamps one end of one sub-stage - folding, pressing or branding - on an
+	// Stamps one end of one sub-stage - thread cutting or pressing - on an
 	// open Finishing_Data row, the moment the finisher presses the button.
 	//
-	// SIX STAMPS, SIX CALLS, NOTHING HELD IN THE BROWSER. That is the whole
+	// FINISHING IS TWO STAGES, THREAD CUTTING THEN PRESSING, AND IT RUNS BEFORE
+	// CHECKING. Folding and branding moved to the packing screen as two ticks on
+	// the Packing record. Folding_* and Branding_* on Finishing_Data are legacy:
+	// they still hold what they held and nothing writes them any more.
+	//
+	// FOUR STAMPS, FOUR CALLS, NOTHING HELD IN THE BROWSER. That is the whole
 	// reason this exists. The times used to be accumulated in page state and sent
-	// in one payload when branding closed; anything that ended the page before
+	// in one payload when the last stage closed; anything that ended the page before
 	// then threw the shift away. Custom API calls from a widget are not metered,
 	// so there is no reason to batch them.
 	//
@@ -44,7 +49,7 @@ string saveFinishingStage(string payloadJson)
 			return "{\"success\":false,\"error\":\"Missing or invalid finishingId\"}";
 		}
 
-		if(stageTxt != "folding" && stageTxt != "pressing" && stageTxt != "branding")
+		if(stageTxt != "threadcutting" && stageTxt != "pressing")
 		{
 			return "{\"success\":false,\"error\":\"Unknown stage '" + stageTxt.replaceAll("\"","'") + "'\"}";
 		}
@@ -65,13 +70,13 @@ string saveFinishingStage(string payloadJson)
 			rowFound = true;
 			rowStatus = ifnull(fdChk.Finishing_Status,"").toString().trim();
 
-			if(stageTxt == "folding" && eventTxt == "start" && fdChk.Folding_Start_Time != null)
+			if(stageTxt == "threadcutting" && eventTxt == "start" && fdChk.Thread_Cutting_Start_Time != null)
 			{
-				existingTxt = fdChk.Folding_Start_Time.toString();
+				existingTxt = fdChk.Thread_Cutting_Start_Time.toString();
 			}
-			else if(stageTxt == "folding" && eventTxt == "end" && fdChk.Folding_End_Time != null)
+			else if(stageTxt == "threadcutting" && eventTxt == "end" && fdChk.Thread_Cutting_End_Time != null)
 			{
-				existingTxt = fdChk.Folding_End_Time.toString();
+				existingTxt = fdChk.Thread_Cutting_End_Time.toString();
 			}
 			else if(stageTxt == "pressing" && eventTxt == "start" && fdChk.Pressing_Start_Time != null)
 			{
@@ -80,14 +85,6 @@ string saveFinishingStage(string payloadJson)
 			else if(stageTxt == "pressing" && eventTxt == "end" && fdChk.Pressing_End_Time != null)
 			{
 				existingTxt = fdChk.Pressing_End_Time.toString();
-			}
-			else if(stageTxt == "branding" && eventTxt == "start" && fdChk.Branding_Start_Time != null)
-			{
-				existingTxt = fdChk.Branding_Start_Time.toString();
-			}
-			else if(stageTxt == "branding" && eventTxt == "end" && fdChk.Branding_End_Time != null)
-			{
-				existingTxt = fdChk.Branding_End_Time.toString();
 			}
 		}
 
@@ -112,13 +109,13 @@ string saveFinishingStage(string payloadJson)
 
 		for each  fdSet in Finishing_Data[ID == finId]
 		{
-			if(stageTxt == "folding" && eventTxt == "start")
+			if(stageTxt == "threadcutting" && eventTxt == "start")
 			{
-				fdSet.Folding_Start_Time = stampTxt;
+				fdSet.Thread_Cutting_Start_Time = stampTxt;
 			}
-			else if(stageTxt == "folding" && eventTxt == "end")
+			else if(stageTxt == "threadcutting" && eventTxt == "end")
 			{
-				fdSet.Folding_End_Time = stampTxt;
+				fdSet.Thread_Cutting_End_Time = stampTxt;
 			}
 			else if(stageTxt == "pressing" && eventTxt == "start")
 			{
@@ -127,14 +124,6 @@ string saveFinishingStage(string payloadJson)
 			else if(stageTxt == "pressing" && eventTxt == "end")
 			{
 				fdSet.Pressing_End_Time = stampTxt;
-			}
-			else if(stageTxt == "branding" && eventTxt == "start")
-			{
-				fdSet.Branding_Start_Time = stampTxt;
-			}
-			else if(stageTxt == "branding" && eventTxt == "end")
-			{
-				fdSet.Branding_End_Time = stampTxt;
 			}
 		}
 

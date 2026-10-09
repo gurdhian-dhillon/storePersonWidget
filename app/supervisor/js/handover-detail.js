@@ -812,7 +812,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = HandoverDe
         Awaiting_Material: { text: 'No material yet', cls: 'status-partial' },
         Ready_For_Production: { text: 'Ready to cut', cls: 'status-info' },
         In_Production: { text: 'In production', cls: 'status-washing' },
-        Awaiting_Check: { text: 'Awaiting check', cls: 'status-partial' },
+        // Neutral on purpose: this screen reads Plan_Item straight from the
+        // database and has no Finishing_Data feed, so it cannot say whether the
+        // batch is in finishing (the supervisor's) or with the checking team
+        // (somebody else). "Production finished" is true of both.
+        Awaiting_Check: { text: 'Production finished', cls: 'status-partial' },
         Complete: { text: 'Complete', cls: 'status-done' }
     };
     function itemStatus(s) {

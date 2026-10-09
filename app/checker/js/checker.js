@@ -1,5 +1,8 @@
-// The checking screen. One job: take a batch that has finished production and
-// split it three ways — approved, rejected, alteration.
+// The checking screen. One job: take a batch that has finished production AND
+// finishing (thread cutting, pressing - getCheckingQueue only offers it once
+// Finishing_Data reads Done) and split it three ways - approved, rejected,
+// alteration. What it approves goes to packing, where it is folded, branded
+// and boxed.
 //
 // Creator JS API v2 (ZOHO.CREATOR.DATA.invokeCustomApi, no init()), ES5-flavoured
 // var/function to match main.js and the other widgets.

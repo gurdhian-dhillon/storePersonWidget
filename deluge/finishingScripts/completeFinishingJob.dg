@@ -4,38 +4,28 @@ string completeFinishingJob(string payloadJson)
 	// - and then asks the order whether that was the last batch it was waiting
 	// for.
 	//
+	// FINISHING RUNS BEFORE CHECKING NOW, so the row belongs to a Plan_Item, not
+	// to an Item_Check. Closing it is what releases the batch to the checker:
+	// getCheckingQueue offers a batch only once its Finishing_Data reads Done.
+	//
 	// IT NO LONGER INSERTS. startFinishingJob opens the row when the first stage
 	// starts and saveFinishingStage stamps each sub-stage as it happens; by the
-	// time this runs, everything except the branding end and the closing figures
-	// is already on the record. The version this replaces created the row here,
-	// from six timestamps the browser had been holding for the length of the job.
+	// time this runs, everything except the pressing end and the closing figures
+	// is already on the record.
 	//
-	// IT DOES NOT TOUCH Plan_Item.Item_Status, AND THAT IS THE POINT.
+	// IT DOES NOT TOUCH Plan_Item.Item_Status, AND THAT IS THE POINT. The batch
+	// stays at Awaiting_Check from the end of production until saveItemCheck
+	// writes Complete, and "finished" is Finishing_Data carrying Finishing_Status
+	// == "Done". Earlier versions wrote an off-picklist "Finishing Done" there and
+	// stopped the plan and the order from ever completing. One fact, one place,
+	// nothing to drift.
 	//
-	// It used to write Item_Status = "Finishing Done" - a value that is not on
-	// that field's picklist and not even in its spelling style. That field
-	// belongs to the production-to-checking lifecycle and three readers test it
-	// for exactly the word "Complete":
-	//
-	//   recheckOrderComplete  - anything else means "still being made", so a
-	//                           finished item stopped the ORDER ever reaching
-	//                           Checking Passed.
-	//   saveProductionPhase   - anything but Complete/Awaiting_Check means the
-	//                           PLAN is not done, so the plan stayed at In
-	//                           Progress for ever, on the supervisor's board and
-	//                           in the store's issue list, with no work left on it.
-	//   getSalesOrderProgress - stopped counting the item as complete.
-	//
-	// Nothing replaced it because nothing needed to: Finishing_Data carrying
-	// Finishing_Status == "Done" IS "this batch is finished", and that is the
-	// test every other reader uses. Done means done; anything else means the job
-	// is still open. One fact, one place, nothing to drift.
-	//
-	// QTY_FINISHED IS READ FROM THE CHECK, NOT FROM THE PAYLOAD. What was
-	// approved is what goes to packing; a figure the screen could set is a figure
-	// that can disagree with the inspection that produced it. Finishing has no
-	// way to record a piece ruined at the press - see the review; that needs its
-	// own shortfall capture, the way a production stage has one.
+	// QTY_FINISHED IS READ FROM THE BATCH, NOT FROM THE PAYLOAD. What production
+	// made is what goes to the checker; a figure the screen could set is a figure
+	// that can disagree with the batch it belongs to. Finishing has no way to
+	// record a piece ruined at the press - that would need its own shortfall
+	// capture, the way a production stage has one. The checker rejects it
+	// instead and the batch is remade.
 	//
 	// IDEMPOTENT. A row that is already closed returns success without writing
 	// again, and the order is still re-evaluated - so a retry after a lost
@@ -58,18 +48,18 @@ string completeFinishingJob(string payloadJson)
 
 		rowFound = false;
 		rowStatus = "";
-		checkId = null;
-		brandingEndSet = false;
+		itemId = null;
+		pressingEndSet = false;
 
 		for each  fdChk in Finishing_Data[ID == finId]
 		{
 			rowFound = true;
 			rowStatus = ifnull(fdChk.Finishing_Status,"").toString().trim();
-			checkId = fdChk.Item_Check;
+			itemId = fdChk.Plan_Item;
 
-			if(fdChk.Branding_End_Time != null)
+			if(fdChk.Pressing_End_Time != null)
 			{
-				brandingEndSet = true;
+				pressingEndSet = true;
 			}
 		}
 
@@ -78,36 +68,34 @@ string completeFinishingJob(string payloadJson)
 			return "{\"success\":false,\"error\":\"No Finishing_Data " + finId + "\"}";
 		}
 
-		if(checkId == null)
+		if(itemId == null)
 		{
-			return "{\"success\":false,\"error\":\"Finishing_Data " + finId + " has no Item_Check behind it\"}";
+			return "{\"success\":false,\"error\":\"Finishing_Data " + finId + " has no Plan_Item behind it\"}";
 		}
 
-		// The batch, the plan and the order, resolved once. Item_Check.Sales_Order
-		// is only stamped when saveItemCheck could resolve one, so the plan is the
-		// fallback: without it a check that missed it can never move its order to
-		// Finishing Complete, the order never reaches the packing queue, and
-		// nothing anywhere says why.
-		checkQty = 0;
+		// The batch, its plan and the plan's order, resolved once. The order comes
+		// through the plan - Production_Planning.Sales_Order - because that is the
+		// one link every batch has.
+		batchQty = 0;
 		planId = null;
 		orderId = null;
 
-		for each  chk in Item_Check[ID == checkId]
+		for each  pi in Plan_Item[ID == itemId]
 		{
-			checkQty = ifnull(chk.Qty_Approved,0).toLong();
-
-			if(chk.Plan != null)
+			prodS = ifnull(pi.Qty_Produced,"0").toString().trim();
+			if(prodS == "")
 			{
-				planId = chk.Plan;
+				prodS = "0";
 			}
+			batchQty = prodS.toDecimal().toLong();
 
-			if(chk.Sales_Order != null)
+			if(pi.Plan != null)
 			{
-				orderId = chk.Sales_Order;
+				planId = pi.Plan;
 			}
 		}
 
-		if(orderId == null && planId != null)
+		if(planId != null)
 		{
 			for each  plF in Production_Planning[ID == planId]
 			{
@@ -126,16 +114,17 @@ string completeFinishingJob(string payloadJson)
 
 			for each  fdSet in Finishing_Data[ID == finId]
 			{
-				// Stamped here rather than in a separate saveFinishingStage call,
-				// so the last press is one round trip and there is no window in
-				// which the branding end is recorded but the job is still open.
-				if(brandingEndSet == false)
+				// Pressing is the last stage, and the last press is one round
+				// trip: stamped here rather than in a separate saveFinishingStage
+				// call, so there is no window in which the pressing end is
+				// recorded but the job is still open.
+				if(pressingEndSet == false)
 				{
-					fdSet.Branding_End_Time = endStampTxt;
+					fdSet.Pressing_End_Time = endStampTxt;
 				}
 
 				fdSet.Finishing_End_Time = zoho.currenttime;
-				fdSet.Qty_Finished = checkQty;
+				fdSet.Qty_Finished = batchQty;
 				fdSet.Finishing_Status = "Done";
 			}
 
@@ -149,10 +138,10 @@ string completeFinishingJob(string payloadJson)
 			// picklist does not offer is not an error in Creator - it simply
 			// does not stick. The other three writes here are a Time, a
 			// Date-Time and a Number and they land regardless, so the symptom is
-			// a batch with all six stamps, a Qty_Finished, and a status that is
-			// still In_Progress: finished work that never leaves the queue, and
-			// an order that can never reach packing, with nothing anywhere
-			// saying why. That is exactly what it did.
+			// a batch with all its stamps, a Qty_Finished, and a status that is
+			// still In_Progress: finished work that never leaves the finishing
+			// queue and never reaches the checker, with nothing anywhere saying
+			// why.
 			//
 			// One extra query per completed job to turn a silent corruption into
 			// a message naming the cause.
@@ -171,11 +160,9 @@ string completeFinishingJob(string payloadJson)
 		}
 
 		// THE ORDER IS RECOMPUTED BY recheckOrderComplete, which owns both
-		// "Checking Passed" and "Finishing Complete" in one pass. There is no
-		// separate finishing recheck any more: a pair of functions that had to be
-		// called in the right order was one more thing to get wrong, and calling
-		// one from the other put two levels of thisapp between saveItemCheck and
-		// the finishing test.
+		// "Finishing Complete" and "Checking Passed" in one pass - a batch
+		// finishing may be the last thing the order was waiting for to reach
+		// Finishing Complete.
 		//
 		// Run for a retry as well as a first close. If the previous attempt wrote
 		// the row and then lost the response, the order still has to be asked -
@@ -191,15 +178,15 @@ string completeFinishingJob(string payloadJson)
 			verdict = thisapp.recheckOrderComplete(orderId.toString());
 		}
 
-		info "completeFinishingJob: finishing " + finId + " (check " + checkId + ", qty " + checkQty + ", closedNow=" + closedNow + ") -> " + verdict;
+		info "completeFinishingJob: finishing " + finId + " (item " + itemId + ", qty " + batchQty + ", closedNow=" + closedNow + ") -> " + verdict;
 
-		msgTxt = "Finished " + checkQty + " pieces";
+		msgTxt = "Finished " + batchQty + " pieces";
 		if(closedNow == false)
 		{
 			msgTxt = "This batch was already recorded as finished";
 		}
 
-		res = "{\"success\":true,\"finishingId\":\"" + finId + "\",\"qty\":" + checkQty + ",\"closedNow\":" + closedNow + ",\"message\":\"" + msgTxt + "\"}";
+		res = "{\"success\":true,\"finishingId\":\"" + finId + "\",\"qty\":" + batchQty + ",\"closedNow\":" + closedNow + ",\"message\":\"" + msgTxt + "\"}";
 	}
 	catch (e)
 	{

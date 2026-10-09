@@ -75,8 +75,8 @@ These are not style preferences. Each one caused a real bug in this app.
 | Form . Field | Style | Values |
 |---|---|---|
 | `Production_Planning.Order_Status` | spaces | `Pending`, `Material Ready`, `Partially Received`, `In Progress`, `Production Complete` |
-| `Sales_Order.Order_Status` | spaces | `Pending`, `In Progress`, `Production Complete`, `Checking Passed`, `Finishing Complete`, `Packed`, `Dispatched` |
-| `Plan_Item.Item_Status` | underscores | `Awaiting_Material`, `Ready_For_Production`, `In_Production`, `Awaiting_Check`, `Complete` — **finishing does not write here**, see the post-checking section |
+| `Sales_Order.Order_Status` | spaces | `Pending`, `In Progress`, `Production Complete`, `Finishing Complete`, `Checking Passed`, `Packed`, `Dispatched` — **finishing now comes BEFORE checking** |
+| `Plan_Item.Item_Status` | underscores | `Awaiting_Material`, `Ready_For_Production`, `In_Production`, `Awaiting_Check`, `Complete` — **finishing does not write here**, see the finishing-then-checking section |
 | `Finishing_Data.Finishing_Status` | underscores | `In_Progress`, `Done` — **only `Done` closes a batch**; anything else means the job is still open |
 | `Plan_Item.Remake_Reason` | underscores | `Production_Loss`, `Check_Reject`, `Alteration` |
 | `Material_Requirement.Source` | underscores | `Plan`, `Reissue`, `Check_Remake`, `Production_Remake`, `Alteration` |
@@ -556,7 +556,7 @@ currently marked `Occupied` will stay that way for ever. `Machine_Master.Applica
 longer one of the places a new stage name has to be added.
 
 **Sales order statuses** (`Sales_Order.Order_Status`, a different field):
-`Pending → In Progress → Production Complete → Checking Passed → Finishing Complete → Packed → Dispatched`.
+`Pending → In Progress → Production Complete → Finishing Complete → Checking Passed → Packed → Dispatched`.
 `Pending` **is** the plan-builder's queue — `createProductionPlans` takes every Pending order,
 plans it, and moves it to In Progress. An order it cannot plan keeps its status and is retried.
 
@@ -574,63 +574,82 @@ order would complete when the *first* one did.
 Both fields carry the words `Production Complete`. That is the seam, not one field seen twice —
 always check which form a query is against.
 
-**AFTER CHECKING, THE PLAN IS OVER AND ONLY THE ORDER MOVES.** Finishing and packing are done by
-other people, on their own widgets, and neither writes anything on `Production_Planning` or
-`Plan_Item`. Three statuses, three writers, each forward only:
+**THE LINE AFTER PRODUCTION IS FINISHING, THEN CHECKING, THEN PACKING — AND ONLY THE ORDER MOVES.**
+Thread cutting and pressing happen on the finishing widget, the checker then judges what was
+finished, and folding, branding and boxing happen on the packing widget. (This was swapped:
+checking used to come first and finishing — folding, pressing, branding — after it.) None of the
+three writes anything on `Production_Planning`, and finishing and packing write nothing on
+`Plan_Item` either. Three statuses, three writers, each forward only:
 
 | Status | Written by | Only from |
 |---|---|---|
-| `Checking Passed` | `recheckOrderComplete` | `Production Complete`, `In Progress` |
-| `Finishing Complete` | `recheckOrderComplete`, same pass | `Checking Passed` |
-| `Packed` | `savePackingRecord` | `Finishing Complete` |
+| `Finishing Complete` | `recheckOrderComplete` | `Production Complete`, `In Progress` |
+| `Checking Passed` | `recheckOrderComplete`, same pass | `Finishing Complete` (and the two above, so a lost finishing close cannot strand it) |
+| `Packed` | `savePackingRecord` | `Checking Passed` |
 
-> **`recheckOrderComplete` owns both post-production statuses, in one pass.** The finishing test
-> briefly lived in its own `recheckFinishingComplete`, called from here — which put **two levels of
-> `thisapp`** between `saveItemCheck` and the finishing test, something nothing else in this app
-> does. Folding it in removes that question and the ordering problem with it: there is no longer a
-> pair of functions that must be called in the right sequence for an order to reach packing.
-> `completeFinishingJob` calls `recheckOrderComplete` too. **Every caller is exactly one level deep.**
+> **`Finishing Complete` MEANS EVERY BATCH IS OFF THE FLOOR AND FINISHED; `Checking Passed` MEANS
+> EVERY ITEM IS `Complete` AND THE QUANTITY IS ACCEPTED.** `recheckOrderComplete` decides both, in
+> one pass, and every caller is exactly one level deep. Finishing's test has **no quantity half**
+> — a piece lost in production becomes a `Production_Loss` batch at `Awaiting_Material`, which
+> holds the order in production for the same reason it always did, so quantity is already
+> enforced by the batches; counting accepted pieces is the checker's test. `Short_Closed` forgives
+> the quantity test and nothing else.
+>
+> **THE ONE BACKWARD MOVE.** A rejection or an alteration opens a new batch, and `saveItemCheck`
+> pulls the order back to `In Progress` **from `Production Complete` or `Finishing Complete`** —
+> with finishing first, the order is usually already at `Finishing Complete` while the inspector
+> works through the batches. The remake then runs the whole line again (production, finishing,
+> checking) and the order walks forward a second time. That pull-back is `saveItemCheck`'s own
+> write; `recheckOrderComplete` itself never moves anything backwards.
 
 > **FINISHING MUST NOT TOUCH `Plan_Item.Item_Status`.** It used to write `Finishing Done` there —
-> off-picklist, wrong spelling style — and three readers test that field for exactly `Complete`:
-> `recheckOrderComplete` (so the order could never reach `Checking Passed`),
-> `saveProductionPhase`'s all-items-done test (so the **plan** stayed `In Progress` for ever, on the
-> supervisor's board and in the store's issue list with no work left on it), and
-> `getSalesOrderProgress`. The two bugs cancelled: the finishing recheck had a guard whose
-> `else if` chain closed before the block it was meant to protect, so every path fell through to
-> the write and dragged the order to `Finishing Complete` from wherever it was — including from
-> `Packed` and `Dispatched`, which put it in front of the packer twice.
+> off-picklist, wrong spelling style — and three readers test that field for exactly `Complete`,
+> so the order could never pass, the **plan** stayed `In Progress` for ever and
+> `getSalesOrderProgress` stopped counting the item. A batch stays at `Awaiting_Check` from the
+> end of production until `saveItemCheck` writes `Complete`; **`Awaiting_Check` now means
+> "production is over", not "ready to inspect"**. Which of finishing or checking it is waiting
+> for is told by its `Finishing_Data` row.
 >
-> **There is nothing to replace that write with, because the state was never missing.**
-> **"This batch is finished" is `Finishing_Data[Item_Check == id]` with
+> **"This batch is finished" is `Finishing_Data[Plan_Item == id]` with
 > `Finishing_Status == "Done"`** — five functions ask it (`getFinishingItems`,
-> `getFinishingHistory`, `recheckOrderComplete`, `getPackingQueue`, `getPackingDetails`) and
-> they must keep asking the same one.
+> `getFinishingHistory`, `getCheckingQueue`, `saveItemCheck`, `recheckOrderComplete`) and they must
+> keep asking the same one. Packing does **not** ask it: an `Item_Check` with pieces approved can
+> only exist for a finished batch, because `saveItemCheck` refuses any other, so packing reads
+> `Qty_Approved` alone.
 >
 > **DONE MEANS DONE; ANYTHING ELSE MEANS THE JOB IS STILL OPEN.** One rule, no third case, and it
-> decides which way all six fail. A row carrying neither value — hand-made, a mistyped dropdown
-> choice, a write that half landed — reads as *unfinished*: the batch stays on the queue where
-> somebody can see it and the order stops short of packing. `!= "In_Progress"` fails the other
-> way, silently calling that row finished and walking the order through with a batch nobody
-> folded. The three writers apply the same rule from the other side — `startFinishingJob` reuses
-> any non-`Done` row rather than adding a second one next to it.
+> decides which way they all fail. A row carrying neither value — hand-made, a mistyped dropdown
+> choice, a write that half landed — reads as *unfinished*: the batch stays on the finishing queue
+> where somebody can see it and the checker never receives it. `!= "In_Progress"` fails the other
+> way, silently handing the checker a batch nobody pressed. The writers apply the same rule from
+> the other side — `startFinishingJob` reuses any non-`Done` row rather than adding a second one.
 
-**Finishing is per BATCH, so it usually finishes before the order passes checking.** A finisher can
-start the moment a check approves something, while other lines are still being cut. That is why
-`recheckOrderComplete` runs the finishing test on **every** pass, not only when it writes
-`Checking Passed`. Only on the transition would strand an order that was already `Checking Passed`
-when its last batch finished; only on the finishing side would strand one whose last event was a
-**check** — a batch that produced nothing, a short close. Both, or an order sits fully folded and
-never reaches the packing queue. **`Short_Closed` forgives the quantity test in both halves**, for
-the same reason — it is an answer about quantity, not a statement that unfinished work has stopped.
+**`saveItemCheck` ENFORCES IT SERVER-SIDE, not only the checker's queue.** A Custom API is
+callable from anywhere, so the queue hiding an unfinished batch is not the same as it being
+refused. A batch with no `Done` finishing row cannot be checked.
 
-**`Finishing_Data` is the `Stage_Log` of finishing**: one row per `Item_Check`, opened by
-`startFinishingJob` when the first stage starts, stamped a stage at a time by `saveFinishingStage`,
-closed by `completeFinishingJob`. **Every stamp is the server's clock, taken at the press.** The
-widget used to hold all six times in page state until branding closed, so a refresh, a closed tab
-or a shift handover lost the job; and one card merged every check sharing an item *name* — a root,
-its remake and its alteration batch — stamping all of them with one identical set of times.
-**One card per `Item_Check`, which is one pile of garments inspected together.**
+**`Finishing_Data` is the `Stage_Log` of finishing**: one row per **`Plan_Item`** (one production
+batch — a root line, a remake or an alteration batch, each of which is checked exactly once, so
+each is finished exactly once), opened by `startFinishingJob` when the first stage starts, stamped a
+stage at a time by `saveFinishingStage`, closed by `completeFinishingJob`. **Every stamp is the
+server's clock, taken at the press.** Two stages, **thread cutting then pressing**
+(`Thread_Cutting_*`, `Pressing_*`); `Folding_*` and `Branding_*` and `Item_Check` on the form are
+legacy, still holding what they held and no longer written. **`Finishing_Data.Plan`** (a lookup to
+`Production_Planning`, stamped by `startFinishingJob`) exists so `getCheckingQueue` and
+`recheckOrderComplete` can read "which batches of this plan are finished" in ONE query per plan —
+a query per batch inside a loop that already walks every batch is the shape that hits the
+uncatchable statement limit, and every finished batch re-runs the recheck. A batch is offered the moment
+production closes its last stage (`Awaiting_Check`, `Qty_Produced > 0`) and `Qty_Finished` is read
+from `Plan_Item.Qty_Produced`. An alteration batch and a remake come back through finishing on
+their own, being Plan_Items like any other.
+
+**FOLDING AND BRANDING ARE TWO TICKS ON THE PACKING RECORD, NOT STAGES.** `savePackingRecord`
+refuses unless both are ticked and stores them as `Packing.Is_Folded` / `Is_Branded`. They carry no
+times. The packing itself is timed once, as a whole: the packer presses **Start packing**
+(`startPacking`, which stamps `Sales_Order.Packing_Started_On` — the Packing record does not exist
+until the one save at the end, so the order carries it), and the save copies it to
+`Packing_Start_Time` and stamps `Packing_End_Time`. Both are the server's clock; no start time
+means the save is refused.
 
 `Item_Check.Sales_Order` is only stamped where `saveItemCheck` could resolve one, so anything that
 needs the order from a check must fall back through `Item_Check.Plan → Production_Planning`.
@@ -752,15 +771,15 @@ Three, all Creator JS API **v2** — `ZOHO.CREATOR.DATA.invokeCustomApi`, **no `
 | `app/supervisor/` | Supervisor — `shell.js` owns tabs + the shared picker; `receive.js`, `production.js`, `tabs.js` |
 | `app/admin/` | Calculation audit — shows the working behind the fabric maths |
 | `app/checker/` | Checking — the inspection queue and `saveItemCheck` |
-| `app/finishing/` | Finishing — folding / pressing / branding |
-| `app/packing/` | Packing — supervisor picker, orders as an accordion, one card per box |
+| `app/finishing/` | Finishing — thread cutting / pressing (runs before checking) |
+| `app/packing/` | Packing — Start packing, folded/branded ticks, supervisor picker, orders as an accordion, one card per box |
 | `app/admin/anotherPage/` | Production & Stock Dashboard — Sales order pipeline / Employee report / Raw materials / Disputes |
 
 > **THE SALES ORDER PIPELINE PLACES EVERY PIECE; IT NEVER GUESSES.** `pipeline-data.js` (getRecords
 > joins) puts each Plan_Item's pieces in exactly one of: waiting for material, ready to start, in
-> production (by open stage), waiting for checking, passed/waiting for finishing, in finishing,
-> finished — from `Item_Status`, `Stage_Log`, `Item_Check` (inspected/approved/rejected/altered) and
-> `Finishing_Data` (**Done means done**). Rejected, lost and altered pieces leave their flow and
+> production (by open stage), waiting for finishing, in finishing, waiting for checking, checked and
+> ready to pack — from `Item_Status`, `Stage_Log`, `Item_Check` (inspected/approved/rejected/altered)
+> and `Finishing_Data` (**Done means done**, read per `Plan_Item` — finishing is before checking). Rejected, lost and altered pieces leave their flow and
 > reappear as the target of the batch that replaces them, so a line's places add back to what was
 > ordered; what does not on a short-closed order is what was deliberately not made. A flow whose
 > production is over (`Complete` / `Awaiting_Check`) with pieces unaccounted counts them **lost**,
@@ -867,9 +886,9 @@ was tested and retracted.
 > zero, every inner above zero when an inner was used) instead of overriding them from the master,
 > which is what it used to do.
 
-> **EVERY FINISHED PIECE MUST BE IN A BOX** before packing saves — enforced in
+> **EVERY CHECKED PIECE MUST BE IN A BOX** before packing saves — enforced in
 > `savePackingRecord`, not only on screen, because a Custom API is callable from anywhere. The
-> finished figure is recomputed from `Item_Check` + `Finishing_Data` rather than trusted from the
+> accepted figure is recomputed from `Item_Check` (`Qty_Approved`) rather than trusted from the
 > payload, using the same walk `getPackingDetails` does, so packing can never disagree with the
 > status that let it be packed. **The SKU, the name and the unit weight are resolved server-side
 > from the order line too** — the payload carries only a line number and a quantity, so nothing
@@ -1143,9 +1162,11 @@ blow the statement limit at 111 plans even after the `matPlanIdx` fix, confirmed
   where the app currently stops.
 - **Dispatch has nothing to read yet.** Packing now records every carton, but nothing shows the
   dispatch person the box list, weights and volumetric weights, and nothing writes `Dispatched`.
-- **Finishing has no shortfall capture.** `Qty_Finished` is always `Item_Check.Qty_Approved`. A
-  piece scorched at the press has nowhere to go, and there is no undo once a job is closed —
-  unlike a production stage, which prompts for damage when fewer come out than went in.
+- **Finishing has no shortfall capture.** `Qty_Finished` is always `Plan_Item.Qty_Produced`. A
+  piece scorched at the press has nowhere to go inside finishing and there is no undo once a job is
+  closed — but it is no longer silent: finishing is now before checking, so the checker sees the
+  piece and rejects it, and the batch is remade. Unlike a production stage, finishing does not
+  prompt for damage when fewer come out than went in.
 - **`packingAutoPopulate` must be DELETED in Creator.** It is a `Packing` form workflow that
   clears and rebuilds `Packing_Items` from `Plan_Item.Qty_Accepted` - a different number from the
   one the widget boxes, and a second writer of a subform that now has one.

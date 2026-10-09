@@ -208,14 +208,26 @@ string closeAlterationBatch(string payloadJson)
 		// applies: a status that has moved on is not this function's to move
 		// back.
 		//
-		// Awaiting_Check is deliberately NOT refused. The check has not happened
-		// yet, so a supervisor correcting the number he declared five minutes
-		// ago is honest bookkeeping, and refusing it would leave him no way to
-		// fix a typo except a data edit nobody would see.
+		// Awaiting_Check IS REFUSED TOO, and it used to be deliberately allowed.
+		// The reasoning was that the check had not happened yet, so correcting
+		// a number declared five minutes ago was honest bookkeeping. That held
+		// while Awaiting_Check meant "waiting for the inspector". Finishing now
+		// runs between this and the inspector, so Awaiting_Check means the batch
+		// has been SENT ON: it is on the finishing queue, may be under the press,
+		// and Finishing_Data.Qty_Finished is copied from Qty_Produced when that
+		// job closes. Re-declaring here changes the batch underneath finishing
+		// and the checker. A wrong figure now has to be corrected by a data
+		// edit in Creator, which is visible, rather than by a button press that
+		// is not.
 		//------------------------------------------------------------------
 		if(statusNow == "Complete")
 		{
 			return "{\"success\":false,\"code\":\"BATCH_CLOSED\",\"error\":\"" + itemNameTxt + " is already Complete. Its quantities cannot be re-declared.\"}";
+		}
+
+		if(statusNow == "Awaiting_Check")
+		{
+			return "{\"success\":false,\"code\":\"ALREADY_SENT\",\"error\":\"" + itemNameTxt + " has already been declared finished and sent on for finishing and checking. It cannot be declared again.\"}";
 		}
 
 		if(openCount > 0)

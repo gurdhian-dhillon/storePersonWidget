@@ -53,7 +53,7 @@ const T = {
         { ID: 'a3', Plan: L('11'), Line_No: 2, Item_Name: 'Sheet', Item_Sku: L('s', 'SHT-1'), Item_Status: 'Awaiting_Check', Qty_Ordered: 6, Qty_Produced: 4 },
         { ID: 'a4', Plan: L('11'), Line_No: 2, Item_Name: 'Sheet', Is_Remake: true, Remake_Reason: 'Production_Loss', Item_Status: 'Awaiting_Material', Qty_Ordered: 2, Qty_Produced: 0 },
         { ID: 'a5', Plan: L('11'), Line_No: 3, Item_Name: 'Napkin', Item_Sku: L('s', 'NAP-1'), Item_Status: 'In_Production', Qty_Ordered: 20, Qty_Produced: 0 },
-        // SO-B: 5 passed checking, finishing open.
+        // SO-B: 5 finished, checked and approved - ready to pack.
         { ID: 'b1', Plan: L('12'), Line_No: 1, Item_Name: 'Tablecloth', Item_Status: 'Complete', Qty_Ordered: 5, Qty_Produced: 5 },
         // SO-C: 20 ordered, 18 made, the loss batch cancelled by short close.
         { ID: 'c1', Plan: L('13'), Line_No: 1, Item_Name: 'Napkin', Item_Status: 'Complete', Qty_Ordered: 20, Qty_Produced: 18 },
@@ -75,11 +75,14 @@ const T = {
         { ID: 'k3', Plan: L('13'), Plan_Item: L('c1'), Qty_Approved: 18, Qty_Rejected: 0, Qty_Alteration: 0 },
         { ID: 'k4', Plan: L('14'), Plan_Item: L('p1'), Qty_Approved: 10, Qty_Rejected: 0, Qty_Alteration: 0 }
     ],
+    // Finishing runs BEFORE checking, so a Finishing_Data row belongs to the
+    // production batch (Plan_Item). a3 is finished and waiting for the checker.
     Finishing_Data_Report: [
-        { Item_Check: L('k1'), Finishing_Status: 'Done' },
-        { Item_Check: L('k2'), Finishing_Status: 'In_Progress' },
-        { Item_Check: L('k3'), Finishing_Status: 'Done' },
-        { Item_Check: L('k4'), Finishing_Status: 'Done' }
+        { Plan_Item: L('a1'), Finishing_Status: 'Done' },
+        { Plan_Item: L('a3'), Finishing_Status: 'Done' },
+        { Plan_Item: L('b1'), Finishing_Status: 'Done' },
+        { Plan_Item: L('c1'), Finishing_Status: 'Done' },
+        { Plan_Item: L('p1'), Finishing_Status: 'Done' }
     ],
     Material_Requirement_Report: []
 };
@@ -162,8 +165,8 @@ const tick = () => new Promise(r => setTimeout(r, 30));
     check('the 22 are all at Stitching', A.pos.stages.Stitching && A.pos.stages.Stitching.qty === 22);
     check('8 of 36 finished = 22%', A.finishedQty === 8 && A.pct === 22);
     const B = run('PIPE.orders.active.filter(function (o) { return o.salesOrder === "SO-B"; })[0]');
-    check('SO-B: 5 passed checking are IN FINISHING, not "in QC queue"',
-        B.pos.inFinishing === 5 && B.pos.awaitingCheck === 0, JSON.stringify(B.pos));
+    check('SO-B: 5 checked pieces are READY TO PACK, not still in finishing or checking',
+        B.pos.finished === 5 && B.pos.inFinishing === 0 && B.pos.awaitingCheck === 0, JSON.stringify(B.pos));
 
     console.log('\nTHE EXPAND:');
     const detA = run('plDetailHtml(PIPE.orders.active.filter(function (o) { return o.salesOrder === "SO-A"; })[0])');

@@ -31,11 +31,18 @@ var OV_OVERDUE_ONLY = false;    // "Overdue" toggle chip
 //
 // The ITEM status map is the same one production.js renderItemCard uses -
 // kept in step by hand, one product across screens.
-function ovItemStatus(s) {
+function ovItemStatus(s, finishing) {
     if (s === 'Awaiting_Material') return { text: 'No material yet', cls: 'status-partial' };
     if (s === 'Ready_For_Production') return { text: 'Ready to start', cls: 'status-sufficient' };
     if (s === 'In_Production') return { text: 'In production', cls: 'status-washing' };
-    if (s === 'Awaiting_Check') return { text: 'Waiting for checking', cls: 'status-partial' };
+    // Finishing is the supervisor's own and the checking team is somebody else, so
+    // a batch that has left production says which of the two holds it. `finishing`
+    // is "None" / "Open" / "Done" off the batch's Finishing_Data.
+    if (s === 'Awaiting_Check') {
+        if (finishing === 'Done') return { text: 'With the checking team', cls: 'status-info' };
+        if (finishing === 'Open') return { text: 'In finishing', cls: 'status-washing' };
+        return { text: 'Waiting for finishing', cls: 'status-partial' };
+    }
     if (s === 'Complete') return { text: 'Completed', cls: 'status-done' };
     return { text: (s || '').replace(/_/g, ' ') || '—', cls: 'status-partial' };
 }
@@ -376,7 +383,7 @@ function ovBodyHtml(planId) {
     }
 
     var rows = items.map(function (it) {
-        var st = ovItemStatus(it.status);
+        var st = ovItemStatus(it.status, it.finishing);
         return '<tr>' +
             '<td class="material-name-cell">' + itemIdentHtml(it) + '</td>' +
             '<td class="col-num col-strong">' + fmt(it.qty) +

@@ -206,12 +206,19 @@ var CHEV_SVG = '<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/20
     '<path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 // STATUS words the shop floor uses, not the picklist codes.
-function itemStatusLabel(s) {
+function itemStatusLabel(s, finishing) {
+    // Finishing is the supervisor's own and the checking team is somebody else,
+    // so a batch that has left production says which of the two holds it.
+    // `finishing` is "None" / "Open" / "Done" off the batch's Finishing_Data.
+    if (s === 'Awaiting_Check') {
+        if (finishing === 'Done') return 'With the checking team';
+        if (finishing === 'Open') return 'In finishing';
+        return 'Waiting for finishing';
+    }
     return ({
         Awaiting_Material: 'No material yet',
         Ready_For_Production: 'Ready',
         In_Production: 'In production',
-        Awaiting_Check: 'Awaiting check',
         Complete: 'Complete'
     })[s] || (s || '').replace(/_/g, ' ');
 }
@@ -426,7 +433,7 @@ function renderOrderItems(items, m) {
         return '<tr>' +
             '<td>' + itemIdentHtml(it, tag) + '</td>' +
             '<td class="bd-owed">' + owed + '</td>' +
-            '<td><span class="status-pill status-partial">' + escapeHtml(itemStatusLabel(it.status)) + '</span></td>' +
+            '<td><span class="status-pill status-partial">' + escapeHtml(itemStatusLabel(it.status, it.finishing)) + '</span></td>' +
             '</tr>';
     }).join('');
     return '<table class="bd-item-table"><thead><tr>' +

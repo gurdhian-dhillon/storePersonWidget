@@ -208,6 +208,35 @@ string getPackingHistory(string payloadJson)
 					packedOn = pk.Added_Time.toString("dd-MMM-yyyy HH:mm");
 				}
 
+				// The packing session and the two ticks. Packing_Start_Time is
+				// copied from Sales_Order.Packing_Started_On by savePackingRecord
+				// and Packing_End_Time is the moment of the save; both are the
+				// server's clock. A record packed before these fields existed
+				// has neither, so they read empty and the screen shows a dash.
+				startedOn = "";
+				if(pk.Packing_Start_Time != null)
+				{
+					startedOn = pk.Packing_Start_Time.toString("dd-MMM-yyyy HH:mm:ss");
+				}
+
+				endedOn = "";
+				if(pk.Packing_End_Time != null)
+				{
+					endedOn = pk.Packing_End_Time.toString("dd-MMM-yyyy HH:mm:ss");
+				}
+
+				foldedTxt = "false";
+				if(ifnull(pk.Is_Folded,false) == true)
+				{
+					foldedTxt = "true";
+				}
+
+				brandedTxt = "false";
+				if(ifnull(pk.Is_Branded,false) == true)
+				{
+					brandedTxt = "true";
+				}
+
 				//----------------------------------------------------------
 				// THE CONTENTS, read ONCE into a map keyed by box number.
 				// Built as a JSON fragment per box as it goes, so the box loop
@@ -478,7 +507,7 @@ string getPackingHistory(string payloadJson)
 					rowsJson = rowsJson + ",";
 				}
 				// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-				rowsJson = rowsJson + "{\"id\":\"" + pk.ID + "\",\"salesOrder\":\"" + soNo + "\",\"source\":\"" + soSrc + "\",\"planNo\":\"" + planNo + "\",\"supervisorId\":\"" + rowSupKey + "\",\"supervisor\":\"" + rowSupName + "\",\"packedBy\":\"" + packedBy + "\",\"packedOn\":\"" + packedOn + "\",\"boxCount\":" + rowBoxes + ",\"innerBoxCount\":" + rowInnerBoxes + ",\"pieces\":" + rowPieces + ",\"estimatedWeight\":" + totEst + ",\"grossWeight\":" + totGross + ",\"volumetricWeight\":" + totVol + ",\"chargeableWeight\":" + chargeable + ",\"imageCount\":" + imgCount + ",\"texusStatus\":\"" + txStatus + "\",\"texusPackageNo\":\"" + txPkgNo + "\",\"texusError\":\"" + txErr + "\",\"gadInvoiceStatus\":\"" + giStatus + "\",\"gadInvoiceNo\":\"" + giNo + "\",\"gadInvoiceError\":\"" + giErr + "\",\"boxes\":[" + boxesJson + "]}";
+				rowsJson = rowsJson + "{\"id\":\"" + pk.ID + "\",\"salesOrder\":\"" + soNo + "\",\"source\":\"" + soSrc + "\",\"planNo\":\"" + planNo + "\",\"supervisorId\":\"" + rowSupKey + "\",\"supervisor\":\"" + rowSupName + "\",\"packedBy\":\"" + packedBy + "\",\"packedOn\":\"" + packedOn + "\",\"startedOn\":\"" + startedOn + "\",\"endedOn\":\"" + endedOn + "\",\"folded\":" + foldedTxt + ",\"branded\":" + brandedTxt + ",\"boxCount\":" + rowBoxes + ",\"innerBoxCount\":" + rowInnerBoxes + ",\"pieces\":" + rowPieces + ",\"estimatedWeight\":" + totEst + ",\"grossWeight\":" + totGross + ",\"volumetricWeight\":" + totVol + ",\"chargeableWeight\":" + chargeable + ",\"imageCount\":" + imgCount + ",\"texusStatus\":\"" + txStatus + "\",\"texusPackageNo\":\"" + txPkgNo + "\",\"texusError\":\"" + txErr + "\",\"gadInvoiceStatus\":\"" + giStatus + "\",\"gadInvoiceNo\":\"" + giNo + "\",\"gadInvoiceError\":\"" + giErr + "\",\"boxes\":[" + boxesJson + "]}";
 
 				shownCount = shownCount + 1;
 			}

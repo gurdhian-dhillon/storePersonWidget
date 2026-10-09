@@ -100,6 +100,29 @@ string getReceiveItemBreakdown(string planId, string materialId)
 
 				nameTxt = ifnull(pItem.Item_Name,"").toString().replaceAll("\"","'").replaceAll("\r","").replaceAll("\n"," | ").replaceAll("\t"," ");
 				statTxt = ifnull(pItem.Item_Status,"").toString();
+
+				// Which team holds a batch that has left production: "None"
+				// nobody has started finishing it, "Open" it is in finishing,
+				// "Done" it is with the checking team. Empty unless the batch is
+				// at Awaiting_Check, and queried only then. Done means done.
+				finStat = "";
+				if(statTxt.trim() == "Awaiting_Check")
+				{
+					finStat = "None";
+
+					for each  fdRi in Finishing_Data[Plan_Item == pItem.ID]
+					{
+						if(ifnull(fdRi.Finishing_Status,"").toString().trim() == "Done")
+						{
+							finStat = "Done";
+						}
+						else if(finStat != "Done")
+						{
+							finStat = "Open";
+						}
+					}
+				}
+
 				isRmk = ifnull(pItem.Is_Remake,false);
 				rmkWhy = ifnull(pItem.Remake_Reason,"").toString().trim();
 
@@ -107,7 +130,7 @@ string getReceiveItemBreakdown(string planId, string materialId)
 				{
 					itemsJson = itemsJson + ",";
 				}
-				itemsJson = itemsJson + "{\"itemId\":\"" + pItem.ID + "\",\"sku\":\"" + skuTxt + "\",\"size\":\"" + sizeTxt + "\",\"color\":\"" + colorTxt + "\",\"name\":\"" + nameTxt + "\",\"status\":\"" + statTxt + "\",\"isFabric\":" + isFab + ",\"owedQty\":" + owedQty + ",\"owedPieces\":" + owedPcs + ",\"reqPieces\":" + reqPcs + ",\"issuedPieces\":" + issPcs + ",\"isRemake\":" + isRmk + ",\"remakeReason\":\"" + rmkWhy + "\",\"source\":\"" + srcTxt + "\"}";
+				itemsJson = itemsJson + "{\"itemId\":\"" + pItem.ID + "\",\"sku\":\"" + skuTxt + "\",\"size\":\"" + sizeTxt + "\",\"color\":\"" + colorTxt + "\",\"name\":\"" + nameTxt + "\",\"status\":\"" + statTxt + "\",\"finishing\":\"" + finStat + "\",\"isFabric\":" + isFab + ",\"owedQty\":" + owedQty + ",\"owedPieces\":" + owedPcs + ",\"reqPieces\":" + reqPcs + ",\"issuedPieces\":" + issPcs + ",\"isRemake\":" + isRmk + ",\"remakeReason\":\"" + rmkWhy + "\",\"source\":\"" + srcTxt + "\"}";
 			}
 		}
 	}

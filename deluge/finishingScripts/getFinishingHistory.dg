@@ -25,7 +25,10 @@ string getFinishingHistory(string payloadJson)
 	// something the filter introduced; paging per supervisor needs the plan on the
 	// query, which Finishing_Data does not carry.
 	//
-	// THE DURATION MATHS IS WRITTEN ONCE AND RUN THREE TIMES. It used to be
+	// FINISHING IS THREAD CUTTING THEN PRESSING. Folding and branding moved to the
+	// packing screen and are no longer read here.
+	//
+	// THE DURATION MATHS IS WRITTEN ONCE AND RUNS PER STAGE. It used to be
 	// copied out per stage, three near-identical eighty-line blocks, and the
 	// pressing copy had drifted: it read the FOLDING end's minutes
 	// (peSecs = peHour * 3600 + feMin * 60 + peSec) because the variable above it
@@ -74,9 +77,8 @@ string getFinishingHistory(string payloadJson)
 		completedRuns = Finishing_Data[ID != 0] sort by Added_Time desc range from 0 to 49;
 
 		stageNames = List();
-		stageNames.add("folding");
+		stageNames.add("threadcutting");
 		stageNames.add("pressing");
-		stageNames.add("branding");
 
 		for each  run in completedRuns
 		{
@@ -156,18 +158,16 @@ string getFinishingHistory(string payloadJson)
 					}
 
 					//----------------------------------------------------------
-					// The six stamps, gathered by name so the maths below can run
+					// The four stamps, gathered by name so the maths below can run
 					// over them instead of being written out three times.
 					//----------------------------------------------------------
 					startByStage = Map();
 					endByStage = Map();
 
-					startByStage.put("folding",ifnull(run.Folding_Start_Time,"").toString());
-					endByStage.put("folding",ifnull(run.Folding_End_Time,"").toString());
+					startByStage.put("threadcutting",ifnull(run.Thread_Cutting_Start_Time,"").toString());
+					endByStage.put("threadcutting",ifnull(run.Thread_Cutting_End_Time,"").toString());
 					startByStage.put("pressing",ifnull(run.Pressing_Start_Time,"").toString());
 					endByStage.put("pressing",ifnull(run.Pressing_End_Time,"").toString());
-					startByStage.put("branding",ifnull(run.Branding_Start_Time,"").toString());
-					endByStage.put("branding",ifnull(run.Branding_End_Time,"").toString());
 
 					durByStage = Map();
 
@@ -279,9 +279,8 @@ string getFinishingHistory(string payloadJson)
 						+ "\"staff\":\"" + staffName + "\","
 						+ "\"completedOn\":\"" + completedOnTxt + "\","
 						+ "\"stages\":{"
-						+ "\"folding\":{\"start\":\"" + ifnull(startByStage.get("folding"),"").toString() + "\",\"end\":\"" + ifnull(endByStage.get("folding"),"").toString() + "\",\"duration\":" + ifnull(durByStage.get("folding"),"null").toString() + "},"
-						+ "\"pressing\":{\"start\":\"" + ifnull(startByStage.get("pressing"),"").toString() + "\",\"end\":\"" + ifnull(endByStage.get("pressing"),"").toString() + "\",\"duration\":" + ifnull(durByStage.get("pressing"),"null").toString() + "},"
-						+ "\"branding\":{\"start\":\"" + ifnull(startByStage.get("branding"),"").toString() + "\",\"end\":\"" + ifnull(endByStage.get("branding"),"").toString() + "\",\"duration\":" + ifnull(durByStage.get("branding"),"null").toString() + "}"
+						+ "\"threadcutting\":{\"start\":\"" + ifnull(startByStage.get("threadcutting"),"").toString() + "\",\"end\":\"" + ifnull(endByStage.get("threadcutting"),"").toString() + "\",\"duration\":" + ifnull(durByStage.get("threadcutting"),"null").toString() + "},"
+						+ "\"pressing\":{\"start\":\"" + ifnull(startByStage.get("pressing"),"").toString() + "\",\"end\":\"" + ifnull(endByStage.get("pressing"),"").toString() + "\",\"duration\":" + ifnull(durByStage.get("pressing"),"null").toString() + "}"
 						+ "}}";
 				}
 			}

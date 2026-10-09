@@ -1,0 +1,82 @@
+string startPacking(string payloadJson)
+{
+	// Stamps the moment the packer pressed Start packing on one order.
+	//
+	// WHY IT IS A SEPARATE CALL, AND WHY IT LIVES ON THE ORDER. The Packing record
+	// does not exist until savePackingRecord writes it, once, at the end - the whole
+	// order is packed in one sitting. So there is no record to hold a start time
+	// while the packer works, and a time held only in the browser is lost by a
+	// refresh, a closed tab or a tablet going to sleep, which is exactly what
+	// finishing used to suffer from. The stamp therefore goes on
+	// Sales_Order.Packing_Started_On, and savePackingRecord copies it onto the
+	// record as Packing_Start_Time when it saves.
+	//
+	// THE CLOCK IS THE SERVER'S. Nothing here reads a time out of the payload.
+	//
+	// IDEMPOTENT, AND A STAMP IS NEVER MOVED. A second press, a refresh or a second
+	// tablet on the same order returns the stamp already there - moving it would
+	// silently shorten the job. It is reported as alreadyStarted so the screen can
+	// show the original time.
+	//
+	// ONLY AN ORDER THAT IS READY TO PACK. Checking Passed is the one status the
+	// queue offers, so it is the one status that may be started; an order that is
+	// already Packed has a finished record and its start time is history.
+
+	res = "{\"success\":false,\"error\":\"Nothing ran\"}";
+
+	try
+	{
+		inp = payloadJson.toMap();
+		salesIdStr = ifnull(inp.get("salesOrderId"),"").toString().trim();
+
+		if(salesIdStr == "" || salesIdStr.isNumber() == false)
+		{
+			return "{\"success\":false,\"error\":\"Missing or invalid salesOrderId\"}";
+		}
+
+		salesId = salesIdStr.toLong();
+
+		orderFound = false;
+		statusNow = "";
+		existingTxt = "";
+
+		for each  soChk in Sales_Order[ID == salesId]
+		{
+			orderFound = true;
+			statusNow = ifnull(soChk.Order_Status,"").toString().trim();
+
+			if(soChk.Packing_Started_On != null)
+			{
+				existingTxt = soChk.Packing_Started_On.toString("dd-MMM-yyyy HH:mm:ss");
+			}
+		}
+
+		if(orderFound == false)
+		{
+			return "{\"success\":false,\"error\":\"No Sales_Order " + salesId + "\"}";
+		}
+
+		if(statusNow != "Checking Passed")
+		{
+			return "{\"success\":false,\"error\":\"Order is '" + statusNow.replaceAll("\"","'") + "', not 'Checking Passed', so packing cannot be started. Refresh the queue.\"}";
+		}
+
+		if(existingTxt != "")
+		{
+			return "{\"success\":true,\"alreadyStarted\":true,\"startedAt\":\"" + existingTxt + "\"}";
+		}
+
+		for each  soSet in Sales_Order[ID == salesId]
+		{
+			soSet.Packing_Started_On = zoho.currenttime;
+		}
+
+		res = "{\"success\":true,\"alreadyStarted\":false,\"startedAt\":\"" + zoho.currenttime.toString("dd-MMM-yyyy HH:mm:ss") + "\"}";
+	}
+	catch (e)
+	{
+		res = "{\"success\":false,\"error\":\"DELUGE: " + e.toString().replaceAll("\"","'") + "\"}";
+	}
+
+	return res;
+}

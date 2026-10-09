@@ -3,9 +3,12 @@ string getCheckingQueue(string supervisorId)
 	// THE CHECKING QUEUE, SCOPED TO ONE SUPERVISOR. Custom API, POST, one
 	// argument.
 	//
-	// Every Plan_Item sitting at Item_Status == "Awaiting_Check". There is no
-	// handover record between production and checking - the transfer is physical
-	// and the status IS the queue - so this function is the only thing that says
+	// Every Plan_Item sitting at Item_Status == "Awaiting_Check" whose finishing
+	// (thread cutting and pressing) has closed - Finishing_Data Done. Finishing
+	// runs BEFORE checking, so a batch that has come off the floor but is still
+	// being finished is not here yet. There is no handover record between
+	// finishing and checking - the transfer is physical and the status plus the
+	// finishing row ARE the queue - so this function is the only thing that says
 	// work is waiting.
 	//
 	// SCOPED TO THE SUPERVISOR, NOT THE INSPECTOR, and that is a deliberate
@@ -170,6 +173,10 @@ string getCheckingQueue(string supervisorId)
 			// and read back with a string finds nothing, silently.
 			planNoById = Map();
 			planSoById = Map();
+			// plan id -> ",itemId,itemId," for the batches of that plan whose finishing
+			// is Done. One read per plan of his, never one per batch. A comma-framed
+			// string rather than a List so the lookup is a plain contains().
+			finDoneByPlan = Map();
 			planSupById = Map();
 
 			rootOrdById = Map();
@@ -226,6 +233,22 @@ string getCheckingQueue(string supervisorId)
 					planNoById.put(planKey,pNoTxt);
 					planSoById.put(planKey,pSoTxt);
 					planSupById.put(planKey,pSupTxt);
+
+					// Finishing is read for the plans of the supervisor asked for only.
+					doneKeysTxt = ",";
+
+					if(pSupTxt == wantSup && planKey.isNumber())
+					{
+						for each  fdPl in Finishing_Data[Plan == planKey.toLong() && Finishing_Status == "Done"]
+						{
+							if(fdPl.Plan_Item != null)
+							{
+								doneKeysTxt = doneKeysTxt + fdPl.Plan_Item.toString() + ",";
+							}
+						}
+					}
+
+					finDoneByPlan.put(planKey,doneKeysTxt);
 				}
 
 				planNoOut = ifnull(planNoById.get(planKey),"").toString();
@@ -234,10 +257,22 @@ string getCheckingQueue(string supervisorId)
 
 				// STRICT GUARD: Match supervisor ID as text.
 				// Only process items for the requested supervisor.
+				//
+				// AND ONLY A BATCH FINISHING HAS CLOSED. Finishing now runs
+				// BEFORE checking, so Awaiting_Check alone means "production is
+				// over", not "ready to inspect" - the garments may still be
+				// waiting for thread cutting and pressing. A Finishing_Data row
+				// reading Done is the release; anything else, including an open
+				// or hand-made row, keeps the batch off this screen and on the
+				// finishing queue where somebody can see it. Read once per plan of
+				// this supervisor (finDoneByPlan), never once per batch.
 				mineTxt = false;
 				if(supIdTxt == wantSup)
 				{
-					mineTxt = true;
+					if(ifnull(finDoneByPlan.get(planKey),"").toString().contains("," + itm.ID.toString() + ","))
+					{
+						mineTxt = true;
+					}
 				}
 
 				if(mineTxt == true)

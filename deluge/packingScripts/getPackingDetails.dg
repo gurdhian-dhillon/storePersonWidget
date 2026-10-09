@@ -1,14 +1,13 @@
 string getPackingDetails(string payloadJson)
 {
 	// What the packer sees for one order: the original lines, how many pieces of
-	// each actually cleared finishing, what one piece of each weighs, and the
-	// carton catalogue his dimension fields are autofilled from.
+	// each the checker accepted, what one piece of each weighs, and the carton
+	// catalogue his dimension fields are autofilled from.
 	//
 	// THE WALK IS DONE ONCE, NOT ONCE PER LINE. This used to re-run
-	// Production_Planning -> Plan_Item -> Item_Check -> Finishing_Data inside the
-	// loop over the order's item table, with the innermost query eight levels
-	// deep. Every line rebuilt the same answer. Now the plan is walked once into
-	// a per-root-line total and the line loop just reads it.
+	// Production_Planning -> Plan_Item -> Item_Check inside the loop over the
+	// order's item table. Every line rebuilt the same answer. Now the plan is
+	// walked once into a per-root-line total and the line loop just reads it.
 	//
 	// THE TOTAL IS PER ORIGINAL LINE. A remake batch replaces pieces the customer
 	// already bought, so its acceptances belong to the line it was raised
@@ -17,10 +16,10 @@ string getPackingDetails(string payloadJson)
 	// recursion. Same arithmetic recheckOrderComplete uses, deliberately: packing
 	// must never disagree with the status that let it be packed.
 	//
-	// "FINISHED" IS Finishing_Status == "Done", not "a row exists".
-	// startFinishingJob opens the row when work starts. Done means done; anything
-	// else means the job is still open, so a row carrying neither value is left
-	// out of the packed quantity rather than quietly counted into it.
+	// THERE IS NO FINISHING LOOKUP. Finishing runs before checking now, and an
+	// Item_Check with pieces approved only exists for a batch whose finishing is
+	// Done - saveItemCheck refuses any other - so the accepted figure is already
+	// the finished-and-checked figure.
 	//
 	// UNIT WEIGHT RIDES ALONG ON THE LINE. Item_Master.Weight is kilograms for one
 	// saleable unit - a napkin set of six is one unit, counted the same way the
@@ -60,28 +59,9 @@ string getPackingDetails(string payloadJson)
 		}
 
 		//------------------------------------------------------------------
-		// ONE PASS: which batches are finished, which item each batch belongs
-		// to, and which original line each item rolls up to.
+		// ONE PASS: which item each check belongs to, and which original line
+		// each item rolls up to.
 		//------------------------------------------------------------------
-		// ASKED PER CHECK, not by scanning the whole form.
-		//
-		// This used to read every Finishing_Data row ever written to build a
-		// list of finished batches, on a screen about ONE order. The form grows
-		// one row per inspected batch for ever, and the statement-execution
-		// limit is NOT catchable - it kills the script and the widget gets a
-		// bare HTTP 500 with no error card.
-		//
-		// Resolved lazily below instead, one indexed query per check on this
-		// order, cached so a check consulted twice is read once. "1" means
-		// finished, "0" means not; a key that is absent has not been asked yet.
-		//
-		// DONE MEANS DONE, and the query says so directly. A row carrying
-		// neither Done nor In_Progress - hand-made, a mistyped dropdown, a
-		// write that half landed - does not match, so the batch reads as
-		// UNFINISHED and the order stops short of packing. That is the same
-		// way round the old in-code test failed, and the safe direction.
-		doneByCheck = Map();
-
 		// Map values kept as STRINGS throughout - a Map holding a mix of Decimal
 		// and String is one more chance at a mixed-type comparison further down.
 		lineByItem = Map();
@@ -128,19 +108,7 @@ string getPackingDetails(string payloadJson)
 
 			for each  chk in Item_Check[Plan == plan.ID && Qty_Approved > 0]
 			{
-				chkKeyD = chk.ID.toString();
-
-				if(doneByCheck.get(chkKeyD) == null)
-				{
-					doneByCheck.put(chkKeyD,"0");
-
-					for each  fd in Finishing_Data[Item_Check == chk.ID && Finishing_Status == "Done"]
-					{
-						doneByCheck.put(chkKeyD,"1");
-					}
-				}
-
-				if(chk.Plan_Item != null && ifnull(doneByCheck.get(chkKeyD),"0").toString() == "1")
+				if(chk.Plan_Item != null)
 				{
 					lineKeyTxt = ifnull(lineByItem.get(chk.Plan_Item.toString()),"").toString();
 

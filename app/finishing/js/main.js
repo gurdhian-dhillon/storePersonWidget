@@ -1,9 +1,12 @@
 // Finishing screen.
 // Creator JS API v2, ES5-flavoured (var/function), no init()
 //
-// Pick a supervisor, see the batches of his that still need folding, pressing and
-// branding, open one and work it. Two tabs - To finish and History - the same
-// strip the checker screen uses.
+// Pick a supervisor, see the batches of his that have come off the production floor
+// and still need thread cutting and pressing, open one and work it. Finishing runs
+// BEFORE checking: closing a batch here is what releases it to the checker.
+// Folding and branding are no longer done here - they are two ticks on the packing
+// screen. Two tabs - To finish and History - the same strip the checker screen
+// uses.
 //
 // THE SAME ACCORDION AS PACKING, deliberately, drawn with the SHARED item-card
 // classes the supervisor and store screens use (item-serial, item-title-row,
@@ -12,8 +15,9 @@
 // WHAT A CARD SAYS, AND WHAT IT NO LONGER SAYS. Item name, SKU, quantity, and the
 // order it belongs to. The round number, the "Alteration batch" tag and the
 // remake reason are gone: they are facts about why the batch exists, and the
-// finisher's job is the same either way - fold it, press it, brand it. They were
-// noise on every row.
+// finisher's job is the same either way - cut the threads, press it. They were
+// noise on every row. A card is a production batch (Plan_Item), so a remake and
+// an alteration batch come back through here on their own.
 //
 // NOTHING IS HELD IN THE BROWSER. The row is opened on the first press by
 // startFinishingJob, each sub-stage is stamped by saveFinishingStage as it
@@ -23,8 +27,8 @@
 // the end of the job, so a tablet with a wrong clock wrote wrong times and two
 // devices on one job wrote two disagreeing sets.
 
-var STAGE_NAMES = ['pressing', 'folding', 'branding'];
-var STAGE_LABELS = ['Pressing', 'Folding', 'Branding'];
+var STAGE_NAMES = ['threadcutting', 'pressing'];
+var STAGE_LABELS = ['Thread cutting', 'Pressing'];
 
 var SUPERVISORS = [];
 var SELECTED_SUP = '';
@@ -150,6 +154,13 @@ function hydrateStages(raw) {
 }
 
 // One place that knows a Deluge reply is only good if it says success:true.
+//
+// THE FINISHING FUNCTIONS REFUSE WITH {success:false, error}, not with an errors
+// array, so checking only `errors` let every refusal through as a success: on a
+// stale queue Start "worked" with no finishingId, the stage read as started and
+// the real message ("not Awaiting_Check", "already finished") never appeared.
+// getFinishingItems / getFinishingHistory carry no success key at all, so only
+// an explicit false is a refusal.
 function callApi(apiName, payload) {
     return ZOHO.CREATOR.DATA.invokeCustomApi({
         api_name: apiName,
@@ -165,18 +176,20 @@ function callApi(apiName, payload) {
         if (parsed && parsed.errors && parsed.errors.length) {
             throw new Error(parsed.errors.join(', '));
         }
+        if (parsed && parsed.success === false) {
+            throw new Error(parsed.error || ('The server refused ' + apiName));
+        }
         return parsed;
     });
 }
 
+// ONE CARD IS ONE BATCH, AND IT IS NEVER MERGED WITH ANOTHER. This used to join
+// every job of the same order and SKU, so a root batch and its Production_Loss
+// batch - piles that arrive on different days - were started, stamped and closed
+// together and carried one identical set of times. The server returns one job per
+// Plan_Item for exactly that reason; the group is the one job.
 function activeJobGroup() {
-    var hit = JOBS_QUEUE.filter(function (j) { return String(j.id) === String(ACTIVE_JOB_ID); });
-    if (!hit.length) return [];
-    var refJob = hit[0];
-    return JOBS_QUEUE.filter(function (j) {
-        return j.salesOrder === refJob.salesOrder && 
-               (refJob.sku ? j.sku === refJob.sku : j.itemName === refJob.itemName);
-    });
+    return JOBS_QUEUE.filter(function (j) { return String(j.id) === String(ACTIVE_JOB_ID); });
 }
 
 function getCombinedActiveJob() {
@@ -495,7 +508,8 @@ function renderQueue() {
             var subGroupsList = [];
 
             groupJobs.forEach(function (job) {
-                var key = job.sku ? job.sku : job.itemName;
+                // Keyed by the batch id, so each batch is its own row.
+                var key = String(job.id);
                 if (!subGroupsMap[key]) {
                     subGroupsMap[key] = [];
                     subGroupsList.push(key);
@@ -595,7 +609,7 @@ function jobBody(job) {
             '>' + escapeHtml(op.name) + '</option>';
     }).join('');
 
-    // ALL THREE STAMPED BUT STILL OPEN IS A REACHABLE STATE, and without this it
+    // BOTH STAMPED BUT STILL OPEN IS A REACHABLE STATE, and without this it
     // was a dead end: every stage renders as done, so no stage offers a button,
     // and the batch sits on the queue for ever with no way to close it from the
     // screen.
@@ -613,7 +627,7 @@ function jobBody(job) {
     var closeRow = '';
     if (allStamped) {
         closeRow = '<div class="fin-close-row">' +
-            '<span>All three stages are stamped, but this job was never closed.</span>' +
+            '<span>Both stages are stamped, but this job was never closed.</span>' +
             '<button type="button" class="fin-btn is-end" onclick="closeJob()">Close the job</button>' +
             '</div>';
     }
@@ -630,7 +644,7 @@ function jobBody(job) {
 }
 
 // The recovery path for the state above. completeFinishingJob is idempotent and
-// does not re-stamp a branding end that already exists, so this only closes the
+// does not re-stamp a pressing end that already exists, so this only closes the
 // row, writes Qty_Finished and asks the order the question it never got asked.
 function closeJob() {
     var combined = activeJob();
@@ -716,7 +730,7 @@ function setStageBusy(busy) {
 }
 
 // ----------------------------------------------------
-// THE THREE PRESSES
+// THE PRESSES
 // ----------------------------------------------------
 
 function startStage(stageName) {
@@ -744,7 +758,7 @@ function startStage(stageName) {
             openedPromise = Promise.resolve(null);
         } else {
             openedPromise = callApi('startFinishingJob', {
-                itemCheckId: job.id,
+                planItemId: job.id,
                 staffName: job.selectedOperator || SELECTED_OPERATOR
             }).then(function (res) {
                 job.finishingId = res.finishingId;
@@ -865,7 +879,7 @@ function loadHistory() {
         COMPLETED_HISTORY = [{
             id: '1', salesOrder: 'SO-00008', planNo: 'PLAN-00016', itemName: 'Linen Hamlet Throw',
             qty: 11, staff: 'Aniket', completedOn: '20-Aug-2026 14:05:00',
-            stages: { folding: { duration: 300 }, pressing: { duration: 420 }, branding: { duration: 180 } }
+            stages: { threadcutting: { duration: 300 }, pressing: { duration: 420 } }
         }];
         HISTORY_LOADED = true;
         renderHistory();
@@ -901,16 +915,15 @@ function renderHistory() {
             '<td class="col-num">' + n(run.qty) + '</td>' +
             '<td>' + escapeHtml(run.salesOrder || '—') + '</td>' +
             '<td>' + escapeHtml(run.staff || '—') + '</td>' +
+            '<td class="col-num">' + fmtDuration(st.threadcutting ? st.threadcutting.duration : null) + '</td>' +
             '<td class="col-num">' + fmtDuration(st.pressing ? st.pressing.duration : null) + '</td>' +
-            '<td class="col-num">' + fmtDuration(st.folding ? st.folding.duration : null) + '</td>' +
-            '<td class="col-num">' + fmtDuration(st.branding ? st.branding.duration : null) + '</td>' +
             '<td>' + escapeHtml(run.completedOn || '—') + '</td>' +
             '</tr>';
     }).join('');
 
     container.innerHTML = '<div class="fin-scroll"><table class="fin-tbl">' +
         '<thead><tr><th>Item</th><th class="col-num">Pcs</th><th>Order</th><th>Finished by</th>' +
-        '<th class="col-num">Pressing</th><th class="col-num">Folding</th><th class="col-num">Branding</th>' +
+        '<th class="col-num">Thread cutting</th><th class="col-num">Pressing</th>' +
         '<th>Completed</th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table></div>';
 }

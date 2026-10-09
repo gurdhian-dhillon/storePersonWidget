@@ -47,21 +47,33 @@ string savePackingRecord(string payloadJson)
 	// the gap between them is the packaging - nothing is blocked by it being
 	// wrong or missing.
 	//
-	// THE QUANTITY CHECK IS ENFORCED HERE, NOT ONLY ON THE SCREEN. Every line's
-	// boxed pieces must equal what finishing actually produced for that line. The
-	// figure is recomputed from Item_Check and Finishing_Data rather than trusted
-	// from the payload - the same walk getPackingDetails does, and deliberately
-	// the same arithmetic, so packing can never disagree with the status that let
-	// it be packed.
+	// PACKING IS THE LAST STEP, AFTER FINISHING AND CHECKING. Thread cutting and
+	// pressing happen in the finishing screen and come first, then the checker
+	// accepts the batch; what is left for the packer is folding, branding and
+	// boxing. Folding and branding are two TICKS on this record (Is_Folded,
+	// Is_Branded) with no times of their own, and the packing itself is timed as a
+	// whole: Packing_Start_Time is the moment he pressed Start packing
+	// (Sales_Order.Packing_Started_On, stamped by startPacking) and
+	// Packing_End_Time is the moment of this save. Both are the server's clock.
 	//
-	// FIVE GUARDS BEFORE ANYTHING IS WRITTEN:
-	//   1. the order is at "Finishing Complete" - the only status the queue offers
+	// THE QUANTITY CHECK IS ENFORCED HERE, NOT ONLY ON THE SCREEN. Every line's
+	// boxed pieces must equal what the checker accepted for that line. The figure
+	// is recomputed from Item_Check rather than trusted from the payload - the same
+	// walk getPackingDetails does, and deliberately the same arithmetic, so packing
+	// can never disagree with the status that let it be packed. An Item_Check with
+	// pieces approved only exists for a batch whose finishing is Done -
+	// saveItemCheck refuses any other - so there is no second look at finishing.
+	//
+	// SEVEN GUARDS BEFORE ANYTHING IS WRITTEN:
+	//   1. the order is at "Checking Passed" - the only status the queue offers
 	//   2. it has no Packing record yet - the whole order is packed in one sitting
+	//   2a. Start packing was pressed, so there is a real start time to record
+	//   2b. folding and branding are both ticked
 	//   3. every box is usable - a carton, unique number, real outer dimensions,
 	//      real inner dimensions if an inner was used
 	//   4. every box holds at least one item, each against a real order line, each
 	//      with pieces above zero, and no line listed twice in the same box
-	//   5. the boxed quantity matches the finished quantity, line by line
+	//   5. the boxed quantity matches the accepted quantity, line by line
 	// Each returns a message the packer can act on. Refusing loudly is the point.
 	//
 	// VOLUMETRIC WEIGHT: outer L x W x H / 5000, the divisor FedEx and Blue Dart
@@ -91,11 +103,13 @@ string savePackingRecord(string payloadJson)
 		//------------------------------------------------------------------
 		orderFound = false;
 		statusNow = "";
+		packStartedOn = null;
 
 		for each  soChk in Sales_Order[ID == salesId]
 		{
 			orderFound = true;
 			statusNow = ifnull(soChk.Order_Status,"").toString().trim();
+			packStartedOn = soChk.Packing_Started_On;
 		}
 
 		if(orderFound == false)
@@ -108,9 +122,36 @@ string savePackingRecord(string payloadJson)
 			return "{\"success\":false,\"error\":\"This order already has a packing record. Refresh the queue - if it needs correcting, edit the existing Packing record in Creator.\"}";
 		}
 
-		if(statusNow != "Finishing Complete")
+		if(statusNow != "Checking Passed")
 		{
-			return "{\"success\":false,\"error\":\"Order is '" + statusNow + "', not 'Finishing Complete', so it cannot be packed yet. Refresh the queue.\"}";
+			return "{\"success\":false,\"error\":\"Order is '" + statusNow + "', not 'Checking Passed', so it cannot be packed yet. Refresh the queue.\"}";
+		}
+
+		//------------------------------------------------------------------
+		// GUARD 2a and 2b - the start time and the two ticks.
+		//
+		// Enforced here and not only on the screen: a Custom API is callable from
+		// anywhere. No start time means Start packing was never pressed, and the
+		// record would carry an end with nothing to measure it from - refused
+		// rather than guessed, because a duration made up at save is worse than
+		// none.
+		//------------------------------------------------------------------
+		if(packStartedOn == null)
+		{
+			return "{\"success\":false,\"error\":\"Packing has not been started on this order. Press Start packing first.\"}";
+		}
+
+		foldedTxt = ifnull(inp.get("folded"),"false").toString().trim().toLowerCase();
+		brandedTxt = ifnull(inp.get("branded"),"false").toString().trim().toLowerCase();
+
+		if(foldedTxt != "true")
+		{
+			return "{\"success\":false,\"error\":\"Folding has not been ticked. Tick it once every piece is folded.\"}";
+		}
+
+		if(brandedTxt != "true")
+		{
+			return "{\"success\":false,\"error\":\"Branding has not been ticked. Tick it once every piece is branded.\"}";
 		}
 
 		//------------------------------------------------------------------
@@ -366,28 +407,16 @@ string savePackingRecord(string payloadJson)
 		}
 
 		//------------------------------------------------------------------
-		// GUARD 5 - what finishing actually produced, per ORIGINAL line.
+		// GUARD 5 - what the checker accepted, per ORIGINAL line.
 		//
 		// The same walk getPackingDetails does. A remake batch replaces pieces
 		// the customer already bought, so its acceptances belong to the line it
 		// was raised against; Remake_Of always points at the ROOT, so this is one
-		// flat pass. "Finished" is Finishing_Status == "Done" - done means done,
-		// anything else means the job is still open.
+		// flat pass. There is no finishing lookup: Item_Check rows with pieces
+		// approved only exist for batches whose finishing is Done, and this is a
+		// WRITE PATH where every extra query is a chance at the uncatchable
+		// statement limit.
 		//------------------------------------------------------------------
-		// ASKED PER CHECK, not by scanning the whole form. Same change and same
-		// reasoning as getPackingDetails, which runs the identical walk - and it
-		// matters more here, because THIS IS A WRITE PATH. The
-		// statement-execution limit is NOT catchable: it kills the script
-		// outright, so a guard that died on a big Finishing_Data would take the
-		// packing save down with it and the packer would see a bare HTTP 500
-		// with no error card, mid-save.
-		//
-		// "1" finished, "0" not, absent means not yet asked. DONE MEANS DONE:
-		// a row carrying neither status does not match and the batch reads as
-		// unfinished, which is the direction that stops an order short of
-		// packing rather than walking it through with a batch nobody folded.
-		doneByCheck = Map();
-
 		lineByItem = Map();
 		finByLine = Map();
 		lineKeys = List();
@@ -432,19 +461,7 @@ string savePackingRecord(string payloadJson)
 
 			for each  chk in Item_Check[Plan == plan.ID && Qty_Approved > 0]
 			{
-				chkKeyD = chk.ID.toString();
-
-				if(doneByCheck.get(chkKeyD) == null)
-				{
-					doneByCheck.put(chkKeyD,"0");
-
-					for each  fd in Finishing_Data[Item_Check == chk.ID && Finishing_Status == "Done"]
-					{
-						doneByCheck.put(chkKeyD,"1");
-					}
-				}
-
-				if(chk.Plan_Item != null && ifnull(doneByCheck.get(chkKeyD),"0").toString() == "1")
+				if(chk.Plan_Item != null)
 				{
 					lineKeyTxt = ifnull(lineByItem.get(chk.Plan_Item.toString()),"").toString();
 
@@ -506,13 +523,13 @@ string savePackingRecord(string payloadJson)
 					mismatchTxt = mismatchTxt + "; ";
 				}
 
-				mismatchTxt = mismatchTxt + "line " + bk + " has boxes but nothing finished against it";
+				mismatchTxt = mismatchTxt + "line " + bk + " has boxes but nothing accepted against it";
 			}
 		}
 
 		if(mismatchTxt != "")
 		{
-			return "{\"success\":false,\"error\":\"Boxed quantity does not match what finishing produced -> " + mismatchTxt.replaceAll("\"","'") + "\"}";
+			return "{\"success\":false,\"error\":\"Boxed quantity does not match what the checker accepted -> " + mismatchTxt.replaceAll("\"","'") + "\"}";
 		}
 
 		//------------------------------------------------------------------
@@ -535,6 +552,8 @@ string savePackingRecord(string payloadJson)
 			Total_Estimated_Weight_Kg = totalEstimated.round(2)
 			Total_Gross_Weight_Kg = totalGross.round(2)
 			Total_Volumetric_Weight_Kg = totalVolumetric.round(2)
+			Is_Folded = true
+			Is_Branded = true
 		];
 
 		packId = newPack.toLong();
@@ -548,6 +567,9 @@ string savePackingRecord(string payloadJson)
 			{
 				packRec.Employee = empId;
 			}
+
+			packRec.Packing_Start_Time = packStartedOn;
+			packRec.Packing_End_Time = zoho.currenttime;
 
 			packRec.Packed_Boxes.insert(boxesCollection);
 			packRec.Packed_Box_Items.insert(itemsCollection);
@@ -564,7 +586,7 @@ string savePackingRecord(string payloadJson)
 		//------------------------------------------------------------------
 		for each  soSet in Sales_Order[ID == salesId]
 		{
-			if(ifnull(soSet.Order_Status,"").toString().trim() == "Finishing Complete")
+			if(ifnull(soSet.Order_Status,"").toString().trim() == "Checking Passed")
 			{
 				soSet.Order_Status = "Packed";
 			}
@@ -601,7 +623,7 @@ string savePackingRecord(string payloadJson)
 		//------------------------------------------------------------------
 		try
 		{
-			thisapp.pushInvoiceToGad(packId.toString());
+			thisapp.Admin_Space.pushInvoiceToGad(packId.toString());
 		}
 		catch (exGadInv)
 		{

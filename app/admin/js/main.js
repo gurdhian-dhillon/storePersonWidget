@@ -2399,15 +2399,15 @@ function renderUsedRow(m, cols) {
 // status, which the picker already carries.
 //
 // Sales_Order.Order_Status runs Pending -> In Progress -> Production Complete ->
-// Checking Passed -> Finishing Complete -> Packed -> Dispatched (CLAUDE.md). Up
+// Finishing Complete -> Checking Passed -> Packed -> Dispatched (CLAUDE.md). Up
 // to and including In Progress, more cloth can still legitimately go out, so a
 // line that is short of its plan is mid-flight, not under-served.
 //
 // UNKNOWN COUNTS AS OPEN. If the status cannot be read the shortfall rule stays
 // quiet: a missed real shortfall is a gap, a false one on every unissued line is
 // a screen nobody reads.
-var CLOSED_STATUSES = ['Production Complete', 'Checking Passed',
-                       'Finishing Complete', 'Packed', 'Dispatched'];
+var CLOSED_STATUSES = ['Production Complete', 'Finishing Complete',
+                       'Checking Passed', 'Packed', 'Dispatched'];
 
 function currentOrder() {
     var sel = document.getElementById('so-select');

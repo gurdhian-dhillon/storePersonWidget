@@ -644,6 +644,18 @@
     outline: none;
 }
 
+/* The packing clock beside "Packed by": a button until Start packing is pressed,
+   then the time it was pressed. */
+.pack-started {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #2563eb;
+    background: #2563eb15;
+    padding: 0.3rem 0.75rem;
+    border-radius: 1rem;
+    white-space: nowrap;
+}
+
 .pack-foot {
     display: flex;
     align-items: center;

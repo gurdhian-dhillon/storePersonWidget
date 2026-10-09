@@ -60,7 +60,10 @@ var PackingScreen = (function () {
     var ACTIVE_ORDER = null;
     // ACTIVE_ORDER = {
     //   id, orderNo, source,
-    //   items:   [ { lineNo, sku, itemName, qty, unitWeight } ]  qty = finished
+    //   startedAt, folded, branded,   Start packing time (server clock, '' until
+    //                                 pressed) and the two ticks - see prepSection
+    //   items:   [ { lineNo, sku, itemName, qty, unitWeight } ]  qty = accepted by
+    //                                 the checker
     //   cartons: [ { id, name, outerLength, outerWidth, outerHeight,
     //                hasInner, innerLength, innerWidth, innerHeight } ]
     //   boxes:   [ { boxTypeId, usesInner,
@@ -76,6 +79,7 @@ var PackingScreen = (function () {
 
     var LOADING_DETAIL = false;
     var SAVING = false;
+    var STARTING = false;
     var BOOTED = false;
 
     // ----------------------------------------------------
@@ -423,11 +427,16 @@ var PackingScreen = (function () {
             var open = (String(o.id) === String(ACTIVE_ORDER_ID));
             var pieces = n(o.totalPieces);
 
-            // Amber rather than green when nothing has cleared finishing: the
+            // Amber rather than green when nothing has cleared checking: the
             // order is in the queue but there is nothing in it to box yet, and he
-            // should know that before he opens it.
+            // should know that before he opens it. Blue once somebody has pressed
+            // Start packing, so an order already in hand is not offered as new.
             var colour = pieces > 0 ? '#059669' : '#d97706';
-            var badge = pieces > 0 ? 'Ready to pack' : 'Nothing finished yet';
+            var badge = pieces > 0 ? 'Ready to pack' : 'Nothing checked yet';
+            if (o.startedAt) {
+                colour = '#2563eb';
+                badge = 'Packing started ' + o.startedAt;
+            }
 
             return '<div class="item-card' + (open ? ' open' : '') + '">' +
                 '<div class="item-header" onclick="PackingScreen.selectOrder(\'' + esc(o.id) + '\')">' +
@@ -436,7 +445,7 @@ var PackingScreen = (function () {
                         '<div class="item-header-info">' +
                             '<h2>' + esc(o.orderNo || '—') + '</h2>' +
                             '<div class="item-meta-line" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">' +
-                                '<span class="item-qty">' + plural(n(o.itemCount), 'line') + ' &middot; ' + pieces + ' pcs finished</span>' +
+                                '<span class="item-qty">' + plural(n(o.itemCount), 'line') + ' &middot; ' + pieces + ' pcs checked</span>' +
                                 '<span class="item-status-badge" style="color:' + colour + '; font-weight:600; font-size:0.8rem; background:' + colour + '15; padding:0.1rem 0.5rem; border-radius:1rem;">' + badge + '</span>' +
                                 (o.planNo ? '<span class="pack-plan">' + esc(o.planNo) + '</span>' : '') +
                             '</div>' +
@@ -500,11 +509,24 @@ var PackingScreen = (function () {
         });
     }
 
+    function queueEntry(orderId) {
+        return QUEUE.filter(function (o) { return String(o.id) === String(orderId); })[0] || null;
+    }
+
     function setupActiveOrder(details) {
+        var qe = queueEntry(details.salesOrderId);
+
         ACTIVE_ORDER = {
             id: details.salesOrderId,
             orderNo: details.orderNo,
             source: details.source,
+            startedAt: qe && qe.startedAt ? qe.startedAt : '',
+            folded: false,
+            branded: false,
+            // Which "also in the box" inserts he has ticked, by position. Held on
+            // the order, not read back from the DOM, so a re-render (Start packing,
+            // a box added) cannot silently clear what he already ticked.
+            inc: {},
             items: (details.items || []).filter(function (it) { return n(it.qty) > 0; }),
             cartons: details.boxes || [],
             boxes: []
@@ -822,12 +844,12 @@ var PackingScreen = (function () {
         // empty lines table, an empty cartons table AND a footer, each saying the
         // same thing in a different box.
         if (!ACTIVE_ORDER.items.length) {
-            host.innerHTML = '<div class="pack-hint">Nothing has cleared finishing for this order yet' +
-                '<span>Cartons can be packed once a finishing job closes a batch.</span></div>';
+            host.innerHTML = '<div class="pack-hint">Nothing has cleared checking for this order yet' +
+                '<span>Cartons can be packed once the checker has accepted a batch.</span></div>';
             return;
         }
 
-        host.innerHTML = packedBySection() + linesSection() + boxesSection() + inclusionsSection() + footerSection();
+        host.innerHTML = packedBySection() + prepSection() + linesSection() + boxesSection() + inclusionsSection() + footerSection();
         renderLive();
     }
 
@@ -849,7 +871,7 @@ var PackingScreen = (function () {
         return '<section class="pack-sec">' +
             '<div class="pack-sec-head"><h3>To be boxed</h3><span class="pack-sec-hint">every line must reach zero</span></div>' +
             '<div class="pack-scroll"><table class="pack-tbl">' +
-            '<thead><tr><th>Item</th><th class="col-num">Unit kg</th><th class="col-num">Finished</th>' +
+            '<thead><tr><th>Item</th><th class="col-num">Unit kg</th><th class="col-num">Checked</th>' +
             '<th class="col-num">Boxed</th><th class="col-num">Left</th><th class="col-act"></th></tr></thead>' +
             '<tbody>' + rows + '</tbody></table></div></section>';
     }
@@ -1024,8 +1046,9 @@ var PackingScreen = (function () {
 
         var items = INCLUSIONS.map(function (inc, idx) {
             var incId = 'pack-inc-' + idx;
-            return '<label class="inc-item" for="' + incId + '">' +
-                '<input type="checkbox" id="' + incId + '" class="inc-checkbox" onchange="PackingScreen.updateInclusion(this)">' +
+            var on = !!(ACTIVE_ORDER && ACTIVE_ORDER.inc && ACTIVE_ORDER.inc[idx]);
+            return '<label class="inc-item' + (on ? ' is-checked' : '') + '" for="' + incId + '">' +
+                '<input type="checkbox" id="' + incId + '" class="inc-checkbox"' + (on ? ' checked' : '') + ' onchange="PackingScreen.updateInclusion(this)">' +
                 '<span>' + esc(inc.name) + '</span>' +
                 '</label>';
         }).join('');
@@ -1051,7 +1074,89 @@ var PackingScreen = (function () {
             '<label class="pack-picker"><span>Packed by</span>' +
             '<select onchange="PackingScreen.setStaff(this.value)">' +
             (staffOpts || '<option value="">No packing staff found</option>') + '</select></label>' +
+            startControl() +
             '</div>';
+    }
+
+    // THE PACKING CLOCK. Start packing stamps the order on the server
+    // (startPacking -> Sales_Order.Packing_Started_On) and the save stamps the end,
+    // so the record carries one start and one end for the whole order. It is a
+    // button rather than something that starts by itself on opening the card,
+    // because opening a card to look at it is not packing it. The stamp is the
+    // server's, never moved by a second press, and survives a refresh.
+    function startControl() {
+        if (ACTIVE_ORDER.startedAt) {
+            return '<span class="pack-started">Started ' + esc(ACTIVE_ORDER.startedAt) + '</span>';
+        }
+        return '<button type="button" class="primary-btn" id="pack-start-btn" onclick="PackingScreen.startPacking()">Start packing</button>';
+    }
+
+    // FOLDING AND BRANDING ARE TICKS, NOT STAGES. They used to be timed stages on
+    // the finishing screen; they now sit here, between the checker and the box, and
+    // are two yes/no statements about the whole order. Unlike the inclusions below
+    // these ARE recorded - savePackingRecord requires both and stores them as
+    // Packing.Is_Folded / Is_Branded - and they hold their state across a re-render
+    // because it lives on the order, not in the DOM.
+    function prepSection() {
+        function tick(field, label) {
+            var on = !!ACTIVE_ORDER[field];
+            return '<label class="inc-item' + (on ? ' is-checked' : '') + '">' +
+                '<input type="checkbox" class="inc-checkbox"' + (on ? ' checked' : '') +
+                ' onchange="PackingScreen.setTick(\'' + field + '\', this.checked, this)">' +
+                '<span>' + label + '</span>' +
+                '</label>';
+        }
+
+        return '<section class="pack-sec">' +
+            '<div class="pack-sec-head">' +
+                '<h3>Before boxing</h3>' +
+                '<span class="pack-sec-hint">tick when every piece is done</span>' +
+            '</div>' +
+            '<div class="inc-list">' + tick('folded', 'Folded') + tick('branded', 'Branded') + '</div>' +
+            '</section>';
+    }
+
+    function setTick(field, value, box) {
+        if (!ACTIVE_ORDER || (field !== 'folded' && field !== 'branded')) return;
+        ACTIVE_ORDER[field] = !!value;
+        if (box && box.parentElement) box.parentElement.classList.toggle('is-checked', !!value);
+        renderValidation();
+    }
+
+    function startPacking() {
+        if (!ACTIVE_ORDER || ACTIVE_ORDER.startedAt || SAVING || STARTING) return;
+
+        var btn = el('start-btn');
+
+        if (!isRunningInCreator()) {
+            ACTIVE_ORDER.startedAt = '09-Oct-2026 10:00:00';
+            var qs = queueEntry(ACTIVE_ORDER.id);
+            if (qs) qs.startedAt = ACTIVE_ORDER.startedAt;
+            renderQueue();
+            return;
+        }
+
+        STARTING = true;
+        if (btn) { btn.disabled = true; btn.innerText = 'Starting…'; }
+
+        var orderId = ACTIVE_ORDER.id;
+
+        callApi('startPacking', { salesOrderId: orderId }).then(function (parsed) {
+            STARTING = false;
+            if (!parsed.success) throw new Error(parsed.error || 'Unknown server error.');
+
+            var qe = queueEntry(orderId);
+            if (qe) qe.startedAt = parsed.startedAt;
+            if (ACTIVE_ORDER && String(ACTIVE_ORDER.id) === String(orderId)) {
+                ACTIVE_ORDER.startedAt = parsed.startedAt;
+            }
+            renderQueue();
+        }).catch(function (err) {
+            STARTING = false;
+            console.error('startPacking failed:', err);
+            if (btn) { btn.disabled = false; btn.innerText = 'Start packing'; }
+            alert('Could not start packing:\n\n' + (err && err.message ? err.message : err));
+        });
     }
 
     function footerSection() {
@@ -1146,7 +1251,7 @@ var PackingScreen = (function () {
     // VALIDATION
     // ----------------------------------------------------
     //
-    // EVERY FINISHED PIECE MUST BE IN A BOX before this saves. A mismatch is a
+    // EVERY CHECKED PIECE MUST BE IN A BOX before this saves. A mismatch is a
     // counting error, cheaper to find here than to have the customer find it.
     // savePackingRecord enforces the same rule server-side - a Custom API is
     // callable from anywhere, so the screen agreeing is not the same as it being
@@ -1154,14 +1259,18 @@ var PackingScreen = (function () {
 
     function problems() {
         if (!ACTIVE_ORDER) return ['No order loaded'];
-        if (!ACTIVE_ORDER.items.length) return ['Nothing has cleared finishing for this order'];
+        if (!ACTIVE_ORDER.items.length) return ['Nothing has cleared checking for this order'];
 
         var out = [];
+
+        if (!ACTIVE_ORDER.startedAt) out.push('Press Start packing first');
+        if (!ACTIVE_ORDER.folded) out.push('Tick Folded once every piece is folded');
+        if (!ACTIVE_ORDER.branded) out.push('Tick Branded once every piece is branded');
 
         ACTIVE_ORDER.items.forEach(function (it) {
             var left = n(it.qty) - boxedFor(it.lineNo);
             if (left > 0) out.push(it.itemName + ': ' + left + ' of ' + n(it.qty) + ' not in a box');
-            else if (left < 0) out.push(it.itemName + ': ' + Math.abs(left) + ' more boxed than finished');
+            else if (left < 0) out.push(it.itemName + ': ' + Math.abs(left) + ' more boxed than checked');
         });
 
         if (!ACTIVE_ORDER.boxes.length) out.push('No boxes added yet');
@@ -1190,8 +1299,7 @@ var PackingScreen = (function () {
         if (INCLUSIONS.length) {
             var allTicked = true;
             for (var idx = 0; idx < INCLUSIONS.length; idx++) {
-                var chk = document.getElementById('pack-inc-' + idx);
-                if (chk && !chk.checked) {
+                if (!(ACTIVE_ORDER.inc && ACTIVE_ORDER.inc[idx])) {
                     allTicked = false;
                     break;
                 }
@@ -1216,7 +1324,7 @@ var PackingScreen = (function () {
                 (list.length > 1 ? ' <span class="more">and ' + (list.length - 1) + ' more</span>' : '');
             if (btn) btn.disabled = true;
         } else {
-            msg.innerHTML = '<span class="ok">Every finished piece is in a box</span>';
+            msg.innerHTML = '<span class="ok">Every checked piece is in a box</span>';
             if (btn) btn.disabled = false;
         }
     }
@@ -1244,6 +1352,8 @@ var PackingScreen = (function () {
         var payload = {
             salesOrderId: ACTIVE_ORDER.id,
             staffName: SELECTED_STAFF,
+            folded: !!ACTIVE_ORDER.folded,
+            branded: !!ACTIVE_ORDER.branded,
             boxes: ACTIVE_ORDER.boxes.map(function (b, i) {
                 return {
                     boxNo: i + 1,
@@ -1813,6 +1923,10 @@ var PackingScreen = (function () {
                 '<span>Volumetric <b>' + kg(p.volumetricWeight) + ' kg</b></span>' +
                 '<span>Inner cartons <b>' + n(p.innerBoxCount) + ' of ' + n(p.boxCount) + '</b></span>' +
                 (p.source ? '<span>Source <b>' + esc(p.source) + '</b></span>' : '') +
+                '<span>Started <b>' + esc(p.startedOn || '—') + '</b></span>' +
+                '<span>Ended <b>' + esc(p.endedOn || '—') + '</b></span>' +
+                '<span>Folded <b>' + (p.folded ? 'Yes' : '—') + '</b></span>' +
+                '<span>Branded <b>' + (p.branded ? 'Yes' : '—') + '</b></span>' +
                 '</div>' +
                 texus +
                 gadInv +
@@ -2022,8 +2136,15 @@ var PackingScreen = (function () {
         setItemLine: setItemLine,
         setItemQty: setItemQty,
         save: save,
+        startPacking: startPacking,
+        setTick: setTick,
         updateInclusion: function (checkbox) {
             checkbox.parentElement.classList.toggle('is-checked', checkbox.checked);
+            var at = String(checkbox.id || '').replace('pack-inc-', '');
+            if (ACTIVE_ORDER && at !== '') {
+                if (!ACTIVE_ORDER.inc) ACTIVE_ORDER.inc = {};
+                ACTIVE_ORDER.inc[at] = !!checkbox.checked;
+            }
             renderValidation();
         },
         // for the stub-DOM tests only

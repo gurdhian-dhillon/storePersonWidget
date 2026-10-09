@@ -119,6 +119,28 @@ string getOrderItemList(string planId)
 
 				ownStat = ifnull(itm.Item_Status,"").toString().trim();
 
+				// Which team holds a batch that has left production: "None"
+				// nobody has started finishing it, "Open" it is in finishing,
+				// "Done" it is with the checking team. Empty unless the batch is
+				// at Awaiting_Check, and queried only then. Done means done.
+				finStat = "";
+				if(ownStat == "Awaiting_Check")
+				{
+					finStat = "None";
+
+					for each  fdOi in Finishing_Data[Plan_Item == itm.ID]
+					{
+						if(ifnull(fdOi.Finishing_Status,"").toString().trim() == "Done")
+						{
+							finStat = "Done";
+						}
+						else if(finStat != "Done")
+						{
+							finStat = "Open";
+						}
+					}
+				}
+
 				// Rolled up: the original is only "done" if it is Complete AND
 				// no child is still open. Anything else reads as in production.
 				rollStat = ownStat;
@@ -132,7 +154,7 @@ string getOrderItemList(string planId)
 					itemsJson = itemsJson + ",";
 				}
 				// IDs forced to string - 18-digit ids break JSON.parse otherwise.
-				itemsJson = itemsJson + "{\"itemId\":\"" + itm.ID + "\",\"name\":\"" + nameTxt + "\",\"sku\":\"" + skuTxt + "\",\"size\":\"" + sizeTxt + "\",\"color\":\"" + colorTxt + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"status\":\"" + rollStat + "\"}";
+				itemsJson = itemsJson + "{\"itemId\":\"" + itm.ID + "\",\"name\":\"" + nameTxt + "\",\"sku\":\"" + skuTxt + "\",\"size\":\"" + sizeTxt + "\",\"color\":\"" + colorTxt + "\",\"qty\":" + ifnull(itm.Qty_Ordered,0) + ",\"produced\":" + ifnull(itm.Qty_Produced,0) + ",\"status\":\"" + rollStat + "\",\"finishing\":\"" + finStat + "\"}";
 			}
 		}
 	}

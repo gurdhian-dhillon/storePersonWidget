@@ -10,9 +10,9 @@
  *   2. What needs me?                "needs attention": overdue, waiting for
  *                                    material (and whose move it is), stalled
  *   3. Where are THIS order's pieces?  one expand per order: every piece placed
- *                                    — waiting for material, in production (by
- *                                    stage), waiting for checking, finishing,
- *                                    finished — and the same per line
+ *                                    - waiting for material, in production (by
+ *                                    stage), finishing, waiting for checking,
+ *                                    ready to pack - and the same per line
  *   4. What went out in the boxes?   Packed: boxes, pieces, weights, invoice
  *
  * WHAT IT REPLACED. A "View progress" pop-up whose numbers were guessed from
@@ -64,14 +64,14 @@ var PENDING_ERROR = '';
 var PENDING_SEARCH_TERM = '';
 var CONVERTING = {};
 
-// The four statuses between "planned" and "packed", in the order they run,
-// with the words an admin uses for them. Order_Status values are stored with
+// The four statuses between "planned" and "packed", in the order they run
+// (finishing BEFORE checking), with the words an admin uses for them. Order_Status values are stored with
 // spaces (CLAUDE.md) and printed nowhere raw on this screen.
 var ACTIVE_STEPS = [
     { status: 'In Progress',         key: 'inProgress',        label: 'In production', sub: 'cutting, stitching…' },
-    { status: 'Production Complete', key: 'completed',         label: 'Checking',      sub: 'with the checker' },
-    { status: 'Checking Passed',     key: 'qcPassed',          label: 'Finishing',     sub: 'folding, pressing' },
-    { status: 'Finishing Complete',  key: 'finishingComplete', label: 'Ready to pack', sub: 'waiting for packing' }
+    { status: 'Production Complete', key: 'completed',         label: 'Finishing',     sub: 'thread cutting, pressing' },
+    { status: 'Finishing Complete',  key: 'finishingComplete', label: 'Checking',      sub: 'with the checker' },
+    { status: 'Checking Passed',     key: 'qcPassed',          label: 'Ready to pack', sub: 'folding, branding, boxing' }
 ];
 
 function plStepOf(status) {
@@ -85,10 +85,10 @@ var PL_PLACES = [
     { key: 'waitingMaterial',  cls: 'pk-material', label: 'Waiting for material' },
     { key: 'readyToStart',     cls: 'pk-ready',    label: 'Ready to start' },
     { key: 'inProduction',     cls: 'pk-prod',     label: 'In production' },
-    { key: 'awaitingCheck',    cls: 'pk-check',    label: 'Waiting for checking' },
-    { key: 'waitingFinishing', cls: 'pk-passed',   label: 'Passed, waiting for finishing' },
+    { key: 'waitingFinishing', cls: 'pk-passed',   label: 'Waiting for finishing' },
     { key: 'inFinishing',      cls: 'pk-finishing', label: 'In finishing' },
-    { key: 'finished',         cls: 'pk-done',     label: 'Finished' }
+    { key: 'awaitingCheck',    cls: 'pk-check',    label: 'Waiting for checking' },
+    { key: 'finished',         cls: 'pk-done',     label: 'Checked, ready to pack' }
 ];
 
 var PL_FLOW_LABEL = {
@@ -473,7 +473,7 @@ function plStatusHtml(o) {
 function plPiecesCellHtml(o) {
     var segs = plSegments(o.pos, { shortClosed: o.shortPieces, unplaced: o.shortClosed ? 0 : o.unplaced });
     return '<div class="pl-pieces">' + plBarHtml(segs, false) +
-        '<span class="pl-pieces-txt"><b>' + plN(o.finishedQty) + '</b> of ' + plN(o.orderedQty) + ' finished</span></div>';
+        '<span class="pl-pieces-txt"><b>' + plN(o.finishedQty) + '</b> of ' + plN(o.orderedQty) + ' ready to pack</span></div>';
 }
 
 // Size · colour under a line's name, once the expand has read Item_Master —
@@ -549,7 +549,7 @@ function plDetailHtml(o) {
     return '<div class="pl-detail">' + banner +
         '<div class="pl-facts">' + facts + '</div>' + status +
         '<div class="pl-d-head"><h4>Where the ' + plN(o.orderedQty) + ' pieces are</h4>' +
-            '<span><b>' + plN(o.finishedQty) + '</b> finished · ' + o.pct + '%</span></div>' +
+            '<span><b>' + plN(o.finishedQty) + '</b> ready to pack · ' + o.pct + '%</span></div>' +
         plBarHtml(segs, true) +
         plLegendHtml(segs, o.pos) +
         (rework.length ? '<div class="pl-rework">Rework: ' + plH(rework.join(' · ')) + '. These are included above.</div>' : '') +

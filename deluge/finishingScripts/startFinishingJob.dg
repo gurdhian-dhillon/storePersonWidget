@@ -1,34 +1,42 @@
 string startFinishingJob(string payloadJson)
 {
-	// Opens the Finishing_Data row for one inspected batch, at the moment the
+	// Opens the Finishing_Data row for one production batch, at the moment the
 	// finisher presses Start on the first stage.
 	//
+	// FINISHING NOW COMES BEFORE CHECKING, SO THE BATCH IS A Plan_Item, NOT AN
+	// Item_Check. An Item_Check does not exist until the inspector has seen the
+	// garments, and he now only sees garments that have already been finished. One
+	// Plan_Item is one pile of garments made together - a root line, a remake or an
+	// alteration batch - and it is checked exactly once, so it is finished exactly
+	// once. Finishing_Data.Item_Check is legacy: it still holds what it held and
+	// nothing writes it.
+	//
+	// THE BATCH MUST BE AT Awaiting_Check. That status is "production is over" and
+	// it is the only door into finishing: an item still being cut has nothing to
+	// press, and an item that is Complete has already been through both.
+	//
 	// WHY THE ROW EXISTS BEFORE THE WORK IS DONE. It used to be created only at
-	// the very end, so folding and pressing times lived nowhere but the browser
-	// until branding closed. A refresh, a closed tab, a tablet going to sleep or
-	// a shift handover lost the lot, and the batch came back on the queue reading
-	// "Pending" with nothing to say an hour had gone into it. The operator's only
-	// way out was to invent the times.
+	// the very end, so the stage times lived nowhere but the browser until the last
+	// stage closed. A refresh, a closed tab, a tablet going to sleep or a shift
+	// handover lost the lot, and the batch came back on the queue reading "Pending"
+	// with nothing to say an hour had gone into it.
 	//
 	// This is the same shape as Stage_Log in production: the row is opened when
 	// work starts, carries Finishing_Status = "In_Progress" while it runs, and is
 	// closed by completeFinishingJob. An open row is not finished work and every
-	// reader has to say so - see the note on the status below.
+	// reader has to say so.
 	//
-	// "FINISHED" IS NOW Finishing_Status == "Done", NOT "a row exists".
-	// Five functions ask that question - getFinishingItems,
-	// getFinishingHistory, recheckOrderComplete, getPackingQueue,
-	// getPackingDetails - and they must all keep asking the same one, or the plan
-	// dropdown, the queue, the order status and the packing list disagree about
-	// whether a batch is done.
+	// "FINISHED" IS Finishing_Status == "Done", NOT "a row exists". Every reader
+	// must keep asking the same question: getFinishingItems, getFinishingHistory,
+	// getCheckingQueue and recheckOrderComplete.
 	//
 	// DONE MEANS DONE; ANYTHING ELSE MEANS THE JOB IS STILL OPEN. One rule, no
 	// third case, and it decides which way every one of those functions fails. A
 	// row that somehow carries neither value - a hand-made record, a mistyped
 	// dropdown choice, a write that half landed - reads as UNFINISHED: the batch
-	// stays on the queue where somebody can see it, and the order stops short of
-	// packing. The other direction fails silently, calling that row finished and
-	// walking the order all the way through with a batch nobody ever folded.
+	// stays on the finishing queue where somebody can see it, and the checker never
+	// receives it. The other direction fails silently, calling that row finished and
+	// walking a batch to the checker that nobody ever pressed.
 	//
 	// IDEMPOTENT. A batch already open returns its existing row rather than a
 	// second one, so a double press, a refresh or a second operator picking the
@@ -44,35 +52,52 @@ string startFinishingJob(string payloadJson)
 	try
 	{
 		inp = payloadJson.toMap();
-		checkIdStr = ifnull(inp.get("itemCheckId"),"").toString().trim();
+		itemIdStr = ifnull(inp.get("planItemId"),"").toString().trim();
 		staffName = ifnull(inp.get("staffName"),"").toString().trim();
 
-		if(checkIdStr == "" || checkIdStr.isNumber() == false)
+		if(itemIdStr == "" || itemIdStr.isNumber() == false)
 		{
-			return "{\"success\":false,\"error\":\"Missing or invalid itemCheckId\"}";
+			return "{\"success\":false,\"error\":\"Missing or invalid planItemId\"}";
 		}
 
-		checkId = checkIdStr.toLong();
+		itemId = itemIdStr.toLong();
 
-		checkFound = false;
-		checkQty = 0;
-		itemId = null;
+		itemFound = false;
+		itemQty = 0;
+		itemStatus = "";
+		itemName = "";
+		planRef = null;
 
-		for each  chk in Item_Check[ID == checkId]
+		for each  pi in Plan_Item[ID == itemId]
 		{
-			checkFound = true;
-			checkQty = ifnull(chk.Qty_Approved,0).toLong();
-			itemId = chk.Plan_Item;
+			itemFound = true;
+			itemName = ifnull(pi.Item_Name,"").toString();
+			itemStatus = ifnull(pi.Item_Status,"").toString().trim();
+			planRef = pi.Plan;
+
+			// A Creator numeric never written is an EMPTY STRING, not null, and
+			// toDecimal() throws on it.
+			prodS = ifnull(pi.Qty_Produced,"0").toString().trim();
+			if(prodS == "")
+			{
+				prodS = "0";
+			}
+			itemQty = prodS.toDecimal().toLong();
 		}
 
-		if(checkFound == false)
+		if(itemFound == false)
 		{
-			return "{\"success\":false,\"error\":\"No Item_Check " + checkId + "\"}";
+			return "{\"success\":false,\"error\":\"No Plan_Item " + itemId + "\"}";
 		}
 
-		if(checkQty <= 0)
+		if(itemStatus != "Awaiting_Check")
 		{
-			return "{\"success\":false,\"error\":\"Batch " + checkId + " approved nothing, so there is nothing to finish\"}";
+			return "{\"success\":false,\"error\":\"" + itemName.replaceAll("\"","'") + " is '" + itemStatus.replaceAll("\"","'") + "', not Awaiting_Check, so it is not ready to finish\"}";
+		}
+
+		if(itemQty <= 0)
+		{
+			return "{\"success\":false,\"error\":\"Batch " + itemId + " produced nothing, so there is nothing to finish\"}";
 		}
 
 		openId = 0;
@@ -81,7 +106,7 @@ string startFinishingJob(string payloadJson)
 		// Only "Done" closes a batch. Any other row is picked up and continued,
 		// which is what stops a half-written or hand-made row turning into a
 		// second one alongside it.
-		for each  fdChk in Finishing_Data[Item_Check == checkId]
+		for each  fdChk in Finishing_Data[Plan_Item == itemId]
 		{
 			if(ifnull(fdChk.Finishing_Status,"").toString().trim() == "Done")
 			{
@@ -112,11 +137,10 @@ string startFinishingJob(string payloadJson)
 		if(openId == 0)
 		{
 			// Qty_Finished stays 0 while the job is open. It is set from the
-			// check when the job closes, so a half-done job cannot be counted as
+			// batch when the job closes, so a half-done job cannot be counted as
 			// output by anything that sums it.
 			newFin = insert into Finishing_Data
 			[
-				Item_Check = checkId
 				Finishing_Status = "In_Progress"
 				Qty_Finished = 0
 			];
@@ -124,13 +148,21 @@ string startFinishingJob(string payloadJson)
 			openId = newFin.toLong();
 
 			// Lookups and date-times go in AFTER the insert - a null inside an
-			// insert block throws, and Plan_Item is only as reliable as the
-			// check that carries it.
+			// insert block throws.
 			for each  fNew in Finishing_Data[ID == openId]
 			{
-				if(itemId != null)
+				fNew.Plan_Item = itemId;
+
+				// THE PLAN IS STAMPED SO FINISHING CAN BE READ ONCE PER PLAN.
+				// getCheckingQueue and recheckOrderComplete both need "which
+				// batches of this plan are finished", and Finishing_Data had no
+				// way to say - so each asked once per batch, which on a 110-batch
+				// order is a query per row inside a loop that already walks every
+				// row, and every finished batch re-runs the recheck. One indexed
+				// query on Plan answers it.
+				if(planRef != null)
 				{
-					fNew.Plan_Item = itemId;
+					fNew.Plan = planRef;
 				}
 
 				if(empId != null)
@@ -155,6 +187,12 @@ string startFinishingJob(string payloadJson)
 					fOpen.Operator = empId;
 				}
 
+				// A row opened before Plan existed is brought into line on resume.
+				if(planRef != null && fOpen.Plan == null)
+				{
+					fOpen.Plan = planRef;
+				}
+
 				if(fOpen.Finishing_Start_Time != null)
 				{
 					startedTxt = fOpen.Finishing_Start_Time.toString("HH:mm:ss");
@@ -162,7 +200,7 @@ string startFinishingJob(string payloadJson)
 			}
 		}
 
-		res = "{\"success\":true,\"finishingId\":\"" + openId + "\",\"qty\":" + checkQty + ",\"startedAt\":\"" + startedTxt + "\"}";
+		res = "{\"success\":true,\"finishingId\":\"" + openId + "\",\"qty\":" + itemQty + ",\"startedAt\":\"" + startedTxt + "\"}";
 	}
 	catch (e)
 	{
